@@ -318,6 +318,36 @@ pub fn run_sandbox(
         }
     }
 
+    // Mount gitconfig if it exists (read-only)
+    if let Some(home) = dirs::home_dir() {
+        let gitconfig = home.join(".gitconfig");
+        if gitconfig.exists() {
+            args.extend([
+                "--mount".to_string(),
+                format!(
+                    "type=bind,source={},target=/home/{}/.gitconfig,readonly",
+                    gitconfig.display(),
+                    user_info.username
+                ),
+            ]);
+        }
+    }
+
+    // Mount nvim config if it exists (read-only)
+    if let Some(home) = dirs::home_dir() {
+        let nvim_config = home.join(".config/nvim");
+        if nvim_config.exists() {
+            args.extend([
+                "--mount".to_string(),
+                format!(
+                    "type=bind,source={},target=/home/{}/.config/nvim,readonly",
+                    nvim_config.display(),
+                    user_info.username
+                ),
+            ]);
+        }
+    }
+
     // Mount Claude config with overlay (copy-on-write, changes don't propagate out)
     // Mount the overlay volume for ~/.claude directory
     if let Some(claude_overlay) = overlays.iter().find(|o| o.name == "claude-dir") {
