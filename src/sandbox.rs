@@ -250,6 +250,8 @@ pub fn run_sandbox(
         "-it".to_string(),
         "--name".to_string(),
         info.container_name.clone(),
+        "--hostname".to_string(),
+        info.name.clone(),
         "--label".to_string(),
         "sandbox=true".to_string(),
         // Use gVisor for sandboxing
