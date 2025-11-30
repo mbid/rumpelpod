@@ -8,6 +8,7 @@ use crate::config::{get_sandbox_base_dir, get_sandbox_instance_dir, UserInfo};
 use crate::docker;
 use crate::git;
 use crate::network;
+use crate::overlay::Overlay;
 
 /// Metadata about a sandbox instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +81,25 @@ impl SandboxInfo {
             purpose
         )
     }
+
+    /// Get the base directory for overlay mounts.
+    pub fn overlays_dir(&self) -> PathBuf {
+        self.sandbox_dir.join("overlays")
+    }
+
+    /// Get the volume name prefix for this sandbox.
+    pub fn volume_prefix(&self) -> String {
+        format!(
+            "sandbox-{}-{}",
+            self.repo_root.file_name().unwrap().to_string_lossy(),
+            self.name
+        )
+    }
+
+    /// Create an overlay configuration for a given source directory.
+    pub fn create_overlay(&self, name: &str, lower: &Path) -> Overlay {
+        Overlay::new(name, lower, &self.overlays_dir(), &self.volume_prefix())
+    }
 }
 
 /// List all sandbox instances for a repository.
@@ -115,18 +135,11 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
         docker::remove_container(&info.container_name)?;
     }
 
-    // Remove Docker volumes
-    for purpose in &[
-        "overlay-work",
-        "overlay-upper",
-        "claude-overlay",
-        "home-overlay",
-    ] {
-        let volume_name = info.overlay_volume_name(purpose);
-        if let Ok(volumes) = docker::list_volumes_with_prefix(&volume_name) {
-            for vol in volumes {
-                let _ = docker::remove_volume(&vol);
-            }
+    // Remove overlay Docker volumes
+    let volume_prefix = info.volume_prefix();
+    if let Ok(volumes) = docker::list_volumes_with_prefix(&volume_prefix) {
+        for vol in volumes {
+            let _ = docker::remove_volume(&vol);
         }
     }
 
@@ -142,7 +155,7 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
         let _ = std::fs::remove_file(&info.repo_symlink);
     }
 
-    // Remove sandbox directory
+    // Remove sandbox directory (includes overlay upper/work dirs)
     if info.sandbox_dir.exists() {
         std::fs::remove_dir_all(&info.sandbox_dir)
             .with_context(|| format!("Failed to remove: {}", info.sandbox_dir.display()))?;
@@ -201,15 +214,35 @@ pub fn run_sandbox(
         docker::remove_container(&info.container_name)?;
     }
 
-    // Create overlay volumes
-    for purpose in &[
-        "overlay-work",
-        "overlay-upper",
-        "claude-overlay",
-        "home-overlay",
-    ] {
-        let volume_name = info.overlay_volume_name(purpose);
-        docker::create_volume(&volume_name)?;
+    // Set up overlay mounts for Claude config directories
+    let mut overlays: Vec<Overlay> = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        // Overlay for ~/.claude directory (copy-on-write)
+        let claude_dir = home.join(".claude");
+        if claude_dir.exists() {
+            let overlay = info.create_overlay("claude-dir", &claude_dir);
+            overlay.create_volume()?;
+            overlays.push(overlay);
+        }
+    }
+
+    // Copy single files (not directories) to sandbox directory
+    // These will be bind-mounted into the container
+    let mut file_copies: Vec<(PathBuf, PathBuf)> = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        // Copy ~/.claude.json (single file, not a directory)
+        let claude_json = home.join(".claude.json");
+        if claude_json.exists() {
+            let copy_path = info.sandbox_dir.join("claude.json");
+            std::fs::copy(&claude_json, &copy_path)
+                .with_context(|| format!("Failed to copy {}", claude_json.display()))?;
+            file_copies.push((
+                copy_path,
+                PathBuf::from(format!("/home/{}/.claude.json", user_info.username)),
+            ));
+        }
     }
 
     // Ensure network exists for whitelist support
@@ -285,32 +318,22 @@ pub fn run_sandbox(
     }
 
     // Mount Claude config with overlay (copy-on-write, changes don't propagate out)
-    if let Some(home) = dirs::home_dir() {
-        let claude_json = home.join(".claude.json");
-        let claude_dir = home.join(".claude");
+    // Mount the overlay volume for ~/.claude directory
+    if let Some(claude_overlay) = overlays.iter().find(|o| o.name == "claude-dir") {
+        let target = PathBuf::from(format!("/home/{}/.claude", user_info.username));
+        args.extend(claude_overlay.docker_mount_args(&target));
+    }
 
-        if claude_json.exists() {
-            args.extend([
-                "--mount".to_string(),
-                format!(
-                    "type=bind,source={},target=/home/{}/.claude.json,readonly",
-                    claude_json.display(),
-                    user_info.username
-                ),
-            ]);
-        }
-
-        if claude_dir.exists() {
-            // Use a volume for claude overlay
-            let claude_volume = info.overlay_volume_name("claude-overlay");
-            args.extend([
-                "--mount".to_string(),
-                format!(
-                    "type=volume,source={},target=/home/{}/.claude",
-                    claude_volume, user_info.username
-                ),
-            ]);
-        }
+    // Mount copied files (single files are copied, not overlaid)
+    for (source, target) in &file_copies {
+        args.extend([
+            "--mount".to_string(),
+            format!(
+                "type=bind,source={},target={}",
+                source.display(),
+                target.display()
+            ),
+        ]);
     }
 
     // Network: use sandbox network with whitelist
@@ -319,18 +342,19 @@ pub fn run_sandbox(
     // Add the image
     args.push(image_tag.to_string());
 
-    // Add command or default to shell
-    if let Some(cmd) = command {
-        args.extend(cmd.iter().cloned());
+    // Determine the main command
+    let main_cmd = if let Some(cmd) = command {
+        cmd.join(" ")
     } else {
         // Default to user's shell
-        let shell = if user_info.uses_fish() {
-            "fish"
+        if user_info.uses_fish() {
+            "fish".to_string()
         } else {
-            "bash"
-        };
-        args.push(shell.to_string());
-    }
+            "bash".to_string()
+        }
+    };
+
+    args.push(main_cmd);
 
     eprintln!("Starting container: {}", info.container_name);
 
