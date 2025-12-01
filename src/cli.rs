@@ -18,13 +18,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Create and run a sandbox
-    Run {
+    /// Enter a sandbox (create if needed)
+    Enter {
         /// Name for this sandbox instance
         name: String,
 
         /// Command to run inside the sandbox (default: interactive shell)
-        #[arg(trailing_var_arg = true)]
+        #[arg(last = true)]
         command: Vec<String>,
     },
 
@@ -60,7 +60,7 @@ pub fn run() -> Result<()> {
             let user_info = UserInfo::current()?;
 
             match cli.command {
-                Commands::Run { name, command } => {
+                Commands::Enter { name, command } => {
                     run_sandbox(&repo_root, &name, &user_info, command)?;
                 }
                 Commands::List => {
