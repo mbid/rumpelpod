@@ -155,17 +155,35 @@ pub fn create_volume(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Attach to a running container.
-pub fn attach_container(name: &str, shell: &str) -> Result<()> {
+/// Attach to a running container and execute a command.
+pub fn exec_in_container(name: &str, command: &[&str]) -> Result<()> {
+    let mut args = vec!["exec", "-it", name];
+    args.extend(command);
+
     let status = Command::new("docker")
-        .args(["exec", "-it", name, shell])
+        .args(&args)
         .status()
-        .context("Failed to attach to container")?;
+        .context("Failed to exec in container")?;
 
     if !status.success() {
         bail!("Container exec failed");
     }
 
+    Ok(())
+}
+
+/// Stop a running container. Silently succeeds if container is already stopped.
+pub fn stop_container(name: &str) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["stop", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Failed to run docker stop")?;
+
+    // We don't check status.success() because stopping an already-stopped
+    // container is fine - we just want it stopped.
+    let _ = status;
     Ok(())
 }
 

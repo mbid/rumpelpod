@@ -151,6 +151,8 @@ pub struct SandboxInfo {
     /// Symlink that points to repo_root, used as the source for shared clone
     /// so the clone's alternates reference this path instead of repo_root directly
     pub repo_symlink: PathBuf,
+    /// Directory for PID files tracking attached processes
+    pub pids_dir: PathBuf,
     pub container_name: String,
     pub created_at: String,
 }
@@ -159,6 +161,7 @@ impl SandboxInfo {
     pub fn new(name: &str, repo_root: &Path) -> Result<Self> {
         let sandbox_dir = get_sandbox_instance_dir(repo_root, name)?;
         let clone_dir = sandbox_dir.join("clone");
+        let pids_dir = sandbox_dir.join("pids");
 
         // The repo symlink lives in the sandbox cache dir and points to repo_root.
         // We create the shared clone from this symlink so the clone's alternates
@@ -180,6 +183,7 @@ impl SandboxInfo {
             sandbox_dir,
             clone_dir,
             repo_symlink,
+            pids_dir,
             container_name,
             created_at,
         })
@@ -230,6 +234,61 @@ impl SandboxInfo {
     pub fn create_overlay(&self, name: &str, lower: &Path) -> Overlay {
         Overlay::new(name, lower, &self.overlays_dir(), &self.volume_prefix())
     }
+
+    /// Write a PID file for the current process to track active attachments.
+    pub fn write_pid_file(&self) -> Result<PathBuf> {
+        std::fs::create_dir_all(&self.pids_dir)?;
+        let pid = std::process::id();
+        let pid_file = self.pids_dir.join(format!("{}.pid", pid));
+        std::fs::write(&pid_file, pid.to_string())?;
+        Ok(pid_file)
+    }
+
+    /// Remove our PID file.
+    pub fn remove_pid_file(&self) {
+        let pid = std::process::id();
+        let pid_file = self.pids_dir.join(format!("{}.pid", pid));
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    /// Check if any other processes are still attached (have live PIDs).
+    pub fn has_other_live_processes(&self) -> bool {
+        let our_pid = std::process::id();
+
+        let entries = match std::fs::read_dir(&self.pids_dir) {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "pid") {
+                if let Ok(contents) = std::fs::read_to_string(&path) {
+                    if let Ok(pid) = contents.trim().parse::<u32>() {
+                        // Skip our own PID
+                        if pid == our_pid {
+                            continue;
+                        }
+                        // Check if process is alive
+                        if process_is_alive(pid) {
+                            return true;
+                        } else {
+                            // Clean up stale PID file
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+}
+
+/// Check if a process with the given PID is alive.
+fn process_is_alive(pid: u32) -> bool {
+    // On Unix, sending signal 0 checks if process exists without affecting it
+    unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
 /// List all sandbox instances for a repository.
@@ -334,22 +393,60 @@ fn build_mount_list(info: &SandboxInfo, user_info: &UserInfo) -> Vec<Mount> {
     mounts
 }
 
-/// Create and run a sandbox container.
+/// Ensure the container is running (start it if not), then exec a command into it.
+/// Uses reference counting via PID files to determine when to stop the container.
 pub fn run_sandbox(
     info: &SandboxInfo,
     image_tag: &str,
     user_info: &UserInfo,
     command: Option<&[String]>,
 ) -> Result<()> {
-    // Check if container is already running
+    // Ensure container is running
+    ensure_container_running(info, image_tag, user_info)?;
+
+    // Write our PID file to track this attachment
+    info.write_pid_file()?;
+
+    // Determine the command to run
+    let default_shell = if user_info.uses_fish() {
+        "fish".to_string()
+    } else {
+        "bash".to_string()
+    };
+
+    let cmd: Vec<&str> = if let Some(c) = command {
+        c.iter().map(|s| s.as_str()).collect()
+    } else {
+        vec![default_shell.as_str()]
+    };
+
+    eprintln!("Executing in container: {}", info.container_name);
+
+    // Execute the command - capture result but don't return early
+    let exec_result = docker::exec_in_container(&info.container_name, &cmd);
+
+    // Cleanup: remove our PID file first
+    info.remove_pid_file();
+
+    // Check if we should stop the container
+    if !info.has_other_live_processes() {
+        eprintln!("No other processes attached, stopping container...");
+        docker::stop_container(&info.container_name)?;
+    }
+
+    exec_result
+}
+
+/// Ensure the container is running, starting it if necessary.
+fn ensure_container_running(
+    info: &SandboxInfo,
+    image_tag: &str,
+    user_info: &UserInfo,
+) -> Result<()> {
+    // If already running, we're done
     if docker::container_is_running(&info.container_name)? {
-        eprintln!("Attaching to existing container: {}", info.container_name);
-        let shell = if user_info.uses_fish() {
-            "fish"
-        } else {
-            "bash"
-        };
-        return docker::attach_container(&info.container_name, shell);
+        eprintln!("Container already running: {}", info.container_name);
+        return Ok(());
     }
 
     // Remove stopped container if it exists
@@ -357,10 +454,10 @@ pub fn run_sandbox(
         docker::remove_container(&info.container_name)?;
     }
 
-    // Build docker run arguments
+    // Build docker run arguments for detached container with sleep infinity
     let mut args = vec![
         "run".to_string(),
-        "-it".to_string(),
+        "-d".to_string(), // Detached mode
         "--name".to_string(),
         info.container_name.clone(),
         "--hostname".to_string(),
@@ -404,29 +501,19 @@ pub fn run_sandbox(
     // Add the image
     args.push(image_tag.to_string());
 
-    // Determine the main command
-    let main_cmd = if let Some(cmd) = command {
-        cmd.join(" ")
-    } else {
-        // Default to user's shell
-        if user_info.uses_fish() {
-            "fish".to_string()
-        } else {
-            "bash".to_string()
-        }
-    };
-
-    args.push(main_cmd);
+    // Run sleep infinity to keep container alive
+    args.push("sleep".to_string());
+    args.push("infinity".to_string());
 
     eprintln!("Starting container: {}", info.container_name);
 
     let status = Command::new("docker")
         .args(&args)
         .status()
-        .context("Failed to run docker container")?;
+        .context("Failed to start docker container")?;
 
     if !status.success() {
-        bail!("Container exited with error");
+        bail!("Failed to start container");
     }
 
     Ok(())
