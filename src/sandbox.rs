@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::{get_sandbox_base_dir, get_sandbox_instance_dir, UserInfo};
 use crate::docker;
@@ -291,6 +291,26 @@ fn process_is_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 
+/// Spawn the sync daemon as a detached background process.
+fn spawn_sync_daemon(info: &SandboxInfo) -> Result<()> {
+    let exe = std::env::current_exe().context("Failed to get current executable path")?;
+
+    Command::new(exe)
+        .args(["sync-daemon", &info.sandbox_dir.to_string_lossy()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Failed to spawn sync daemon")?;
+
+    eprintln!(
+        "Sync daemon started (log: {})",
+        info.sandbox_dir.join("sync.log").display()
+    );
+
+    Ok(())
+}
+
 /// List all sandbox instances for a repository.
 pub fn list_sandboxes(repo_root: &Path) -> Result<Vec<SandboxInfo>> {
     let base_dir = get_sandbox_base_dir(repo_root)?;
@@ -395,6 +415,7 @@ fn build_mount_list(info: &SandboxInfo, user_info: &UserInfo) -> Vec<Mount> {
 
 /// Ensure the container is running (start it if not), then exec a command into it.
 /// Uses reference counting via PID files to determine when to stop the container.
+/// If we launch a new container, also spawns the sync daemon.
 pub fn run_sandbox(
     info: &SandboxInfo,
     image_tag: &str,
@@ -402,7 +423,12 @@ pub fn run_sandbox(
     command: Option<&[String]>,
 ) -> Result<()> {
     // Ensure container is running
-    ensure_container_running(info, image_tag, user_info)?;
+    let launched = ensure_container_running(info, image_tag, user_info)?;
+
+    // If we launched a new container, spawn the sync daemon
+    if launched {
+        spawn_sync_daemon(info)?;
+    }
 
     // Write our PID file to track this attachment
     info.write_pid_file()?;
@@ -438,15 +464,16 @@ pub fn run_sandbox(
 }
 
 /// Ensure the container is running, starting it if necessary.
+/// Returns true if we launched a new container, false if it was already running.
 fn ensure_container_running(
     info: &SandboxInfo,
     image_tag: &str,
     user_info: &UserInfo,
-) -> Result<()> {
+) -> Result<bool> {
     // If already running, we're done
     if docker::container_is_running(&info.container_name)? {
         eprintln!("Container already running: {}", info.container_name);
-        return Ok(());
+        return Ok(false);
     }
 
     // Remove stopped container if it exists
@@ -516,7 +543,7 @@ fn ensure_container_running(
         bail!("Failed to start container");
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Ensure a sandbox is set up and ready to use.
@@ -544,6 +571,10 @@ pub fn ensure_sandbox(repo_root: &Path, name: &str) -> Result<SandboxInfo> {
     // Create shared clone from the symlink path (not the real repo path)
     // This ensures the clone references the symlink in its alternates
     git::create_shared_clone(&info.repo_symlink, &info.clone_dir)?;
+
+    // Checkout or create a branch named after the sandbox
+    // This ensures all work in the sandbox happens on this branch
+    git::checkout_or_create_branch(&info.clone_dir, name)?;
 
     // Setup bidirectional remotes
     git::setup_bidirectional_remotes(repo_root, &info.clone_dir, name)?;

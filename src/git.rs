@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Find the root of the current git repository.
 pub fn find_repo_root() -> Result<PathBuf> {
@@ -106,47 +106,44 @@ pub fn setup_bidirectional_remotes(
     Ok(())
 }
 
-/// Get the current branch name.
-pub fn get_current_branch(repo: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(repo)
-        .args(["branch", "--show-current"])
-        .output()
-        .context("Failed to get current branch")?;
-
-    if !output.status.success() {
-        bail!("Failed to get current branch");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-/// Fetch all remotes in a repository.
-pub fn fetch_all(repo: &Path) -> Result<()> {
+/// Checkout a branch, creating it if it doesn't exist.
+pub fn checkout_or_create_branch(repo: &Path, branch_name: &str) -> Result<()> {
+    // Try to checkout existing branch first
     let status = Command::new("git")
         .current_dir(repo)
-        .args(["fetch", "--all"])
+        .args(["checkout", branch_name])
+        .stderr(Stdio::null())
         .status()
-        .context("Failed to fetch")?;
+        .context("Failed to run git checkout")?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    // Branch doesn't exist, create it
+    let status = Command::new("git")
+        .current_dir(repo)
+        .args(["checkout", "-b", branch_name])
+        .status()
+        .context("Failed to create branch")?;
 
     if !status.success() {
-        bail!("Git fetch failed");
+        bail!("Failed to create branch: {}", branch_name);
     }
 
     Ok(())
 }
 
-/// Update server info for git repository (needed for some operations).
-pub fn update_server_info(repo: &Path) -> Result<()> {
+/// Fetch a specific branch from a remote into the local repo.
+pub fn fetch_branch(repo: &Path, remote: &str, branch: &str) -> Result<()> {
     let status = Command::new("git")
         .current_dir(repo)
-        .args(["update-server-info"])
+        .args(["fetch", remote, branch])
         .status()
-        .context("Failed to update server info")?;
+        .context("Failed to fetch branch")?;
 
-    // This command may fail if not a bare repo, that's OK
     if !status.success() {
-        // Ignore failure
+        bail!("Git fetch failed for {}:{}", remote, branch);
     }
 
     Ok(())

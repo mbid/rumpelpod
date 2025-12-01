@@ -1,101 +1,136 @@
 use anyhow::{Context, Result};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::mpsc;
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::docker;
 use crate::git;
+use crate::sandbox::SandboxInfo;
 
-/// Run the git sync loop, watching for changes in both repos.
-/// This function blocks until `running` is set to false.
-pub fn run_sync_loop(
-    main_repo: &Path,
-    sandbox_repo: &Path,
-    running: &Arc<AtomicBool>,
-) -> Result<()> {
+/// Run the sync daemon, watching for changes in the sandbox clone and fetching
+/// them into the host repo. Exits when the container stops.
+///
+/// Errors are logged to `sandbox_dir/sync.log`.
+pub fn run_sync_daemon(info: &SandboxInfo) -> Result<()> {
+    let log_path = info.sandbox_dir.join("sync.log");
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("Failed to open log file: {}", log_path.display()))?;
+
+    let remote_name = format!("sandbox-{}", info.name);
+
+    log(
+        &mut log_file,
+        &format!("Sync daemon started for sandbox '{}'", info.name),
+    );
+    log(
+        &mut log_file,
+        &format!("Watching: {}", info.clone_dir.display()),
+    );
+    log(
+        &mut log_file,
+        &format!(
+            "Fetching to: {} remote '{}'",
+            info.repo_root.display(),
+            remote_name
+        ),
+    );
+
     let (tx, rx) = mpsc::channel();
 
-    let tx_clone = tx.clone();
-    let mut main_watcher = RecommendedWatcher::new(
+    let mut watcher = RecommendedWatcher::new(
         move |res| {
-            let _ = tx_clone.send(("main", res));
+            let _ = tx.send(res);
         },
         Config::default().with_poll_interval(Duration::from_secs(1)),
     )
-    .context("Failed to create main repo watcher")?;
+    .context("Failed to create file watcher")?;
 
-    let tx_clone = tx.clone();
-    let mut sandbox_watcher = RecommendedWatcher::new(
-        move |res| {
-            let _ = tx_clone.send(("sandbox", res));
-        },
-        Config::default().with_poll_interval(Duration::from_secs(1)),
-    )
-    .context("Failed to create sandbox repo watcher")?;
-
-    // Watch the .git directories
-    let main_git = main_repo.join(".git");
-    let sandbox_git = sandbox_repo.join(".git");
-
-    if main_git.exists() {
-        main_watcher
-            .watch(&main_git, RecursiveMode::Recursive)
-            .with_context(|| format!("Failed to watch: {}", main_git.display()))?;
-    }
-
+    // Watch the sandbox clone's .git directory
+    let sandbox_git = info.clone_dir.join(".git");
     if sandbox_git.exists() {
-        sandbox_watcher
+        watcher
             .watch(&sandbox_git, RecursiveMode::Recursive)
             .with_context(|| format!("Failed to watch: {}", sandbox_git.display()))?;
+    } else {
+        log(
+            &mut log_file,
+            &format!(
+                "Warning: .git directory not found at {}",
+                sandbox_git.display()
+            ),
+        );
     }
 
-    // Track last sync times to debounce
-    let mut last_main_sync = std::time::Instant::now();
-    let mut last_sandbox_sync = std::time::Instant::now();
     let debounce = Duration::from_millis(500);
+    let container_check_interval = Duration::from_secs(5);
+    let mut last_sync = Instant::now();
+    let mut last_container_check = Instant::now();
+    let mut pending_sync = false;
 
-    while running.load(Ordering::SeqCst) {
-        // Check for events with a timeout
+    loop {
+        // Check for file system events with a timeout
         match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok((source, result)) => {
+            Ok(result) => {
                 if let Ok(event) = result {
-                    let now = std::time::Instant::now();
-
-                    // Filter out certain event kinds that don't need syncing
-                    let dominated_by_access = event.kind.is_access();
-                    if dominated_by_access {
+                    // Filter out access-only events
+                    if event.kind.is_access() {
                         continue;
                     }
-
-                    match source {
-                        "main" => {
-                            if now.duration_since(last_main_sync) > debounce {
-                                // Changes in main repo - update refs in sandbox
-                                let _ = git::update_server_info(main_repo);
-                                last_main_sync = now;
-                            }
-                        }
-                        "sandbox" => {
-                            if now.duration_since(last_sandbox_sync) > debounce {
-                                // Changes in sandbox repo - update refs in main
-                                let _ = git::update_server_info(sandbox_repo);
-                                last_sandbox_sync = now;
-                            }
-                        }
-                        _ => {}
-                    }
+                    pending_sync = true;
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                // No events, continue looping
+                // No events, continue
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                log(&mut log_file, "Watcher channel disconnected, exiting");
                 break;
             }
         }
+
+        let now = Instant::now();
+
+        // Perform sync if we have pending changes and debounce period has passed
+        if pending_sync && now.duration_since(last_sync) > debounce {
+            if let Err(e) = git::fetch_branch(&info.repo_root, &remote_name, &info.name) {
+                log(&mut log_file, &format!("Fetch error: {}", e));
+            }
+            last_sync = now;
+            pending_sync = false;
+        }
+
+        // Periodically check if container is still running
+        if now.duration_since(last_container_check) > container_check_interval {
+            match docker::container_is_running(&info.container_name) {
+                Ok(true) => {
+                    // Container still running, continue
+                }
+                Ok(false) => {
+                    log(&mut log_file, "Container stopped, exiting sync daemon");
+                    break;
+                }
+                Err(e) => {
+                    log(
+                        &mut log_file,
+                        &format!("Error checking container status: {}", e),
+                    );
+                    // Continue anyway, might be transient
+                }
+            }
+            last_container_check = now;
+        }
     }
 
+    log(&mut log_file, "Sync daemon exiting");
     Ok(())
+}
+
+fn log(file: &mut std::fs::File, message: &str) {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let _ = writeln!(file, "[{}] {}", timestamp, message);
 }
