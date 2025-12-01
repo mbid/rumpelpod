@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -8,6 +9,136 @@ use crate::config::{get_sandbox_base_dir, get_sandbox_instance_dir, UserInfo};
 use crate::docker;
 use crate::git;
 use crate::overlay::Overlay;
+
+/// Specifies how a path should be mounted into the sandbox.
+#[derive(Debug, Clone)]
+pub enum MountMode {
+    /// Read-only bind mount. Changes inside the sandbox are not allowed.
+    ReadOnly,
+    /// Read-write bind mount. Changes propagate back to the host.
+    WriteThrough,
+    /// Copy-on-write mount. Reads come from the host, writes are isolated.
+    /// For directories, uses overlayfs. For files, creates a copy.
+    Overlay,
+}
+
+/// Configuration for a single mount point.
+#[derive(Debug, Clone)]
+pub struct Mount {
+    /// Path on the host filesystem.
+    pub host_path: PathBuf,
+    /// Path inside the container. If None, uses host_path.
+    pub container_path: Option<PathBuf>,
+    /// How to mount this path.
+    pub mode: MountMode,
+}
+
+impl Mount {
+    /// Create a new mount configuration.
+    pub fn new(host_path: impl Into<PathBuf>, mode: MountMode) -> Self {
+        Mount {
+            host_path: host_path.into(),
+            container_path: None,
+            mode,
+        }
+    }
+
+    /// Set a different container path (default is to use host_path).
+    pub fn with_container_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.container_path = Some(path.into());
+        self
+    }
+
+    /// Get the effective container path.
+    pub fn target_path(&self) -> &Path {
+        self.container_path.as_ref().unwrap_or(&self.host_path)
+    }
+
+    /// Generate a unique name for this mount (used for overlay volumes and file copies).
+    /// Format: <last_path_component>-<short_hash>
+    fn unique_name(&self) -> String {
+        let last_component = self
+            .host_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "mount".to_string());
+
+        let mut hasher = Sha256::new();
+        hasher.update(self.host_path.to_string_lossy().as_bytes());
+        if let Some(ref cp) = self.container_path {
+            hasher.update(cp.to_string_lossy().as_bytes());
+        }
+        let hash = hex::encode(&hasher.finalize()[..4]); // 8 hex chars
+
+        format!("{}-{}", last_component, hash)
+    }
+}
+
+/// Process mounts and generate docker arguments.
+fn process_mounts(mounts: &[Mount], info: &SandboxInfo) -> Result<Vec<String>> {
+    let mut docker_args = Vec::new();
+
+    for mount in mounts {
+        // Skip if host path doesn't exist
+        if !mount.host_path.exists() {
+            continue;
+        }
+
+        let target = mount.target_path().to_path_buf();
+
+        match &mount.mode {
+            MountMode::ReadOnly => {
+                docker_args.extend([
+                    "--mount".to_string(),
+                    format!(
+                        "type=bind,source={},target={},readonly",
+                        mount.host_path.display(),
+                        target.display()
+                    ),
+                ]);
+            }
+            MountMode::WriteThrough => {
+                docker_args.extend([
+                    "--mount".to_string(),
+                    format!(
+                        "type=bind,source={},target={}",
+                        mount.host_path.display(),
+                        target.display()
+                    ),
+                ]);
+            }
+            MountMode::Overlay => {
+                let name = mount.unique_name();
+                if mount.host_path.is_dir() {
+                    // Use overlayfs for directories
+                    let overlay = info.create_overlay(&name, &mount.host_path);
+                    overlay.create_volume()?;
+                    docker_args.extend(overlay.docker_mount_args(&target));
+                } else {
+                    // Copy file to sandbox directory and bind mount it
+                    let copy_path = info.sandbox_dir.join(&name);
+                    std::fs::copy(&mount.host_path, &copy_path).with_context(|| {
+                        format!(
+                            "Failed to copy {} to {}",
+                            mount.host_path.display(),
+                            copy_path.display()
+                        )
+                    })?;
+                    docker_args.extend([
+                        "--mount".to_string(),
+                        format!(
+                            "type=bind,source={},target={}",
+                            copy_path.display(),
+                            target.display()
+                        ),
+                    ]);
+                }
+            }
+        }
+    }
+
+    Ok(docker_args)
+}
 
 /// Metadata about a sandbox instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +321,46 @@ pub fn cleanup_orphaned_volumes(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Build the list of mounts for a sandbox container.
+fn build_mount_list(info: &SandboxInfo, user_info: &UserInfo) -> Vec<Mount> {
+    let home = dirs::home_dir();
+    let container_home = format!("/home/{}", user_info.username);
+
+    // Core mounts for the repository setup
+    let mut mounts = vec![
+        // Original repo at symlink path (read-only, for git alternates)
+        Mount::new(&info.repo_root, MountMode::ReadOnly).with_container_path(&info.repo_symlink),
+        // Sandbox clone at the original repo path (write-through for working directory)
+        Mount::new(&info.clone_dir, MountMode::WriteThrough).with_container_path(&info.repo_root),
+        // Sandbox clone at its actual path (write-through for git operations)
+        Mount::new(&info.clone_dir, MountMode::WriteThrough),
+        // Overlay for target/ directory (Rust build artifacts, copy-on-write)
+        Mount::new(info.repo_root.join("target"), MountMode::Overlay),
+    ];
+
+    // Read-only config mounts
+    if let Some(ref home) = home {
+        mounts.push(
+            Mount::new(home.join(".gitconfig"), MountMode::ReadOnly)
+                .with_container_path(format!("{}/.gitconfig", container_home)),
+        );
+
+        if user_info.uses_fish() {
+            mounts.push(
+                Mount::new(home.join(".config/fish"), MountMode::ReadOnly)
+                    .with_container_path(format!("{}/.config/fish", container_home)),
+            );
+        }
+
+        mounts.push(
+            Mount::new(home.join(".config/nvim"), MountMode::ReadOnly)
+                .with_container_path(format!("{}/.config/nvim", container_home)),
+        );
+    }
+
+    mounts
+}
+
 /// Create and run a sandbox container.
 pub fn run_sandbox(
     info: &SandboxInfo,
@@ -213,36 +384,6 @@ pub fn run_sandbox(
         docker::remove_container(&info.container_name)?;
     }
 
-    // Set up overlay mounts
-    let mut overlays: Vec<Overlay> = Vec::new();
-
-    // Overlay for target directory (Rust build artifacts, copy-on-write)
-    let target_dir = info.repo_root.join("target");
-    if target_dir.exists() {
-        let overlay = info.create_overlay("target-dir", &target_dir);
-        overlay.create_volume()?;
-        overlays.push(overlay);
-    }
-
-    // Copy single files (not directories) to sandbox directory
-    // These will be bind-mounted into the container
-    let mut file_copies: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-    if let Some(home) = dirs::home_dir() {
-        // Copy ~/.claude.json with filtered projects (only keep the current project)
-        let claude_json = home.join(".claude.json");
-        if claude_json.exists() {
-            let copy_path = info.sandbox_dir.join("claude.json");
-            let filtered_json = filter_claude_json(&claude_json, &info.repo_root)?;
-            std::fs::write(&copy_path, filtered_json)
-                .with_context(|| format!("Failed to write filtered {}", copy_path.display()))?;
-            file_copies.push((
-                copy_path,
-                PathBuf::from(format!("/home/{}/.claude.json", user_info.username)),
-            ));
-        }
-    }
-
     // Build docker run arguments
     let mut args = vec![
         "run".to_string(),
@@ -259,110 +400,32 @@ pub fn run_sandbox(
         // User mapping
         "--user".to_string(),
         format!("{}:{}", user_info.uid, user_info.gid),
-    ];
-
-    // Mount the original repo at the symlink path (read-only)
-    // The shared clone's alternates reference the symlink path, so we mount the repo there.
-    // This makes the clone work inside the container.
-    args.extend([
-        "--mount".to_string(),
-        format!(
-            "type=bind,source={},target={},readonly",
-            info.repo_root.display(),
-            info.repo_symlink.display()
-        ),
-    ]);
-
-    // Mount the sandbox clone at the original repo path
-    // This way the working directory path matches the original repo path
-    args.extend([
-        "--mount".to_string(),
-        format!(
-            "type=bind,source={},target={}",
-            info.clone_dir.display(),
-            info.repo_root.display()
-        ),
-    ]);
-
-    // Also mount the clone at its actual path for git operations
-    args.extend([
-        "--mount".to_string(),
-        format!(
-            "type=bind,source={},target={}",
-            info.clone_dir.display(),
-            info.clone_dir.display()
-        ),
-    ]);
-
-    // Set working directory to the repo path (where clone is mounted)
-    args.extend([
+        // Set working directory to the repo path (where clone is mounted)
         "--workdir".to_string(),
         info.repo_root.to_string_lossy().to_string(),
-    ]);
+    ];
 
-    // Mount fish config if user uses fish
-    if user_info.uses_fish() {
-        if let Some(home) = dirs::home_dir() {
-            let fish_config = home.join(".config/fish");
-            if fish_config.exists() {
-                args.extend([
-                    "--mount".to_string(),
-                    format!(
-                        "type=bind,source={},target=/home/{}/.config/fish,readonly",
-                        fish_config.display(),
-                        user_info.username
-                    ),
-                ]);
-            }
-        }
-    }
+    // Build and process the mount list
+    let mounts = build_mount_list(info, user_info);
+    args.extend(process_mounts(&mounts, info)?);
 
-    // Mount gitconfig if it exists (read-only)
+    // Special handling for ~/.claude.json (needs filtering, not just copying)
     if let Some(home) = dirs::home_dir() {
-        let gitconfig = home.join(".gitconfig");
-        if gitconfig.exists() {
+        let claude_json = home.join(".claude.json");
+        if claude_json.exists() {
+            let copy_path = info.sandbox_dir.join("claude.json");
+            let filtered_json = filter_claude_json(&claude_json, &info.repo_root)?;
+            std::fs::write(&copy_path, &filtered_json)
+                .with_context(|| format!("Failed to write filtered {}", copy_path.display()))?;
             args.extend([
                 "--mount".to_string(),
                 format!(
-                    "type=bind,source={},target=/home/{}/.gitconfig,readonly",
-                    gitconfig.display(),
+                    "type=bind,source={},target=/home/{}/.claude.json",
+                    copy_path.display(),
                     user_info.username
                 ),
             ]);
         }
-    }
-
-    // Mount nvim config if it exists (read-only)
-    if let Some(home) = dirs::home_dir() {
-        let nvim_config = home.join(".config/nvim");
-        if nvim_config.exists() {
-            args.extend([
-                "--mount".to_string(),
-                format!(
-                    "type=bind,source={},target=/home/{}/.config/nvim,readonly",
-                    nvim_config.display(),
-                    user_info.username
-                ),
-            ]);
-        }
-    }
-
-    // Mount target directory with overlay (copy-on-write, changes don't propagate out)
-    if let Some(target_overlay) = overlays.iter().find(|o| o.name == "target-dir") {
-        let target = info.repo_root.join("target");
-        args.extend(target_overlay.docker_mount_args(&target));
-    }
-
-    // Mount copied files (single files are copied, not overlaid)
-    for (source, target) in &file_copies {
-        args.extend([
-            "--mount".to_string(),
-            format!(
-                "type=bind,source={},target={}",
-                source.display(),
-                target.display()
-            ),
-        ]);
     }
 
     // Add the image
