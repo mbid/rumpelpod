@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-use crate::config::UserInfo;
+use crate::config::{Runtime, UserInfo};
 use crate::docker;
 use crate::git;
 use crate::sandbox;
@@ -22,6 +22,10 @@ pub enum Commands {
     Enter {
         /// Name for this sandbox instance
         name: String,
+
+        /// Container runtime to use for sandboxing
+        #[arg(short, long, value_enum, default_value_t = Runtime::Runsc)]
+        runtime: Runtime,
 
         /// Command to run inside the sandbox (default: interactive shell)
         #[arg(last = true)]
@@ -60,8 +64,12 @@ pub fn run() -> Result<()> {
             let user_info = UserInfo::current()?;
 
             match cli.command {
-                Commands::Enter { name, command } => {
-                    run_sandbox(&repo_root, &name, &user_info, command)?;
+                Commands::Enter {
+                    name,
+                    runtime,
+                    command,
+                } => {
+                    run_sandbox(&repo_root, &name, &user_info, runtime, command)?;
                 }
                 Commands::List => {
                     list_sandboxes(&repo_root)?;
@@ -81,6 +89,7 @@ fn run_sandbox(
     repo_root: &PathBuf,
     name: &str,
     user_info: &UserInfo,
+    runtime: Runtime,
     command: Vec<String>,
 ) -> Result<()> {
     // Check for Dockerfile
@@ -105,7 +114,7 @@ fn run_sandbox(
         Some(command.as_slice())
     };
 
-    let result = sandbox::run_sandbox(&info, &image_tag, user_info, cmd);
+    let result = sandbox::run_sandbox(&info, &image_tag, user_info, runtime, cmd);
 
     result
 }

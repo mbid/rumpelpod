@@ -5,7 +5,7 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::config::{get_sandbox_base_dir, get_sandbox_instance_dir, UserInfo};
+use crate::config::{get_sandbox_base_dir, get_sandbox_instance_dir, Runtime, UserInfo};
 use crate::docker;
 use crate::git;
 use crate::overlay::Overlay;
@@ -420,10 +420,11 @@ pub fn run_sandbox(
     info: &SandboxInfo,
     image_tag: &str,
     user_info: &UserInfo,
+    runtime: Runtime,
     command: Option<&[String]>,
 ) -> Result<()> {
     // Ensure container is running
-    let launched = ensure_container_running(info, image_tag, user_info)?;
+    let launched = ensure_container_running(info, image_tag, user_info, runtime)?;
 
     // If we launched a new container, spawn the sync daemon
     if launched {
@@ -469,6 +470,7 @@ fn ensure_container_running(
     info: &SandboxInfo,
     image_tag: &str,
     user_info: &UserInfo,
+    runtime: Runtime,
 ) -> Result<bool> {
     // If already running, we're done
     if docker::container_is_running(&info.container_name)? {
@@ -491,9 +493,9 @@ fn ensure_container_running(
         info.name.clone(),
         "--label".to_string(),
         "sandbox=true".to_string(),
-        // Use gVisor for sandboxing
+        // Use configured runtime for sandboxing
         "--runtime".to_string(),
-        "runsc".to_string(),
+        runtime.docker_runtime_name().to_string(),
         // User mapping
         "--user".to_string(),
         format!("{}:{}", user_info.uid, user_info.gid),

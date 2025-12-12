@@ -1,6 +1,30 @@
 use anyhow::{Context, Result};
+use clap::ValueEnum;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+
+/// Container runtime to use for sandboxing.
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum Runtime {
+    /// gVisor runtime (default) - strong isolation via kernel syscall interception
+    #[default]
+    Runsc,
+    /// Standard OCI runtime - no additional isolation
+    Runc,
+    /// Sysbox runtime - enables Docker-in-Docker with VM-like isolation
+    SysboxRunc,
+}
+
+impl Runtime {
+    /// Get the runtime name as used by Docker's --runtime flag.
+    pub fn docker_runtime_name(&self) -> &'static str {
+        match self {
+            Runtime::Runsc => "runsc",
+            Runtime::Runc => "runc",
+            Runtime::SysboxRunc => "sysbox-runc",
+        }
+    }
+}
 
 /// Get the cache directory for sandbox data.
 /// Uses $XDG_CACHE_HOME/sandbox or ~/.cache/sandbox as fallback.
