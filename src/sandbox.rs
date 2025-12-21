@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use log::{debug, info, warn};
 use reflink_copy::reflink_or_copy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -296,7 +297,7 @@ fn fix_mount_parent_ownership(
 
     if !status.success() {
         // Non-fatal: log but continue
-        eprintln!("Warning: Failed to fix some mount parent directory ownership");
+        warn!("Failed to fix some mount parent directory ownership");
     }
 
     Ok(())
@@ -458,7 +459,7 @@ fn spawn_sync_daemon(info: &SandboxInfo) -> Result<()> {
         .spawn()
         .context("Failed to spawn sync daemon")?;
 
-    eprintln!(
+    info!(
         "Sync daemon started (log: {})",
         info.sandbox_dir.join("sync.log").display()
     );
@@ -492,7 +493,7 @@ pub fn list_sandboxes(repo_root: &Path) -> Result<Vec<SandboxInfo>> {
 
 /// Delete a sandbox and its associated resources.
 pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
-    eprintln!("Deleting sandbox: {}", info.name);
+    info!("Deleting sandbox: {}", info.name);
 
     // Stop and remove container if it exists
     if docker::container_exists(&info.container_name)? {
@@ -536,7 +537,7 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
     // If so, clean up meta.git and the sandbox remote
     let remaining_sandboxes = list_sandboxes(&info.repo_root)?;
     if remaining_sandboxes.is_empty() {
-        eprintln!("Last sandbox deleted, cleaning up meta.git...");
+        info!("Last sandbox deleted, cleaning up meta.git...");
 
         // Remove meta.git
         if info.meta_git_dir.exists() {
@@ -608,9 +609,9 @@ pub fn run_sandbox(
 ) -> Result<()> {
     // Warn about overlayfs + sysbox combination
     if matches!(runtime, Runtime::SysboxRunc) && matches!(overlay_mode, OverlayMode::Overlayfs) {
-        eprintln!(
-            "Warning: Using overlayfs with sysbox-runc may cause permission issues.\n\
-             Consider using --overlay-mode copy instead.\n\
+        warn!(
+            "Using overlayfs with sysbox-runc may cause permission issues. \
+             Consider using --overlay-mode copy instead. \
              See: https://github.com/nestybox/sysbox/issues/968"
         );
     }
@@ -639,7 +640,7 @@ pub fn run_sandbox(
         vec![default_shell.as_str()]
     };
 
-    eprintln!("Executing in container: {}", info.container_name);
+    debug!("Executing in container: {}", info.container_name);
 
     // Execute the command - capture result but don't return early
     let exec_result = docker::exec_in_container(&info.container_name, &cmd);
@@ -649,7 +650,7 @@ pub fn run_sandbox(
 
     // Check if we should stop the container
     if !info.has_other_live_processes() {
-        eprintln!("No other processes attached, stopping container...");
+        debug!("No other processes attached, stopping container...");
         docker::stop_container(&info.container_name)?;
     }
 
@@ -667,7 +668,7 @@ fn ensure_container_running(
 ) -> Result<bool> {
     // If already running, we're done
     if docker::container_is_running(&info.container_name)? {
-        eprintln!("Container already running: {}", info.container_name);
+        debug!("Container already running: {}", info.container_name);
         return Ok(false);
     }
 
@@ -727,10 +728,11 @@ fn ensure_container_running(
     args.push("sleep".to_string());
     args.push("infinity".to_string());
 
-    eprintln!("Starting container: {}", info.container_name);
+    info!("Starting container: {}", info.container_name);
 
     let status = Command::new("docker")
         .args(&args)
+        .stdout(Stdio::null())
         .status()
         .context("Failed to start docker container")?;
 

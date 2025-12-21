@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use log::{debug, info};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -25,11 +26,11 @@ pub fn build_image(dockerfile_path: &Path, user_info: &UserInfo) -> Result<Strin
 
     // Check if image already exists
     if image_exists(&image_tag)? {
-        eprintln!("Using existing image: {}", image_tag);
+        debug!("Using existing image: {}", image_tag);
         return Ok(image_tag);
     }
 
-    eprintln!("Building Docker image: {}", image_tag);
+    info!("Building Docker image: {}", image_tag);
 
     let dockerfile_dir = dockerfile_path
         .parent()
@@ -50,6 +51,8 @@ pub fn build_image(dockerfile_path: &Path, user_info: &UserInfo) -> Result<Strin
             &format!("GROUP_ID={}", user_info.gid),
             &dockerfile_dir.to_string_lossy(),
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("Failed to run docker build")?;
 
@@ -157,7 +160,16 @@ pub fn create_volume(name: &str) -> Result<()> {
 
 /// Attach to a running container and execute a command.
 pub fn exec_in_container(name: &str, command: &[&str]) -> Result<()> {
-    let mut args = vec!["exec", "-it", name];
+    use std::io::IsTerminal;
+
+    let mut args = vec!["exec"];
+
+    // Only use -it flags when stdin is a TTY
+    if std::io::stdin().is_terminal() {
+        args.push("-it");
+    }
+
+    args.push(name);
     args.extend(command);
 
     let status = Command::new("docker")

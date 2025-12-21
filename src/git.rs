@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use log::{debug, info};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -21,7 +22,7 @@ pub fn find_repo_root() -> Result<PathBuf> {
 /// A shared clone uses --shared to reference the source repo's objects.
 pub fn create_shared_clone(source: &Path, dest: &Path) -> Result<()> {
     if dest.exists() {
-        eprintln!("Shared clone already exists at: {}", dest.display());
+        debug!("Shared clone already exists at: {}", dest.display());
         return Ok(());
     }
 
@@ -31,7 +32,7 @@ pub fn create_shared_clone(source: &Path, dest: &Path) -> Result<()> {
             .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
-    eprintln!(
+    info!(
         "Creating shared clone: {} -> {}",
         source.display(),
         dest.display()
@@ -44,6 +45,8 @@ pub fn create_shared_clone(source: &Path, dest: &Path) -> Result<()> {
             &source.to_string_lossy(),
             &dest.to_string_lossy(),
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("Failed to run git clone")?;
 
@@ -112,6 +115,7 @@ pub fn checkout_or_create_branch(repo: &Path, branch_name: &str) -> Result<()> {
     let status = Command::new("git")
         .current_dir(repo)
         .args(["checkout", branch_name])
+        .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .context("Failed to run git checkout")?;
@@ -124,6 +128,8 @@ pub fn checkout_or_create_branch(repo: &Path, branch_name: &str) -> Result<()> {
     let status = Command::new("git")
         .current_dir(repo)
         .args(["checkout", "-b", branch_name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("Failed to create branch")?;
 
@@ -163,7 +169,7 @@ pub fn ensure_meta_git(host_repo: &Path, meta_git_dir: &Path) -> Result<bool> {
             .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
-    eprintln!(
+    info!(
         "Creating meta.git bare clone: {} -> {}",
         host_repo.display(),
         meta_git_dir.display()
@@ -176,6 +182,8 @@ pub fn ensure_meta_git(host_repo: &Path, meta_git_dir: &Path) -> Result<bool> {
             &host_repo.to_string_lossy(),
             &meta_git_dir.to_string_lossy(),
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("Failed to run git clone --bare")?;
 
@@ -290,15 +298,29 @@ pub fn setup_host_sandbox_remote(host_repo: &Path, meta_git_dir: &Path) -> Resul
 /// Setup remotes for a sandbox repo.
 /// Renames the "origin" remote (created by git clone) to "sandbox".
 pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result<()> {
-    // Rename "origin" (created by git clone --shared) to "sandbox"
-    let status = Command::new("git")
+    // Check if "sandbox" remote already exists
+    let sandbox_exists = Command::new("git")
         .current_dir(sandbox_repo)
-        .args(["remote", "rename", "origin", "sandbox"])
+        .args(["remote", "get-url", "sandbox"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
-        .context("Failed to rename origin remote to sandbox")?;
+        .context("Failed to check sandbox remote")?
+        .success();
 
-    if !status.success() {
-        bail!("Failed to rename origin remote to sandbox");
+    if !sandbox_exists {
+        // Rename "origin" (created by git clone --shared) to "sandbox"
+        let status = Command::new("git")
+            .current_dir(sandbox_repo)
+            .args(["remote", "rename", "origin", "sandbox"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("Failed to rename origin remote to sandbox")?;
+
+        if !status.success() {
+            bail!("Failed to rename origin remote to sandbox");
+        }
     }
 
     // Update the URL to ensure it points to meta_git_dir
@@ -310,6 +332,8 @@ pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result
             "sandbox",
             &meta_git_dir.to_string_lossy(),
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("Failed to set sandbox remote URL")?;
 
@@ -321,6 +345,8 @@ pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result
     let status = Command::new("git")
         .current_dir(sandbox_repo)
         .args(["config", "uploadpack.allowAnySHA1InWant", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("Failed to configure uploadpack.allowAnySHA1InWant")?;
 
