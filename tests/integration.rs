@@ -309,7 +309,11 @@ fn test_sync_with_history_rewrite() {
     let output = run_in_sandbox(
         &repo,
         sandbox_name,
-        &["sh", "-c", "git config user.email 'test@example.com' && git config user.name 'Test User'"],
+        &[
+            "sh",
+            "-c",
+            "git config user.email 'test@example.com' && git config user.name 'Test User'",
+        ],
     );
     assert!(
         output.status.success(),
@@ -321,7 +325,11 @@ fn test_sync_with_history_rewrite() {
     let output = run_in_sandbox(
         &repo,
         sandbox_name,
-        &["sh", "-c", "echo 'first version' > file.txt && git add file.txt && git commit -m 'First commit'"],
+        &[
+            "sh",
+            "-c",
+            "echo 'first version' > file.txt && git add file.txt && git commit -m 'First commit'",
+        ],
     );
     assert!(
         output.status.success(),
@@ -340,7 +348,10 @@ fn test_sync_with_history_rewrite() {
     // Verify the commit is synced to host's remote tracking ref
     let output = run_git(
         &repo.dir,
-        &["rev-parse", &format!("refs/remotes/sandbox/{}", sandbox_name)],
+        &[
+            "rev-parse",
+            &format!("refs/remotes/sandbox/{}", sandbox_name),
+        ],
     );
     let host_remote_ref = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(
@@ -377,14 +388,16 @@ fn test_sync_with_history_rewrite() {
     // Verify the amended commit is synced to host's remote tracking ref
     let output = run_git(
         &repo.dir,
-        &["rev-parse", &format!("refs/remotes/sandbox/{}", sandbox_name)],
+        &[
+            "rev-parse",
+            &format!("refs/remotes/sandbox/{}", sandbox_name),
+        ],
     );
     let host_remote_ref_after = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(
         amended_commit, host_remote_ref_after,
         "Amended commit should be synced to host. Expected {}, got {}",
-        amended_commit,
-        host_remote_ref_after
+        amended_commit, host_remote_ref_after
     );
 
     // Clean up

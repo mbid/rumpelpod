@@ -257,7 +257,7 @@ pub fn sync_sandbox_to_meta(meta_git_dir: &Path, sandbox_repo: &Path, branch: &s
         .args([
             "fetch",
             &sandbox_repo.to_string_lossy(),
-            &format!("{}:refs/heads/{}", branch, branch),
+            &format!("+{}:refs/heads/{}", branch, branch),
         ])
         .status()
         .context("Failed to sync sandbox branch to meta.git")?;
@@ -278,7 +278,7 @@ pub fn sync_meta_to_host(host_repo: &Path, meta_git_dir: &Path, branch: &str) ->
         .args([
             "fetch",
             &meta_git_dir.to_string_lossy(),
-            &format!("refs/heads/{}:refs/remotes/sandbox/{}", branch, branch),
+            &format!("+refs/heads/{}:refs/remotes/sandbox/{}", branch, branch),
         ])
         .status()
         .context("Failed to sync meta.git branch to host")?;
