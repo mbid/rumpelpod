@@ -103,6 +103,21 @@ fn run_in_sandbox(sandbox_name: &str, command: &[&str]) -> Output {
     run_sandbox(&args)
 }
 
+/// Run a command inside the sandbox with a specific overlay mode.
+fn run_in_sandbox_with_mode(sandbox_name: &str, overlay_mode: &str, command: &[&str]) -> Output {
+    let mut args = vec![
+        "enter",
+        sandbox_name,
+        "--runtime",
+        "runc",
+        "--overlay-mode",
+        overlay_mode,
+        "--",
+    ];
+    args.extend(command);
+    run_sandbox(&args)
+}
+
 #[test]
 fn smoke_test_sandbox_enter() {
     let repo = TestRepo::init();
@@ -176,6 +191,104 @@ fn smoke_test_sandbox_enter() {
     assert!(
         output.status.success(),
         "Failed to delete sandbox: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_delete_with_readonly_files_copy_mode() {
+    let repo = TestRepo::init();
+
+    // Copy the minimal Dockerfile for the sandbox
+    fs::write(
+        repo.dir.join("Dockerfile"),
+        include_str!("Dockerfile-debian"),
+    )
+    .expect("Failed to write Dockerfile");
+
+    // Commit the Dockerfile
+    run_git(&repo.dir, &["add", "Dockerfile"]);
+    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
+
+    let sandbox_name = "test-delete-copy";
+
+    // Enter sandbox with copy overlay mode and create files with restrictive permissions
+    let output = run_in_sandbox_with_mode(
+        sandbox_name,
+        "copy",
+        &[
+            "sh",
+            "-c",
+            "mkdir -p readonly_dir && \
+             echo 'test' > readonly_dir/file.txt && \
+             chmod 000 readonly_dir/file.txt && \
+             chmod 000 readonly_dir",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "Failed to create readonly files: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Exit the sandbox (it should stop automatically)
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Try to delete the sandbox - this should succeed even with readonly files
+    let output = run_sandbox(&["delete", sandbox_name]);
+    assert!(
+        output.status.success(),
+        "Failed to delete sandbox with readonly files in copy mode: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_delete_with_readonly_files_overlayfs_mode() {
+    let repo = TestRepo::init();
+
+    // Copy the minimal Dockerfile for the sandbox
+    fs::write(
+        repo.dir.join("Dockerfile"),
+        include_str!("Dockerfile-debian"),
+    )
+    .expect("Failed to write Dockerfile");
+
+    // Commit the Dockerfile
+    run_git(&repo.dir, &["add", "Dockerfile"]);
+    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
+
+    let sandbox_name = "test-delete-overlayfs";
+
+    // Enter sandbox with overlayfs mode and create files with restrictive permissions
+    let output = run_in_sandbox_with_mode(
+        sandbox_name,
+        "overlayfs",
+        &[
+            "sh",
+            "-c",
+            "mkdir -p readonly_dir && \
+             echo 'test' > readonly_dir/file.txt && \
+             chmod 000 readonly_dir/file.txt && \
+             chmod 000 readonly_dir",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "Failed to create readonly files: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Exit the sandbox (it should stop automatically)
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Try to delete the sandbox - this should succeed even with readonly files
+    let output = run_sandbox(&["delete", sandbox_name]);
+    assert!(
+        output.status.success(),
+        "Failed to delete sandbox with readonly files in overlayfs mode: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
 }
