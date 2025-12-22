@@ -1,17 +1,15 @@
 use assert_cmd::Command;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Output;
 
 /// A test fixture that creates a temporary git repository in /tmp.
 /// The repository is initialized with a README.md file and an initial commit.
-/// The current directory is changed to the repository on creation.
-/// On drop, the original directory is restored and the temp directory is cleaned up.
+/// Does NOT change the current directory, allowing tests to run in parallel.
+/// On drop, the temp directory is cleaned up.
 pub struct TestRepo {
     pub dir: PathBuf,
     pub initial_commit: String,
-    original_dir: PathBuf,
 }
 
 impl TestRepo {
@@ -19,10 +17,8 @@ impl TestRepo {
     ///
     /// Creates a temporary directory in /tmp, initializes a git repo with "master"
     /// as the initial branch, creates a README.md with "TEST" content, and makes
-    /// an initial commit. Changes the current directory to the new repository.
+    /// an initial commit. Does NOT change the current directory.
     pub fn init() -> Self {
-        let original_dir = env::current_dir().expect("Failed to get current directory");
-
         // Create temp directory with unique name
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -49,22 +45,15 @@ impl TestRepo {
         let output = run_git(&dir, &["rev-parse", "HEAD"]);
         let initial_commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        // Change to the test directory
-        env::set_current_dir(&dir).expect("Failed to change to test directory");
-
         TestRepo {
             dir,
             initial_commit,
-            original_dir,
         }
     }
 }
 
 impl Drop for TestRepo {
     fn drop(&mut self) {
-        // Restore original directory
-        let _ = env::set_current_dir(&self.original_dir);
-
         // Clean up temp directory
         let _ = fs::remove_dir_all(&self.dir);
     }
@@ -87,24 +76,30 @@ fn run_git(dir: &PathBuf, args: &[&str]) -> Output {
     output
 }
 
-/// Run the sandbox binary with the given arguments.
-fn run_sandbox(args: &[&str]) -> Output {
+/// Run the sandbox binary with the given arguments in a specific working directory.
+fn run_sandbox_in(working_dir: &PathBuf, args: &[&str]) -> Output {
     Command::cargo_bin("sandbox")
         .expect("Failed to find sandbox binary")
+        .current_dir(working_dir)
         .args(args)
         .output()
         .expect("Failed to run sandbox command")
 }
 
 /// Run a command inside the sandbox and capture its output.
-fn run_in_sandbox(sandbox_name: &str, command: &[&str]) -> Output {
+fn run_in_sandbox(repo: &TestRepo, sandbox_name: &str, command: &[&str]) -> Output {
     let mut args = vec!["enter", sandbox_name, "--runtime", "runc", "--"];
     args.extend(command);
-    run_sandbox(&args)
+    run_sandbox_in(&repo.dir, &args)
 }
 
 /// Run a command inside the sandbox with a specific overlay mode.
-fn run_in_sandbox_with_mode(sandbox_name: &str, overlay_mode: &str, command: &[&str]) -> Output {
+fn run_in_sandbox_with_mode(
+    repo: &TestRepo,
+    sandbox_name: &str,
+    overlay_mode: &str,
+    command: &[&str],
+) -> Output {
     let mut args = vec![
         "enter",
         sandbox_name,
@@ -115,7 +110,7 @@ fn run_in_sandbox_with_mode(sandbox_name: &str, overlay_mode: &str, command: &[&
         "--",
     ];
     args.extend(command);
-    run_sandbox(&args)
+    run_sandbox_in(&repo.dir, &args)
 }
 
 #[test]
@@ -140,7 +135,7 @@ fn smoke_test_sandbox_enter() {
     let sandbox_name = "test-sandbox";
 
     // Test 1: Verify README.md content inside sandbox
-    let output = run_in_sandbox(sandbox_name, &["cat", "README.md"]);
+    let output = run_in_sandbox(&repo, sandbox_name, &["cat", "README.md"]);
     assert!(
         output.status.success(),
         "Failed to read README.md in sandbox: {}",
@@ -155,7 +150,7 @@ fn smoke_test_sandbox_enter() {
     );
 
     // Test 2: Verify we're on the correct branch (sandbox name)
-    let output = run_in_sandbox(sandbox_name, &["git", "branch", "--show-current"]);
+    let output = run_in_sandbox(&repo, sandbox_name, &["git", "branch", "--show-current"]);
     assert!(
         output.status.success(),
         "Failed to get current branch: {}",
@@ -171,7 +166,7 @@ fn smoke_test_sandbox_enter() {
     );
 
     // Test 3: Verify we're on the correct commit
-    let output = run_in_sandbox(sandbox_name, &["git", "rev-parse", "HEAD"]);
+    let output = run_in_sandbox(&repo, sandbox_name, &["git", "rev-parse", "HEAD"]);
     assert!(
         output.status.success(),
         "Failed to get current commit: {}",
@@ -187,7 +182,7 @@ fn smoke_test_sandbox_enter() {
     );
 
     // Clean up: delete the sandbox
-    let output = run_sandbox(&["delete", sandbox_name]);
+    let output = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
     assert!(
         output.status.success(),
         "Failed to delete sandbox: {}",
@@ -214,6 +209,7 @@ fn test_delete_with_readonly_files_copy_mode() {
 
     // Enter sandbox with copy overlay mode and create files with restrictive permissions
     let output = run_in_sandbox_with_mode(
+        &repo,
         sandbox_name,
         "copy",
         &[
@@ -235,7 +231,7 @@ fn test_delete_with_readonly_files_copy_mode() {
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     // Try to delete the sandbox - this should succeed even with readonly files
-    let output = run_sandbox(&["delete", sandbox_name]);
+    let output = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
     assert!(
         output.status.success(),
         "Failed to delete sandbox with readonly files in copy mode: {}\nstderr: {}",
@@ -263,6 +259,7 @@ fn test_delete_with_readonly_files_overlayfs_mode() {
 
     // Enter sandbox with overlayfs mode and create files with restrictive permissions
     let output = run_in_sandbox_with_mode(
+        &repo,
         sandbox_name,
         "overlayfs",
         &[
@@ -284,7 +281,7 @@ fn test_delete_with_readonly_files_overlayfs_mode() {
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     // Try to delete the sandbox - this should succeed even with readonly files
-    let output = run_sandbox(&["delete", sandbox_name]);
+    let output = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
     assert!(
         output.status.success(),
         "Failed to delete sandbox with readonly files in overlayfs mode: {}\nstderr: {}",
