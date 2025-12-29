@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use backoff::{backoff::Backoff, ExponentialBackoff};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -237,17 +237,14 @@ impl Client {
         Ok(Self::new(api_key))
     }
 
+    /// Retry logic follows claude code's behavior: up to 10 retries, first retry instant
+    /// (unless rate-limited), then 2 minute delays with jitter.
     pub fn messages(&self, request: MessagesRequest) -> Result<MessagesResponse> {
-        const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
-
-        let mut backoff = ExponentialBackoff {
-            max_elapsed_time: None,
-            max_interval: MAX_RETRY_DELAY,
-            ..Default::default()
-        };
+        const MAX_RETRIES: u32 = 10;
+        const BASE_RETRY_DELAY: Duration = Duration::from_secs(120);
+        const MAX_JITTER: Duration = Duration::from_secs(30);
 
         let mut attempt = 0;
-        const MAX_RETRIES: u32 = 2;
 
         loop {
             let response = self
@@ -269,25 +266,32 @@ impl Client {
                 return Ok(response);
             }
 
+            let is_rate_limited = status.as_u16() == 429;
             let should_retry = matches!(status.as_u16(), 429 | 500 | 504 | 529);
 
             if should_retry && attempt < MAX_RETRIES {
                 attempt += 1;
 
-                // Prefer retry-after header when available (e.g. rate limits)
-                let delay = response
+                let retry_after = response
                     .headers()
                     .get("retry-after")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok())
-                    .map(Duration::from_secs)
-                    .or_else(|| backoff.next_backoff())
-                    .map(|d| d.min(MAX_RETRY_DELAY));
+                    .map(Duration::from_secs);
 
-                if let Some(delay) = delay {
+                let delay = if let Some(retry_after) = retry_after {
+                    retry_after
+                } else if attempt == 1 && !is_rate_limited {
+                    Duration::ZERO
+                } else {
+                    let jitter = rand::thread_rng().gen_range(Duration::ZERO..MAX_JITTER);
+                    BASE_RETRY_DELAY + jitter
+                };
+
+                if !delay.is_zero() {
                     std::thread::sleep(delay);
-                    continue;
                 }
+                continue;
             }
 
             let error_text = response.text().unwrap_or_default();
