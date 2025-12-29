@@ -159,18 +159,27 @@ pub fn create_volume(name: &str) -> Result<()> {
 }
 
 /// Attach to a running container and execute a command.
-pub fn exec_in_container(name: &str, command: &[&str]) -> Result<()> {
+pub fn exec_in_container(
+    name: &str,
+    command: &[&str],
+    env_vars: &[(String, String)],
+) -> Result<()> {
     use std::io::IsTerminal;
 
-    let mut args = vec!["exec"];
+    let mut args = vec!["exec".to_string()];
 
     // Only use -it flags when stdin is a TTY
     if std::io::stdin().is_terminal() {
-        args.push("-it");
+        args.push("-it".to_string());
     }
 
-    args.push(name);
-    args.extend(command);
+    for (k, v) in env_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", k, v));
+    }
+
+    args.push(name.to_string());
+    args.extend(command.iter().map(|s| s.to_string()));
 
     let status = Command::new("docker")
         .args(&args)

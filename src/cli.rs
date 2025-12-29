@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 
 use crate::agent;
 use crate::config::{Model, OverlayMode, Runtime, UserInfo};
+use crate::daemon;
 use crate::docker;
 use crate::git;
 use crate::sandbox;
-use crate::sync;
 
 #[derive(Parser)]
 #[command(name = "sandbox")]
@@ -73,11 +73,28 @@ pub enum Commands {
         passthrough_env: Vec<String>,
     },
 
-    /// Internal: sync daemon process (not shown in help)
+    /// Internal daemon process (not shown in help)
     #[command(hide = true)]
-    SyncDaemon {
+    InternalDaemon {
         /// Path to the sandbox directory
         sandbox_dir: PathBuf,
+        /// Docker image tag
+        image_tag: String,
+        /// Username for container
+        username: String,
+        /// UID for container
+        uid: u32,
+        /// GID for container
+        gid: u32,
+        /// Shell for container
+        shell: String,
+        /// Container runtime name
+        runtime: String,
+        /// Overlay mode
+        overlay_mode: String,
+        /// Environment variables in NAME=VALUE format
+        #[arg(trailing_var_arg = true)]
+        env_vars: Vec<String>,
     },
 }
 
@@ -98,10 +115,50 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::SyncDaemon { sandbox_dir } => {
-            // Sync daemon doesn't need repo_root or user_info - it loads SandboxInfo
+        Commands::InternalDaemon {
+            sandbox_dir,
+            image_tag,
+            username,
+            uid,
+            gid,
+            shell,
+            runtime,
+            overlay_mode,
+            env_vars,
+        } => {
             let info = sandbox::SandboxInfo::load(&sandbox_dir)?;
-            sync::run_sync_daemon(&info)?;
+            let user_info = UserInfo {
+                username,
+                uid,
+                gid,
+                shell,
+            };
+            let runtime = match runtime.as_str() {
+                "runsc" => Runtime::Runsc,
+                "runc" => Runtime::Runc,
+                "sysbox-runc" => Runtime::SysboxRunc,
+                _ => bail!("Unknown runtime: {}", runtime),
+            };
+            let overlay_mode = match overlay_mode.as_str() {
+                "overlayfs" => OverlayMode::Overlayfs,
+                "copy" => OverlayMode::Copy,
+                _ => bail!("Unknown overlay mode: {}", overlay_mode),
+            };
+            let env_vars: Vec<(String, String)> = env_vars
+                .into_iter()
+                .filter_map(|s| {
+                    let mut parts = s.splitn(2, '=');
+                    Some((parts.next()?.to_string(), parts.next()?.to_string()))
+                })
+                .collect();
+            daemon::run_daemon_with_sync(
+                &info,
+                &image_tag,
+                &user_info,
+                runtime,
+                overlay_mode,
+                &env_vars,
+            )?;
         }
         _ => {
             // All other commands need repo_root and user_info
@@ -151,7 +208,7 @@ pub fn run() -> Result<()> {
                         &env_vars,
                     )?;
                 }
-                Commands::SyncDaemon { .. } => unreachable!(),
+                Commands::InternalDaemon { .. } => unreachable!(),
             }
         }
     }
@@ -261,7 +318,7 @@ fn run_agent(
     let image_tag = docker::build_image(&dockerfile, user_info)?;
     let info = sandbox::ensure_sandbox(repo_root, name)?;
 
-    sandbox::ensure_container_running(
+    let _daemon_conn = sandbox::ensure_container_running(
         &info,
         &image_tag,
         user_info,
@@ -271,4 +328,5 @@ fn run_agent(
     )?;
 
     agent::run_agent(&info.container_name, model)
+    // _daemon_conn is dropped here, signaling disconnection to daemon
 }

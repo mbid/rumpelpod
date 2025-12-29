@@ -12,6 +12,7 @@ use crate::config::{
     get_meta_git_dir, get_sandbox_base_dir, get_sandbox_instance_dir, OverlayMode, Runtime,
     UserInfo,
 };
+use crate::daemon::{self, DaemonConnection};
 use crate::docker;
 use crate::git;
 use crate::overlay::Overlay;
@@ -111,7 +112,7 @@ fn copy_dir_reflink(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Process mounts and generate docker arguments.
-fn process_mounts(
+pub fn process_mounts(
     mounts: &[Mount],
     info: &SandboxInfo,
     overlay_mode: OverlayMode,
@@ -390,81 +391,6 @@ impl SandboxInfo {
     pub fn create_overlay(&self, name: &str, lower: &Path) -> Overlay {
         Overlay::new(name, lower, &self.overlays_dir(), &self.volume_prefix())
     }
-
-    /// Write a PID file for the current process to track active attachments.
-    pub fn write_pid_file(&self) -> Result<PathBuf> {
-        std::fs::create_dir_all(&self.pids_dir)?;
-        let pid = std::process::id();
-        let pid_file = self.pids_dir.join(format!("{}.pid", pid));
-        std::fs::write(&pid_file, pid.to_string())?;
-        Ok(pid_file)
-    }
-
-    /// Remove our PID file.
-    pub fn remove_pid_file(&self) {
-        let pid = std::process::id();
-        let pid_file = self.pids_dir.join(format!("{}.pid", pid));
-        let _ = std::fs::remove_file(&pid_file);
-    }
-
-    /// Check if any other processes are still attached (have live PIDs).
-    pub fn has_other_live_processes(&self) -> bool {
-        let our_pid = std::process::id();
-
-        let entries = match std::fs::read_dir(&self.pids_dir) {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "pid") {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    if let Ok(pid) = contents.trim().parse::<u32>() {
-                        // Skip our own PID
-                        if pid == our_pid {
-                            continue;
-                        }
-                        // Check if process is alive
-                        if process_is_alive(pid) {
-                            return true;
-                        } else {
-                            // Clean up stale PID file
-                            let _ = std::fs::remove_file(&path);
-                        }
-                    }
-                }
-            }
-        }
-
-        false
-    }
-}
-
-/// Check if a process with the given PID is alive.
-fn process_is_alive(pid: u32) -> bool {
-    // On Unix, sending signal 0 checks if process exists without affecting it
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-/// Spawn the sync daemon as a detached background process.
-fn spawn_sync_daemon(info: &SandboxInfo) -> Result<()> {
-    let exe = std::env::current_exe().context("Failed to get current executable path")?;
-
-    Command::new(exe)
-        .args(["sync-daemon", &info.sandbox_dir.to_string_lossy()])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Failed to spawn sync daemon")?;
-
-    info!(
-        "Sync daemon started (log: {})",
-        info.sandbox_dir.join("sync.log").display()
-    );
-
-    Ok(())
 }
 
 /// List all sandbox instances for a repository.
@@ -603,7 +529,7 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
 }
 
 /// Build the list of mounts for a sandbox container.
-fn build_mount_list(info: &SandboxInfo, user_info: &UserInfo) -> Vec<Mount> {
+pub fn build_mount_list(info: &SandboxInfo, user_info: &UserInfo) -> Vec<Mount> {
     let home = dirs::home_dir();
     let container_home = format!("/home/{}", user_info.username);
 
@@ -644,8 +570,7 @@ fn build_mount_list(info: &SandboxInfo, user_info: &UserInfo) -> Vec<Mount> {
 }
 
 /// Ensure the container is running (start it if not), then exec a command into it.
-/// Uses reference counting via PID files to determine when to stop the container.
-/// If we launch a new container, also spawns the sync daemon.
+/// Connects to the daemon (launching it if necessary) to manage the container lifecycle.
 pub fn run_sandbox(
     info: &SandboxInfo,
     image_tag: &str,
@@ -655,7 +580,6 @@ pub fn run_sandbox(
     env_vars: &[(String, String)],
     command: Option<&[String]>,
 ) -> Result<()> {
-    // Warn about overlayfs + sysbox combination
     if matches!(runtime, Runtime::SysboxRunc) && matches!(overlay_mode, OverlayMode::Overlayfs) {
         warn!(
             "Using overlayfs with sysbox-runc may cause permission issues. \
@@ -664,19 +588,9 @@ pub fn run_sandbox(
         );
     }
 
-    // Ensure container is running
-    let launched =
-        ensure_container_running(info, image_tag, user_info, runtime, overlay_mode, env_vars)?;
+    let _daemon_conn =
+        daemon::connect_or_launch(info, image_tag, user_info, runtime, overlay_mode, env_vars)?;
 
-    // If we launched a new container, spawn the sync daemon
-    if launched {
-        spawn_sync_daemon(info)?;
-    }
-
-    // Write our PID file to track this attachment
-    info.write_pid_file()?;
-
-    // Determine the command to run
     let default_shell = if user_info.uses_fish() {
         "fish".to_string()
     } else {
@@ -691,23 +605,12 @@ pub fn run_sandbox(
 
     debug!("Executing in container: {}", info.container_name);
 
-    // Execute the command - capture result but don't return early
-    let exec_result = docker::exec_in_container(&info.container_name, &cmd);
-
-    // Cleanup: remove our PID file first
-    info.remove_pid_file();
-
-    // Check if we should stop the container
-    if !info.has_other_live_processes() {
-        debug!("No other processes attached, stopping container...");
-        docker::stop_container(&info.container_name)?;
-    }
-
-    exec_result
+    docker::exec_in_container(&info.container_name, &cmd, env_vars)
+    // _daemon_conn is dropped here, signaling disconnection to daemon
 }
 
-/// Ensure the container is running, starting it if necessary.
-/// Returns true if we launched a new container, false if it was already running.
+/// Ensure the container is running by connecting to (or launching) the daemon.
+/// Returns the daemon connection which must be held to keep the container alive.
 pub fn ensure_container_running(
     info: &SandboxInfo,
     image_tag: &str,
@@ -715,44 +618,44 @@ pub fn ensure_container_running(
     runtime: Runtime,
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
-) -> Result<bool> {
-    // If already running, we're done
-    if docker::container_is_running(&info.container_name)? {
-        debug!("Container already running: {}", info.container_name);
-        return Ok(false);
-    }
+) -> Result<DaemonConnection> {
+    daemon::connect_or_launch(info, image_tag, user_info, runtime, overlay_mode, env_vars)
+}
 
+/// Internal function to start the container directly (called by daemon).
+pub fn ensure_container_running_internal(
+    info: &SandboxInfo,
+    image_tag: &str,
+    user_info: &UserInfo,
+    runtime: Runtime,
+    overlay_mode: OverlayMode,
+    env_vars: &[(String, String)],
+) -> Result<()> {
     // Remove stopped container if it exists
     if docker::container_exists(&info.container_name)? {
         docker::remove_container(&info.container_name)?;
     }
 
-    // Build docker run arguments for detached container with sleep infinity
     let mut args = vec![
         "run".to_string(),
-        "-d".to_string(), // Detached mode
+        "-d".to_string(),
         "--name".to_string(),
         info.container_name.clone(),
         "--hostname".to_string(),
         info.name.clone(),
         "--label".to_string(),
         "sandbox=true".to_string(),
-        // Use configured runtime for sandboxing
         "--runtime".to_string(),
         runtime.docker_runtime_name().to_string(),
-        // User mapping
         "--user".to_string(),
         format!("{}:{}", user_info.uid, user_info.gid),
-        // Set working directory to the repo path (where clone is mounted)
         "--workdir".to_string(),
         info.repo_root.to_string_lossy().to_string(),
     ];
 
-    // Build and process the mount list
     let mounts = build_mount_list(info, user_info);
     args.extend(process_mounts(&mounts, info, overlay_mode)?);
 
-    // Special handling for ~/.claude.json (needs filtering, not just copying)
     if let Some(home) = dirs::home_dir() {
         let claude_json = home.join(".claude.json");
         if claude_json.exists() {
@@ -771,16 +674,12 @@ pub fn ensure_container_running(
         }
     }
 
-    // Add environment variables
     for (name, value) in env_vars {
         args.push("-e".to_string());
         args.push(format!("{}={}", name, value));
     }
 
-    // Add the image
     args.push(image_tag.to_string());
-
-    // Run sleep infinity to keep container alive
     args.push("sleep".to_string());
     args.push("infinity".to_string());
 
@@ -796,10 +695,9 @@ pub fn ensure_container_running(
         bail!("Failed to start container");
     }
 
-    // Fix ownership of mount parent directories that Docker created as root
     fix_mount_parent_ownership(&info.container_name, &mounts, user_info)?;
 
-    Ok(true)
+    Ok(())
 }
 
 /// Ensure a sandbox is set up and ready to use.
