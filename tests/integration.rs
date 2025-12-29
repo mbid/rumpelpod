@@ -588,6 +588,127 @@ fn test_agent_writes_file() {
 }
 
 #[test]
+fn test_enter_passthrough_env() {
+    let repo = TestRepo::init();
+
+    fs::write(
+        repo.dir.join("Dockerfile"),
+        include_str!("Dockerfile-debian"),
+    )
+    .expect("Failed to write Dockerfile");
+
+    run_git(&repo.dir, &["add", "Dockerfile"]);
+    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
+
+    let sandbox_name = "test-env-passthrough";
+    let env_value = "SECRET_ENV_VALUE_42";
+
+    // Test 1: Verify env var is passed through when set on host
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(&repo.dir)
+        .env("MY_TEST_VAR", env_value)
+        .args([
+            "enter",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--env",
+            "MY_TEST_VAR",
+            "--",
+            "sh",
+            "-c",
+            "echo $MY_TEST_VAR",
+        ])
+        .output()
+        .expect("Failed to run sandbox");
+
+    assert!(
+        output.status.success(),
+        "Failed to run command with --env flag: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        env_value,
+        "Env var not passed through. Got: '{}'",
+        stdout.trim()
+    );
+
+    // Test 2: Verify error when env var is not set on host
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(&repo.dir)
+        .args([
+            "enter",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--env",
+            "NONEXISTENT_VAR_XYZ",
+            "--",
+            "echo",
+            "should not reach here",
+        ])
+        .output()
+        .expect("Failed to run sandbox");
+
+    assert!(
+        !output.status.success(),
+        "Should fail when env var is not set: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("NONEXISTENT_VAR_XYZ"),
+        "Error message should mention the missing env var. Got: '{}'",
+        stderr
+    );
+
+    // Test 3: Verify multiple env vars can be passed
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(&repo.dir)
+        .env("VAR_ONE", "value1")
+        .env("VAR_TWO", "value2")
+        .args([
+            "enter",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--env",
+            "VAR_ONE",
+            "--env",
+            "VAR_TWO",
+            "--",
+            "sh",
+            "-c",
+            "echo $VAR_ONE-$VAR_TWO",
+        ])
+        .output()
+        .expect("Failed to run sandbox");
+
+    assert!(
+        output.status.success(),
+        "Failed to run with multiple --env flags: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "value1-value2",
+        "Multiple env vars not passed correctly. Got: '{}'",
+        stdout.trim()
+    );
+
+    // Clean up
+    let output = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
+    assert!(
+        output.status.success(),
+        "Failed to delete sandbox: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_agent_handles_command_with_empty_output_and_nonzero_exit() {
     // Regression test: The Anthropic API rejects tool_result blocks with empty
     // content when is_error is true. Commands like `false` or `exit 1` produce
