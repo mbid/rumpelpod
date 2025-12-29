@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::io::{BufRead, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 use strum::{Display, EnumString};
@@ -256,6 +256,49 @@ fn save_output_to_file(container_name: &str, data: &[u8]) -> Result<String> {
     Ok(output_file)
 }
 
+/// Get user input by launching vim on a temp file containing the chat history.
+/// Returns the new message (content after the chat history prefix).
+/// If the user doesn't preserve the chat history prefix, prompts to retry.
+fn get_input_via_vim(chat_history: &str) -> Result<String> {
+    use std::fs;
+
+    loop {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("sandbox-chat-{}.txt", std::process::id()));
+
+        fs::write(&temp_file, chat_history).context("Failed to write temp file for vim")?;
+
+        let status = Command::new("vim")
+            .arg(&temp_file)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("Failed to launch vim")?;
+
+        if !status.success() {
+            anyhow::bail!("vim exited with non-zero status");
+        }
+
+        let edited_content = fs::read_to_string(&temp_file).context("Failed to read temp file")?;
+        let _ = fs::remove_file(&temp_file);
+
+        // Prevent accidental editing of history
+        if !edited_content.starts_with(chat_history) {
+            eprintln!("Error: The chat history prefix was modified. Please keep it intact.");
+            eprint!("Press Enter to try again...");
+            std::io::stderr().flush()?;
+
+            let mut buf = [0u8; 1];
+            let _ = std::io::stdin().read(&mut buf);
+            continue;
+        }
+
+        let new_message = edited_content[chat_history.len()..].trim().to_string();
+        return Ok(new_message);
+    }
+}
+
 fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(String, bool)> {
     const MAX_OUTPUT_SIZE: usize = 30000;
 
@@ -313,29 +356,62 @@ fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(Strin
     Ok((combined, success))
 }
 
+/// Helper macro to append to chat history and print to stdout
+macro_rules! chat_println {
+    ($history:expr) => {{
+        println!();
+        $history.push('\n');
+    }};
+    ($history:expr, $($arg:tt)*) => {{
+        let s = format!($($arg)*);
+        println!("{}", s);
+        $history.push_str(&s);
+        $history.push('\n');
+    }};
+}
+
 pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
     let client = Client::from_env()?;
 
-    let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
     let mut messages: Vec<Message> = Vec::new();
+    let mut chat_history = String::new();
 
-    print!("> ");
-    stdout.flush()?;
+    let is_tty = std::io::stdin().is_terminal();
 
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            print!("> ");
-            stdout.flush()?;
-            continue;
-        }
+    // Non-TTY mode reads entire stdin upfront and exits after one response
+    let initial_prompt = if !is_tty {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .context("Failed to read stdin")?;
+        Some(input.trim().to_string())
+    } else {
+        None
+    };
+
+    loop {
+        let user_input = if let Some(ref prompt) = initial_prompt {
+            if !messages.is_empty() {
+                break;
+            }
+            prompt.clone()
+        } else {
+            let input = get_input_via_vim(&chat_history)?;
+            if input.is_empty() {
+                continue;
+            }
+            input
+        };
+
+        chat_println!(chat_history, "> {}", user_input);
+        stdout.flush()?;
 
         messages.push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text {
-                text: line,
+                text: user_input,
                 cache_control: None,
             }],
         });
@@ -397,7 +473,7 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
             for block in &response.content {
                 match block {
                     ContentBlock::Text { text, .. } => {
-                        println!("{}", text);
+                        chat_println!(chat_history, "{}", text);
                     }
                     ContentBlock::ToolUse { id, name, input } => {
                         has_tool_use = true;
@@ -409,13 +485,13 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
                                 let command =
                                     input.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
-                                println!("$ {}", command);
+                                chat_println!(chat_history, "$ {}", command);
 
                                 let (output, success) =
                                     execute_bash_in_sandbox(container_name, command)?;
 
                                 if !output.is_empty() {
-                                    println!("{}", output);
+                                    chat_println!(chat_history, "{}", output);
                                 }
 
                                 (output, success)
@@ -434,7 +510,7 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
 
-                                println!("[edit] {}", file_path);
+                                chat_println!(chat_history, "[edit] {}", file_path);
 
                                 let (output, success) = execute_edit_in_sandbox(
                                     container_name,
@@ -443,7 +519,7 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
                                     new_string,
                                 )?;
 
-                                println!("{}", output);
+                                chat_println!(chat_history, "{}", output);
                                 (output, success)
                             }
                             AgentToolName::Write => {
@@ -454,12 +530,12 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
                                 let content =
                                     input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-                                println!("[write] {}", file_path);
+                                chat_println!(chat_history, "[write] {}", file_path);
 
                                 let (output, success) =
                                     execute_write_in_sandbox(container_name, file_path, content)?;
 
-                                println!("{}", output);
+                                chat_println!(chat_history, "{}", output);
                                 (output, success)
                             }
                         };
@@ -499,9 +575,6 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
                 break;
             }
         }
-
-        print!("> ");
-        stdout.flush()?;
     }
 
     Ok(())

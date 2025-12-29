@@ -34,3 +34,4 @@ backoff = "0.4"
 
 [dev-dependencies]
 assert_cmd = "2.0"
+portable-pty = "0.8"

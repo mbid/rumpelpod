@@ -1,7 +1,9 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
 /// A test fixture that creates a temporary git repository in /tmp.
 /// The repository is initialized with a README.md file and an initial commit.
@@ -807,5 +809,178 @@ fn test_agent_handles_command_with_empty_output_and_nonzero_exit() {
         output.status.success(),
         "Failed to delete sandbox: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_agent_vim_input() {
+    // Test the vim-based input mode using a PTY to simulate a real terminal
+    let repo = TestRepo::init();
+
+    fs::write(
+        repo.dir.join("Dockerfile"),
+        include_str!("Dockerfile-debian"),
+    )
+    .expect("Failed to write Dockerfile");
+
+    let secret_content = "VIM_TEST_SECRET_98765";
+    fs::write(repo.dir.join("secret.txt"), secret_content).expect("Failed to write secret.txt");
+
+    run_git(&repo.dir, &["add", "Dockerfile", "secret.txt"]);
+    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile and secret"]);
+
+    // Create a directory for the mock vim script
+    let mock_bin_dir = repo.dir.join("mock-bin");
+    fs::create_dir_all(&mock_bin_dir).expect("Failed to create mock-bin dir");
+
+    // Create a unique marker file path for this test
+    let marker_file = repo.dir.join("vim-marker");
+
+    // Create a mock vim script that:
+    // 1. On first invocation: appends a test message and creates a marker
+    // 2. On subsequent invocations: sleeps forever (will be killed by test timeout)
+    let mock_vim_script = format!(
+        r#"#!/bin/bash
+FILE="$1"
+MARKER="{}"
+
+if [ -f "$MARKER" ]; then
+    # Second invocation: sleep forever, test will kill us
+    sleep 3600
+    exit 0
+fi
+
+# First invocation: append the test message
+echo "" >> "$FILE"
+echo "What is the content of the file secret.txt?" >> "$FILE"
+
+# Create marker for next invocation
+touch "$MARKER"
+"#,
+        marker_file.display()
+    );
+
+    let mock_vim_path = mock_bin_dir.join("vim");
+    fs::write(&mock_vim_path, mock_vim_script).expect("Failed to write mock vim");
+
+    // Make mock vim executable
+    Command::new("chmod")
+        .args(["+x", mock_vim_path.to_str().unwrap()])
+        .output()
+        .expect("Failed to chmod mock vim");
+
+    let sandbox_name = "test-agent-vim";
+
+    // Get current PATH and prepend mock bin dir
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", mock_bin_dir.display(), current_path);
+
+    // Create a PTY to simulate a real terminal
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("Failed to open PTY");
+
+    // Build command to spawn via PTY
+    let sandbox_bin = assert_cmd::cargo::cargo_bin!("sandbox");
+    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    cmd.cwd(&repo.dir);
+    cmd.env("PATH", &new_path);
+    cmd.args([
+        "agent",
+        sandbox_name,
+        "--runtime",
+        "runc",
+        "--model",
+        "haiku",
+    ]);
+
+    // Spawn the agent process in the PTY
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .expect("Failed to spawn agent in PTY");
+
+    // Drop the slave to avoid blocking on read
+    drop(pair.slave);
+
+    // Get a reader from the master side and spawn a thread to collect output
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("Failed to get PTY reader");
+    let output_data = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let output_data_clone = output_data.clone();
+
+    let reader_thread = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    output_data_clone
+                        .lock()
+                        .unwrap()
+                        .extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Wait for the agent to process the message (poll collected output for expected content)
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(120);
+
+    loop {
+        // Check if we got the expected output
+        let data = output_data.lock().unwrap();
+        let output_str = String::from_utf8_lossy(&data);
+        if output_str.contains(secret_content) {
+            break;
+        }
+
+        // Check timeout
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            panic!("Timeout waiting for agent output.\noutput: {}", output_str);
+        }
+        drop(data);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Kill the agent (it's waiting for more vim input)
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(pair.master); // Close the master to unblock the reader thread
+    let _ = reader_thread.join();
+
+    let final_data = output_data.lock().unwrap();
+    let output = String::from_utf8_lossy(&final_data);
+    assert!(
+        output.contains(secret_content),
+        "Agent output should contain the secret content when using vim input.\noutput: {}",
+        output
+    );
+
+    // Verify the user message was recorded in output (shows vim input worked)
+    assert!(
+        output.contains("> What is the content of the file secret.txt?"),
+        "Agent output should show the user message from vim.\noutput: {}",
+        output
+    );
+    drop(final_data);
+
+    let delete_output = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
+    assert!(
+        delete_output.status.success(),
+        "Failed to delete sandbox: {}",
+        String::from_utf8_lossy(&delete_output.stderr)
     );
 }
