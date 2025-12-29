@@ -430,7 +430,14 @@ fn test_agent_reads_file() {
 
     let mut child = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&repo.dir)
-        .args(["agent", sandbox_name, "--runtime", "runc"])
+        .args([
+            "agent",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--model",
+            "haiku",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -481,7 +488,14 @@ fn test_agent_edits_file() {
 
     let mut child = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&repo.dir)
-        .args(["agent", sandbox_name, "--runtime", "runc"])
+        .args([
+            "agent",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--model",
+            "haiku",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -532,7 +546,14 @@ fn test_agent_writes_file() {
 
     let mut child = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&repo.dir)
-        .args(["agent", sandbox_name, "--runtime", "runc"])
+        .args([
+            "agent",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--model",
+            "haiku",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -586,7 +607,14 @@ fn test_agent_handles_command_with_empty_output_and_nonzero_exit() {
 
     let mut child = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&repo.dir)
-        .args(["agent", sandbox_name, "--runtime", "runc"])
+        .args([
+            "agent",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--model",
+            "haiku",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
