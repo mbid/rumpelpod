@@ -652,6 +652,7 @@ pub fn run_sandbox(
     user_info: &UserInfo,
     runtime: Runtime,
     overlay_mode: OverlayMode,
+    env_vars: &[(String, String)],
     command: Option<&[String]>,
 ) -> Result<()> {
     // Warn about overlayfs + sysbox combination
@@ -664,7 +665,8 @@ pub fn run_sandbox(
     }
 
     // Ensure container is running
-    let launched = ensure_container_running(info, image_tag, user_info, runtime, overlay_mode)?;
+    let launched =
+        ensure_container_running(info, image_tag, user_info, runtime, overlay_mode, env_vars)?;
 
     // If we launched a new container, spawn the sync daemon
     if launched {
@@ -712,6 +714,7 @@ pub fn ensure_container_running(
     user_info: &UserInfo,
     runtime: Runtime,
     overlay_mode: OverlayMode,
+    env_vars: &[(String, String)],
 ) -> Result<bool> {
     // If already running, we're done
     if docker::container_is_running(&info.container_name)? {
@@ -766,6 +769,12 @@ pub fn ensure_container_running(
                 ),
             ]);
         }
+    }
+
+    // Add environment variables
+    for (name, value) in env_vars {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", name, value));
     }
 
     // Add the image

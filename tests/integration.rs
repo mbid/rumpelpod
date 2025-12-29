@@ -411,6 +411,50 @@ fn test_sync_with_history_rewrite() {
 }
 
 #[test]
+fn test_agent_passthrough_env() {
+    let repo = TestRepo::init();
+
+    fs::write(
+        repo.dir.join("Dockerfile"),
+        include_str!("Dockerfile-debian"),
+    )
+    .expect("Failed to write Dockerfile");
+
+    run_git(&repo.dir, &["add", "Dockerfile"]);
+    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
+
+    let sandbox_name = "test-agent-env";
+
+    // Test: Verify error when env var is not set for agent command
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(&repo.dir)
+        .args([
+            "agent",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--env",
+            "MISSING_API_KEY_XYZ",
+        ])
+        .output()
+        .expect("Failed to run sandbox");
+
+    assert!(
+        !output.status.success(),
+        "Agent should fail when env var is not set"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("MISSING_API_KEY_XYZ"),
+        "Error should mention the missing env var. Got: '{}'",
+        stderr
+    );
+
+    // Clean up
+    let _ = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
+}
+
+#[test]
 fn test_agent_reads_file() {
     let repo = TestRepo::init();
 

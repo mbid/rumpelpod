@@ -33,6 +33,10 @@ pub enum Commands {
         #[arg(short, long, value_enum, default_value_t = OverlayMode::Overlayfs)]
         overlay_mode: OverlayMode,
 
+        /// Pass through an environment variable from the host
+        #[arg(long = "env", value_name = "VAR")]
+        passthrough_env: Vec<String>,
+
         /// Command to run inside the sandbox (default: interactive shell)
         #[arg(last = true)]
         command: Vec<String>,
@@ -63,6 +67,10 @@ pub enum Commands {
         /// Claude model to use
         #[arg(short, long, value_enum, default_value_t = Model::Opus)]
         model: Model,
+
+        /// Pass through an environment variable from the host
+        #[arg(long = "env", value_name = "VAR")]
+        passthrough_env: Vec<String>,
     },
 
     /// Internal: sync daemon process (not shown in help)
@@ -71,6 +79,19 @@ pub enum Commands {
         /// Path to the sandbox directory
         sandbox_dir: PathBuf,
     },
+}
+
+/// Resolve environment variable names to their values.
+/// Returns an error if any variable is not set.
+fn resolve_env_vars(var_names: &[String]) -> Result<Vec<(String, String)>> {
+    var_names
+        .iter()
+        .map(|name| {
+            std::env::var(name)
+                .map(|value| (name.clone(), value))
+                .map_err(|_| anyhow::anyhow!("environment variable '{}' is not set", name))
+        })
+        .collect()
 }
 
 pub fn run() -> Result<()> {
@@ -92,14 +113,17 @@ pub fn run() -> Result<()> {
                     name,
                     runtime,
                     overlay_mode,
+                    passthrough_env,
                     command,
                 } => {
+                    let env_vars = resolve_env_vars(&passthrough_env)?;
                     run_sandbox(
                         &repo_root,
                         &name,
                         &user_info,
                         runtime,
                         overlay_mode,
+                        &env_vars,
                         command,
                     )?;
                 }
@@ -114,8 +138,18 @@ pub fn run() -> Result<()> {
                     runtime,
                     overlay_mode,
                     model,
+                    passthrough_env,
                 } => {
-                    run_agent(&repo_root, &name, &user_info, runtime, overlay_mode, model)?;
+                    let env_vars = resolve_env_vars(&passthrough_env)?;
+                    run_agent(
+                        &repo_root,
+                        &name,
+                        &user_info,
+                        runtime,
+                        overlay_mode,
+                        model,
+                        &env_vars,
+                    )?;
                 }
                 Commands::SyncDaemon { .. } => unreachable!(),
             }
@@ -131,6 +165,7 @@ fn run_sandbox(
     user_info: &UserInfo,
     runtime: Runtime,
     overlay_mode: OverlayMode,
+    env_vars: &[(String, String)],
     command: Vec<String>,
 ) -> Result<()> {
     // Check for Dockerfile
@@ -155,7 +190,15 @@ fn run_sandbox(
         Some(command.as_slice())
     };
 
-    sandbox::run_sandbox(&info, &image_tag, user_info, runtime, overlay_mode, cmd)
+    sandbox::run_sandbox(
+        &info,
+        &image_tag,
+        user_info,
+        runtime,
+        overlay_mode,
+        env_vars,
+        cmd,
+    )
 }
 
 fn list_sandboxes(repo_root: &Path) -> Result<()> {
@@ -205,6 +248,7 @@ fn run_agent(
     runtime: Runtime,
     overlay_mode: OverlayMode,
     model: Model,
+    env_vars: &[(String, String)],
 ) -> Result<()> {
     let dockerfile = repo_root.join("Dockerfile");
     if !dockerfile.exists() {
@@ -217,7 +261,14 @@ fn run_agent(
     let image_tag = docker::build_image(&dockerfile, user_info)?;
     let info = sandbox::ensure_sandbox(repo_root, name)?;
 
-    sandbox::ensure_container_running(&info, &image_tag, user_info, runtime, overlay_mode)?;
+    sandbox::ensure_container_running(
+        &info,
+        &image_tag,
+        user_info,
+        runtime,
+        overlay_mode,
+        env_vars,
+    )?;
 
     agent::run_agent(&info.container_name, model)
 }
