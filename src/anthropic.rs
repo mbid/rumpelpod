@@ -238,9 +238,11 @@ impl Client {
     }
 
     pub fn messages(&self, request: MessagesRequest) -> Result<MessagesResponse> {
+        const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+
         let mut backoff = ExponentialBackoff {
             max_elapsed_time: None,
-            max_interval: Duration::from_secs(60),
+            max_interval: MAX_RETRY_DELAY,
             ..Default::default()
         };
 
@@ -271,7 +273,18 @@ impl Client {
 
             if should_retry && attempt < MAX_RETRIES {
                 attempt += 1;
-                if let Some(delay) = backoff.next_backoff() {
+
+                // Prefer retry-after header when available (e.g. rate limits)
+                let delay = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_secs)
+                    .or_else(|| backoff.next_backoff())
+                    .map(|d| d.min(MAX_RETRY_DELAY));
+
+                if let Some(delay) = delay {
                     std::thread::sleep(delay);
                     continue;
                 }
