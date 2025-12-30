@@ -322,7 +322,7 @@ impl Client {
         let mut attempt = 0;
 
         loop {
-            let response = self
+            let response = match self
                 .client
                 .post(ANTHROPIC_API_URL)
                 .header("x-api-key", &self.api_key)
@@ -331,7 +331,28 @@ impl Client {
                 .header("content-type", "application/json")
                 .json(&request)
                 .send()
-                .context("Failed to send request to Anthropic API")?;
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    // Only retry on timeout errors, fail immediately on other errors
+                    if e.is_timeout() && attempt < MAX_RETRIES {
+                        attempt += 1;
+
+                        let delay = if attempt == 1 {
+                            Duration::ZERO
+                        } else {
+                            let jitter = rand::rng().random_range(Duration::ZERO..MAX_JITTER);
+                            BASE_RETRY_DELAY + jitter
+                        };
+
+                        if !delay.is_zero() {
+                            std::thread::sleep(delay);
+                        }
+                        continue;
+                    }
+                    return Err(e).context("Failed to send request to Anthropic API");
+                }
+            };
 
             let status = response.status();
 
