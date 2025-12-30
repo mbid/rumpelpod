@@ -815,6 +815,72 @@ fn test_agent_handles_command_with_empty_output_and_nonzero_exit() {
 }
 
 #[test]
+fn test_agent_large_file_output() {
+    // Regression test: reading a file that exceeds the 30000 character limit
+    // should not cause the agent to deadlock.
+    let repo = TestRepo::init();
+
+    fs::write(
+        repo.dir.join("Dockerfile"),
+        include_str!("Dockerfile-debian"),
+    )
+    .expect("Failed to write Dockerfile");
+
+    let large_content = "x".repeat(35000);
+    fs::write(repo.dir.join("large.txt"), &large_content).expect("Failed to write large.txt");
+
+    run_git(&repo.dir, &["add", "Dockerfile", "large.txt"]);
+    run_git(
+        &repo.dir,
+        &["commit", "-m", "Add Dockerfile and large file"],
+    );
+
+    let sandbox_name = "test-agent-large-file";
+
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(&repo.dir)
+        .args([
+            "agent",
+            sandbox_name,
+            "--runtime",
+            "runc",
+            "--model",
+            "haiku",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn agent");
+
+    let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+    writeln!(
+        stdin,
+        "Run exactly one tool: `cat large.txt`. After that single tool call, stop immediately and tell me what you observed. Do not run any other tools."
+    )
+    .expect("Failed to write to stdin");
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("Failed to wait for agent");
+
+    // Agent should complete without deadlocking and mention the output file
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/agent/bash-output-"),
+        "Agent should report that output was saved to a file.\nstdout: {}\nstderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
+    assert!(
+        output.status.success(),
+        "Failed to delete sandbox: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_agent_vim_input() {
     // Test the vim-based input mode using a PTY to simulate a real terminal
     let repo = TestRepo::init();
