@@ -10,6 +10,7 @@ use crate::config::{Model, OverlayMode, Runtime, UserInfo};
 use crate::daemon;
 use crate::docker;
 use crate::git;
+use crate::llm_cache::LlmCache;
 use crate::sandbox;
 
 #[derive(Parser)]
@@ -74,6 +75,10 @@ pub enum Commands {
         /// Pass through an environment variable from the host
         #[arg(long = "env", value_name = "VAR")]
         passthrough_env: Vec<String>,
+
+        /// LLM response cache directory (for testing only)
+        #[arg(long, hide = true)]
+        cache: Option<PathBuf>,
     },
 
     /// Internal daemon process (not shown in help)
@@ -221,8 +226,12 @@ pub fn run() -> Result<()> {
                     overlay_mode,
                     model,
                     passthrough_env,
+                    cache,
                 } => {
                     let env_vars = resolve_env_vars(&passthrough_env)?;
+                    let llm_cache = cache
+                        .map(|dir| LlmCache::new(&dir, "anthropic"))
+                        .transpose()?;
                     run_agent(
                         &repo_root,
                         &name,
@@ -231,6 +240,7 @@ pub fn run() -> Result<()> {
                         overlay_mode,
                         model,
                         &env_vars,
+                        llm_cache,
                     )?;
                 }
                 Commands::InternalDaemon { .. } => unreachable!(),
@@ -339,6 +349,7 @@ fn run_agent(
     overlay_mode: OverlayMode,
     model: Model,
     env_vars: &[(String, String)],
+    llm_cache: Option<LlmCache>,
 ) -> Result<()> {
     let dockerfile = repo_root.join("Dockerfile");
     if !dockerfile.exists() {
@@ -360,6 +371,6 @@ fn run_agent(
         env_vars,
     )?;
 
-    agent::run_agent(&info.container_name, model)
+    agent::run_agent(&info.container_name, model, llm_cache)
     // _daemon_conn is dropped here, signaling disconnection to daemon
 }

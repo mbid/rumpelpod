@@ -3,6 +3,8 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+use crate::llm_cache::LlmCache;
+
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -295,21 +297,54 @@ pub struct MessagesResponse {
 }
 
 pub struct Client {
-    api_key: String,
+    api_key: Option<String>,
     client: reqwest::blocking::Client,
+    cache: Option<LlmCache>,
 }
 
 impl Client {
     pub fn new(api_key: String) -> Self {
         Self {
+            api_key: Some(api_key),
+            client: reqwest::blocking::Client::new(),
+            cache: None,
+        }
+    }
+
+    /// Create a new client with optional caching.
+    /// If cache is provided and no API key is set, only cached responses will work.
+    pub fn new_with_cache(cache: Option<LlmCache>) -> Result<Self> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        if api_key.is_none() && cache.is_none() {
+            anyhow::bail!("ANTHROPIC_API_KEY not set and no cache provided");
+        }
+
+        Ok(Self {
             api_key,
             client: reqwest::blocking::Client::new(),
-        }
+            cache,
+        })
     }
 
     pub fn from_env() -> Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
         Ok(Self::new(api_key))
+    }
+
+    /// Build request headers for the messages endpoint.
+    fn build_headers(&self) -> Vec<(&'static str, String)> {
+        let mut headers = vec![
+            ("anthropic-version", ANTHROPIC_VERSION.to_string()),
+            ("anthropic-beta", "web-fetch-2025-09-10".to_string()),
+            ("content-type", "application/json".to_string()),
+        ];
+        if let Some(ref api_key) = self.api_key {
+            headers.push(("x-api-key", api_key.clone()));
+        }
+        headers
     }
 
     /// Retry logic follows claude code's behavior: up to 10 retries, first retry instant
@@ -319,19 +354,39 @@ impl Client {
         const BASE_RETRY_DELAY: Duration = Duration::from_secs(120);
         const MAX_JITTER: Duration = Duration::from_secs(30);
 
+        // Serialize request body to a string once
+        let body = serde_json::to_string(&request).context("Failed to serialize request")?;
+
+        // Build headers for cache key computation
+        let headers = self.build_headers();
+        let header_refs: Vec<(&str, &str)> =
+            headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+        // Check cache first
+        if let Some(ref cache) = self.cache {
+            let cache_key = cache.compute_key(&header_refs, &body);
+            if let Some(cached_response) = cache.get(&cache_key) {
+                let response: MessagesResponse = serde_json::from_str(&cached_response)
+                    .context("Failed to parse cached response")?;
+                return Ok(response);
+            }
+        }
+
+        // No cache hit - need API key to make the request
+        if self.api_key.is_none() {
+            anyhow::bail!("Cache miss and no ANTHROPIC_API_KEY set - cannot make API request");
+        }
+
         let mut attempt = 0;
 
         loop {
-            let response = match self
-                .client
-                .post(ANTHROPIC_API_URL)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("anthropic-beta", "web-fetch-2025-09-10")
-                .header("content-type", "application/json")
-                .json(&request)
-                .send()
-            {
+            let mut req = self.client.post(ANTHROPIC_API_URL).body(body.clone());
+
+            for (name, value) in &headers {
+                req = req.header(*name, value);
+            }
+
+            let response = match req.send() {
                 Ok(response) => response,
                 Err(e) => {
                     // Only retry on timeout errors, fail immediately on other errors
@@ -357,8 +412,14 @@ impl Client {
             let status = response.status();
 
             if status.is_success() {
-                let response: MessagesResponse = response
-                    .json()
+                let response_text = response.text().context("Failed to read response body")?;
+
+                if let Some(ref cache) = self.cache {
+                    let cache_key = cache.compute_key(&header_refs, &body);
+                    cache.put(&cache_key, &response_text)?;
+                }
+
+                let response: MessagesResponse = serde_json::from_str(&response_text)
                     .context("Failed to parse Anthropic API response")?;
                 return Ok(response);
             }

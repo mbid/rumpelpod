@@ -9,6 +9,7 @@ use crate::anthropic::{
     ServerTool, StopReason, SystemBlock, SystemPrompt, Tool, WebSearchToolType,
 };
 use crate::config::Model;
+use crate::llm_cache::LlmCache;
 
 const MAX_TOKENS: u32 = 4096;
 const AGENTS_MD_PATH: &str = "AGENTS.md";
@@ -436,8 +437,8 @@ macro_rules! chat_println {
     }};
 }
 
-pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
-    let client = Client::from_env()?;
+pub fn run_agent(container_name: &str, model: Model, cache: Option<LlmCache>) -> Result<()> {
+    let client = Client::new_with_cache(cache)?;
 
     let mut stdout = std::io::stdout();
 

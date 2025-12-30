@@ -5,6 +5,7 @@ pub mod config;
 pub mod daemon;
 pub mod docker;
 pub mod git;
+pub mod llm_cache;
 pub mod overlay;
 pub mod sandbox;
 
