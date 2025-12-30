@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use rand::Rng;
 
 /// A test fixture that creates a temporary git repository in /tmp.
 /// The repository is initialized with a README.md file and an initial commit.
@@ -21,12 +22,13 @@ impl TestRepo {
     /// as the initial branch, creates a README.md with "TEST" content, and makes
     /// an initial commit. Does NOT change the current directory.
     pub fn init() -> Self {
-        // Create temp directory with unique name
+        // Random component ensures uniqueness even when parallel tests read the same timestamp
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = PathBuf::from(format!("/tmp/sandbox-test-{}", timestamp));
+        let random: u64 = rand::thread_rng().gen();
+        let dir = PathBuf::from(format!("/tmp/sandbox-test-{}-{:016x}", timestamp, random));
         fs::create_dir_all(&dir).expect("Failed to create temp directory");
 
         // Initialize git repo with master branch
