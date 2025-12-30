@@ -11,6 +11,9 @@ use crate::anthropic::{
 use crate::config::Model;
 
 const MAX_TOKENS: u32 = 4096;
+const AGENTS_MD_PATH: &str = "AGENTS.md";
+
+const BASE_SYSTEM_PROMPT: &str = "You are a helpful assistant running inside a sandboxed environment. You can execute bash commands to help the user.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Display, EnumString)]
 #[strum(serialize_all = "lowercase")]
@@ -87,6 +90,29 @@ fn write_tool() -> Tool {
         }),
         cache_control: None,
     })
+}
+
+/// Read AGENTS.md from the sandbox if it exists.
+fn read_agents_md(container_name: &str) -> Option<String> {
+    let output = Command::new("docker")
+        .args(["exec", container_name, "cat", AGENTS_MD_PATH])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8(output.stdout).ok()
+}
+
+fn build_system_prompt(agents_md: Option<&str>) -> String {
+    match agents_md {
+        Some(content) => format!("{}\n\n{}", BASE_SYSTEM_PROMPT, content),
+        None => BASE_SYSTEM_PROMPT.to_string(),
+    }
 }
 
 fn execute_edit_in_sandbox(
@@ -398,6 +424,10 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
     let mut messages: Vec<Message> = Vec::new();
     let mut chat_history = String::new();
 
+    // Read AGENTS.md once at startup to include project-specific instructions
+    let agents_md = read_agents_md(container_name);
+    let system_prompt = build_system_prompt(agents_md.as_deref());
+
     let is_tty = std::io::stdin().is_terminal();
 
     // Non-TTY mode reads entire stdin upfront and exits after one response
@@ -462,9 +492,8 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
             let request = MessagesRequest {
                 model: model.api_model_id().to_string(),
                 max_tokens: MAX_TOKENS,
-                // Cache static system prompt for reuse across all turns.
                 system: Some(SystemPrompt::Blocks(vec![SystemBlock::Text {
-                    text: "You are a helpful assistant running inside a sandboxed environment. You can execute bash commands to help the user.".to_string(),
+                    text: system_prompt.clone(),
                     cache_control: Some(CacheControl::default()),
                 }])),
                 messages: request_messages,
