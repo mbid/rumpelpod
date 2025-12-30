@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use tempfile::TempPath;
 
 use crate::config::{OverlayMode, Runtime, UserInfo};
 use crate::docker;
@@ -27,42 +28,33 @@ fn socket_path(info: &SandboxInfo) -> PathBuf {
 }
 
 fn bind_socket(sock_path: &Path, log_file: &mut std::fs::File) -> Result<UnixListener> {
-    let temp_path = sock_path.with_extension("sock.tmp");
+    let scratch_dir = Path::new("/tmp/sandbox/scratch");
+    std::fs::create_dir_all(scratch_dir).context("Failed to create scratch directory")?;
 
-    if let Some(parent) = temp_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create socket directory: {}", parent.display())
-            })?;
-        }
-    }
-
-    let _ = std::fs::remove_file(&temp_path);
-
-    let listener = UnixListener::bind(&temp_path).with_context(|| {
+    let sock_parent = sock_path.parent().unwrap();
+    std::fs::create_dir_all(sock_parent).with_context(|| {
         format!(
-            "Failed to bind socket at {} (errno: {:?})",
-            temp_path.display(),
-            std::io::Error::last_os_error()
+            "Failed to create socket directory: {}",
+            sock_parent.display()
         )
     })?;
 
+    let random_id: u64 = rand::random();
+    let temp_path = scratch_dir.join(format!("{:016x}.sock", random_id));
+
+    let listener = UnixListener::bind(&temp_path)
+        .with_context(|| format!("Failed to bind socket at {}", temp_path.display()))?;
+
+    let _temp_path = TempPath::from_path(&temp_path);
+
     // Atomically publish the socket via hard link
     match std::fs::hard_link(&temp_path, sock_path) {
-        Ok(()) => {
-            let _ = std::fs::remove_file(&temp_path);
-            Ok(listener)
-        }
+        Ok(()) => Ok(listener),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Another daemon was faster
-            let _ = std::fs::remove_file(&temp_path);
             log(log_file, "Another daemon already running, exiting");
-            bail!("Another daemon is already running");
+            Err(e).context("Another daemon is already running")
         }
-        Err(e) => {
-            let _ = std::fs::remove_file(&temp_path);
-            Err(e).context("Failed to publish socket")
-        }
+        Err(e) => Err(e).context("Failed to publish socket"),
     }
 }
 
@@ -465,6 +457,9 @@ pub fn run_daemon_with_sync(
         std::thread::sleep(Duration::from_millis(100));
     }
 
+    // Remove socket immediately so new clients can start a fresh daemon
+    cleanup_socket(&sock_path);
+
     log(&mut log_file, "Running final sync before shutdown...");
     if let Err(e) = git::sync_sandbox_to_meta(&info.meta_git_dir, &info.clone_dir, &info.name) {
         log(
@@ -483,7 +478,6 @@ pub fn run_daemon_with_sync(
         log(&mut log_file, &format!("Error stopping container: {}", e));
     }
 
-    cleanup_socket(&sock_path);
     log(&mut log_file, "Daemon exiting");
     Ok(())
 }
