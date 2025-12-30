@@ -5,8 +5,8 @@ use std::str::FromStr;
 use strum::{Display, EnumString};
 
 use crate::anthropic::{
-    CacheControl, Client, ContentBlock, CustomTool, Message, MessagesRequest, Role, StopReason,
-    SystemBlock, SystemPrompt, Tool,
+    CacheControl, Client, ContentBlock, CustomTool, Message, MessagesRequest, Role, ServerTool,
+    StopReason, SystemBlock, SystemPrompt, Tool, WebSearchToolType,
 };
 use crate::config::Model;
 
@@ -89,6 +89,16 @@ fn write_tool() -> Tool {
             "additionalProperties": false
         }),
         cache_control: None,
+    })
+}
+
+fn websearch_tool() -> Tool {
+    Tool::Server(ServerTool::WebSearch {
+        tool_type: WebSearchToolType::WebSearch20250305,
+        max_uses: None,
+        allowed_domains: None,
+        blocked_domains: None,
+        user_location: None,
     })
 }
 
@@ -498,7 +508,12 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
                     cache_control: Some(CacheControl::default()),
                 }])),
                 messages: request_messages,
-                tools: Some(vec![bash_tool(), edit_tool(), write_tool()]),
+                tools: Some(vec![
+                    bash_tool(),
+                    edit_tool(),
+                    write_tool(),
+                    websearch_tool(),
+                ]),
                 temperature: None,
                 top_p: None,
                 top_k: None,
@@ -595,6 +610,9 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
                     }
                     ContentBlock::ToolResult { .. } => {}
                     ContentBlock::Image { .. } => {}
+                    // Server-side tools (like web search) are handled by the API
+                    ContentBlock::ServerToolUse { .. } => {}
+                    ContentBlock::WebSearchToolResult { .. } => {}
                 }
             }
 

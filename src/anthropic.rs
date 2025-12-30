@@ -105,6 +105,30 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    /// Server-side tool use (e.g., web_search)
+    ServerToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Result from a server-side tool (e.g., web search results)
+    WebSearchToolResult {
+        tool_use_id: String,
+        content: Vec<WebSearchResult>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WebSearchResult {
+    WebSearchResult {
+        url: String,
+        title: String,
+        #[serde(default)]
+        encrypted_content: Option<String>,
+        #[serde(default)]
+        page_age: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
