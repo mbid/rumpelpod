@@ -476,20 +476,6 @@ pub fn run_agent(container_name: &str, model: Model) -> Result<()> {
 
             let response = client.messages(request)?;
 
-            // Print cache usage statistics
-            if response.usage.cache_read_input_tokens > 0 {
-                eprintln!(
-                    "[Cache hit: {} tokens read, {} tokens created]",
-                    response.usage.cache_read_input_tokens,
-                    response.usage.cache_creation_input_tokens
-                );
-            } else if response.usage.cache_creation_input_tokens > 0 {
-                eprintln!(
-                    "[Cache created: {} tokens]",
-                    response.usage.cache_creation_input_tokens
-                );
-            }
-
             let mut has_tool_use = false;
             let mut tool_results: Vec<ContentBlock> = Vec::new();
 
