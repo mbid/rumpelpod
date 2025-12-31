@@ -1292,3 +1292,66 @@ fn test_agent_websearch_output_format() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// Test that host-side history rewrite (amend on master) syncs correctly to meta.git.
+/// This verifies that sync_main_to_meta uses force-update.
+#[test]
+fn test_host_history_rewrite_syncs_to_sandbox() {
+    let repo = TestRepo::init();
+
+    fs::write(
+        repo.dir.join("Dockerfile"),
+        include_str!("Dockerfile-debian"),
+    )
+    .expect("Failed to write Dockerfile");
+
+    run_git(&repo.dir, &["add", "Dockerfile"]);
+    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
+
+    let sandbox_name = "test-host-rewrite";
+
+    // Create sandbox and verify initial state
+    let output = run_in_sandbox(&repo, sandbox_name, &["git", "rev-parse", "sandbox/master"]);
+    assert!(
+        output.status.success(),
+        "Failed to get sandbox/master: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let initial_master = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Amend the commit on host (rewrite history)
+    fs::write(repo.dir.join("README.md"), "AMENDED CONTENT").expect("Failed to write README.md");
+    run_git(&repo.dir, &["add", "README.md"]);
+    run_git(&repo.dir, &["commit", "--amend", "-m", "Amended commit"]);
+
+    let output = run_git(&repo.dir, &["rev-parse", "HEAD"]);
+    let amended_master = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    assert_ne!(
+        initial_master, amended_master,
+        "Amended commit should have different hash"
+    );
+
+    // Create a new sandbox - this triggers sync_main_to_meta
+    let sandbox_name_2 = "test-host-rewrite-2";
+    let output = run_in_sandbox(
+        &repo,
+        sandbox_name_2,
+        &["git", "rev-parse", "sandbox/master"],
+    );
+    assert!(
+        output.status.success(),
+        "Failed to create second sandbox after host history rewrite: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let synced_master = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    assert_eq!(
+        amended_master, synced_master,
+        "Amended master should be synced to new sandbox"
+    );
+
+    // Clean up
+    let _ = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
+    let _ = run_sandbox_in(&repo.dir, &["delete", sandbox_name_2]);
+}

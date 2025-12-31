@@ -229,16 +229,17 @@ fn get_primary_branch(repo: &Path) -> Result<String> {
 
 /// Sync the primary branch (main/master) from host repo to meta.git.
 /// This is a ONE-WAY sync: host -> meta only.
+/// Uses force-update (+) because host always has precedence over meta.git.
 pub fn sync_main_to_meta(host_repo: &Path, meta_git_dir: &Path) -> Result<()> {
     let branch = get_primary_branch(host_repo)?;
 
-    // Fetch the branch from host into meta.git
+    // Force-fetch the branch from host into meta.git (+ prefix forces non-fast-forward updates)
     let status = Command::new("git")
         .current_dir(meta_git_dir)
         .args([
             "fetch",
             &host_repo.to_string_lossy(),
-            &format!("{}:refs/heads/{}", branch, branch),
+            &format!("+{}:refs/heads/{}", branch, branch),
         ])
         .status()
         .context("Failed to fetch main branch to meta.git")?;
