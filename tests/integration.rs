@@ -15,6 +15,12 @@ pub struct TestRepo {
     pub initial_commit: String,
 }
 
+/// Default .sandbox config file for tests (no required env vars).
+/// Default .sandbox.toml config for tests (no required env vars).
+const DEFAULT_SANDBOX_CONFIG: &str = r#"
+env = []
+"#;
+
 impl TestRepo {
     /// Initialize a new test repository.
     ///
@@ -41,8 +47,12 @@ impl TestRepo {
         // Create README.md
         fs::write(dir.join("README.md"), "TEST").expect("Failed to write README.md");
 
+        // Create .sandbox config file (required for sandbox to work)
+        fs::write(dir.join(".sandbox.toml"), DEFAULT_SANDBOX_CONFIG)
+            .expect("Failed to write .sandbox config");
+
         // Make initial commit
-        run_git(&dir, &["add", "README.md"]);
+        run_git(&dir, &["add", "README.md", ".sandbox.toml"]);
         run_git(&dir, &["commit", "-m", "Initial commit"]);
 
         // Get the initial commit hash
@@ -424,7 +434,16 @@ fn test_agent_passthrough_env() {
     )
     .expect("Failed to write Dockerfile");
 
-    run_git(&repo.dir, &["add", "Dockerfile"]);
+    // Update .sandbox to require a missing env var
+    fs::write(
+        repo.dir.join(".sandbox.toml"),
+        r#"
+env = ["MISSING_API_KEY_XYZ"]
+"#,
+    )
+    .expect("Failed to write .sandbox.toml");
+
+    run_git(&repo.dir, &["add", "Dockerfile", ".sandbox.toml"]);
     run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
 
     let sandbox_name = "test-agent-env";
@@ -432,14 +451,7 @@ fn test_agent_passthrough_env() {
     // Test: Verify error when env var is not set for agent command
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&repo.dir)
-        .args([
-            "agent",
-            sandbox_name,
-            "--runtime",
-            "runc",
-            "--env",
-            "MISSING_API_KEY_XYZ",
-        ])
+        .args(["agent", sandbox_name, "--runtime", "runc"])
         .output()
         .expect("Failed to run sandbox");
 
@@ -654,7 +666,16 @@ fn test_enter_passthrough_env() {
     )
     .expect("Failed to write Dockerfile");
 
-    run_git(&repo.dir, &["add", "Dockerfile"]);
+    // Configure .sandbox to require MY_TEST_VAR
+    fs::write(
+        repo.dir.join(".sandbox.toml"),
+        r#"
+env = ["MY_TEST_VAR"]
+"#,
+    )
+    .expect("Failed to write .sandbox.toml");
+
+    run_git(&repo.dir, &["add", "Dockerfile", ".sandbox.toml"]);
     run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
 
     let sandbox_name = "test-env-passthrough";
@@ -669,8 +690,6 @@ fn test_enter_passthrough_env() {
             sandbox_name,
             "--runtime",
             "runc",
-            "--env",
-            "MY_TEST_VAR",
             "--",
             "sh",
             "-c",
@@ -681,7 +700,7 @@ fn test_enter_passthrough_env() {
 
     assert!(
         output.status.success(),
-        "Failed to run command with --env flag: {}",
+        "Failed to run command with required env var: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -692,7 +711,16 @@ fn test_enter_passthrough_env() {
         stdout.trim()
     );
 
-    // Test 2: Verify error when env var is not set on host
+    // Test 2: Verify error when required env var is not set on host
+    // First update .sandbox.toml to require a different (missing) env var
+    fs::write(
+        repo.dir.join(".sandbox.toml"),
+        r#"
+env = ["NONEXISTENT_VAR_XYZ"]
+"#,
+    )
+    .expect("Failed to write .sandbox.toml");
+
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&repo.dir)
         .args([
@@ -700,8 +728,6 @@ fn test_enter_passthrough_env() {
             sandbox_name,
             "--runtime",
             "runc",
-            "--env",
-            "NONEXISTENT_VAR_XYZ",
             "--",
             "echo",
             "should not reach here",
@@ -722,6 +748,14 @@ fn test_enter_passthrough_env() {
     );
 
     // Test 3: Verify multiple env vars can be passed
+    fs::write(
+        repo.dir.join(".sandbox.toml"),
+        r#"
+env = ["VAR_ONE", "VAR_TWO"]
+"#,
+    )
+    .expect("Failed to write .sandbox.toml");
+
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&repo.dir)
         .env("VAR_ONE", "value1")
@@ -731,10 +765,6 @@ fn test_enter_passthrough_env() {
             sandbox_name,
             "--runtime",
             "runc",
-            "--env",
-            "VAR_ONE",
-            "--env",
-            "VAR_TWO",
             "--",
             "sh",
             "-c",
@@ -745,7 +775,7 @@ fn test_enter_passthrough_env() {
 
     assert!(
         output.status.success(),
-        "Failed to run with multiple --env flags: {}",
+        "Failed to run with multiple required env vars: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);

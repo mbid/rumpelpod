@@ -1,0 +1,4 @@
+# Sandbox configuration for this repository.
+# See src/sandbox_config.rs for the schema documentation.
+
+env = ["ANTHROPIC_API_KEY"]

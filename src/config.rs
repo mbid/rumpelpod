@@ -26,7 +26,8 @@ pub enum OverlayMode {
 }
 
 /// Claude model to use for the agent.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Model {
     /// Claude Opus 4.5 - most capable model
     #[default]

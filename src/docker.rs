@@ -20,7 +20,7 @@ pub fn image_exists(tag: &str) -> Result<bool> {
 /// Build a Docker image from a Dockerfile.
 /// The image is tagged with a hash of the Dockerfile contents.
 /// Returns the image tag.
-pub fn build_image(dockerfile_path: &Path, user_info: &UserInfo) -> Result<String> {
+pub fn build_image(dockerfile_path: &Path, context: &Path, user_info: &UserInfo) -> Result<String> {
     let dockerfile_hash = hash_file(dockerfile_path)?;
     let image_tag = format!("sandbox:{}", dockerfile_hash);
 
@@ -31,10 +31,6 @@ pub fn build_image(dockerfile_path: &Path, user_info: &UserInfo) -> Result<Strin
     }
 
     info!("Building Docker image: {}", image_tag);
-
-    let dockerfile_dir = dockerfile_path
-        .parent()
-        .context("Dockerfile has no parent directory")?;
 
     let status = Command::new("docker")
         .args([
@@ -49,7 +45,7 @@ pub fn build_image(dockerfile_path: &Path, user_info: &UserInfo) -> Result<Strin
             &format!("USER_ID={}", user_info.uid),
             "--build-arg",
             &format!("GROUP_ID={}", user_info.gid),
-            &dockerfile_dir.to_string_lossy(),
+            &context.to_string_lossy(),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

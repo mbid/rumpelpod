@@ -12,6 +12,7 @@ use crate::docker;
 use crate::git;
 use crate::llm_cache::LlmCache;
 use crate::sandbox;
+use crate::sandbox_config::SandboxConfig;
 
 #[derive(Parser)]
 #[command(name = "sandbox")]
@@ -36,10 +37,6 @@ pub enum Commands {
         /// container but don't propagate changes to the host)
         #[arg(short, long, value_enum, default_value_t = OverlayMode::Overlayfs)]
         overlay_mode: OverlayMode,
-
-        /// Pass through an environment variable from the host
-        #[arg(long = "env", value_name = "VAR")]
-        passthrough_env: Vec<String>,
 
         /// Command to run inside the sandbox (default: interactive shell)
         #[arg(last = true)]
@@ -68,13 +65,9 @@ pub enum Commands {
         #[arg(short, long, value_enum, default_value_t = OverlayMode::Overlayfs)]
         overlay_mode: OverlayMode,
 
-        /// Claude model to use
-        #[arg(short, long, value_enum, default_value_t = Model::Opus)]
-        model: Model,
-
-        /// Pass through an environment variable from the host
-        #[arg(long = "env", value_name = "VAR")]
-        passthrough_env: Vec<String>,
+        /// Claude model to use (overrides config file)
+        #[arg(short, long, value_enum)]
+        model: Option<Model>,
 
         /// LLM response cache directory (for testing only)
         #[arg(long, hide = true)]
@@ -104,17 +97,6 @@ pub enum Commands {
         #[arg(trailing_var_arg = true)]
         env_vars: Vec<String>,
     },
-}
-
-fn resolve_env_vars(var_names: &[String]) -> Result<Vec<(String, String)>> {
-    var_names
-        .iter()
-        .map(|name| {
-            std::env::var(name)
-                .map(|value| (name.clone(), value))
-                .map_err(|_| anyhow::anyhow!("environment variable '{}' is not set", name))
-        })
-        .collect()
 }
 
 fn init_logging(command: &Commands) -> Result<()> {
@@ -191,21 +173,22 @@ pub fn run() -> Result<()> {
             )?;
         }
         _ => {
-            // All other commands need repo_root and user_info
+            // All other commands need repo_root, user_info, and sandbox config
             let repo_root = git::find_repo_root()?;
             let user_info = UserInfo::current()?;
+            let sandbox_config = SandboxConfig::load(&repo_root)?;
 
             match cli.command {
                 Commands::Enter {
                     name,
                     runtime,
                     overlay_mode,
-                    passthrough_env,
                     command,
                 } => {
-                    let env_vars = resolve_env_vars(&passthrough_env)?;
+                    let env_vars = sandbox_config.resolve_env_vars()?;
                     run_sandbox(
                         &repo_root,
+                        &sandbox_config,
                         &name,
                         &user_info,
                         runtime,
@@ -225,15 +208,17 @@ pub fn run() -> Result<()> {
                     runtime,
                     overlay_mode,
                     model,
-                    passthrough_env,
                     cache,
                 } => {
-                    let env_vars = resolve_env_vars(&passthrough_env)?;
+                    let env_vars = sandbox_config.resolve_env_vars()?;
                     let llm_cache = cache
                         .map(|dir| LlmCache::new(&dir, "anthropic"))
                         .transpose()?;
+                    // CLI model flag overrides config file
+                    let model = model.or(sandbox_config.agent.model).unwrap_or_default();
                     run_agent(
                         &repo_root,
+                        &sandbox_config,
                         &name,
                         &user_info,
                         runtime,
@@ -251,8 +236,50 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+/// Resolve the Docker image tag from config, building if necessary.
+fn resolve_image_tag(
+    repo_root: &Path,
+    config: &SandboxConfig,
+    user_info: &UserInfo,
+) -> Result<String> {
+    use crate::sandbox_config::ImageConfig;
+
+    match &config.image {
+        Some(ImageConfig::Tag(tag)) => Ok(tag.clone()),
+        Some(ImageConfig::Build {
+            dockerfile,
+            context,
+        }) => {
+            let dockerfile_path = repo_root.join(dockerfile);
+            if !dockerfile_path.exists() {
+                bail!("Dockerfile not found at {}", dockerfile_path.display());
+            }
+            let context_path = context
+                .as_ref()
+                .map(|p| repo_root.join(p))
+                .unwrap_or_else(|| repo_root.to_path_buf());
+            docker::build_image(&dockerfile_path, &context_path, user_info)
+        }
+        None => {
+            // Default: look for Dockerfile in repo root
+            let dockerfile_path = repo_root.join("Dockerfile");
+            if !dockerfile_path.exists() {
+                bail!(
+                    "No Dockerfile found at {}.\n\
+                     Either create a Dockerfile or specify an image in .sandbox.toml:\n\n\
+                     [image]\n\
+                     tag = \"your-image:tag\"\n",
+                    dockerfile_path.display()
+                );
+            }
+            docker::build_image(&dockerfile_path, repo_root, user_info)
+        }
+    }
+}
+
 fn run_sandbox(
     repo_root: &Path,
+    config: &SandboxConfig,
     name: &str,
     user_info: &UserInfo,
     runtime: Runtime,
@@ -260,17 +287,7 @@ fn run_sandbox(
     env_vars: &[(String, String)],
     command: Vec<String>,
 ) -> Result<()> {
-    // Check for Dockerfile
-    let dockerfile = repo_root.join("Dockerfile");
-    if !dockerfile.exists() {
-        bail!(
-            "No Dockerfile found at {}. Please create a Dockerfile for the sandbox.",
-            dockerfile.display()
-        );
-    }
-
-    // Build or get existing image
-    let image_tag = docker::build_image(&dockerfile, user_info)?;
+    let image_tag = resolve_image_tag(repo_root, config, user_info)?;
 
     // Ensure sandbox is set up
     let info = sandbox::ensure_sandbox(repo_root, name)?;
@@ -343,6 +360,7 @@ fn delete_sandbox(repo_root: &Path, name: &str) -> Result<()> {
 
 fn run_agent(
     repo_root: &Path,
+    config: &SandboxConfig,
     name: &str,
     user_info: &UserInfo,
     runtime: Runtime,
@@ -351,15 +369,7 @@ fn run_agent(
     env_vars: &[(String, String)],
     llm_cache: Option<LlmCache>,
 ) -> Result<()> {
-    let dockerfile = repo_root.join("Dockerfile");
-    if !dockerfile.exists() {
-        bail!(
-            "No Dockerfile found at {}. Please create a Dockerfile for the sandbox.",
-            dockerfile.display()
-        );
-    }
-
-    let image_tag = docker::build_image(&dockerfile, user_info)?;
+    let image_tag = resolve_image_tag(repo_root, config, user_info)?;
     let info = sandbox::ensure_sandbox(repo_root, name)?;
 
     let _daemon_conn = sandbox::ensure_container_running(
