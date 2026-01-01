@@ -6,6 +6,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -163,6 +164,9 @@ fn spawn_daemon(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // Start daemon in its own process group so it survives if the parent
+        // process is killed (e.g., when a PTY session terminates).
+        .process_group(0)
         .spawn()
         .context("Failed to spawn daemon process")?;
 
