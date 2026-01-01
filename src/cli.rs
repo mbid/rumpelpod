@@ -68,7 +68,8 @@ pub enum Commands {
         #[arg(short, long, value_enum)]
         model: Option<Model>,
 
-        /// LLM response cache directory (for testing only)
+        /// LLM response cache directory for deterministic testing.
+        /// See llm-cache/README.md for documentation.
         #[arg(long, hide = true)]
         cache: Option<PathBuf>,
     },

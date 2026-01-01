@@ -319,8 +319,10 @@ impl Client {
         }
     }
 
-    /// Create a new client with optional caching.
+    /// Create a new client with optional caching for deterministic testing.
     /// If cache is provided and no API key is set, only cached responses will work.
+    ///
+    /// See [`llm-cache/README.md`](../../llm-cache/README.md) for cache documentation.
     pub fn new_with_cache(cache: Option<LlmCache>) -> Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()

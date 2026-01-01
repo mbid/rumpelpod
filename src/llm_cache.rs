@@ -1,3 +1,7 @@
+//! LLM response cache for deterministic testing.
+//!
+//! See [`llm-cache/README.md`](../../llm-cache/README.md) for usage documentation.
+
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;

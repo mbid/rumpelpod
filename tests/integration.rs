@@ -1,3 +1,8 @@
+//! Integration tests for the sandbox agent.
+//!
+//! Tests that interact with the LLM use cached responses for determinism.
+//! See [`llm-cache/README.md`](../llm-cache/README.md) for cache documentation.
+
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
