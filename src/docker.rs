@@ -204,6 +204,21 @@ pub fn stop_container(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Wait for a container to stop.
+pub fn wait_container(name: &str) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["wait", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Failed to run docker wait")?;
+
+    if !status.success() {
+        anyhow::bail!("docker wait failed for container '{}'", name);
+    }
+    Ok(())
+}
+
 /// List all containers with a specific label.
 pub fn list_containers_with_label(label: &str) -> Result<Vec<String>> {
     let output = Command::new("docker")

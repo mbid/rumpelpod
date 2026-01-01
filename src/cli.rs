@@ -361,6 +361,11 @@ fn delete_sandbox(repo_root: &Path, name: &str) -> Result<()> {
         .find(|s| s.name == name)
         .ok_or_else(|| anyhow::anyhow!("Sandbox '{}' not found", name))?;
 
+    if docker::container_is_running(&info.container_name)? {
+        println!("Container is still running, waiting for it to stop...");
+        docker::wait_container(&info.container_name)?;
+    }
+
     sandbox::delete_sandbox(&info)?;
     println!("Deleted sandbox: {}", name);
 
