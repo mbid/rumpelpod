@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use indoc::indoc;
 use log::debug;
 use sha2::{Digest, Sha256};
 use std::io::{IsTerminal, Read, Write};
@@ -29,7 +30,12 @@ enum AgentToolName {
 fn bash_tool() -> Tool {
     Tool::Custom(CustomTool {
         name: AgentToolName::Bash.to_string(),
-        description: "Execute a bash command inside the sandbox and return the output.".to_string(),
+        description: indoc! {"
+            Execute a bash command inside the sandbox and return the output.
+            The working directory is the project root.
+        "}
+        .trim()
+        .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
