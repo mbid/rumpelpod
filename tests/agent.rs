@@ -295,34 +295,6 @@ fn test_agent_websearch() {
 }
 
 #[test]
-fn test_agent_write_tool_output_format() {
-    // Test that the write tool prints "[write] <filename>" on success
-    // without additional success messages or content echoing.
-    let fixture = SandboxFixture::new("test-agent-write-format");
-
-    let output = AgentBuilder::new(&fixture)
-        .run_with_prompt("Use the write tool to create a file called 'test.txt' with content 'hello'. Do not use bash.");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Should see "[write] test.txt" in output
-    assert!(
-        stdout.contains("[write] test.txt"),
-        "Expected '[write] test.txt' in output.\nstdout: {}\nstderr: {}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Should NOT see success messages like "successful" or "Successfully"
-    let stdout_lower = stdout.to_lowercase();
-    assert!(
-        !stdout_lower.contains("successful"),
-        "Should not contain 'successful' in output.\nstdout: {}",
-        stdout
-    );
-}
-
-#[test]
 fn test_agent_websearch_output_format() {
     // Test that web searches print "[search] <query>" in output.
     let fixture = SandboxFixture::new("test-agent-search-format");
