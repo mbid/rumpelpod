@@ -88,7 +88,7 @@ fn test_agent_edits_file() {
     run_git(&fixture.repo.dir, &["commit", "--amend", "--no-edit"]);
 
     let output = AgentBuilder::new(&fixture.repo, &fixture.name)
-        .run_with_prompt("Run `sed -i 's/World/Universe/' greeting.txt` then run `cat greeting.txt` and tell me the result.");
+        .run_with_prompt("Use the edit tool to replace 'World' with 'Universe' in greeting.txt, then run `cat greeting.txt` and tell me the result.");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
