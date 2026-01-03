@@ -3,6 +3,7 @@ pub mod anthropic;
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod daemon_protocol;
 pub mod docker;
 pub mod git;
 pub mod llm_cache;

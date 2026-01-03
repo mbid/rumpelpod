@@ -4,7 +4,7 @@ use log::{debug, error, info};
 use nix::fcntl::{Flock, FlockArg};
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::{OverlayMode, Runtime, UserInfo};
+use crate::daemon_protocol::{self, DaemonApi};
 use crate::docker;
 use crate::git;
 use crate::sandbox::SandboxInfo;
@@ -72,34 +73,12 @@ fn start_container(
     )
 }
 
+/// Handle to a daemon connection. Dropping this signals disconnection to the daemon.
 pub struct DaemonConnection {
+    // Hold the stream to keep the connection alive; the daemon shuts down
+    // when all clients disconnect.
+    #[allow(dead_code)]
     stream: UnixStream,
-}
-
-impl DaemonConnection {
-    pub fn check_alive(&mut self) -> bool {
-        let mut buf = [0u8; 1];
-        match self.stream.read(&mut buf) {
-            Ok(0) => false, // EOF - daemon exited
-            Ok(_) => true,  // Got data (unexpected, but daemon is alive)
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
-            Err(_) => false, // Error - assume dead
-        }
-    }
-
-    fn wait_for_ready(&mut self) -> Result<()> {
-        self.stream.set_nonblocking(false)?;
-        let mut buf = [0u8; 1];
-        match self.stream.read_exact(&mut buf) {
-            Ok(()) => {
-                self.stream.set_nonblocking(true)?;
-                Ok(())
-            }
-            Err(e) => {
-                bail!("Daemon failed to start container: {}", e);
-            }
-        }
-    }
 }
 
 pub fn connect_or_launch(
@@ -116,9 +95,8 @@ pub fn connect_or_launch(
     // Try to connect to existing socket
     if let Ok(stream) = UnixStream::connect(&sock_path) {
         debug!("Connected to existing daemon");
-        let mut conn = DaemonConnection { stream };
-        conn.wait_for_ready()?;
-        return Ok(conn);
+        let stream = do_handshake(stream, &info.name)?;
+        return Ok(DaemonConnection { stream });
     }
 
     // Spawn a new daemon (it will handle lock acquisition with backoff)
@@ -127,10 +105,15 @@ pub fn connect_or_launch(
 
     // Wait for socket to become connectable (not just exist)
     let stream = wait_for_socket_connectable(&sock_path, &lock_path)?;
-    let mut conn = DaemonConnection { stream };
-    conn.wait_for_ready()?;
+    let stream = do_handshake(stream, &info.name)?;
 
-    Ok(conn)
+    Ok(DaemonConnection { stream })
+}
+
+fn do_handshake(stream: UnixStream, sandbox_name: &str) -> Result<UnixStream> {
+    let mut client = daemon_protocol::Client::new(stream);
+    client.ensure_sandbox(sandbox_name)?;
+    Ok(client.into_inner())
 }
 
 fn spawn_daemon(
@@ -350,6 +333,35 @@ fn bind_socket(sock_path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
+/// Handle a client request: read the JSON-RPC request, process it, and send response.
+/// Returns the stream on success (for keeping the connection alive), or None on error.
+fn handle_client_request(mut stream: UnixStream) -> Option<UnixStream> {
+    use daemon_protocol::server::{self, ClientRequest};
+
+    let request = match server::read_request(&mut stream) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to read client request: {}", e);
+            let _ = server::send_error(&mut stream, -32700, "Parse error");
+            return None;
+        }
+    };
+
+    debug!("Received request: {:?}", request);
+
+    match request {
+        ClientRequest::EnsureSandbox { .. } => {
+            if server::send_ensure_sandbox_ok(&mut stream).is_err() {
+                error!("Failed to send response to client");
+                return None;
+            }
+        }
+    }
+
+    stream.set_nonblocking(true).ok();
+    Some(stream)
+}
+
 pub fn run_daemon_with_sync(
     info: &SandboxInfo,
     image_tag: &str,
@@ -396,15 +408,14 @@ pub fn run_daemon_with_sync(
 
     loop {
         match listener.accept() {
-            Ok((mut stream, _)) => {
+            Ok((stream, _)) => {
                 info!(
                     "Client connected (total: {})",
                     clients.len() + pending_clients.len() + 1
                 );
 
                 if container_started {
-                    if stream.write_all(&[0u8]).is_ok() {
-                        stream.set_nonblocking(true).ok();
+                    if let Some(stream) = handle_client_request(stream) {
                         clients.push(stream);
                     }
                 } else {
@@ -425,10 +436,9 @@ pub fn run_daemon_with_sync(
                                 container_started = true;
                                 info!("Container started successfully");
 
-                                for mut client in pending_clients.drain(..) {
-                                    if client.write_all(&[0u8]).is_ok() {
-                                        client.set_nonblocking(true).ok();
-                                        clients.push(client);
+                                for client in pending_clients.drain(..) {
+                                    if let Some(stream) = handle_client_request(client) {
+                                        clients.push(stream);
                                     }
                                 }
 
