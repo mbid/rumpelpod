@@ -6,18 +6,75 @@
 #![allow(dead_code)]
 
 use std::fs;
-
-use indoc::indoc;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
+use indoc::indoc;
 use rand::Rng;
 
 /// Default .sandbox.toml config for tests (no required env vars).
 const DEFAULT_SANDBOX_CONFIG: &str = indoc! {r#"
     env = []
 "#};
+
+/// Environment variable used to configure the daemon socket path.
+const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
+
+/// A test daemon that manages sandboxes for integration tests.
+/// Each test gets its own daemon with an isolated socket to enable parallel execution.
+/// On drop, the daemon process is terminated.
+pub struct TestDaemon {
+    pub socket_path: PathBuf,
+    process: Child,
+    #[allow(dead_code)]
+    temp_dir: tempfile::TempDir,
+}
+
+impl TestDaemon {
+    /// Start a new test daemon with an isolated socket.
+    pub fn start() -> Self {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
+        let socket_path = temp_dir.path().join("sandbox.sock");
+
+        let process = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+            .env(SOCKET_PATH_ENV, &socket_path)
+            .arg("daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("Failed to spawn daemon");
+
+        // Wait for socket to exist
+        let timeout = std::time::Duration::from_secs(10);
+        let start = std::time::Instant::now();
+        while !socket_path.exists() {
+            if start.elapsed() > timeout {
+                panic!(
+                    "Daemon socket did not appear within {:?}: {}",
+                    timeout,
+                    socket_path.display()
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        TestDaemon {
+            socket_path,
+            process,
+            temp_dir,
+        }
+    }
+}
+
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        // Kill the daemon process
+        let _ = self.process.kill();
+        let _ = self.process.wait();
+    }
+}
 
 /// A test fixture that creates a temporary git repository in /tmp.
 /// The repository is initialized with a README.md file and an initial commit.
@@ -109,7 +166,24 @@ pub fn run_git(dir: &PathBuf, args: &[&str]) -> Output {
     output
 }
 
+/// Run the sandbox binary with the given arguments in a specific working directory,
+/// using the given socket path for daemon communication.
+pub fn run_sandbox_in_with_socket(
+    working_dir: &PathBuf,
+    socket_path: &PathBuf,
+    args: &[&str],
+) -> Output {
+    Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(working_dir)
+        .env(SOCKET_PATH_ENV, socket_path)
+        .args(args)
+        .output()
+        .expect("Failed to run sandbox command")
+}
+
 /// Run the sandbox binary with the given arguments in a specific working directory.
+/// NOTE: This requires a daemon to already be running with the default socket path.
+/// For test isolation, prefer using `run_sandbox_in_with_socket` with a TestDaemon.
 pub fn run_sandbox_in(working_dir: &PathBuf, args: &[&str]) -> Output {
     Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(working_dir)
@@ -161,53 +235,97 @@ pub fn delete_sandbox_ignore_errors(repo: &TestRepo, sandbox_name: &str) {
 }
 
 /// A test fixture that wraps TestRepo and tracks a sandbox for automatic cleanup.
+/// Also manages its own daemon for test isolation.
 ///
-/// On drop, deletes the sandbox (ignoring errors) before cleaning up the repo.
+/// On drop, deletes the sandbox (ignoring errors) before cleaning up the repo and daemon.
 pub struct SandboxFixture {
     pub repo: TestRepo,
     pub name: String,
+    pub daemon: TestDaemon,
 }
 
 impl SandboxFixture {
     /// Create a new sandbox fixture with a Dockerfile already committed.
+    /// Also starts a daemon for this fixture.
     pub fn new(sandbox_name: &str) -> Self {
         let repo = TestRepo::init();
         repo.add_dockerfile();
+        let daemon = TestDaemon::start();
         SandboxFixture {
             repo,
             name: sandbox_name.to_string(),
+            daemon,
         }
     }
 
     /// Run a command inside this sandbox.
     pub fn run(&self, command: &[&str]) -> Output {
-        run_in_sandbox(&self.repo, &self.name, command)
+        self.run_in_sandbox(command)
     }
 
     /// Run a command inside this sandbox with a specific overlay mode.
     pub fn run_with_mode(&self, overlay_mode: &str, command: &[&str]) -> Output {
-        run_in_sandbox_with_mode(&self.repo, &self.name, overlay_mode, command)
+        self.run_in_sandbox_with_mode(overlay_mode, command)
+    }
+
+    /// Run the sandbox binary with the given arguments.
+    pub fn run_sandbox(&self, args: &[&str]) -> Output {
+        run_sandbox_in_with_socket(&self.repo.dir, &self.daemon.socket_path, args)
+    }
+
+    fn run_in_sandbox(&self, command: &[&str]) -> Output {
+        let mut args = vec!["enter", &self.name, "--runtime", "runc", "--"];
+        args.extend(command);
+        self.run_sandbox(&args)
+    }
+
+    fn run_in_sandbox_with_mode(&self, overlay_mode: &str, command: &[&str]) -> Output {
+        let mut args = vec![
+            "enter",
+            &self.name,
+            "--runtime",
+            "runc",
+            "--overlay-mode",
+            overlay_mode,
+            "--",
+        ];
+        args.extend(command);
+        self.run_sandbox(&args)
+    }
+
+    /// Delete this sandbox, asserting success.
+    pub fn delete(&self) {
+        let output = self.run_sandbox(&["delete", &self.name]);
+        assert!(
+            output.status.success(),
+            "Failed to delete sandbox: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
 
 impl Drop for SandboxFixture {
     fn drop(&mut self) {
-        delete_sandbox_ignore_errors(&self.repo, &self.name);
+        // Try to delete the sandbox, ignore errors
+        let _ = run_sandbox_in_with_socket(
+            &self.repo.dir,
+            &self.daemon.socket_path,
+            &["delete", &self.name],
+        );
+        // daemon is dropped automatically after this, killing the process
     }
 }
 
 /// Configuration for spawning an agent process.
 pub struct AgentBuilder<'a> {
-    repo: &'a TestRepo,
-    sandbox_name: &'a str,
+    fixture: &'a SandboxFixture,
     env_vars: Vec<(&'a str, &'a str)>,
 }
 
 impl<'a> AgentBuilder<'a> {
-    pub fn new(repo: &'a TestRepo, sandbox_name: &'a str) -> Self {
+    pub fn new(fixture: &'a SandboxFixture) -> Self {
         Self {
-            repo,
-            sandbox_name,
+            fixture,
             env_vars: Vec::new(),
         }
     }
@@ -222,10 +340,11 @@ impl<'a> AgentBuilder<'a> {
     pub fn run_with_prompt(self, prompt: &str) -> Output {
         let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache");
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
-        cmd.current_dir(&self.repo.dir);
+        cmd.current_dir(&self.fixture.repo.dir);
+        cmd.env(SOCKET_PATH_ENV, &self.fixture.daemon.socket_path);
         cmd.args([
             "agent",
-            self.sandbox_name,
+            &self.fixture.name,
             "--runtime",
             "runc",
             "--model",

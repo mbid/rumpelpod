@@ -1,8 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use chrono;
 use clap::{Parser, Subcommand};
-use env_logger::Builder;
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 
 use crate::agent;
@@ -74,34 +72,12 @@ pub enum Commands {
         cache: Option<PathBuf>,
     },
 
-    /// Internal daemon process (not shown in help)
-    #[command(hide = true)]
-    InternalDaemon {
-        /// Path to the sandbox directory
-        sandbox_dir: PathBuf,
-    },
+    /// Run the sandbox daemon (manages sandboxes across all projects)
+    Daemon,
 }
 
-fn init_logging(command: &Commands) -> Result<()> {
-    match command {
-        Commands::Enter { .. }
-        | Commands::List
-        | Commands::Delete { .. }
-        | Commands::Agent { .. } => {
-            env_logger::init();
-        }
-        Commands::InternalDaemon { sandbox_dir } => {
-            let log_path = sandbox_dir.join("daemon.log");
-            let log_file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .with_context(|| format!("Failed to open log file: {}", log_path.display()))?;
-            Builder::from_env(env_logger::Env::default())
-                .target(env_logger::Target::Pipe(Box::new(log_file)))
-                .init();
-        }
-    }
+fn init_logging(_command: &Commands) -> Result<()> {
+    env_logger::init();
     Ok(())
 }
 
@@ -110,77 +86,74 @@ pub fn run() -> Result<()> {
     init_logging(&cli.command)?;
 
     match cli.command {
-        Commands::InternalDaemon { sandbox_dir } => {
-            let info = sandbox::SandboxInfo::load(&sandbox_dir)?;
-            daemon::run_daemon(&info)?;
+        Commands::Daemon => {
+            daemon::run_daemon()?;
         }
-        _ => {
-            // All other commands need repo_root, user_info, and sandbox config
+        Commands::Enter {
+            name,
+            runtime,
+            overlay_mode,
+            command,
+        } => {
             let repo_root = git::find_repo_root()?;
             let user_info = UserInfo::current()?;
             let sandbox_config = SandboxConfig::load(&repo_root)?;
-
-            match cli.command {
-                Commands::Enter {
-                    name,
-                    runtime,
-                    overlay_mode,
-                    command,
-                } => {
-                    let env_vars = sandbox_config.resolve_env_vars()?;
-                    // CLI flags override config file values
-                    let runtime = runtime.or(sandbox_config.runtime).unwrap_or_default();
-                    let overlay_mode = overlay_mode
-                        .or(sandbox_config.overlay_mode)
-                        .unwrap_or_default();
-                    run_sandbox(
-                        &repo_root,
-                        &sandbox_config,
-                        &name,
-                        &user_info,
-                        runtime,
-                        overlay_mode,
-                        &env_vars,
-                        command,
-                    )?;
-                }
-                Commands::List => {
-                    list_sandboxes(&repo_root)?;
-                }
-                Commands::Delete { name } => {
-                    delete_sandbox(&repo_root, &name)?;
-                }
-                Commands::Agent {
-                    name,
-                    runtime,
-                    overlay_mode,
-                    model,
-                    cache,
-                } => {
-                    let env_vars = sandbox_config.resolve_env_vars()?;
-                    let llm_cache = cache
-                        .map(|dir| LlmCache::new(&dir, "anthropic"))
-                        .transpose()?;
-                    // CLI flags override config file values
-                    let runtime = runtime.or(sandbox_config.runtime).unwrap_or_default();
-                    let overlay_mode = overlay_mode
-                        .or(sandbox_config.overlay_mode)
-                        .unwrap_or_default();
-                    let model = model.or(sandbox_config.agent.model).unwrap_or_default();
-                    run_agent(
-                        &repo_root,
-                        &sandbox_config,
-                        &name,
-                        &user_info,
-                        runtime,
-                        overlay_mode,
-                        model,
-                        &env_vars,
-                        llm_cache,
-                    )?;
-                }
-                Commands::InternalDaemon { .. } => unreachable!(),
-            }
+            let env_vars = sandbox_config.resolve_env_vars()?;
+            // CLI flags override config file values
+            let runtime = runtime.or(sandbox_config.runtime).unwrap_or_default();
+            let overlay_mode = overlay_mode
+                .or(sandbox_config.overlay_mode)
+                .unwrap_or_default();
+            run_sandbox(
+                &repo_root,
+                &sandbox_config,
+                &name,
+                &user_info,
+                runtime,
+                overlay_mode,
+                &env_vars,
+                command,
+            )?;
+        }
+        Commands::List => {
+            let repo_root = git::find_repo_root()?;
+            list_sandboxes(&repo_root)?;
+        }
+        Commands::Delete { name } => {
+            let repo_root = git::find_repo_root()?;
+            delete_sandbox(&repo_root, &name)?;
+        }
+        Commands::Agent {
+            name,
+            runtime,
+            overlay_mode,
+            model,
+            cache,
+        } => {
+            let repo_root = git::find_repo_root()?;
+            let user_info = UserInfo::current()?;
+            let sandbox_config = SandboxConfig::load(&repo_root)?;
+            let env_vars = sandbox_config.resolve_env_vars()?;
+            let llm_cache = cache
+                .map(|dir| LlmCache::new(&dir, "anthropic"))
+                .transpose()?;
+            // CLI flags override config file values
+            let runtime = runtime.or(sandbox_config.runtime).unwrap_or_default();
+            let overlay_mode = overlay_mode
+                .or(sandbox_config.overlay_mode)
+                .unwrap_or_default();
+            let model = model.or(sandbox_config.agent.model).unwrap_or_default();
+            run_agent(
+                &repo_root,
+                &sandbox_config,
+                &name,
+                &user_info,
+                runtime,
+                overlay_mode,
+                model,
+                &env_vars,
+                llm_cache,
+            )?;
         }
     }
 

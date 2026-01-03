@@ -677,7 +677,7 @@ pub fn run_sandbox(
     }
 
     let _daemon_conn =
-        daemon::connect_or_launch(info, image_tag, user_info, runtime, overlay_mode, env_vars)?;
+        daemon::connect(info, image_tag, user_info, runtime, overlay_mode, env_vars)?;
 
     let default_shell = if user_info.uses_fish() {
         "fish".to_string()
@@ -697,7 +697,7 @@ pub fn run_sandbox(
     // _daemon_conn is dropped here, signaling disconnection to daemon
 }
 
-/// Ensure the container is running by connecting to (or launching) the daemon.
+/// Ensure the container is running by connecting to the daemon.
 /// Returns the daemon connection which must be held to keep the container alive.
 pub fn ensure_container_running(
     info: &SandboxInfo,
@@ -707,7 +707,7 @@ pub fn ensure_container_running(
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
 ) -> Result<DaemonConnection> {
-    daemon::connect_or_launch(info, image_tag, user_info, runtime, overlay_mode, env_vars)
+    daemon::connect(info, image_tag, user_info, runtime, overlay_mode, env_vars)
 }
 
 /// Internal function to start the container directly (called by daemon).

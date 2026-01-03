@@ -10,33 +10,27 @@ use std::process::Command;
 use indoc::{formatdoc, indoc};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use common::{run_git, run_sandbox_in, AgentBuilder, SandboxFixture, TestRepo};
+use common::{run_git, AgentBuilder, SandboxFixture};
 
 #[test]
 fn test_agent_passthrough_env() {
-    let repo = TestRepo::init();
-    repo.add_dockerfile();
+    let fixture = SandboxFixture::new("test-agent-env");
 
     // Update .sandbox to require a missing env var
     fs::write(
-        repo.dir.join(".sandbox.toml"),
+        fixture.repo.dir.join(".sandbox.toml"),
         indoc! {r#"
             env = ["MISSING_API_KEY_XYZ"]
         "#},
     )
     .expect("Failed to write .sandbox.toml");
 
-    run_git(&repo.dir, &["add", ".sandbox.toml"]);
-    run_git(&repo.dir, &["commit", "--amend", "--no-edit"]);
-
-    let sandbox_name = "test-agent-env";
+    run_git(&fixture.repo.dir, &["add", ".sandbox.toml"]);
+    run_git(&fixture.repo.dir, &["commit", "--amend", "--no-edit"]);
 
     // Test: Verify error when env var is not set for agent command
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
-        .current_dir(&repo.dir)
-        .args(["agent", sandbox_name, "--runtime", "runc"])
-        .output()
-        .expect("Failed to run sandbox");
+    // This should fail during env resolution before connecting to daemon
+    let output = fixture.run_sandbox(&["agent", &fixture.name, "--runtime", "runc"]);
 
     assert!(
         !output.status.success(),
@@ -48,9 +42,6 @@ fn test_agent_passthrough_env() {
         "Error should mention the missing env var. Got: '{}'",
         stderr
     );
-
-    // Clean up
-    let _ = run_sandbox_in(&repo.dir, &["delete", sandbox_name]);
 }
 
 #[test]
@@ -64,7 +55,7 @@ fn test_agent_reads_file() {
     run_git(&fixture.repo.dir, &["add", "secret.txt"]);
     run_git(&fixture.repo.dir, &["commit", "--amend", "--no-edit"]);
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name)
+    let output = AgentBuilder::new(&fixture)
         .run_with_prompt("Run `cat secret.txt` and tell me what it contains.");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -87,7 +78,7 @@ fn test_agent_edits_file() {
     run_git(&fixture.repo.dir, &["add", "greeting.txt"]);
     run_git(&fixture.repo.dir, &["commit", "--amend", "--no-edit"]);
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name)
+    let output = AgentBuilder::new(&fixture)
         .run_with_prompt("Use the edit tool to replace 'World' with 'Universe' in greeting.txt, then run `cat greeting.txt` and tell me the result.");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -104,7 +95,7 @@ fn test_agent_writes_file() {
     let fixture = SandboxFixture::new("test-agent-write");
     let expected_content = "WRITTEN_BY_AGENT_12345";
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name).run_with_prompt(&format!(
+    let output = AgentBuilder::new(&fixture).run_with_prompt(&format!(
         "Run `echo '{}' > newfile.txt` then run `cat newfile.txt` and tell me the result.",
         expected_content
     ));
@@ -125,7 +116,7 @@ fn test_agent_handles_command_with_empty_output_and_nonzero_exit() {
     // no output but exit with non-zero status.
     let fixture = SandboxFixture::new("test-agent-empty-error");
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name)
+    let output = AgentBuilder::new(&fixture)
         .run_with_prompt("Run the command `false` and tell me what happened.");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -150,7 +141,7 @@ fn test_agent_large_file_output() {
     run_git(&fixture.repo.dir, &["add", "large.txt"]);
     run_git(&fixture.repo.dir, &["commit", "--amend", "--no-edit"]);
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name)
+    let output = AgentBuilder::new(&fixture)
         .run_with_prompt("Run exactly one tool: `cat large.txt`. After that single tool call, stop immediately and tell me what you observed. Do not run any other tools.");
 
     // Agent should complete without deadlocking and mention the output file
@@ -229,6 +220,10 @@ fn test_agent_vim_input() {
     let mut cmd = CommandBuilder::new(&sandbox_bin);
     cmd.cwd(&fixture.repo.dir);
     cmd.env("PATH", &new_path);
+    cmd.env(
+        "SANDBOX_DAEMON_SOCKET",
+        fixture.daemon.socket_path.to_str().unwrap(),
+    );
     cmd.args([
         "agent",
         &fixture.name,
@@ -286,7 +281,7 @@ fn test_agent_websearch() {
     // The US penny production ended in November 2025, after the model's training data.
     let fixture = SandboxFixture::new("test-agent-websearch");
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name).run_with_prompt(
+    let output = AgentBuilder::new(&fixture).run_with_prompt(
         "When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
     );
 
@@ -305,7 +300,7 @@ fn test_agent_write_tool_output_format() {
     // without additional success messages or content echoing.
     let fixture = SandboxFixture::new("test-agent-write-format");
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name)
+    let output = AgentBuilder::new(&fixture)
         .run_with_prompt("Use the write tool to create a file called 'test.txt' with content 'hello'. Do not use bash.");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -332,7 +327,7 @@ fn test_agent_websearch_output_format() {
     // Test that web searches print "[search] <query>" in output.
     let fixture = SandboxFixture::new("test-agent-search-format");
 
-    let output = AgentBuilder::new(&fixture.repo, &fixture.name).run_with_prompt(
+    let output = AgentBuilder::new(&fixture).run_with_prompt(
         "When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
     );
 

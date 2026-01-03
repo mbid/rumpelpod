@@ -6,7 +6,7 @@ use std::fs;
 
 use indoc::indoc;
 
-use common::{run_git, run_sandbox_in, SandboxFixture};
+use common::{run_git, SandboxFixture};
 
 #[test]
 fn test_delete_with_readonly_files_copy_mode() {
@@ -33,7 +33,7 @@ fn test_delete_with_readonly_files_copy_mode() {
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     // Try to delete the sandbox - this should succeed even with readonly files
-    let output = run_sandbox_in(&fixture.repo.dir, &["delete", &fixture.name]);
+    let output = fixture.run_sandbox(&["delete", &fixture.name]);
     assert!(
         output.status.success(),
         "Failed to delete sandbox with readonly files in copy mode: {}\nstderr: {}",
@@ -67,7 +67,7 @@ fn test_delete_with_readonly_files_overlayfs_mode() {
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     // Try to delete the sandbox - this should succeed even with readonly files
-    let output = run_sandbox_in(&fixture.repo.dir, &["delete", &fixture.name]);
+    let output = fixture.run_sandbox(&["delete", &fixture.name]);
     assert!(
         output.status.success(),
         "Failed to delete sandbox with readonly files in overlayfs mode: {}\nstderr: {}",
@@ -124,7 +124,7 @@ fn test_delete_with_repo_relative_overlay_copy_mount() {
 
     // Try to delete the sandbox - this should succeed even if Docker created
     // a root-owned directory in the clone
-    let output = run_sandbox_in(&fixture.repo.dir, &["delete", &fixture.name]);
+    let output = fixture.run_sandbox(&["delete", &fixture.name]);
     assert!(
         output.status.success(),
         "Failed to delete sandbox with repo-relative overlay mount in copy mode: {}\nstderr: {}",

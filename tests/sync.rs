@@ -4,7 +4,7 @@ mod common;
 
 use std::fs;
 
-use common::{delete_sandbox_ignore_errors, run_git, run_in_sandbox, SandboxFixture, TestRepo};
+use common::{run_git, run_sandbox_in_with_socket, SandboxFixture, TestDaemon, TestRepo};
 
 #[test]
 fn test_sync_with_history_rewrite() {
@@ -104,11 +104,19 @@ fn test_sync_with_history_rewrite() {
 fn test_host_history_rewrite_syncs_to_sandbox() {
     let repo = TestRepo::init();
     repo.add_dockerfile();
+    let daemon = TestDaemon::start();
 
     let sandbox_name = "test-host-rewrite";
 
+    // Helper to run command in sandbox
+    let run_in_sandbox = |name: &str, cmd: &[&str]| {
+        let mut args = vec!["enter", name, "--runtime", "runc", "--"];
+        args.extend(cmd);
+        run_sandbox_in_with_socket(&repo.dir, &daemon.socket_path, &args)
+    };
+
     // Create sandbox and verify initial state
-    let output = run_in_sandbox(&repo, sandbox_name, &["git", "rev-parse", "sandbox/master"]);
+    let output = run_in_sandbox(sandbox_name, &["git", "rev-parse", "sandbox/master"]);
     assert!(
         output.status.success(),
         "Failed to get sandbox/master: {}",
@@ -131,11 +139,7 @@ fn test_host_history_rewrite_syncs_to_sandbox() {
 
     // Create a new sandbox - this triggers sync_main_to_meta
     let sandbox_name_2 = "test-host-rewrite-2";
-    let output = run_in_sandbox(
-        &repo,
-        sandbox_name_2,
-        &["git", "rev-parse", "sandbox/master"],
-    );
+    let output = run_in_sandbox(sandbox_name_2, &["git", "rev-parse", "sandbox/master"]);
     assert!(
         output.status.success(),
         "Failed to create second sandbox after host history rewrite: {}",
@@ -149,6 +153,6 @@ fn test_host_history_rewrite_syncs_to_sandbox() {
     );
 
     // Clean up
-    delete_sandbox_ignore_errors(&repo, sandbox_name);
-    delete_sandbox_ignore_errors(&repo, sandbox_name_2);
+    let _ = run_sandbox_in_with_socket(&repo.dir, &daemon.socket_path, &["delete", sandbox_name]);
+    let _ = run_sandbox_in_with_socket(&repo.dir, &daemon.socket_path, &["delete", sandbox_name_2]);
 }

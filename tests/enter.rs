@@ -7,29 +7,15 @@ use std::process::Command;
 
 use indoc::indoc;
 
-use common::{run_git, SandboxFixture, TestRepo};
+use common::{run_git, SandboxFixture};
 
 #[test]
 fn smoke_test_sandbox_enter() {
-    let repo = TestRepo::init();
+    let fixture = SandboxFixture::new("test-sandbox");
 
-    fs::write(
-        repo.dir.join("Dockerfile"),
-        include_str!("Dockerfile-debian"),
-    )
-    .expect("Failed to write Dockerfile");
-
-    run_git(&repo.dir, &["add", "Dockerfile"]);
-    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile"]);
-
-    // Get the new commit hash (after adding Dockerfile)
-    let output = run_git(&repo.dir, &["rev-parse", "HEAD"]);
+    // Get the commit hash (after adding Dockerfile via SandboxFixture::new)
+    let output = run_git(&fixture.repo.dir, &["rev-parse", "HEAD"]);
     let expected_commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    let fixture = SandboxFixture {
-        repo,
-        name: "test-sandbox".to_string(),
-    };
 
     // Test 1: Verify README.md content inside sandbox
     let output = fixture.run(&["cat", "README.md"]);
@@ -100,6 +86,7 @@ fn test_enter_passthrough_env() {
     // Test 1: Verify env var is passed through when set on host
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&fixture.repo.dir)
+        .env("SANDBOX_DAEMON_SOCKET", &fixture.daemon.socket_path)
         .env("MY_TEST_VAR", env_value)
         .args([
             "enter",
@@ -128,6 +115,7 @@ fn test_enter_passthrough_env() {
     );
 
     // Test 2: Verify error when required env var is not set on host
+    // This error happens before connecting to daemon, so socket path doesn't matter
     fs::write(
         fixture.repo.dir.join(".sandbox.toml"),
         indoc! {r#"
@@ -138,6 +126,7 @@ fn test_enter_passthrough_env() {
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&fixture.repo.dir)
+        .env("SANDBOX_DAEMON_SOCKET", &fixture.daemon.socket_path)
         .args([
             "enter",
             &fixture.name,
@@ -173,6 +162,7 @@ fn test_enter_passthrough_env() {
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&fixture.repo.dir)
+        .env("SANDBOX_DAEMON_SOCKET", &fixture.daemon.socket_path)
         .env("VAR_ONE", "value1")
         .env("VAR_TWO", "value2")
         .args([

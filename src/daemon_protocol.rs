@@ -3,12 +3,14 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 
 use crate::config::{OverlayMode, Runtime, UserInfo};
 
 /// Parameters needed to start a sandbox container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxParams {
+    pub project_dir: PathBuf,
     pub image_tag: String,
     pub user_info: UserInfoWire,
     pub runtime: RuntimeWire,
@@ -106,6 +108,9 @@ impl From<OverlayModeWire> for OverlayMode {
 pub trait DaemonApi {
     /// Ensure the sandbox is running. Blocks until the container is started.
     fn ensure_sandbox(&mut self, sandbox_name: &str, params: &SandboxParams) -> Result<()>;
+
+    /// Shutdown the daemon gracefully.
+    fn shutdown(&mut self) -> Result<()>;
 }
 
 /// Client implementation of the daemon API over a stream.
@@ -132,6 +137,22 @@ impl<S: std::io::Read + Write> DaemonApi for Client<S> {
                 sandbox_name: sandbox_name.to_string(),
                 params: params.clone(),
             })),
+        };
+
+        send_request(&mut self.stream, &request)?;
+        let response = read_response(&mut self.stream)?;
+
+        if let Some(err) = response.error {
+            bail!("Daemon error: {} (code {})", err.message, err.code);
+        }
+
+        Ok(())
+    }
+
+    fn shutdown(&mut self) -> Result<()> {
+        let request = Request {
+            method: Method::Shutdown,
+            params: None,
         };
 
         send_request(&mut self.stream, &request)?;
@@ -176,6 +197,7 @@ fn read_response(stream: &mut impl std::io::Read) -> Result<Response> {
 #[serde(rename_all = "snake_case")]
 enum Method {
     EnsureSandbox,
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,10 +231,14 @@ struct Response {
 #[serde(untagged)]
 enum ResponseResult {
     EnsureSandbox(EnsureSandboxResult),
+    Shutdown(ShutdownResult),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct EnsureSandboxResult {}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ShutdownResult {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RpcError {
@@ -251,6 +277,7 @@ pub mod server {
             sandbox_name: String,
             params: SandboxParams,
         },
+        Shutdown,
     }
 
     /// Read and parse a request from a client stream.
@@ -279,12 +306,19 @@ pub mod server {
                     params: params.params,
                 })
             }
+            Method::Shutdown => Ok(ClientRequest::Shutdown),
         }
     }
 
     /// Send a success response for ensure_sandbox.
     pub fn send_ensure_sandbox_ok(stream: &mut impl Write) -> Result<()> {
         let response = Response::success(ResponseResult::EnsureSandbox(EnsureSandboxResult {}));
+        send_response(stream, &response)
+    }
+
+    /// Send a success response for shutdown.
+    pub fn send_shutdown_ok(stream: &mut impl Write) -> Result<()> {
+        let response = Response::success(ResponseResult::Shutdown(ShutdownResult {}));
         send_response(stream, &response)
     }
 
