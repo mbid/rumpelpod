@@ -13,6 +13,7 @@ use crate::config::{OverlayMode, Runtime, UserInfo};
 use crate::daemon_protocol::{self, server, SandboxParams};
 use crate::docker;
 use crate::git::GitSync;
+use crate::git_http::GitHttpServer;
 use crate::sandbox::SandboxInfo;
 use crate::sandbox_config::SandboxConfig;
 
@@ -97,6 +98,10 @@ struct SandboxState {
     info: SandboxInfo,
     /// Number of active client connections for this sandbox.
     client_count: usize,
+    /// Git HTTP server for this sandbox (provides HTTP access to meta.git).
+    /// Kept alive for the lifetime of the sandbox; dropped when sandbox is cleaned up.
+    #[allow(dead_code)]
+    git_http_server: Option<GitHttpServer>,
 }
 
 /// Global daemon state shared across all connection handler threads.
@@ -125,6 +130,7 @@ fn start_container(
     runtime: Runtime,
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
+    git_http_host_port: Option<u16>,
 ) -> Result<()> {
     crate::sandbox::ensure_container_running_internal(
         info,
@@ -133,6 +139,7 @@ fn start_container(
         runtime,
         overlay_mode,
         env_vars,
+        git_http_host_port,
     )
 }
 
@@ -234,7 +241,26 @@ fn handle_ensure_sandbox(
             }
         };
 
-        // Start the container
+        // Start git HTTP server for this sandbox
+        let git_http_server = match GitHttpServer::start(&info.meta_git_dir, sandbox_name) {
+            Ok(server) => {
+                info!(
+                    "Client {}: git HTTP server started on port {}",
+                    client_id, server.host_port
+                );
+                Some(server)
+            }
+            Err(e) => {
+                error!(
+                    "Client {}: failed to start git HTTP server: {}",
+                    client_id, e
+                );
+                // Continue without git HTTP - it's not critical for basic operation
+                None
+            }
+        };
+
+        // Start the container with port mapping for git HTTP
         if let Err(e) = start_container(
             &info,
             &params.image_tag,
@@ -242,6 +268,7 @@ fn handle_ensure_sandbox(
             runtime,
             overlay_mode,
             &params.env_vars,
+            git_http_server.as_ref().map(|s| s.host_port),
         ) {
             error!("Client {}: failed to start container: {}", client_id, e);
             let _ = server::send_error(
@@ -268,6 +295,7 @@ fn handle_ensure_sandbox(
                 SandboxState {
                     info,
                     client_count: 1,
+                    git_http_server,
                 },
             );
         }

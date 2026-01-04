@@ -708,6 +708,7 @@ pub fn ensure_container_running_internal(
     runtime: Runtime,
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
+    git_http_host_port: Option<u16>,
 ) -> Result<()> {
     // Remove stopped container if it exists
     if docker::container_exists(&info.container_name)? {
@@ -729,7 +730,16 @@ pub fn ensure_container_running_internal(
         format!("{}:{}", user_info.uid, user_info.gid),
         "--workdir".to_string(),
         info.repo_root.to_string_lossy().to_string(),
+        // Allow container to access host services via host.docker.internal
+        "--add-host".to_string(),
+        "host.docker.internal:host-gateway".to_string(),
     ];
+
+    // Pass git HTTP server port as environment variable if available
+    if let Some(host_port) = git_http_host_port {
+        args.push("-e".to_string());
+        args.push(format!("SANDBOX_GIT_HTTP_PORT={}", host_port));
+    }
 
     // Load mounts config saved during ensure_sandbox
     let mounts_config = info.load_mounts_config()?;
@@ -751,14 +761,16 @@ pub fn ensure_container_running_internal(
 
     info!("Starting container: {}", info.container_name);
 
-    let status = Command::new("docker")
+    let output = Command::new("docker")
         .args(&args)
         .stdout(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .output()
         .context("Failed to start docker container")?;
 
-    if !status.success() {
-        bail!("Failed to start container");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to start container: {}", stderr);
     }
 
     fix_mount_parent_ownership(&info.container_name, &mounts, user_info)?;

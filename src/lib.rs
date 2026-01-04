@@ -6,6 +6,7 @@ mod daemon;
 mod daemon_protocol;
 mod docker;
 mod git;
+mod git_http;
 mod llm;
 mod overlay;
 mod sandbox;
