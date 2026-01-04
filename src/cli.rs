@@ -201,6 +201,7 @@ fn resolve_image_tag(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_sandbox(
     repo_root: &Path,
     config: &SandboxConfig,
@@ -287,6 +288,7 @@ fn delete_sandbox(repo_root: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_agent(
     repo_root: &Path,
     config: &SandboxConfig,
