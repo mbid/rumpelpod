@@ -177,6 +177,67 @@ pub struct ToolChoiceFunctionName {
     pub name: String,
 }
 
+/// Search mode for live search functionality.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    /// Disables search, uses model without accessing additional data sources.
+    Off,
+    /// Model automatically decides whether to perform live search.
+    Auto,
+    /// Enables live search.
+    On,
+}
+
+/// Data source type for live search.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchSourceType {
+    Web,
+    News,
+    X,
+    Rss,
+}
+
+/// A search source configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchSource {
+    #[serde(rename = "type")]
+    pub source_type: SearchSourceType,
+    /// Allowed websites (max 5, cannot be used with excluded_websites).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_websites: Option<Vec<String>>,
+    /// Excluded websites (max 5, cannot be used with allowed_websites).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_websites: Option<Vec<String>>,
+}
+
+/// Search parameters for live search in chat completions.
+///
+/// Enables the model to search the web, news, X, and RSS feeds for real-time data.
+/// See https://docs.x.ai/docs/guides/live-search for details.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SearchParameters {
+    /// Search mode: "off", "auto", or "on". Defaults to "auto" if unspecified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SearchMode>,
+    /// Maximum number of search results. Optional.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_search_results: Option<u32>,
+    /// Whether to return citations in the response.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub return_citations: Option<bool>,
+    /// Start date for search data (ISO8601 format, e.g., "2025-01-01").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_date: Option<String>,
+    /// End date for search data (ISO8601 format, e.g., "2025-12-31").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_date: Option<String>,
+    /// Data sources to search. Defaults to web, news, and x if unspecified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sources: Option<Vec<SearchSource>>,
+}
+
 /// Request body for the chat completions endpoint.
 #[derive(Debug, Serialize)]
 pub struct ChatCompletionRequest {
@@ -195,6 +256,10 @@ pub struct ChatCompletionRequest {
     /// Whether to stream the response (not supported by this client yet)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
+    /// Search parameters for live search functionality.
+    /// See https://docs.x.ai/docs/guides/live-search
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_parameters: Option<SearchParameters>,
 }
 
 /// Response from the chat completions endpoint.

@@ -196,8 +196,8 @@ impl Client {
 mod tests {
     use super::*;
     use crate::llm::types::xai::{
-        FinishReason, FunctionDefinition, Message, MessageContent, Role, Tool, ToolChoice,
-        ToolChoiceMode, ToolType,
+        FinishReason, FunctionDefinition, Message, MessageContent, Role, SearchMode,
+        SearchParameters, Tool, ToolChoice, ToolChoiceMode, ToolType,
     };
     use std::path::PathBuf;
 
@@ -225,6 +225,7 @@ mod tests {
             tools: None,
             tool_choice: None,
             stream: Some(false),
+            search_parameters: None,
         };
 
         let response = client.chat_completion(request).expect("API call failed");
@@ -282,6 +283,7 @@ mod tests {
             tools: Some(vec![tool]),
             tool_choice: Some(ToolChoice::Mode(ToolChoiceMode::Required)),
             stream: Some(false),
+            search_parameters: None,
         };
 
         let response = client.chat_completion(request).expect("API call failed");
@@ -311,6 +313,51 @@ mod tests {
             args.get("city").is_some(),
             "Expected city argument, got: {}",
             args
+        );
+    }
+
+    #[test]
+    fn test_web_search() {
+        // Test that the model can use web search to find information past its knowledge cutoff.
+        // The US penny production ended in November 2025, after the model's training data.
+        let cache = get_cache();
+        let client = Client::new_with_cache(Some(cache)).expect("Failed to create client");
+
+        let request = ChatCompletionRequest {
+            model: "grok-3-mini-fast".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(
+                    "When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.".to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: Some(0.0),
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            stream: Some(false),
+            search_parameters: Some(SearchParameters {
+                mode: Some(SearchMode::On),
+                ..Default::default()
+            }),
+        };
+
+        let response = client.chat_completion(request).expect("API call failed");
+
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+        assert_eq!(choice.message.role, Role::Assistant);
+        assert!(choice.finish_reason == Some(FinishReason::Stop));
+
+        let content = choice.message.content.as_ref().expect("Expected content");
+        // The last US penny was minted on November 12, 2025
+        assert!(
+            content.contains("2025-11-12"),
+            "Response should contain the last US penny minting date '2025-11-12', got: {}",
+            content
         );
     }
 }
