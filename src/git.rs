@@ -110,21 +110,56 @@ pub fn checkout_or_create_branch(repo: &Path, branch_name: &str) -> Result<()> {
         .status()
         .context("Failed to run git checkout")?;
 
-    if status.success() {
-        return Ok(());
+    if !status.success() {
+        // Branch doesn't exist, create it
+        let status = Command::new("git")
+            .current_dir(repo)
+            .args(["checkout", "-b", branch_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("Failed to create branch")?;
+
+        if !status.success() {
+            bail!("Failed to create branch: {}", branch_name);
+        }
     }
 
-    // Branch doesn't exist, create it
-    let status = Command::new("git")
-        .current_dir(repo)
-        .args(["checkout", "-b", branch_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("Failed to create branch")?;
+    // git clone creates a local branch for the remote HEAD (e.g., master).
+    // Delete it to keep only the sandbox branch.
+    delete_other_local_branches(repo, branch_name)?;
 
-    if !status.success() {
-        bail!("Failed to create branch: {}", branch_name);
+    Ok(())
+}
+
+/// Delete all local branches except the specified one.
+fn delete_other_local_branches(repo: &Path, keep_branch: &str) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["branch", "--format=%(refname:short)"])
+        .output()
+        .context("Failed to list branches")?;
+
+    if !output.status.success() {
+        bail!("Failed to list branches");
+    }
+
+    let branches = String::from_utf8_lossy(&output.stdout);
+    for branch in branches.lines() {
+        let branch = branch.trim();
+        if !branch.is_empty() && branch != keep_branch {
+            let status = Command::new("git")
+                .current_dir(repo)
+                .args(["branch", "-D", branch])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .context("Failed to delete branch")?;
+
+            if !status.success() {
+                warn!("Failed to delete branch: {}", branch);
+            }
+        }
     }
 
     Ok(())
