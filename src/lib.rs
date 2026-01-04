@@ -1,3 +1,4 @@
+#[macro_use]
 mod agent;
 mod cli;
 mod config;

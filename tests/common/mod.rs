@@ -321,6 +321,7 @@ impl Drop for SandboxFixture {
 pub struct AgentBuilder<'a> {
     fixture: &'a SandboxFixture,
     env_vars: Vec<(&'a str, &'a str)>,
+    model: &'a str,
 }
 
 impl<'a> AgentBuilder<'a> {
@@ -328,7 +329,14 @@ impl<'a> AgentBuilder<'a> {
         Self {
             fixture,
             env_vars: Vec::new(),
+            model: "haiku",
         }
+    }
+
+    /// Set the model to use for the agent.
+    pub fn model(mut self, model: &'a str) -> Self {
+        self.model = model;
+        self
     }
 
     /// Add an environment variable to the agent process.
@@ -349,7 +357,7 @@ impl<'a> AgentBuilder<'a> {
             "--runtime",
             "runc",
             "--model",
-            "haiku",
+            self.model,
             "--cache",
             cache_dir.to_str().unwrap(),
         ]);

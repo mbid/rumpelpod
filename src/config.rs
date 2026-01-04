@@ -27,10 +27,11 @@ pub enum OverlayMode {
     Copy,
 }
 
-/// Claude model to use for the agent.
+/// Model to use for the agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Model {
+    // Claude models (Anthropic)
     /// Claude Opus 4.5 - most capable model
     #[default]
     #[value(name = "opus")]
@@ -41,15 +42,25 @@ pub enum Model {
     /// Claude Haiku 4.5 - fast and cost-effective
     #[value(name = "haiku")]
     Haiku,
+
+    // Grok models (xAI)
+    /// Grok 3 Mini - lightweight reasoning model, cost-effective
+    #[value(name = "grok-3-mini")]
+    Grok3Mini,
+    /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
+    #[value(name = "grok-4.1-fast")]
+    Grok41Fast,
 }
 
 impl Model {
-    /// Get the model identifier as used by the Anthropic API.
+    /// Get the model identifier as used by the provider's API.
     pub fn api_model_id(&self) -> &'static str {
         match self {
             Model::Opus => "claude-opus-4-5-20251101",
             Model::Sonnet => "claude-sonnet-4-5-20250929",
             Model::Haiku => "claude-haiku-4-5-20251001",
+            Model::Grok3Mini => "grok-3-mini",
+            Model::Grok41Fast => "grok-4-1-fast",
         }
     }
 }
