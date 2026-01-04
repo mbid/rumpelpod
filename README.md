@@ -1,42 +1,99 @@
 # Sandbox
 
-A docker-based sandbox to let untrusted LLM-enabled agents work on bureaucracy-related problems.
-Features:
-- Has a command `run` with a name.
-  Creates a temporary shallow clone of the current git repo.
-  The shallow clone should have the current git repo as remote (sandbox-<name>) and vice-verca.
-  Mount the current git repo suitably in read-only mode into the container so that the shallow (or is it called "shared") clone still works.
-- Make sure the user ids inside and outside the containers are mapped to each other.
-  The user inside should be the same as the user outside.
-- Assume the docker image is provided as a Dockerfile in the root directory of the git repo.
-  You should build the docker image first if necessary.
-  You can determine whether a rebuild is necessary by taking the sha2 hash of the Dockerfile and tagging the image built with that hash.
-  Assume the dockerfile accepts suitable args corresponding to the user name, user id and group id.
-  Use that to align the internal and external users.
-- The working directory and location of the git repo should be the same as externally.
-  To accomplish that, you have to point the shared clone to a symlinked that points to the real repo root, at least externally.
-  Inside the container, set up mount points such that the symlinked directory path is actuallly the outside repo, while the shared clone git repo is at the same location as externally.
-- Use overlay file systems/volumes on various directories to make them accessible inside the container but don't propagate changes outside.
-- On launch, creates a temporary shallow clone of the current git repo.
-- Don't necessarily tear down shared cloned directories when the container exits.
-  Keep them around, but add commands to list existing sandboxed git repos, and delete them.
-  If you find docker volumes (needed, I think, for overlay file systems) that belong to sandboxes for which we don't have a directory anymore, tear them down.
-- It should be possible to attach a sandbox twice.
-  This shouldn't launch the container again, we should attach to the existing one.
-- While sandboxes are running, keep the two git repos in sync, in the sense that git fetch and git push are not necessary.
-  You probably want to have a wathcer process on the host that listens for file system/dir changes to the .git directories of the clone and main repo.
-- Make it work with fish.
-  Assume that the Dockerfile installs fish.
-  If the ambient user's shell is fish, then also use fish inside the container.
-  This reminds me: If no command is provided for the `run` command, drop into an interactive shell.
-  Mount the fish config (~/.config/fish) into the container in read-only mode.
-- Keep most logic in the rust crate library.
-  The binary should have a very simple main fucntion that simply calls into the library.
-- Contrary to what I might have written furhter up, the location for sandbox dirs (shared clone, overlay related dirs) should be in $XDG_CACHE_HOME/sandbox/<repo-root-dir-name>-<sha2-of-repo-root-absolute-path>.
-  Make sure it works also when $XDG_CACHE_HOME (if that's the var) is not set, defaulting to ~/.cache.
-- Make claude work inside the docker container.
-  To do that, mount ~/.claude.json and ~/.claude into the container with overlay (no changes propagate outside; writeable with copy on write optimization).
-- Block all network traffic by default.
-  Specific IPs/domains should be whitelistable though.
-  Add the API endpoint of the claude API to the whitelist by default.
-  Make the whitelist some constant in the code; doesn't need to be configurable.
+Run LLM agents in isolated Docker containers with filesystem sandboxing.
+
+## Features
+
+- **Isolation**: Runs in Docker with gVisor (runsc) by default for strong syscall-level isolation
+- **Filesystem safety**: Uses overlay filesystems so agent changes don't affect your host
+- **Git integration**: Each sandbox gets its own working copy synced with your repo
+- **Multiple models**: Supports Claude (Opus, Sonnet, Haiku) and Grok (3-mini, 4.1-fast)
+
+## Installation
+
+```bash
+cargo install --path .
+sandbox system-install  # Sets up systemd daemon for git sync
+```
+
+Requires Docker with gVisor runtime (`runsc`). Alternative runtimes: `runc`, `sysbox-runc`.
+
+## Quick Start
+
+Create a `.sandbox.toml` in your project root:
+
+```toml
+env = ["ANTHROPIC_API_KEY"]
+```
+
+Create a `Dockerfile` for your project environment (must accept `USER_NAME`, `USER_ID`, `GROUP_ID` build args).
+
+Run an agent:
+
+```bash
+sandbox agent my-task
+```
+
+Or get an interactive shell:
+
+```bash
+sandbox enter my-shell
+```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `sandbox agent <name>` | Run an LLM agent in a sandbox |
+| `sandbox enter <name>` | Enter a sandbox interactively (or run a command) |
+| `sandbox list` | List sandboxes for the current repository |
+| `sandbox delete <name>` | Delete a sandbox |
+| `sandbox system-install` | Install the systemd daemon |
+| `sandbox system-uninstall` | Uninstall the systemd daemon |
+
+## Configuration
+
+The `.sandbox.toml` file configures sandbox behavior:
+
+```toml
+# Environment variables passed to container (must be set on host)
+env = ["ANTHROPIC_API_KEY", "XAI_API_KEY"]
+
+# Container runtime: runsc (default), runc, sysbox-runc
+runtime = "runsc"
+
+# Overlay strategy: overlayfs (default) or copy
+overlay-mode = "overlayfs"
+
+# Mounts
+[[mounts.readonly]]
+host = "~/.gitconfig"
+
+[[mounts.overlay]]
+host = "~/.cargo/registry"
+container = "~/.cargo/registry"
+
+# Image configuration (defaults to ./Dockerfile)
+[image]
+tag = "my-image:latest"
+# Or build from Dockerfile:
+# [image.build]
+# dockerfile = "Dockerfile"
+# context = "."
+
+# Agent settings
+[agent]
+model = "sonnet"  # opus, sonnet, haiku, grok-3-mini, grok-4.1-fast
+```
+
+### Mount Types
+
+- **readonly**: Host files visible in container, no writes allowed
+- **overlay**: Copy-on-write; writes stay in container
+- **unsafe-write**: Writes propagate to host (use with caution)
+
+## How It Works
+
+The agent runs autonomously without asking for permissions. Safety comes from the sandbox: all filesystem changes are isolated via overlays, and the container runs with gVisor for syscall-level protection.
+
+Project-specific instructions can be provided in an `AGENTS.md` file.
