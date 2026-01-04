@@ -47,6 +47,9 @@ pub enum Model {
     /// Grok 3 Mini - lightweight reasoning model, cost-effective
     #[value(name = "grok-3-mini")]
     Grok3Mini,
+    /// Grok 4 - most capable reasoning model from xAI
+    #[value(name = "grok-4")]
+    Grok4,
     /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
     #[value(name = "grok-4.1-fast")]
     Grok41Fast,
@@ -60,6 +63,7 @@ impl Model {
             Model::Sonnet => "claude-sonnet-4-5-20250929",
             Model::Haiku => "claude-haiku-4-5-20251001",
             Model::Grok3Mini => "grok-3-mini",
+            Model::Grok4 => "grok-4",
             Model::Grok41Fast => "grok-4-1-fast",
         }
     }

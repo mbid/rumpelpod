@@ -19,6 +19,8 @@ pub fn run_agent(container_name: &str, model: Model, cache: Option<LlmCache>) ->
         Model::Opus | Model::Sonnet | Model::Haiku => {
             run_claude_agent(container_name, model, cache)
         }
-        Model::Grok3Mini | Model::Grok41Fast => run_grok_agent(container_name, model, cache),
+        Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => {
+            run_grok_agent(container_name, model, cache)
+        }
     }
 }
