@@ -262,6 +262,11 @@ pub fn sync_main_to_meta(host_repo: &Path, meta_git_dir: &Path) -> Result<()> {
 }
 
 /// Sync a sandbox branch from the sandbox repo to meta.git.
+///
+/// Note: This is no longer used by the file-watching sync mechanism.
+/// Sandbox->meta.git sync is now handled by post-commit hooks that push
+/// to the HTTP remote. This function is kept for potential manual use.
+#[allow(dead_code)]
 pub fn sync_sandbox_to_meta(meta_git_dir: &Path, sandbox_repo: &Path, branch: &str) -> Result<()> {
     let status = Command::new("git")
         .current_dir(meta_git_dir)
@@ -422,6 +427,49 @@ pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result
     Ok(())
 }
 
+/// Setup git hooks in the sandbox repo to push commits to meta.git via HTTP.
+///
+/// Installs a post-commit hook that pushes the current branch to the HTTP
+/// remote exposed by the daemon. This replaces the file-watching-based
+/// sync mechanism for sandbox->meta.git direction.
+pub fn setup_sandbox_hooks(sandbox_repo: &Path, branch_name: &str) -> Result<()> {
+    let hooks_dir = sandbox_repo.join(".git/hooks");
+    std::fs::create_dir_all(&hooks_dir)?;
+
+    // Post-commit hook: push to meta.git via HTTP after each commit
+    let post_commit_path = hooks_dir.join("post-commit");
+    let post_commit_script = format!(
+        r#"#!/bin/sh
+# Auto-generated hook to sync commits to meta.git via HTTP
+# Only pushes the sandbox branch (write access to other branches is rejected by server)
+# Uses --force to handle history rewrites (amend, rebase, etc.)
+
+BRANCH="{}"
+REMOTE_URL="http://host.docker.internal:$SANDBOX_GIT_HTTP_PORT/meta.git"
+
+# Only push if SANDBOX_GIT_HTTP_PORT is set (we're inside a sandbox container)
+if [ -n "$SANDBOX_GIT_HTTP_PORT" ]; then
+    git push --force --quiet "$REMOTE_URL" "HEAD:refs/heads/$BRANCH" 2>/dev/null || true
+fi
+"#,
+        branch_name
+    );
+
+    std::fs::write(&post_commit_path, post_commit_script)?;
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&post_commit_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&post_commit_path, perms)?;
+    }
+
+    debug!("Created post-commit hook at {}", post_commit_path.display());
+    Ok(())
+}
+
 // --- Git OID helpers using git2 ---
 
 /// Get the OID of a reference in a repository.
@@ -445,10 +493,16 @@ fn get_remote_ref_oid(repo_path: &Path, remote: &str, branch: &str) -> Option<Oi
 // --- Full git sync ---
 
 /// Run a full git sync for a sandbox.
-/// This syncs between the sandbox clone, meta.git, and host repo.
+///
+/// Syncs:
+/// - host main/master -> meta.git (one-way, host has precedence)
+/// - meta.git sandbox branch -> host remote tracking refs
+/// - meta.git branches -> sandbox remote tracking refs
+///
+/// Note: sandbox -> meta.git is handled by post-commit hook inside the
+/// container, which pushes to the HTTP remote. This allows the sync to
+/// work even when the sandbox is on a remote machine.
 pub fn run_full_sync(info: &SandboxInfo) -> Result<()> {
-    sync_sandbox_to_meta(&info.meta_git_dir, &info.clone_dir, &info.name)
-        .context("syncing sandbox to meta.git")?;
     sync_main_to_meta(&info.repo_root, &info.meta_git_dir)
         .context("syncing main branch to meta.git")?;
     sync_meta_to_host(&info.repo_root, &info.meta_git_dir, &info.name)
@@ -456,13 +510,6 @@ pub fn run_full_sync(info: &SandboxInfo) -> Result<()> {
     sync_meta_to_sandbox(&info.meta_git_dir, &info.clone_dir, &info.name)
         .context("syncing meta.git to sandbox")?;
     Ok(())
-}
-
-/// Check if sync from sandbox to meta.git is needed.
-fn needs_sandbox_to_meta_sync(info: &SandboxInfo) -> bool {
-    let sandbox_oid = get_branch_oid(&info.clone_dir, &info.name);
-    let meta_oid = get_branch_oid(&info.meta_git_dir, &info.name);
-    sandbox_oid != meta_oid
 }
 
 /// Check if sync from host main to meta.git is needed.
@@ -499,9 +546,10 @@ fn needs_meta_to_sandbox_sync(info: &SandboxInfo) -> bool {
 }
 
 /// Check if any sync operation is needed for a sandbox.
+///
+/// Note: sandbox -> meta.git sync is handled by post-commit hook, not file watching.
 fn needs_sync(info: &SandboxInfo) -> bool {
-    needs_sandbox_to_meta_sync(info)
-        || needs_main_to_meta_sync(info)
+    needs_main_to_meta_sync(info)
         || needs_meta_to_host_sync(info)
         || needs_meta_to_sandbox_sync(info)
 }
@@ -582,21 +630,25 @@ impl GitSync {
 
     /// Add a sandbox to be watched and run initial sync.
     /// First registers watch paths (to avoid missing changes), then runs initial sync.
+    ///
+    /// Watches:
+    /// - host refs/heads (for main/master changes)
+    /// - meta.git refs/heads (for changes pushed from sandbox via HTTP)
+    ///
+    /// Note: sandbox refs/heads is NOT watched because sandbox->meta.git sync
+    /// is handled by post-commit hook pushing to HTTP remote.
     pub fn add_sandbox(&mut self, key: String, info: SandboxInfo) -> Result<()> {
-        // Determine paths to watch
+        // Determine paths to watch (not sandbox refs - hook handles that direction)
         let host_refs = info.repo_root.join(".git/refs/heads");
         let meta_refs = info.meta_git_dir.join("refs/heads");
-        let sandbox_refs = info.clone_dir.join(".git/refs/heads");
 
         // Ensure directories exist
         std::fs::create_dir_all(&host_refs)
             .with_context(|| format!("creating {}", host_refs.display()))?;
         std::fs::create_dir_all(&meta_refs)
             .with_context(|| format!("creating {}", meta_refs.display()))?;
-        std::fs::create_dir_all(&sandbox_refs)
-            .with_context(|| format!("creating {}", sandbox_refs.display()))?;
 
-        let paths_to_watch = vec![host_refs, meta_refs, sandbox_refs];
+        let paths_to_watch = vec![host_refs, meta_refs];
 
         // Determine which paths need to be watched (check state briefly)
         let paths_to_add: Vec<PathBuf> = {

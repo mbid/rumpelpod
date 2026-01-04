@@ -810,6 +810,9 @@ pub fn ensure_sandbox(
     // Setup remotes for the sandbox repo (rename "origin" to "sandbox")
     git::setup_sandbox_remotes(&info.meta_git_dir, &info.clone_dir)?;
 
+    // Setup git hooks to push commits via HTTP (replaces file-watching sync)
+    git::setup_sandbox_hooks(&info.clone_dir, name)?;
+
     // Save sandbox info and mounts config (mounts config used by daemon)
     info.save()?;
     info.save_mounts_config(&config.mounts)?;
