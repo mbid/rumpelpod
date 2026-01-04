@@ -750,24 +750,6 @@ pub fn ensure_container_running_internal(
     let mounts = build_mount_list(info, user_info, &config)?;
     args.extend(process_mounts(&mounts, info, overlay_mode)?);
 
-    if let Some(home) = dirs::home_dir() {
-        let claude_json = home.join(".claude.json");
-        if claude_json.exists() {
-            let copy_path = info.sandbox_dir.join("claude.json");
-            let filtered_json = filter_claude_json(&claude_json, &info.repo_root)?;
-            std::fs::write(&copy_path, &filtered_json)
-                .with_context(|| format!("Failed to write filtered {}", copy_path.display()))?;
-            args.extend([
-                "--mount".to_string(),
-                format!(
-                    "type=bind,source={},target=/home/{}/.claude.json",
-                    copy_path.display(),
-                    user_info.username
-                ),
-            ]);
-        }
-    }
-
     for (name, value) in env_vars {
         args.push("-e".to_string());
         args.push(format!("{}={}", name, value));
@@ -831,24 +813,4 @@ pub fn ensure_sandbox(
     info.save_mounts_config(&config.mounts)?;
 
     Ok(info)
-}
-
-/// Filter ~/.claude.json to only include the project matching repo_root.
-/// This preserves key ordering in the JSON using serde_json's preserve_order feature.
-fn filter_claude_json(claude_json_path: &Path, repo_root: &Path) -> Result<String> {
-    let contents = std::fs::read_to_string(claude_json_path)
-        .with_context(|| format!("Failed to read {}", claude_json_path.display()))?;
-
-    let mut json: serde_json::Value = serde_json::from_str(&contents)
-        .with_context(|| format!("Failed to parse {}", claude_json_path.display()))?;
-
-    // Filter the "projects" object to only keep the entry matching repo_root
-    if let Some(projects) = json.get_mut("projects") {
-        if let Some(projects_obj) = projects.as_object_mut() {
-            let repo_root_str = repo_root.to_string_lossy();
-            projects_obj.retain(|key, _| key == repo_root_str.as_ref());
-        }
-    }
-
-    serde_json::to_string_pretty(&json).context("Failed to serialize filtered JSON")
 }
