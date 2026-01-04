@@ -74,6 +74,7 @@ pub enum Commands {
     },
 
     /// Run the sandbox daemon (manages sandboxes across all projects)
+    #[command(hide = true)]
     Daemon,
 
     /// Install the sandbox daemon as a systemd user service
