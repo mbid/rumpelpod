@@ -7,7 +7,7 @@ use crate::config::{Model, OverlayMode, Runtime, UserInfo};
 use crate::daemon;
 use crate::docker;
 use crate::git;
-use crate::llm_cache::LlmCache;
+use crate::llm::cache::LlmCache;
 use crate::sandbox;
 use crate::sandbox_config::SandboxConfig;
 use crate::setup;

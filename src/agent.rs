@@ -7,12 +7,13 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use strum::{Display, EnumString};
 
-use crate::anthropic::{
-    CacheControl, Client, ContentBlock, CustomTool, FetchToolType, Message, MessagesRequest, Role,
+use crate::config::Model;
+use crate::llm::cache::LlmCache;
+use crate::llm::client::anthropic::Client;
+use crate::llm::types::anthropic::{
+    CacheControl, ContentBlock, CustomTool, FetchToolType, Message, MessagesRequest, Role,
     ServerTool, StopReason, SystemBlock, SystemPrompt, Tool, WebSearchToolType,
 };
-use crate::config::Model;
-use crate::llm_cache::LlmCache;
 
 const MAX_TOKENS: u32 = 4096;
 const AGENTS_MD_PATH: &str = "AGENTS.md";
@@ -662,15 +663,16 @@ pub fn run_agent(container_name: &str, model: Model, cache: Option<LlmCache>) ->
                         }
                     }
                     ContentBlock::WebSearchToolResult { .. } => {}
-                    ContentBlock::WebFetchToolResult { content, .. } => match content {
-                        crate::anthropic::WebFetchResult::WebFetchToolError { error_code }
-                        | crate::anthropic::WebFetchResult::WebFetchToolResultError {
-                            error_code,
-                        } => {
-                            chat_println!(chat_history, "[fetch] (failed: {})", error_code);
+                    ContentBlock::WebFetchToolResult { content, .. } => {
+                        use crate::llm::types::anthropic::WebFetchResult;
+                        match content {
+                            WebFetchResult::WebFetchToolError { error_code }
+                            | WebFetchResult::WebFetchToolResultError { error_code } => {
+                                chat_println!(chat_history, "[fetch] (failed: {})", error_code);
+                            }
+                            WebFetchResult::WebFetchResult { .. } => {}
                         }
-                        crate::anthropic::WebFetchResult::WebFetchResult { .. } => {}
-                    },
+                    }
                     ContentBlock::WebFetchToolResultError { error_code, .. } => {
                         chat_println!(chat_history, "[fetch] (failed: {})", error_code);
                     }
