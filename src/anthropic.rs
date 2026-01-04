@@ -122,6 +122,11 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: WebFetchResult,
     },
+    /// Error variant returned by API when web_fetch fails at content block level
+    WebFetchToolResultError {
+        tool_use_id: String,
+        error_code: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,6 +151,10 @@ pub enum WebFetchResult {
         retrieved_at: String,
     },
     WebFetchToolError {
+        error_code: String,
+    },
+    /// Alternative error variant returned by API in some cases
+    WebFetchToolResultError {
         error_code: String,
     },
 }

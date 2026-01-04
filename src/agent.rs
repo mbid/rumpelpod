@@ -662,12 +662,17 @@ pub fn run_agent(container_name: &str, model: Model, cache: Option<LlmCache>) ->
                         }
                     }
                     ContentBlock::WebSearchToolResult { .. } => {}
-                    ContentBlock::WebFetchToolResult { content, .. } => {
-                        if let crate::anthropic::WebFetchResult::WebFetchToolError { error_code } =
-                            content
-                        {
+                    ContentBlock::WebFetchToolResult { content, .. } => match content {
+                        crate::anthropic::WebFetchResult::WebFetchToolError { error_code }
+                        | crate::anthropic::WebFetchResult::WebFetchToolResultError {
+                            error_code,
+                        } => {
                             chat_println!(chat_history, "[fetch] (failed: {})", error_code);
                         }
+                        crate::anthropic::WebFetchResult::WebFetchResult { .. } => {}
+                    },
+                    ContentBlock::WebFetchToolResultError { error_code, .. } => {
+                        chat_println!(chat_history, "[fetch] (failed: {})", error_code);
                     }
                 }
             }

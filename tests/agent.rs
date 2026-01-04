@@ -313,3 +313,33 @@ fn test_agent_websearch_output_format() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn test_agent_webfetch_error_handling() {
+    // Test that web fetch errors are handled gracefully.
+    // We ask the agent to fetch a URL that will fail (non-existent page).
+    let fixture = SandboxFixture::new("test-agent-fetch-error");
+
+    let output = AgentBuilder::new(&fixture).run_with_prompt(
+        "Please fetch the content from https://httpstat.us/404 and tell me what you find. This URL will return a 404 error.",
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // The agent should complete without crashing
+    assert!(
+        output.status.success(),
+        "Agent should handle fetch errors gracefully.\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+
+    // Should see "[fetch]" in output indicating the fetch was attempted
+    assert!(
+        stdout.contains("[fetch]"),
+        "Expected '[fetch]' in output for web fetch attempt.\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+}
