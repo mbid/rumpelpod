@@ -28,6 +28,7 @@ nix = { version = "*", features = ["user", "fs"] }
 chrono = { version = "*", features = ["serde"] }
 libc = "*"
 reflink-copy = "*"
+git2 = { version = "*", default-features = false }
 reqwest = { version = "*", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 indoc = "*"
 strum = { version = "*", features = ["derive"] }

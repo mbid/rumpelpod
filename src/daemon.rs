@@ -1,21 +1,18 @@
 use anyhow::{Context, Result};
 use indoc::{formatdoc, indoc};
 use listenfd::ListenFd;
-use log::{debug, error, info, warn};
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::io::Read;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread;
 
 use crate::config::{OverlayMode, Runtime, UserInfo};
 use crate::daemon_protocol::{self, server, SandboxParams};
 use crate::docker;
-use crate::git;
+use crate::git::GitSync;
 use crate::sandbox::SandboxInfo;
 use crate::sandbox_config::SandboxConfig;
 
@@ -93,166 +90,11 @@ fn do_handshake(
     Ok(client.into_inner())
 }
 
-// --- Git Sync Thread ---
-
-/// Message type for controlling the git sync thread.
-enum GitSyncMessage {
-    /// Signal to stop the thread gracefully.
-    Stop,
-}
-
-/// Handle to a running git sync thread that can be stopped gracefully.
-pub struct GitSyncThread {
-    stop_tx: Sender<GitSyncMessage>,
-    handle: Option<JoinHandle<()>>,
-}
-
-impl GitSyncThread {
-    /// Spawn a new git sync thread for the given sandbox.
-    pub fn spawn(info: SandboxInfo) -> Result<Self> {
-        let (stop_tx, stop_rx) = mpsc::channel();
-
-        let handle = thread::spawn(move || {
-            if let Err(e) = run_git_sync_loop(info, stop_rx) {
-                error!("Git sync thread failed: {:#}", e);
-            }
-        });
-
-        Ok(GitSyncThread {
-            stop_tx,
-            handle: Some(handle),
-        })
-    }
-
-    /// Stop the git sync thread gracefully and wait for it to finish.
-    pub fn stop(mut self) {
-        let _ = self.stop_tx.send(GitSyncMessage::Stop);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for GitSyncThread {
-    fn drop(&mut self) {
-        // Send stop signal but don't wait (might already be stopped)
-        let _ = self.stop_tx.send(GitSyncMessage::Stop);
-    }
-}
-
-fn run_full_git_sync(info: &SandboxInfo) -> Result<()> {
-    git::sync_sandbox_to_meta(&info.meta_git_dir, &info.clone_dir, &info.name)
-        .context("syncing sandbox to meta.git")?;
-    git::sync_main_to_meta(&info.repo_root, &info.meta_git_dir)
-        .context("syncing main branch to meta.git")?;
-    git::sync_meta_to_host(&info.repo_root, &info.meta_git_dir, &info.name)
-        .context("syncing meta.git to host")?;
-    git::sync_meta_to_sandbox(&info.meta_git_dir, &info.clone_dir, &info.name)
-        .context("syncing meta.git to sandbox")?;
-    Ok(())
-}
-
-fn run_git_sync_loop(info: SandboxInfo, stop_rx: mpsc::Receiver<GitSyncMessage>) -> Result<()> {
-    let debounce = Duration::from_millis(500);
-    let mut last_sync = Instant::now();
-    let mut pending_sync = false;
-
-    let (watcher_tx, watcher_rx) = mpsc::channel();
-    let mut watcher = RecommendedWatcher::new(
-        move |res| {
-            let _ = watcher_tx.send(res);
-        },
-        Config::default(),
-    )
-    .context("creating watcher")?;
-
-    // Watch the three refs/heads directories with non-recursive watchers
-    let host_refs = info.repo_root.join(".git/refs/heads");
-    let meta_refs = info.meta_git_dir.join("refs/heads");
-    let sandbox_refs = info.clone_dir.join(".git/refs/heads");
-
-    std::fs::create_dir_all(&host_refs)
-        .with_context(|| format!("creating {}", host_refs.display()))?;
-    std::fs::create_dir_all(&meta_refs)
-        .with_context(|| format!("creating {}", meta_refs.display()))?;
-    std::fs::create_dir_all(&sandbox_refs)
-        .with_context(|| format!("creating {}", sandbox_refs.display()))?;
-
-    watcher
-        .watch(&host_refs, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watching {}", host_refs.display()))?;
-    watcher
-        .watch(&meta_refs, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watching {}", meta_refs.display()))?;
-    watcher
-        .watch(&sandbox_refs, RecursiveMode::NonRecursive)
-        .with_context(|| format!("watching {}", sandbox_refs.display()))?;
-
-    info!(
-        "Git sync watching: {}, {}, {}",
-        host_refs.display(),
-        meta_refs.display(),
-        sandbox_refs.display()
-    );
-
-    // Run initial sync
-    if let Err(e) = run_full_git_sync(&info) {
-        error!("Initial git sync failed: {:#}", e);
-    }
-
-    loop {
-        // Check for stop signal first
-        match stop_rx.try_recv() {
-            Ok(GitSyncMessage::Stop) => {
-                info!("Git sync thread received stop signal");
-                // Run final sync before exiting
-                if let Err(e) = run_full_git_sync(&info) {
-                    error!("Final git sync failed: {:#}", e);
-                }
-                return Ok(());
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                info!("Git sync stop channel disconnected");
-                return Ok(());
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-
-        // Check for file system events
-        match watcher_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(Ok(event)) => {
-                if !event.kind.is_access() {
-                    pending_sync = true;
-                }
-            }
-            Ok(Err(e)) => {
-                error!("Watcher error: {}", e);
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                info!("Git sync watcher channel disconnected");
-                return Ok(());
-            }
-        }
-
-        let now = Instant::now();
-
-        if pending_sync && now.duration_since(last_sync) > debounce {
-            if let Err(e) = run_full_git_sync(&info) {
-                error!("Git sync failed: {:#}", e);
-            }
-            last_sync = now;
-            pending_sync = false;
-        }
-    }
-}
-
 // --- Daemon State ---
 
 /// State for a single sandbox managed by the daemon.
 struct SandboxState {
     info: SandboxInfo,
-    git_sync: GitSyncThread,
     /// Number of active client connections for this sandbox.
     client_count: usize,
 }
@@ -261,13 +103,16 @@ struct SandboxState {
 struct DaemonState {
     /// Active sandboxes, keyed by sandbox name.
     sandboxes: HashMap<String, SandboxState>,
+    /// Git sync manager for all sandboxes.
+    git_sync: GitSync,
 }
 
 impl DaemonState {
-    fn new() -> Self {
-        DaemonState {
+    fn new() -> Result<Self> {
+        Ok(DaemonState {
             sandboxes: HashMap::new(),
-        }
+            git_sync: GitSync::new()?,
+        })
     }
 }
 
@@ -407,32 +252,21 @@ fn handle_ensure_sandbox(
             return;
         }
 
-        // Start git sync thread
-        let git_sync = match GitSyncThread::spawn(info.clone()) {
-            Ok(g) => g,
-            Err(e) => {
-                error!("Client {}: failed to start git sync: {}", client_id, e);
-                // Container is started, so we should still proceed
-                // but log the error - create a dummy git sync
-                warn!("Proceeding without git sync");
-                // We need to handle this case - for now, let's fail
-                let _ = server::send_error(
-                    &mut stream,
-                    -32000,
-                    &format!("Failed to start git sync: {}", e),
-                );
-                return;
-            }
-        };
-
-        // Add to state
+        // Add to state and register with git sync (which runs initial sync)
         {
             let mut state = state.lock().unwrap();
+
+            if let Err(e) = state.git_sync.add_sandbox(key.clone(), info.clone()) {
+                error!(
+                    "Client {}: failed to add sandbox to git sync: {:#}",
+                    client_id, e
+                );
+            }
+
             state.sandboxes.insert(
                 key.clone(),
                 SandboxState {
                     info,
-                    git_sync,
                     client_count: 1,
                 },
             );
@@ -478,8 +312,8 @@ fn handle_ensure_sandbox(
 
             // Take ownership of the sandbox state to clean up
             if let Some(sandbox_state) = state.sandboxes.remove(&key) {
-                // Stop git sync thread (runs final sync)
-                sandbox_state.git_sync.stop();
+                // Remove from git sync (runs final sync internally)
+                state.git_sync.remove_sandbox(&key);
 
                 // Stop container
                 if let Err(e) = docker::stop_container(&sandbox_state.info.container_name) {
@@ -531,7 +365,7 @@ fn get_listener() -> Result<UnixListener> {
 pub fn run_daemon() -> Result<()> {
     let listener = get_listener()?;
 
-    let state = Arc::new(Mutex::new(DaemonState::new()));
+    let state = Arc::new(Mutex::new(DaemonState::new()?));
     let mut client_id: u64 = 0;
 
     loop {

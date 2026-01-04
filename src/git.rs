@@ -1,7 +1,13 @@
 use anyhow::{bail, Context, Result};
-use log::{debug, info};
+use git2::{Oid, Repository};
+use log::{debug, error, info, warn};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+use crate::sandbox::SandboxInfo;
 
 /// Find the root of the current git repository.
 pub fn find_repo_root() -> Result<PathBuf> {
@@ -379,4 +385,257 @@ pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result
     }
 
     Ok(())
+}
+
+// --- Git OID helpers using git2 ---
+
+/// Get the OID of a reference in a repository.
+/// Returns None if the reference doesn't exist.
+fn get_ref_oid(repo_path: &Path, ref_name: &str) -> Option<Oid> {
+    let repo = Repository::open(repo_path).ok()?;
+    let reference = repo.find_reference(ref_name).ok()?;
+    reference.target()
+}
+
+/// Get the OID of a branch in a repository.
+fn get_branch_oid(repo_path: &Path, branch_name: &str) -> Option<Oid> {
+    get_ref_oid(repo_path, &format!("refs/heads/{}", branch_name))
+}
+
+/// Get the OID of a remote tracking ref.
+fn get_remote_ref_oid(repo_path: &Path, remote: &str, branch: &str) -> Option<Oid> {
+    get_ref_oid(repo_path, &format!("refs/remotes/{}/{}", remote, branch))
+}
+
+// --- Full git sync ---
+
+/// Run a full git sync for a sandbox.
+/// This syncs between the sandbox clone, meta.git, and host repo.
+pub fn run_full_sync(info: &SandboxInfo) -> Result<()> {
+    sync_sandbox_to_meta(&info.meta_git_dir, &info.clone_dir, &info.name)
+        .context("syncing sandbox to meta.git")?;
+    sync_main_to_meta(&info.repo_root, &info.meta_git_dir)
+        .context("syncing main branch to meta.git")?;
+    sync_meta_to_host(&info.repo_root, &info.meta_git_dir, &info.name)
+        .context("syncing meta.git to host")?;
+    sync_meta_to_sandbox(&info.meta_git_dir, &info.clone_dir, &info.name)
+        .context("syncing meta.git to sandbox")?;
+    Ok(())
+}
+
+/// Check if sync from sandbox to meta.git is needed.
+fn needs_sandbox_to_meta_sync(info: &SandboxInfo) -> bool {
+    let sandbox_oid = get_branch_oid(&info.clone_dir, &info.name);
+    let meta_oid = get_branch_oid(&info.meta_git_dir, &info.name);
+    sandbox_oid != meta_oid
+}
+
+/// Check if sync from host main to meta.git is needed.
+fn needs_main_to_meta_sync(info: &SandboxInfo) -> bool {
+    let primary_branch = get_primary_branch(&info.repo_root).unwrap_or_else(|_| "main".to_string());
+    let host_oid = get_branch_oid(&info.repo_root, &primary_branch);
+    let meta_oid = get_branch_oid(&info.meta_git_dir, &primary_branch);
+    host_oid != meta_oid
+}
+
+/// Check if sync from meta.git to host remote refs is needed.
+fn needs_meta_to_host_sync(info: &SandboxInfo) -> bool {
+    let meta_oid = get_branch_oid(&info.meta_git_dir, &info.name);
+    let host_remote_oid = get_remote_ref_oid(&info.repo_root, "sandbox", &info.name);
+    meta_oid != host_remote_oid
+}
+
+/// Check if sync from meta.git to sandbox remote refs is needed.
+fn needs_meta_to_sandbox_sync(info: &SandboxInfo) -> bool {
+    let primary_branch = get_primary_branch(&info.repo_root).unwrap_or_else(|_| "main".to_string());
+
+    // Check primary branch
+    let meta_primary_oid = get_branch_oid(&info.meta_git_dir, &primary_branch);
+    let sandbox_remote_primary_oid =
+        get_remote_ref_oid(&info.clone_dir, "sandbox", &primary_branch);
+    if meta_primary_oid != sandbox_remote_primary_oid {
+        return true;
+    }
+
+    // Check sandbox branch
+    let meta_sandbox_oid = get_branch_oid(&info.meta_git_dir, &info.name);
+    let sandbox_remote_sandbox_oid = get_remote_ref_oid(&info.clone_dir, "sandbox", &info.name);
+    meta_sandbox_oid != sandbox_remote_sandbox_oid
+}
+
+/// Check if any sync operation is needed for a sandbox.
+fn needs_sync(info: &SandboxInfo) -> bool {
+    needs_sandbox_to_meta_sync(info)
+        || needs_main_to_meta_sync(info)
+        || needs_meta_to_host_sync(info)
+        || needs_meta_to_sandbox_sync(info)
+}
+
+// --- Git Sync ---
+
+/// Internal state for tracking watched sandboxes.
+/// Not exposed outside GitSync.
+struct GitSyncState {
+    /// Sandbox infos keyed by sandbox key, used by watcher callback
+    sandboxes: HashMap<String, SandboxInfo>,
+    /// Paths being watched for each sandbox
+    watched_paths: HashMap<String, Vec<PathBuf>>,
+}
+
+impl GitSyncState {
+    fn new() -> Self {
+        GitSyncState {
+            sandboxes: HashMap::new(),
+            watched_paths: HashMap::new(),
+        }
+    }
+
+    /// Check if a path is being watched by any sandbox.
+    fn is_path_watched(&self, path: &Path) -> bool {
+        self.watched_paths
+            .values()
+            .any(|paths| paths.iter().any(|p| p == path))
+    }
+}
+
+/// Manages git synchronization for all sandboxes.
+/// Watches refs/heads directories and triggers sync when changes are detected.
+pub struct GitSync {
+    watcher: RecommendedWatcher,
+    state: Arc<Mutex<GitSyncState>>,
+}
+
+impl GitSync {
+    /// Create a new GitSync instance with an empty watcher.
+    pub fn new() -> Result<Self> {
+        let state = Arc::new(Mutex::new(GitSyncState::new()));
+        let state_for_callback = state.clone();
+
+        let watcher = RecommendedWatcher::new(
+            move |res: std::result::Result<notify::Event, notify::Error>| {
+                match res {
+                    Ok(event) => {
+                        // Ignore access events
+                        if event.kind.is_access() {
+                            return;
+                        }
+
+                        debug!("Git sync watcher event: {:?}", event);
+
+                        // Acquire the lock and sync all sandboxes that need it
+                        let state = state_for_callback.lock().unwrap();
+                        for (key, info) in state.sandboxes.iter() {
+                            if needs_sync(info) {
+                                debug!("Syncing sandbox: {}", key);
+                                if let Err(e) = run_full_sync(info) {
+                                    error!("Git sync failed for {}: {:#}", key, e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Git sync watcher error: {}", e);
+                    }
+                }
+            },
+            Config::default(),
+        )
+        .context("creating git sync watcher")?;
+
+        Ok(GitSync { watcher, state })
+    }
+
+    /// Add a sandbox to be watched and run initial sync.
+    /// First registers watch paths (to avoid missing changes), then runs initial sync.
+    pub fn add_sandbox(&mut self, key: String, info: SandboxInfo) -> Result<()> {
+        // Determine paths to watch
+        let host_refs = info.repo_root.join(".git/refs/heads");
+        let meta_refs = info.meta_git_dir.join("refs/heads");
+        let sandbox_refs = info.clone_dir.join(".git/refs/heads");
+
+        // Ensure directories exist
+        std::fs::create_dir_all(&host_refs)
+            .with_context(|| format!("creating {}", host_refs.display()))?;
+        std::fs::create_dir_all(&meta_refs)
+            .with_context(|| format!("creating {}", meta_refs.display()))?;
+        std::fs::create_dir_all(&sandbox_refs)
+            .with_context(|| format!("creating {}", sandbox_refs.display()))?;
+
+        let paths_to_watch = vec![host_refs, meta_refs, sandbox_refs];
+
+        // Determine which paths need to be watched (check state briefly)
+        let paths_to_add: Vec<PathBuf> = {
+            let state = self.state.lock().unwrap();
+            paths_to_watch
+                .iter()
+                .filter(|p| !state.is_path_watched(p))
+                .cloned()
+                .collect()
+        };
+
+        // Register watch paths WITHOUT holding the state lock to avoid deadlock
+        // (watcher callback also acquires the state lock)
+        for path in &paths_to_add {
+            self.watcher
+                .watch(path, RecursiveMode::NonRecursive)
+                .with_context(|| format!("watching {}", path.display()))?;
+            info!("Git sync watching: {}", path.display());
+        }
+
+        // Now update state
+        {
+            let mut state = self.state.lock().unwrap();
+            state.watched_paths.insert(key.clone(), paths_to_watch);
+            state.sandboxes.insert(key.clone(), info.clone());
+        }
+
+        // Run initial sync (watcher is already active, so no changes will be missed)
+        if let Err(e) = run_full_sync(&info) {
+            error!("Initial git sync failed for {}: {:#}", key, e);
+        }
+
+        Ok(())
+    }
+
+    /// Remove a sandbox from being watched after running final sync.
+    /// First runs final sync, then removes watch paths.
+    pub fn remove_sandbox(&mut self, key: &str) {
+        // Get the info before removing from state, to run final sync
+        let info = {
+            let state = self.state.lock().unwrap();
+            state.sandboxes.get(key).cloned()
+        };
+
+        // Run final sync before removing watcher
+        if let Some(ref info) = info {
+            if let Err(e) = run_full_sync(info) {
+                error!("Final git sync failed for {}: {:#}", key, e);
+            }
+        }
+
+        // Remove from state and determine which paths to unwatch
+        let paths_to_unwatch: Vec<PathBuf> = {
+            let mut state = self.state.lock().unwrap();
+            state.sandboxes.remove(key);
+
+            if let Some(removed_paths) = state.watched_paths.remove(key) {
+                // Only unwatch paths no longer needed by any sandbox
+                removed_paths
+                    .into_iter()
+                    .filter(|p| !state.is_path_watched(p))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+
+        // Unwatch paths WITHOUT holding the state lock to avoid deadlock
+        for path in paths_to_unwatch {
+            if let Err(e) = self.watcher.unwatch(&path) {
+                warn!("Failed to unwatch {}: {}", path.display(), e);
+            } else {
+                info!("Git sync unwatching: {}", path.display());
+            }
+        }
+    }
 }
