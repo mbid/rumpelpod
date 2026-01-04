@@ -5,3 +5,4 @@ This is a rust project implementing a sandboxed LLM agent.
 - Comments and commit messages should explain "why", not "what".
   Don't paraphrase code next to the comment.
 - Format, run tests before committing.
+- Always run tests with a timeout, e.g. 60 seconds, to prevent getting stuck.
