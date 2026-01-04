@@ -308,6 +308,10 @@ pub fn sync_meta_to_host(host_repo: &Path, meta_git_dir: &Path, branch: &str) ->
 
 /// Sync branches from meta.git to the sandbox repo's remote tracking refs.
 /// Updates refs/remotes/sandbox/master and refs/remotes/sandbox/<sandbox_name>.
+///
+/// NOTE: This is no longer called automatically. The sandbox can fetch from
+/// the "sandbox" remote manually if it needs to pull changes from meta.git.
+#[allow(dead_code)]
 pub fn sync_meta_to_sandbox(
     meta_git_dir: &Path,
     sandbox_repo: &Path,
@@ -497,18 +501,15 @@ fn get_remote_ref_oid(repo_path: &Path, remote: &str, branch: &str) -> Option<Oi
 /// Syncs:
 /// - host main/master -> meta.git (one-way, host has precedence)
 /// - meta.git sandbox branch -> host remote tracking refs
-/// - meta.git branches -> sandbox remote tracking refs
 ///
 /// Note: sandbox -> meta.git is handled by post-commit hook inside the
-/// container, which pushes to the HTTP remote. This allows the sync to
-/// work even when the sandbox is on a remote machine.
+/// container, which pushes to the HTTP remote. meta.git -> sandbox sync
+/// is NOT automatic; the sandbox can `git fetch sandbox` to pull changes.
 pub fn run_full_sync(info: &SandboxInfo) -> Result<()> {
     sync_main_to_meta(&info.repo_root, &info.meta_git_dir)
         .context("syncing main branch to meta.git")?;
     sync_meta_to_host(&info.repo_root, &info.meta_git_dir, &info.name)
         .context("syncing meta.git to host")?;
-    sync_meta_to_sandbox(&info.meta_git_dir, &info.clone_dir, &info.name)
-        .context("syncing meta.git to sandbox")?;
     Ok(())
 }
 
@@ -528,6 +529,9 @@ fn needs_meta_to_host_sync(info: &SandboxInfo) -> bool {
 }
 
 /// Check if sync from meta.git to sandbox remote refs is needed.
+/// NOTE: This is no longer used since meta->sandbox sync is disabled.
+/// Kept for potential future use or manual syncing.
+#[allow(dead_code)]
 fn needs_meta_to_sandbox_sync(info: &SandboxInfo) -> bool {
     let primary_branch = get_primary_branch(&info.repo_root).unwrap_or_else(|_| "main".to_string());
 
@@ -548,10 +552,9 @@ fn needs_meta_to_sandbox_sync(info: &SandboxInfo) -> bool {
 /// Check if any sync operation is needed for a sandbox.
 ///
 /// Note: sandbox -> meta.git sync is handled by post-commit hook, not file watching.
+/// Note: meta.git -> sandbox sync is disabled; sandbox can `git fetch sandbox` manually.
 fn needs_sync(info: &SandboxInfo) -> bool {
-    needs_main_to_meta_sync(info)
-        || needs_meta_to_host_sync(info)
-        || needs_meta_to_sandbox_sync(info)
+    needs_main_to_meta_sync(info) || needs_meta_to_host_sync(info)
 }
 
 // --- Git Sync ---
