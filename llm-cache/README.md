@@ -14,7 +14,7 @@ them **realistic** (actual API responses, not hand-crafted mocks).
 3. On cache miss, the actual API is called and the response is stored
 
 The cache key excludes the API key, so cached responses work regardless of whether
-`ANTHROPIC_API_KEY` is set.
+`ANTHROPIC_API_KEY` or `XAI_API_KEY` is set.
 
 ## Workflow for tests
 
@@ -50,6 +50,9 @@ This happens automatically on the first test run after such changes.
 llm-cache/
 ├── README.md           # This file
 ├── anthropic/          # Cached Anthropic API responses
+│   ├── .gitkeep
+│   └── <sha256>.json   # Individual cached responses
+├── xai/                # Cached xAI API responses
 │   ├── .gitkeep
 │   └── <sha256>.json   # Individual cached responses
 └── scratch/            # Temporary files during atomic writes (not committed)

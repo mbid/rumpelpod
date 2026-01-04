@@ -191,3 +191,126 @@ impl Client {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::types::xai::{
+        FinishReason, FunctionDefinition, Message, MessageContent, Role, Tool, ToolChoice,
+        ToolChoiceMode, ToolType,
+    };
+    use std::path::PathBuf;
+
+    fn get_cache() -> LlmCache {
+        let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache");
+        LlmCache::new(&cache_dir, "xai").expect("Failed to create cache")
+    }
+
+    #[test]
+    fn test_hello_world() {
+        let cache = get_cache();
+        let client = Client::new_with_cache(Some(cache)).expect("Failed to create client");
+
+        let request = ChatCompletionRequest {
+            model: "grok-3-mini-fast".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("Say exactly: Hello World".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: Some(0.0),
+            top_p: None,
+            tools: None,
+            tool_choice: None,
+            stream: Some(false),
+        };
+
+        let response = client.chat_completion(request).expect("API call failed");
+
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+        assert_eq!(choice.message.role, Role::Assistant);
+        assert!(choice.finish_reason == Some(FinishReason::Stop));
+
+        let content = choice.message.content.as_ref().expect("Expected content");
+        assert!(
+            content.to_lowercase().contains("hello world"),
+            "Response should contain 'hello world', got: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_tool_invocation() {
+        let cache = get_cache();
+        let client = Client::new_with_cache(Some(cache)).expect("Failed to create client");
+
+        // Define a simple tool
+        let tool = Tool {
+            tool_type: ToolType::Function,
+            function: FunctionDefinition {
+                name: "get_weather".to_string(),
+                description: "Get the current weather in a city".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "The city name"
+                        }
+                    },
+                    "required": ["city"]
+                }),
+            },
+        };
+
+        let request = ChatCompletionRequest {
+            model: "grok-3-mini-fast".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(
+                    "What's the weather in Paris?".to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            max_tokens: Some(100),
+            temperature: Some(0.0),
+            top_p: None,
+            tools: Some(vec![tool]),
+            tool_choice: Some(ToolChoice::Mode(ToolChoiceMode::Required)),
+            stream: Some(false),
+        };
+
+        let response = client.chat_completion(request).expect("API call failed");
+
+        assert_eq!(response.choices.len(), 1);
+        let choice = &response.choices[0];
+        assert_eq!(choice.message.role, Role::Assistant);
+        assert!(
+            choice.finish_reason == Some(FinishReason::ToolCalls),
+            "Expected tool_calls finish reason, got: {:?}",
+            choice.finish_reason
+        );
+
+        // Verify tool was called
+        let tool_calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("Expected tool_calls");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+
+        // Parse and verify arguments
+        let args: serde_json::Value =
+            serde_json::from_str(&tool_calls[0].function.arguments).expect("Invalid JSON args");
+        assert!(
+            args.get("city").is_some(),
+            "Expected city argument, got: {}",
+            args
+        );
+    }
+}
