@@ -400,16 +400,6 @@ impl SandboxInfo {
         Ok(())
     }
 
-    /// Get the volume name for overlay storage.
-    pub fn overlay_volume_name(&self, purpose: &str) -> String {
-        format!(
-            "sandbox-{}-{}-{}",
-            self.repo_root.file_name().unwrap().to_string_lossy(),
-            self.name,
-            purpose
-        )
-    }
-
     /// Get the base directory for overlay mounts.
     pub fn overlays_dir(&self) -> PathBuf {
         self.sandbox_dir.join("overlays")

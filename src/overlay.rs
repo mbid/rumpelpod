@@ -105,26 +105,6 @@ impl Overlay {
         Ok(output.success())
     }
 
-    /// Remove the Docker volume.
-    pub fn remove_volume(&self) -> Result<()> {
-        if !self.volume_exists()? {
-            return Ok(());
-        }
-
-        let status = Command::new("docker")
-            .args(["volume", "rm", &self.volume_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("Failed to run docker volume rm")?;
-
-        if !status.success() {
-            bail!("Failed to remove volume: {}", self.volume_name);
-        }
-
-        Ok(())
-    }
-
     /// Get Docker mount arguments for this overlay.
     /// Returns the arguments to pass to `docker run`.
     pub fn docker_mount_args(&self, target: &Path) -> Vec<String> {
@@ -136,24 +116,5 @@ impl Overlay {
                 target.display()
             ),
         ]
-    }
-
-    /// Clean up the overlay: remove volume and optionally the upper/work directories.
-    pub fn cleanup(&self, remove_dirs: bool) -> Result<()> {
-        // Remove the Docker volume
-        let _ = self.remove_volume();
-
-        if remove_dirs {
-            // Remove the overlay directory (contains upper, work)
-            if let Some(overlay_dir) = self.upper.parent() {
-                if overlay_dir.exists() {
-                    std::fs::remove_dir_all(overlay_dir).with_context(|| {
-                        format!("Failed to remove overlay dir: {}", overlay_dir.display())
-                    })?;
-                }
-            }
-        }
-
-        Ok(())
     }
 }

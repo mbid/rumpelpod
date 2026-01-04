@@ -93,22 +93,6 @@ pub fn add_remote(repo: &Path, name: &str, url: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Setup bidirectional remotes between two repos.
-pub fn setup_bidirectional_remotes(
-    main_repo: &Path,
-    sandbox_repo: &Path,
-    sandbox_name: &str,
-) -> Result<()> {
-    // Add remote from main repo to sandbox
-    let remote_name = format!("sandbox-{}", sandbox_name);
-    add_remote(main_repo, &remote_name, sandbox_repo)?;
-
-    // Add remote from sandbox to main repo (named "origin" typically, but we'll use "main")
-    add_remote(sandbox_repo, "main", main_repo)?;
-
-    Ok(())
-}
-
 /// Checkout a branch, creating it if it doesn't exist.
 pub fn checkout_or_create_branch(repo: &Path, branch_name: &str) -> Result<()> {
     // Try to checkout existing branch first
@@ -135,21 +119,6 @@ pub fn checkout_or_create_branch(repo: &Path, branch_name: &str) -> Result<()> {
 
     if !status.success() {
         bail!("Failed to create branch: {}", branch_name);
-    }
-
-    Ok(())
-}
-
-/// Fetch a specific branch from a remote into the local repo.
-pub fn fetch_branch(repo: &Path, remote: &str, branch: &str) -> Result<()> {
-    let status = Command::new("git")
-        .current_dir(repo)
-        .args(["fetch", remote, branch])
-        .status()
-        .context("Failed to fetch branch")?;
-
-    if !status.success() {
-        bail!("Git fetch failed for {}:{}", remote, branch);
     }
 
     Ok(())

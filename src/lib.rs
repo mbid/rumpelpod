@@ -1,15 +1,15 @@
-pub mod agent;
-pub mod anthropic;
-pub mod cli;
-pub mod config;
-pub mod daemon;
-pub mod daemon_protocol;
-pub mod docker;
-pub mod git;
-pub mod llm_cache;
-pub mod overlay;
-pub mod sandbox;
-pub mod sandbox_config;
-pub mod setup;
+mod agent;
+mod anthropic;
+mod cli;
+mod config;
+mod daemon;
+mod daemon_protocol;
+mod docker;
+mod git;
+mod llm_cache;
+mod overlay;
+mod sandbox;
+mod sandbox_config;
+mod setup;
 
 pub use cli::run;

@@ -139,21 +139,6 @@ pub fn remove_volume(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Create a Docker volume.
-pub fn create_volume(name: &str) -> Result<()> {
-    let status = Command::new("docker")
-        .args(["volume", "create", name])
-        .stdout(Stdio::null())
-        .status()
-        .context("Failed to create Docker volume")?;
-
-    if !status.success() {
-        bail!("Failed to create volume: {}", name);
-    }
-
-    Ok(())
-}
-
 /// Attach to a running container and execute a command.
 pub fn exec_in_container(
     name: &str,
@@ -219,26 +204,4 @@ pub fn wait_container(name: &str) -> Result<()> {
         anyhow::bail!("docker wait failed for container '{}'", name);
     }
     Ok(())
-}
-
-/// List all containers with a specific label.
-pub fn list_containers_with_label(label: &str) -> Result<Vec<String>> {
-    let output = Command::new("docker")
-        .args([
-            "ps",
-            "-a",
-            "--filter",
-            &format!("label={}", label),
-            "--format",
-            "{{.Names}}",
-        ])
-        .output()
-        .context("Failed to list containers")?;
-
-    if !output.status.success() {
-        bail!("Failed to list containers");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.lines().map(String::from).collect())
 }

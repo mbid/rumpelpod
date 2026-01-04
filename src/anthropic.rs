@@ -279,20 +279,11 @@ pub struct MessagesRequest {
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
-    #[serde(default)]
-    pub cache_creation_input_tokens: u32,
-    #[serde(default)]
-    pub cache_read_input_tokens: u32,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct MessagesResponse {
-    pub id: String,
-    #[serde(rename = "type")]
-    pub response_type: String,
-    pub role: Role,
     pub content: Vec<ContentBlock>,
-    pub model: String,
     pub stop_reason: StopReason,
     pub usage: Usage,
 }
@@ -304,21 +295,6 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(api_key: String) -> Self {
-        // Use 180s timeout as API requests with large context can take >30s to complete.
-        // This includes connection, sending request body, and receiving response.
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(180))
-            .build()
-            .expect("Failed to build HTTP client");
-
-        Self {
-            api_key: Some(api_key),
-            client,
-            cache: None,
-        }
-    }
-
     /// Create a new client with optional caching for deterministic testing.
     /// If cache is provided and no API key is set, only cached responses will work.
     ///
@@ -344,11 +320,6 @@ impl Client {
             client,
             cache,
         })
-    }
-
-    pub fn from_env() -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY not set")?;
-        Ok(Self::new(api_key))
     }
 
     /// Build request headers for the messages endpoint.

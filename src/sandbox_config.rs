@@ -92,9 +92,6 @@ pub enum ImageConfig {
 pub struct AgentConfig {
     /// Default model.
     pub model: Option<Model>,
-
-    /// Editor for composing messages.
-    pub editor: Option<String>,
 }
 
 impl SandboxConfig {
@@ -229,7 +226,6 @@ context = "."
 
 [agent]
 model = "sonnet"
-editor = "vim"
 "#,
         );
 
@@ -251,7 +247,6 @@ editor = "vim"
             _ => panic!("Expected ImageConfig::Build"),
         }
         assert_eq!(config.agent.model, Some(Model::Sonnet));
-        assert_eq!(config.agent.editor, Some("vim".to_string()));
     }
 
     #[test]
