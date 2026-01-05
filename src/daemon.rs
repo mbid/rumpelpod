@@ -101,7 +101,7 @@ struct SandboxState {
     /// Git HTTP server for this sandbox (provides HTTP access to meta.git).
     /// Kept alive for the lifetime of the sandbox; dropped when sandbox is cleaned up.
     #[allow(dead_code)]
-    git_http_server: Option<GitHttpServer>,
+    git_http_server: GitHttpServer,
 }
 
 /// Global daemon state shared across all connection handler threads.
@@ -122,7 +122,6 @@ impl DaemonState {
 }
 
 type SharedState = Arc<Mutex<DaemonState>>;
-
 fn start_container(
     info: &SandboxInfo,
     image_tag: &str,
@@ -130,7 +129,6 @@ fn start_container(
     runtime: Runtime,
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
-    git_http_host_port: Option<u16>,
 ) -> Result<()> {
     crate::sandbox::ensure_container_running_internal(
         info,
@@ -139,7 +137,6 @@ fn start_container(
         runtime,
         overlay_mode,
         env_vars,
-        git_http_host_port,
     )
 }
 
@@ -241,26 +238,31 @@ fn handle_ensure_sandbox(
             }
         };
 
-        // Start git HTTP server for this sandbox
-        let git_http_server = match GitHttpServer::start(&info.meta_git_dir, sandbox_name) {
-            Ok(server) => {
-                info!(
-                    "Client {}: git HTTP server started on port {}",
-                    client_id, server.host_port
-                );
-                Some(server)
-            }
-            Err(e) => {
-                error!(
-                    "Client {}: failed to start git HTTP server: {}",
-                    client_id, e
-                );
-                // Continue without git HTTP - it's not critical for basic operation
-                None
-            }
-        };
+        // Start git HTTP server bound to the sandbox's network gateway IP
+        let git_http_server =
+            match GitHttpServer::start(&info.meta_git_dir, sandbox_name, info.gateway_ip) {
+                Ok(server) => {
+                    info!(
+                        "Client {}: git HTTP server started on {}",
+                        client_id, server.bind_addr
+                    );
+                    server
+                }
+                Err(e) => {
+                    error!(
+                        "Client {}: failed to start git HTTP server: {}",
+                        client_id, e
+                    );
+                    let _ = server::send_error(
+                        &mut stream,
+                        -32000,
+                        &format!("Failed to start git HTTP server: {}", e),
+                    );
+                    return;
+                }
+            };
 
-        // Start the container with port mapping for git HTTP
+        // Start the container connected to the sandbox's network
         if let Err(e) = start_container(
             &info,
             &params.image_tag,
@@ -268,7 +270,6 @@ fn handle_ensure_sandbox(
             runtime,
             overlay_mode,
             &params.env_vars,
-            git_http_server.as_ref().map(|s| s.host_port),
         ) {
             error!("Client {}: failed to start container: {}", client_id, e);
             let _ = server::send_error(
@@ -346,6 +347,11 @@ fn handle_ensure_sandbox(
                 // Stop container
                 if let Err(e) = docker::stop_container(&sandbox_state.info.container_name) {
                     error!("Failed to stop container: {}", e);
+                }
+
+                // Remove Docker network (git_http_server is dropped automatically)
+                if let Err(e) = docker::remove_network(&sandbox_state.info.network_name) {
+                    error!("Failed to remove Docker network: {}", e);
                 }
 
                 info!("Sandbox '{}' cleaned up", key);

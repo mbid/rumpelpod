@@ -5,23 +5,26 @@
 //! - Allows fetching any branch (read access)
 //! - Only allows pushing to the sandbox's own branch (write access via update hook)
 //!
-//! The server runs on the host and is accessible from inside containers via
-//! `http://host.docker.internal:$SANDBOX_GIT_HTTP_PORT/meta.git`.
+//! The server runs on the host, bound to the gateway IP of the sandbox's Docker network.
+//! Containers on that network can access it via `http://<gateway-ip>:<port>/meta.git`.
 
 use anyhow::{Context, Result};
 use log::{debug, error, info};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 
+/// Fixed port for the git HTTP server. Using the standard git port.
+pub const GIT_HTTP_PORT: u16 = 9418;
+
 /// A running git HTTP server instance.
 pub struct GitHttpServer {
-    /// The port the server is listening on (on the host).
-    pub host_port: u16,
+    /// The address the server is bound to.
+    pub bind_addr: SocketAddr,
     /// Handle to signal shutdown.
     shutdown: Arc<AtomicBool>,
     /// Thread handle for the server.
@@ -31,18 +34,29 @@ pub struct GitHttpServer {
 impl GitHttpServer {
     /// Start a new git HTTP server for a sandbox.
     ///
-    /// The server listens on a random available port on all interfaces and serves
-    /// the meta.git repository with write access restricted to the given branch.
-    /// The container can access it via `http://host.docker.internal:<port>/meta.git`.
-    pub fn start(meta_git_dir: &Path, allowed_branch: &str) -> Result<Self> {
-        // Bind to a random available port on all interfaces
-        // (needed so Docker containers can reach it via the bridge network)
-        let listener = TcpListener::bind("0.0.0.0:0").context("Failed to bind git HTTP server")?;
-        let host_port = listener.local_addr()?.port();
+    /// The server listens on the specified IP address (typically a Docker network gateway)
+    /// on the fixed git HTTP port. This isolates the server to only be accessible from
+    /// containers on that specific Docker network.
+    pub fn start(meta_git_dir: &Path, allowed_branch: &str, bind_ip: IpAddr) -> Result<Self> {
+        Self::start_on_port(meta_git_dir, allowed_branch, bind_ip, GIT_HTTP_PORT)
+    }
+
+    /// Start a git HTTP server on a specific port.
+    /// Use port 0 to bind to a random available port.
+    fn start_on_port(
+        meta_git_dir: &Path,
+        allowed_branch: &str,
+        bind_ip: IpAddr,
+        port: u16,
+    ) -> Result<Self> {
+        let bind_addr = SocketAddr::new(bind_ip, port);
+        let listener = TcpListener::bind(bind_addr).context("Failed to bind git HTTP server")?;
+        // Get the actual bound address (port may have changed if 0 was specified)
+        let bind_addr = listener.local_addr()?;
 
         info!(
-            "Starting git HTTP server on port {} for branch '{}'",
-            host_port, allowed_branch
+            "Starting git HTTP server on {} for branch '{}'",
+            bind_addr, allowed_branch
         );
 
         // Setup the update hook in meta.git to restrict pushes
@@ -66,7 +80,7 @@ impl GitHttpServer {
         });
 
         Ok(GitHttpServer {
-            host_port,
+            bind_addr,
             shutdown,
             thread: Some(thread),
         })
@@ -411,6 +425,7 @@ fn send_cgi_response(stream: &mut TcpStream, cgi_output: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+    use std::net::Ipv4Addr;
     use std::process::Command;
 
     #[test]
@@ -434,16 +449,16 @@ mod tests {
             .output()
             .expect("Failed to create bare repo");
 
-        // Start the server
-        let server = GitHttpServer::start(&meta_git, "test-branch").unwrap();
-        let port = server.host_port;
+        // Start the server on localhost with a random port (port 0)
+        let bind_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let server = GitHttpServer::start_on_port(&meta_git, "test-branch", bind_ip, 0).unwrap();
+        let addr = server.bind_addr;
 
         // Give the server time to start
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Make a request to the server
-        let mut stream =
-            TcpStream::connect(format!("127.0.0.1:{}", port)).expect("Failed to connect");
+        let mut stream = TcpStream::connect(addr).expect("Failed to connect");
         stream
             .write_all(b"GET /meta.git/info/refs?service=git-upload-pack HTTP/1.1\r\nHost: localhost\r\n\r\n")
             .unwrap();
@@ -507,16 +522,17 @@ mod tests {
             .output()
             .expect("Failed to create bare repo");
 
-        // Start the server
-        let server = GitHttpServer::start(&meta_git, "test-branch").unwrap();
-        let port = server.host_port;
+        // Start the server on localhost with a random port (port 0)
+        let bind_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let server = GitHttpServer::start_on_port(&meta_git, "test-branch", bind_ip, 0).unwrap();
+        let addr = server.bind_addr;
 
         // Give the server time to start
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Use git ls-remote to test
         let output = Command::new("git")
-            .args(["ls-remote", &format!("http://127.0.0.1:{}/meta.git", port)])
+            .args(["ls-remote", &format!("http://{}/meta.git", addr)])
             .output()
             .expect("Failed to run git ls-remote");
 

@@ -371,7 +371,7 @@ pub fn setup_host_sandbox_remote(host_repo: &Path, meta_git_dir: &Path) -> Resul
 
 /// Setup remotes for a sandbox repo.
 /// Renames the "origin" remote (created by git clone) to "sandbox".
-pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result<()> {
+pub fn setup_sandbox_remotes(sandbox_repo: &Path, git_http_url: &str) -> Result<()> {
     // Check if "sandbox" remote already exists
     let sandbox_exists = Command::new("git")
         .current_dir(sandbox_repo)
@@ -397,15 +397,10 @@ pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result
         }
     }
 
-    // Update the URL to ensure it points to meta_git_dir
+    // Update the URL to point to the HTTP server
     let status = Command::new("git")
         .current_dir(sandbox_repo)
-        .args([
-            "remote",
-            "set-url",
-            "sandbox",
-            &meta_git_dir.to_string_lossy(),
-        ])
+        .args(["remote", "set-url", "sandbox", git_http_url])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -436,7 +431,11 @@ pub fn setup_sandbox_remotes(meta_git_dir: &Path, sandbox_repo: &Path) -> Result
 /// Installs a post-commit hook that pushes the current branch to the HTTP
 /// remote exposed by the daemon. This replaces the file-watching-based
 /// sync mechanism for sandbox->meta.git direction.
-pub fn setup_sandbox_hooks(sandbox_repo: &Path, branch_name: &str) -> Result<()> {
+pub fn setup_sandbox_hooks(
+    sandbox_repo: &Path,
+    branch_name: &str,
+    git_http_url: &str,
+) -> Result<()> {
     let hooks_dir = sandbox_repo.join(".git/hooks");
     std::fs::create_dir_all(&hooks_dir)?;
 
@@ -448,15 +447,9 @@ pub fn setup_sandbox_hooks(sandbox_repo: &Path, branch_name: &str) -> Result<()>
 # Only pushes the sandbox branch (write access to other branches is rejected by server)
 # Uses --force to handle history rewrites (amend, rebase, etc.)
 
-BRANCH="{}"
-REMOTE_URL="http://host.docker.internal:$SANDBOX_GIT_HTTP_PORT/meta.git"
-
-# Only push if SANDBOX_GIT_HTTP_PORT is set (we're inside a sandbox container)
-if [ -n "$SANDBOX_GIT_HTTP_PORT" ]; then
-    git push --force --quiet "$REMOTE_URL" "HEAD:refs/heads/$BRANCH" 2>/dev/null || true
-fi
+git push --force --quiet "{}" "HEAD:refs/heads/{}" 2>/dev/null || true
 "#,
-        branch_name
+        git_http_url, branch_name
     );
 
     std::fs::write(&post_commit_path, post_commit_script)?;

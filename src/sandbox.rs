@@ -354,6 +354,10 @@ pub struct SandboxInfo {
     /// Directory for PID files tracking attached processes
     pub pids_dir: PathBuf,
     pub container_name: String,
+    /// Docker network name for this sandbox
+    pub network_name: String,
+    /// Gateway IP of the Docker network (where git HTTP server binds)
+    pub gateway_ip: std::net::IpAddr,
     pub created_at: String,
 }
 
@@ -369,6 +373,11 @@ impl SandboxInfo {
             repo_root.file_name().unwrap().to_string_lossy(),
             name
         );
+        let network_name = format!("{}-net", container_name);
+
+        // Create the Docker network and get the gateway IP
+        let gateway_ip = docker::ensure_network(&network_name)?;
+
         let created_at = chrono::Utc::now().to_rfc3339();
 
         Ok(SandboxInfo {
@@ -379,6 +388,8 @@ impl SandboxInfo {
             meta_git_dir,
             pids_dir,
             container_name,
+            network_name,
+            gateway_ip,
             created_at,
         })
     }
@@ -708,7 +719,6 @@ pub fn ensure_container_running_internal(
     runtime: Runtime,
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
-    git_http_host_port: Option<u16>,
 ) -> Result<()> {
     // Remove stopped container if it exists
     if docker::container_exists(&info.container_name)? {
@@ -730,16 +740,10 @@ pub fn ensure_container_running_internal(
         format!("{}:{}", user_info.uid, user_info.gid),
         "--workdir".to_string(),
         info.repo_root.to_string_lossy().to_string(),
-        // Allow container to access host services via host.docker.internal
-        "--add-host".to_string(),
-        "host.docker.internal:host-gateway".to_string(),
+        // Connect to sandbox-specific network
+        "--network".to_string(),
+        info.network_name.clone(),
     ];
-
-    // Pass git HTTP server port as environment variable if available
-    if let Some(host_port) = git_http_host_port {
-        args.push("-e".to_string());
-        args.push(format!("SANDBOX_GIT_HTTP_PORT={}", host_port));
-    }
 
     // Load mounts config saved during ensure_sandbox
     let mounts_config = info.load_mounts_config()?;
@@ -807,11 +811,18 @@ pub fn ensure_sandbox(
     // This ensures all work in the sandbox happens on this branch
     git::checkout_or_create_branch(&info.clone_dir, name)?;
 
-    // Setup remotes for the sandbox repo (rename "origin" to "sandbox")
-    git::setup_sandbox_remotes(&info.meta_git_dir, &info.clone_dir)?;
+    // Build the HTTP URL for the git server
+    let git_http_url = format!(
+        "http://{}:{}/meta.git",
+        info.gateway_ip,
+        crate::git_http::GIT_HTTP_PORT
+    );
 
-    // Setup git hooks to push commits via HTTP (replaces file-watching sync)
-    git::setup_sandbox_hooks(&info.clone_dir, name)?;
+    // Setup "sandbox" remote pointing to the HTTP URL
+    git::setup_sandbox_remotes(&info.clone_dir, &git_http_url)?;
+
+    // Setup git hooks to push commits via HTTP
+    git::setup_sandbox_hooks(&info.clone_dir, name, &git_http_url)?;
 
     // Save sandbox info and mounts config (mounts config used by daemon)
     info.save()?;

@@ -205,3 +205,74 @@ pub fn wait_container(name: &str) -> Result<()> {
     }
     Ok(())
 }
+
+/// Check if a Docker network exists.
+pub fn network_exists(name: &str) -> Result<bool> {
+    let output = Command::new("docker")
+        .args(["network", "inspect", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Failed to run docker network inspect")?;
+
+    Ok(output.success())
+}
+
+/// Create a Docker network if it doesn't exist. Returns the gateway IP address.
+pub fn ensure_network(name: &str) -> Result<std::net::IpAddr> {
+    if !network_exists(name)? {
+        info!("Creating Docker network: {}", name);
+        let status = Command::new("docker")
+            .args(["network", "create", name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .context("Failed to run docker network create")?;
+
+        if !status.success() {
+            bail!("Failed to create Docker network: {}", name);
+        }
+    }
+
+    // Get the gateway IP for the network
+    let output = Command::new("docker")
+        .args([
+            "network",
+            "inspect",
+            name,
+            "--format",
+            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
+        ])
+        .output()
+        .context("Failed to get network gateway IP")?;
+
+    if !output.status.success() {
+        bail!("Failed to inspect Docker network: {}", name);
+    }
+
+    let gateway_ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    gateway_ip
+        .parse()
+        .with_context(|| format!("Invalid gateway IP from network {}: {}", name, gateway_ip))
+}
+
+/// Remove a Docker network.
+pub fn remove_network(name: &str) -> Result<()> {
+    if !network_exists(name)? {
+        return Ok(());
+    }
+
+    debug!("Removing Docker network: {}", name);
+    let status = Command::new("docker")
+        .args(["network", "rm", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Failed to run docker network rm")?;
+
+    if !status.success() {
+        bail!("Failed to remove network: {}", name);
+    }
+
+    Ok(())
+}

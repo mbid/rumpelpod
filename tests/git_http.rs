@@ -6,18 +6,14 @@ use common::SandboxFixture;
 
 /// Test that the git HTTP endpoint is available inside the sandbox.
 ///
-/// The sandbox should be able to access meta.git via HTTP using the
-/// host.docker.internal hostname and the port from $SANDBOX_GIT_HTTP_PORT.
+/// The sandbox has an 'sandbox' remote configured to point to the HTTP server
+/// on the Docker network gateway.
 #[test]
 fn test_git_http_endpoint_available() {
     let fixture = SandboxFixture::new("test-git-http");
 
-    // Use git ls-remote to check if the endpoint is available
-    let output = fixture.run(&[
-        "sh",
-        "-c",
-        "git ls-remote http://host.docker.internal:$SANDBOX_GIT_HTTP_PORT/meta.git",
-    ]);
+    // Use git ls-remote with the sandbox remote (configured to HTTP URL)
+    let output = fixture.run(&["git", "ls-remote", "sandbox"]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -43,15 +39,14 @@ fn test_git_http_endpoint_available() {
 fn test_git_http_fetch() {
     let fixture = SandboxFixture::new("test-git-http-fetch");
 
-    // Use a single shell command to add remote and fetch, ensuring the env var is consistent
+    // Fetch from sandbox (configured to HTTP URL)
     let output = fixture.run(&[
         "sh",
         "-c",
         r#"
-        echo "Using port: $SANDBOX_GIT_HTTP_PORT"
-        git remote add http-sandbox "http://host.docker.internal:$SANDBOX_GIT_HTTP_PORT/meta.git"
+        echo "Origin URL: $(git remote get-url sandbox)"
         git remote -v
-        git fetch http-sandbox
+        git fetch sandbox
         "#,
     ]);
 
@@ -84,8 +79,7 @@ fn test_git_http_push_own_branch() {
             echo 'test content' > test-file.txt
             git add test-file.txt
             git commit -m "Test commit"
-            git remote add http-sandbox "http://host.docker.internal:$SANDBOX_GIT_HTTP_PORT/meta.git"
-            git push http-sandbox HEAD:refs/heads/{}
+            git push sandbox HEAD:refs/heads/{}
             "#,
             branch_name
         ),
@@ -126,14 +120,7 @@ fn test_git_http_push_master_rejected() {
     );
 
     // Then try to push to master (should fail)
-    let output = fixture.run(&[
-        "sh",
-        "-c",
-        r#"
-        git remote add http-sandbox "http://host.docker.internal:$SANDBOX_GIT_HTTP_PORT/meta.git"
-        git push http-sandbox HEAD:refs/heads/master 2>&1
-        "#,
-    ]);
+    let output = fixture.run(&["sh", "-c", "git push sandbox HEAD:refs/heads/master 2>&1"]);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
