@@ -191,6 +191,22 @@ pub fn stop_container(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Start a stopped container.
+pub fn start_container(name: &str) -> Result<()> {
+    let status = Command::new("docker")
+        .args(["start", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Failed to run docker start")?;
+
+    if !status.success() {
+        bail!("Failed to start container: {}", name);
+    }
+
+    Ok(())
+}
+
 /// Wait for a container to stop.
 pub fn wait_container(name: &str) -> Result<()> {
     let status = Command::new("docker")

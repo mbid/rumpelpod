@@ -337,24 +337,23 @@ fn handle_ensure_sandbox(
         );
 
         if sandbox_state.client_count == 0 {
-            info!("Sandbox '{}' has no clients, cleaning up", key);
+            info!("Sandbox '{}' has no clients, stopping container", key);
 
             // Take ownership of the sandbox state to clean up
             if let Some(sandbox_state) = state.sandboxes.remove(&key) {
                 // Remove from git sync (runs final sync internally)
                 state.git_sync.remove_sandbox(&key);
 
-                // Stop container
+                // Stop container (but don't remove it, so we can resume later)
                 if let Err(e) = docker::stop_container(&sandbox_state.info.container_name) {
                     error!("Failed to stop container: {}", e);
                 }
 
-                // Remove Docker network (git_http_server is dropped automatically)
-                if let Err(e) = docker::remove_network(&sandbox_state.info.network_name) {
-                    error!("Failed to remove Docker network: {}", e);
-                }
+                // Keep the Docker network alive so the gateway IP stays the same
+                // when we resume the container. The git_http_server is dropped here
+                // but will be recreated when a client reconnects.
 
-                info!("Sandbox '{}' cleaned up", key);
+                info!("Sandbox '{}' stopped", key);
             }
         }
     }

@@ -527,6 +527,9 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
         docker::remove_container(&info.container_name)?;
     }
 
+    // Remove Docker network
+    docker::remove_network(&info.network_name)?;
+
     // Remove overlay Docker volumes
     let volume_prefix = info.volume_prefix();
     if let Ok(volumes) = docker::list_volumes_with_prefix(&volume_prefix) {
@@ -720,9 +723,13 @@ pub fn ensure_container_running_internal(
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
 ) -> Result<()> {
-    // Remove stopped container if it exists
+    // If container already exists, just start it (it may be stopped)
     if docker::container_exists(&info.container_name)? {
-        docker::remove_container(&info.container_name)?;
+        if !docker::container_is_running(&info.container_name)? {
+            info!("Starting existing container: {}", info.container_name);
+            docker::start_container(&info.container_name)?;
+        }
+        return Ok(());
     }
 
     let mut args = vec![
