@@ -111,49 +111,12 @@ fn copy_dir_reflink(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Pre-create mount target directories in the clone to prevent Docker from creating them as root.
-///
-/// When Docker starts a container, it creates any missing mount target directories before
-/// applying bind mounts. If the clone directory is already bind-mounted at repo_root, Docker
-/// will create subdirectories inside it as root. This function pre-creates these directories
-/// with the correct ownership.
-fn precreate_mount_targets_in_clone(mounts: &[Mount], info: &SandboxInfo) -> Result<()> {
-    for mount in mounts {
-        if !mount.host_path.exists() {
-            continue;
-        }
-
-        let target = mount.target_path();
-
-        // Check if target path is inside repo_root (i.e., would be created inside the clone)
-        if let Ok(relative) = target.strip_prefix(&info.repo_root) {
-            let clone_target = info.clone_dir.join(relative);
-            if !clone_target.exists() {
-                debug!(
-                    "Pre-creating mount target in clone: {}",
-                    clone_target.display()
-                );
-                std::fs::create_dir_all(&clone_target).with_context(|| {
-                    format!(
-                        "Failed to pre-create mount target: {}",
-                        clone_target.display()
-                    )
-                })?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Process mounts and generate docker arguments.
 pub fn process_mounts(
     mounts: &[Mount],
     info: &SandboxInfo,
     overlay_mode: OverlayMode,
 ) -> Result<Vec<String>> {
-    // Pre-create mount target directories in clone to prevent Docker from creating them as root
-    precreate_mount_targets_in_clone(mounts, info)?;
-
     let mut docker_args = Vec::new();
 
     for mount in mounts {
@@ -347,8 +310,6 @@ pub struct SandboxInfo {
     pub name: String,
     pub repo_root: PathBuf,
     pub sandbox_dir: PathBuf,
-    /// The actual clone directory (in cache)
-    pub clone_dir: PathBuf,
     /// Path to the shared meta.git bare repository
     pub meta_git_dir: PathBuf,
     /// Directory for PID files tracking attached processes
@@ -358,13 +319,14 @@ pub struct SandboxInfo {
     pub network_name: String,
     /// Gateway IP of the Docker network (where git HTTP server binds)
     pub gateway_ip: std::net::IpAddr,
+    /// The commit SHA that should be checked out in the sandbox
+    pub head_commit: String,
     pub created_at: String,
 }
 
 impl SandboxInfo {
-    pub fn new(name: &str, repo_root: &Path) -> Result<Self> {
+    pub fn new(name: &str, repo_root: &Path, head_commit: String) -> Result<Self> {
         let sandbox_dir = get_sandbox_instance_dir(repo_root, name)?;
-        let clone_dir = sandbox_dir.join("clone");
         let pids_dir = sandbox_dir.join("pids");
         let meta_git_dir = get_meta_git_dir(repo_root)?;
 
@@ -384,12 +346,12 @@ impl SandboxInfo {
             name: name.to_string(),
             repo_root: repo_root.to_path_buf(),
             sandbox_dir,
-            clone_dir,
             meta_git_dir,
             pids_dir,
             container_name,
             network_name,
             gateway_ip,
+            head_commit,
             created_at,
         })
     }
@@ -593,15 +555,10 @@ pub fn build_mount_list(
 ) -> Result<Vec<Mount>> {
     use crate::sandbox_config::SandboxConfig;
 
-    // Core mounts for the repository setup (always required)
-    let mut mounts = vec![
-        // meta.git at its actual path (read-only, for git alternates and sandbox remote)
-        Mount::new(&info.meta_git_dir, MountMode::ReadOnly),
-        // Sandbox clone at the original repo path (write-through for working directory)
-        Mount::new(&info.clone_dir, MountMode::WriteThrough).with_container_path(&info.repo_root),
-        // Sandbox clone at its actual path (write-through for git operations)
-        Mount::new(&info.clone_dir, MountMode::WriteThrough),
-    ];
+    // The repository checkout is baked into the container image layer,
+    // so no core mounts are needed for the repository itself.
+    // Docker's overlay filesystem provides copy-on-write semantics for the checkout.
+    let mut mounts = Vec::new();
 
     // Add read-only mounts from config
     for entry in &config.mounts.readonly {
@@ -790,46 +747,35 @@ pub fn ensure_container_running_internal(
 }
 
 /// Ensure a sandbox is set up and ready to use.
+///
+/// Sets up the meta.git bare repository and records the current HEAD commit.
+/// The actual repository checkout is baked into the container image by the daemon.
 pub fn ensure_sandbox(
     repo_root: &Path,
     name: &str,
     config: &crate::sandbox_config::SandboxConfig,
 ) -> Result<SandboxInfo> {
-    let info = SandboxInfo::new(name, repo_root)?;
+    // Ensure meta.git bare repository exists (shared across all sandboxes for this repo)
+    // We need to do this first so we can get the HEAD commit from meta.git
+    let meta_git_dir = get_meta_git_dir(repo_root)?;
+    git::ensure_meta_git(repo_root, &meta_git_dir)?;
+
+    // Setup "sandbox" remote in host repo pointing to meta.git
+    git::setup_host_sandbox_remote(repo_root, &meta_git_dir)?;
+
+    // Sync main branch from host to meta.git (ensures meta.git has the latest commits)
+    git::sync_main_to_meta(repo_root, &meta_git_dir)?;
+
+    // Get the current HEAD commit from the host repo
+    // This is the commit that will be checked out in the sandbox
+    let head_commit =
+        git::get_head_commit(repo_root).context("Failed to get HEAD commit from host repo")?;
+
+    // Create sandbox info with the head commit
+    let info = SandboxInfo::new(name, repo_root, head_commit)?;
 
     // Create sandbox directory
     std::fs::create_dir_all(&info.sandbox_dir)?;
-
-    // Ensure meta.git bare repository exists (shared across all sandboxes for this repo)
-    git::ensure_meta_git(&info.repo_root, &info.meta_git_dir)?;
-
-    // Setup "sandbox" remote in host repo pointing to meta.git
-    git::setup_host_sandbox_remote(&info.repo_root, &info.meta_git_dir)?;
-
-    // Sync main branch from host to meta.git
-    git::sync_main_to_meta(&info.repo_root, &info.meta_git_dir)?;
-
-    // Create shared clone from meta.git
-    // The clone's alternates will reference meta_git_dir, which is mounted
-    // at the same path inside the container
-    git::create_shared_clone(&info.meta_git_dir, &info.clone_dir)?;
-
-    // Checkout or create a branch named after the sandbox
-    // This ensures all work in the sandbox happens on this branch
-    git::checkout_or_create_branch(&info.clone_dir, name)?;
-
-    // Build the HTTP URL for the git server
-    let git_http_url = format!(
-        "http://{}:{}/meta.git",
-        info.gateway_ip,
-        crate::git_http::GIT_HTTP_PORT
-    );
-
-    // Setup "sandbox" remote pointing to the HTTP URL
-    git::setup_sandbox_remotes(&info.clone_dir, &git_http_url)?;
-
-    // Setup git hooks to push commits via HTTP
-    git::setup_sandbox_hooks(&info.clone_dir, name, &git_http_url)?;
 
     // Save sandbox info and mounts config (mounts config used by daemon)
     info.save()?;

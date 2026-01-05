@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use log::{debug, info};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -291,4 +292,117 @@ pub fn remove_network(name: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build a sandbox image with the repository checkout baked into the image layer.
+///
+/// This creates a new image based on the provided base image, with the repository
+/// cloned from meta.git and checked out to the specified commit on a branch named
+/// after the sandbox.
+///
+/// # Arguments
+/// * `base_image` - The base Docker image tag to build from
+/// * `meta_git_path` - Path to the meta.git bare repository on the host
+/// * `checkout_path` - Path inside the container where the repo should be cloned
+/// * `sandbox_name` - Name of the sandbox (used for branch name)
+/// * `commit_sha` - The commit SHA to checkout
+/// * `git_http_url` - URL of the git HTTP server for the sandbox remote
+pub fn build_sandbox_image(
+    base_image: &str,
+    meta_git_path: &Path,
+    checkout_path: &Path,
+    sandbox_name: &str,
+    commit_sha: &str,
+    git_http_url: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<String> {
+    // Generate a deterministic image tag based on inputs
+    // Include uid/gid so different users get separate images with correct ownership
+    let mut hasher = Sha256::new();
+    hasher.update(base_image.as_bytes());
+    hasher.update(commit_sha.as_bytes());
+    hasher.update(sandbox_name.as_bytes());
+    hasher.update(checkout_path.to_string_lossy().as_bytes());
+    hasher.update(uid.to_le_bytes());
+    hasher.update(gid.to_le_bytes());
+    let hash = hex::encode(&hasher.finalize()[..16]);
+    let image_tag = format!("sandbox-checkout:{}", hash);
+
+    // Check if image already exists
+    if image_exists(&image_tag)? {
+        debug!("Using existing sandbox image: {}", image_tag);
+        return Ok(image_tag);
+    }
+
+    info!("Building sandbox image with checkout: {}", image_tag);
+
+    // Create a temporary directory for the Dockerfile
+    let temp_dir = tempfile::tempdir().context("Failed to create temp directory for Dockerfile")?;
+    let dockerfile_path = temp_dir.path().join("Dockerfile");
+
+    // Write the Dockerfile
+    // We use BuildKit's RUN --mount=type=bind to mount meta.git read-only during the clone
+    // The post-commit hook is written using printf with escaped newlines to avoid Dockerfile parsing issues
+    // We chown the checkout to the target user so Docker's overlay will allow writes
+    //
+    // Note: We add origin pointing to /meta.git for the initial clone, then switch to HTTP remote.
+    // We fetch the refs from meta.git before switching so that sandbox/master etc. are available.
+    let dockerfile_content = format!(
+        r##"# syntax=docker/dockerfile:1
+FROM {base_image}
+# Clone the repository from the mounted meta.git (read-only bind mount during build)
+RUN --mount=type=bind,from=metagit,source=/,target=/meta.git,readonly \
+    git clone /meta.git {checkout_path} && \
+    cd {checkout_path} && \
+    git checkout {commit_sha} && \
+    git checkout -b {sandbox_name} && \
+    (git branch | grep -v '{sandbox_name}' | xargs -r git branch -D 2>/dev/null || true) && \
+    git remote rename origin sandbox && \
+    git fetch sandbox && \
+    git remote set-url sandbox {git_http_url} && \
+    git config uploadpack.allowAnySHA1InWant true && \
+    git config --system --add safe.directory {checkout_path} && \
+    mkdir -p .git/hooks && \
+    printf '#!/bin/sh\ngit push --force --quiet "{git_http_url}" "HEAD:refs/heads/{sandbox_name}" 2>/dev/null || true\n' > .git/hooks/post-commit && \
+    chmod +x .git/hooks/post-commit && \
+    chown -R {uid}:{gid} {checkout_path}
+WORKDIR {checkout_path}
+"##,
+        base_image = base_image,
+        checkout_path = checkout_path.display(),
+        commit_sha = commit_sha,
+        sandbox_name = sandbox_name,
+        git_http_url = git_http_url,
+        uid = uid,
+        gid = gid,
+    );
+
+    std::fs::write(&dockerfile_path, dockerfile_content)
+        .context("Failed to write Dockerfile for sandbox image")?;
+
+    // Build the image with meta.git as a named build context
+    let output = Command::new("docker")
+        .env("DOCKER_BUILDKIT", "1")
+        .args([
+            "build",
+            "-f",
+            &dockerfile_path.to_string_lossy(),
+            "-t",
+            &image_tag,
+            // Provide meta.git as a named build context that can be used in RUN --mount
+            "--build-context",
+            &format!("metagit={}", meta_git_path.display()),
+            // Use the temp directory as the main build context
+            &temp_dir.path().to_string_lossy(),
+        ])
+        .output()
+        .context("Failed to run docker build for sandbox image")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to build sandbox image: {}", stderr);
+    }
+
+    Ok(image_tag)
 }

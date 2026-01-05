@@ -24,45 +24,24 @@ pub fn find_repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(path))
 }
 
-/// Create a shared clone of a git repository.
-/// A shared clone uses --shared to reference the source repo's objects.
-pub fn create_shared_clone(source: &Path, dest: &Path) -> Result<()> {
-    if dest.exists() {
-        debug!("Shared clone already exists at: {}", dest.display());
-        return Ok(());
+/// Get the current HEAD commit SHA of a repository.
+pub fn get_head_commit(repo: &Path) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .context("Failed to run git rev-parse HEAD")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to get HEAD commit: {}", stderr.trim());
     }
 
-    // Create parent directory if needed
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
-    }
-
-    info!(
-        "Creating shared clone: {} -> {}",
-        source.display(),
-        dest.display()
-    );
-
-    let status = Command::new("git")
-        .args([
-            "clone",
-            "--shared",
-            &source.to_string_lossy(),
-            &dest.to_string_lossy(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("Failed to run git clone")?;
-
-    if !status.success() {
-        bail!("Git clone failed");
-    }
-
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Create a shared clone of a git repository.
+/// A shared clone uses --shared to reference the source repo's objects.
 /// Add a remote to a git repository.
 pub fn add_remote(repo: &Path, name: &str, url: &Path) -> Result<()> {
     // Check if remote already exists
@@ -100,71 +79,6 @@ pub fn add_remote(repo: &Path, name: &str, url: &Path) -> Result<()> {
 }
 
 /// Checkout a branch, creating it if it doesn't exist.
-pub fn checkout_or_create_branch(repo: &Path, branch_name: &str) -> Result<()> {
-    // Try to checkout existing branch first
-    let status = Command::new("git")
-        .current_dir(repo)
-        .args(["checkout", branch_name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("Failed to run git checkout")?;
-
-    if !status.success() {
-        // Branch doesn't exist, create it
-        let status = Command::new("git")
-            .current_dir(repo)
-            .args(["checkout", "-b", branch_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("Failed to create branch")?;
-
-        if !status.success() {
-            bail!("Failed to create branch: {}", branch_name);
-        }
-    }
-
-    // git clone creates a local branch for the remote HEAD (e.g., master).
-    // Delete it to keep only the sandbox branch.
-    delete_other_local_branches(repo, branch_name)?;
-
-    Ok(())
-}
-
-/// Delete all local branches except the specified one.
-fn delete_other_local_branches(repo: &Path, keep_branch: &str) -> Result<()> {
-    let output = Command::new("git")
-        .current_dir(repo)
-        .args(["branch", "--format=%(refname:short)"])
-        .output()
-        .context("Failed to list branches")?;
-
-    if !output.status.success() {
-        bail!("Failed to list branches");
-    }
-
-    let branches = String::from_utf8_lossy(&output.stdout);
-    for branch in branches.lines() {
-        let branch = branch.trim();
-        if !branch.is_empty() && branch != keep_branch {
-            let status = Command::new("git")
-                .current_dir(repo)
-                .args(["branch", "-D", branch])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .context("Failed to delete branch")?;
-
-            if !status.success() {
-                warn!("Failed to delete branch: {}", branch);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Ensure the meta.git bare repository exists.
 /// Creates a bare clone of the host repo if it doesn't exist.
 /// Returns true if a new meta.git was created, false if it already existed.
@@ -371,102 +285,6 @@ pub fn setup_host_sandbox_remote(host_repo: &Path, meta_git_dir: &Path) -> Resul
 
 /// Setup remotes for a sandbox repo.
 /// Renames the "origin" remote (created by git clone) to "sandbox".
-pub fn setup_sandbox_remotes(sandbox_repo: &Path, git_http_url: &str) -> Result<()> {
-    // Check if "sandbox" remote already exists
-    let sandbox_exists = Command::new("git")
-        .current_dir(sandbox_repo)
-        .args(["remote", "get-url", "sandbox"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("Failed to check sandbox remote")?
-        .success();
-
-    if !sandbox_exists {
-        // Rename "origin" (created by git clone --shared) to "sandbox"
-        let status = Command::new("git")
-            .current_dir(sandbox_repo)
-            .args(["remote", "rename", "origin", "sandbox"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("Failed to rename origin remote to sandbox")?;
-
-        if !status.success() {
-            bail!("Failed to rename origin remote to sandbox");
-        }
-    }
-
-    // Update the URL to point to the HTTP server
-    let status = Command::new("git")
-        .current_dir(sandbox_repo)
-        .args(["remote", "set-url", "sandbox", git_http_url])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("Failed to set sandbox remote URL")?;
-
-    if !status.success() {
-        bail!("Failed to set sandbox remote URL");
-    }
-
-    // Allow fetching arbitrary SHAs (useful for syncing specific commits)
-    let status = Command::new("git")
-        .current_dir(sandbox_repo)
-        .args(["config", "uploadpack.allowAnySHA1InWant", "true"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .context("Failed to configure uploadpack.allowAnySHA1InWant")?;
-
-    if !status.success() {
-        bail!("Failed to configure sandbox repo");
-    }
-
-    Ok(())
-}
-
-/// Setup git hooks in the sandbox repo to push commits to meta.git via HTTP.
-///
-/// Installs a post-commit hook that pushes the current branch to the HTTP
-/// remote exposed by the daemon. This replaces the file-watching-based
-/// sync mechanism for sandbox->meta.git direction.
-pub fn setup_sandbox_hooks(
-    sandbox_repo: &Path,
-    branch_name: &str,
-    git_http_url: &str,
-) -> Result<()> {
-    let hooks_dir = sandbox_repo.join(".git/hooks");
-    std::fs::create_dir_all(&hooks_dir)?;
-
-    // Post-commit hook: push to meta.git via HTTP after each commit
-    let post_commit_path = hooks_dir.join("post-commit");
-    let post_commit_script = format!(
-        r#"#!/bin/sh
-# Auto-generated hook to sync commits to meta.git via HTTP
-# Only pushes the sandbox branch (write access to other branches is rejected by server)
-# Uses --force to handle history rewrites (amend, rebase, etc.)
-
-git push --force --quiet "{}" "HEAD:refs/heads/{}" 2>/dev/null || true
-"#,
-        git_http_url, branch_name
-    );
-
-    std::fs::write(&post_commit_path, post_commit_script)?;
-
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&post_commit_path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&post_commit_path, perms)?;
-    }
-
-    debug!("Created post-commit hook at {}", post_commit_path.display());
-    Ok(())
-}
-
 // --- Git OID helpers using git2 ---
 
 /// Get the OID of a reference in a repository.
@@ -519,27 +337,6 @@ fn needs_meta_to_host_sync(info: &SandboxInfo) -> bool {
     let meta_oid = get_branch_oid(&info.meta_git_dir, &info.name);
     let host_remote_oid = get_remote_ref_oid(&info.repo_root, "sandbox", &info.name);
     meta_oid != host_remote_oid
-}
-
-/// Check if sync from meta.git to sandbox remote refs is needed.
-/// NOTE: This is no longer used since meta->sandbox sync is disabled.
-/// Kept for potential future use or manual syncing.
-#[allow(dead_code)]
-fn needs_meta_to_sandbox_sync(info: &SandboxInfo) -> bool {
-    let primary_branch = get_primary_branch(&info.repo_root).unwrap_or_else(|_| "main".to_string());
-
-    // Check primary branch
-    let meta_primary_oid = get_branch_oid(&info.meta_git_dir, &primary_branch);
-    let sandbox_remote_primary_oid =
-        get_remote_ref_oid(&info.clone_dir, "sandbox", &primary_branch);
-    if meta_primary_oid != sandbox_remote_primary_oid {
-        return true;
-    }
-
-    // Check sandbox branch
-    let meta_sandbox_oid = get_branch_oid(&info.meta_git_dir, &info.name);
-    let sandbox_remote_sandbox_oid = get_remote_ref_oid(&info.clone_dir, "sandbox", &info.name);
-    meta_sandbox_oid != sandbox_remote_sandbox_oid
 }
 
 /// Check if any sync operation is needed for a sandbox.

@@ -262,10 +262,40 @@ fn handle_ensure_sandbox(
                 }
             };
 
+        // Build the git HTTP URL for the sandbox remote
+        let git_http_url = format!(
+            "http://{}:{}/meta.git",
+            info.gateway_ip,
+            crate::git_http::GIT_HTTP_PORT
+        );
+
+        // Build the sandbox image with the repository checkout baked in
+        let sandbox_image_tag = match docker::build_sandbox_image(
+            &params.image_tag,
+            &info.meta_git_dir,
+            &info.repo_root,
+            sandbox_name,
+            &info.head_commit,
+            &git_http_url,
+            user_info.uid,
+            user_info.gid,
+        ) {
+            Ok(tag) => tag,
+            Err(e) => {
+                error!("Client {}: failed to build sandbox image: {}", client_id, e);
+                let _ = server::send_error(
+                    &mut stream,
+                    -32000,
+                    &format!("Failed to build sandbox image: {}", e),
+                );
+                return;
+            }
+        };
+
         // Start the container connected to the sandbox's network
         if let Err(e) = start_container(
             &info,
-            &params.image_tag,
+            &sandbox_image_tag,
             &user_info,
             runtime,
             overlay_mode,
