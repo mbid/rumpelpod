@@ -389,8 +389,19 @@ WORKDIR {checkout_path}
     std::fs::write(&dockerfile_path, dockerfile_content)
         .context("Failed to write Dockerfile for sandbox image")?;
 
-    // Build the image with meta.git as a named build context
+    // Build the image with meta.git as a named build context.
+    // BuildKit requires relative paths for --build-context, so we run docker from
+    // the parent directory of meta.git and use a relative path for it.
+    let meta_git_parent = meta_git_path
+        .parent()
+        .context("meta_git_path has no parent directory")?;
+    let meta_git_name = meta_git_path
+        .file_name()
+        .context("meta_git_path has no file name")?
+        .to_string_lossy();
+
     let output = Command::new("docker")
+        .current_dir(meta_git_parent)
         .env("DOCKER_BUILDKIT", "1")
         .args([
             "build",
@@ -400,7 +411,7 @@ WORKDIR {checkout_path}
             &image_tag,
             // Provide meta.git as a named build context that can be used in RUN --mount
             "--build-context",
-            &format!("metagit={}", meta_git_path.display()),
+            &format!("metagit={}", meta_git_name),
             // Use the temp directory as the main build context
             &temp_dir.path().to_string_lossy(),
         ])
