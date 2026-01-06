@@ -504,21 +504,67 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
         }
     }
 
-    // Remove sandbox branch from meta.git
+    // Remove all sandbox branches from meta.git for this sandbox
+    // This includes:
+    // - sandbox/<name> (primary branch)
+    // - sandbox/*@<name> (other branches at this sandbox)
     if info.meta_git_dir.exists() {
-        let _ = Command::new("git")
+        // Get all branches matching this sandbox's pattern
+        let output = Command::new("git")
             .current_dir(&info.meta_git_dir)
-            .args(["branch", "-D", &info.name])
-            .stderr(Stdio::null())
-            .status();
+            .args([
+                "for-each-ref",
+                "--format=%(refname:short)",
+                "refs/heads/sandbox/",
+            ])
+            .output();
+
+        if let Ok(output) = output {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let name = &info.name;
+            for branch in stdout.lines() {
+                // Match sandbox/<name> or sandbox/*@<name>
+                let is_primary = branch == format!("sandbox/{name}");
+                let is_at_sandbox = branch.ends_with(&format!("@{name}"));
+                if is_primary || is_at_sandbox {
+                    let _ = Command::new("git")
+                        .current_dir(&info.meta_git_dir)
+                        .args(["branch", "-D", branch])
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            }
+        }
     }
 
-    // Remove remote tracking ref from host repo
-    let name = &info.name;
-    let _ = Command::new("git")
+    // Remove all remote tracking refs from host repo for this sandbox
+    // This includes sandbox/<name> and sandbox/*@<name>
+    let output = Command::new("git")
         .current_dir(&info.repo_root)
-        .args(["update-ref", "-d", &format!("refs/remotes/sandbox/{name}")])
-        .status();
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/sandbox/",
+        ])
+        .output();
+
+    if let Ok(output) = output {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let name = &info.name;
+        for refname in stdout.lines() {
+            // Extract the branch part after refs/remotes/sandbox/
+            let branch = refname.strip_prefix("refs/remotes/sandbox/").unwrap_or("");
+            // Match <name> or *@<name>
+            let is_primary = branch == name.as_str();
+            let is_at_sandbox = branch.ends_with(&format!("@{name}"));
+            if is_primary || is_at_sandbox {
+                let _ = Command::new("git")
+                    .current_dir(&info.repo_root)
+                    .args(["update-ref", "-d", refname])
+                    .status();
+            }
+        }
+    }
 
     // Remove sandbox directory (includes overlay upper/work dirs)
     if info.sandbox_dir.exists() {
@@ -752,6 +798,23 @@ pub fn ensure_container_running_internal(
     Ok(())
 }
 
+/// Validate that a sandbox name is legal.
+///
+/// Sandbox names must not contain `/` (breaks ref paths) or `@` (reserved for
+/// branch@sandbox notation).
+fn validate_sandbox_name(name: &str) -> Result<()> {
+    if name.contains('/') {
+        bail!("Sandbox name cannot contain '/': {}", name);
+    }
+    if name.contains('@') {
+        bail!("Sandbox name cannot contain '@': {}", name);
+    }
+    if name.is_empty() {
+        bail!("Sandbox name cannot be empty");
+    }
+    Ok(())
+}
+
 /// Ensure a sandbox is set up and ready to use.
 ///
 /// Sets up the meta.git bare repository and records the current HEAD commit.
@@ -761,6 +824,9 @@ pub fn ensure_sandbox(
     name: &str,
     config: &crate::sandbox_config::SandboxConfig,
 ) -> Result<SandboxInfo> {
+    // Validate sandbox name before proceeding
+    validate_sandbox_name(name)?;
+
     // Ensure meta.git bare repository exists (shared across all sandboxes for this repo)
     // We need to do this first so we can get the HEAD commit from meta.git
     let meta_git_dir = get_meta_git_dir(repo_root)?;

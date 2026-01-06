@@ -25,10 +25,10 @@ fn test_git_http_endpoint_available() {
         stderr
     );
 
-    // Should see at least the master branch
+    // Should see at least the host/master or host/main branch (host branches are namespaced)
     assert!(
-        stdout.contains("refs/heads/master") || stdout.contains("refs/heads/main"),
-        "Expected to see master or main branch in output.\nstdout: {}\nstderr: {}",
+        stdout.contains("refs/heads/host/master") || stdout.contains("refs/heads/host/main"),
+        "Expected to see host/master or host/main branch in output.\nstdout: {}\nstderr: {}",
         stdout,
         stderr
     );
@@ -64,11 +64,13 @@ fn test_git_http_fetch() {
 }
 
 /// Test that pushing to the sandbox's own branch works via HTTP.
+/// Sandboxes must push to `sandbox/<sandbox-name>` namespace.
 #[test]
 fn test_git_http_push_own_branch() {
     let fixture = SandboxFixture::new("test-git-http-push");
 
-    let branch_name = &fixture.name;
+    let sandbox_name = &fixture.name;
+    // Push to sandbox/<sandbox-name> (the correct namespace)
     let output = fixture.run(&[
         "sh",
         "-c",
@@ -79,7 +81,7 @@ fn test_git_http_push_own_branch() {
             echo 'test content' > test-file.txt
             git add test-file.txt
             git commit -m "Test commit"
-            git push sandbox HEAD:refs/heads/{branch_name}
+            git push sandbox HEAD:refs/heads/sandbox/{sandbox_name}
             "#
         ),
     ]);
@@ -89,13 +91,14 @@ fn test_git_http_push_own_branch() {
 
     assert!(
         output.status.success(),
-        "git push to own branch should succeed.\nstdout: {}\nstderr: {}",
+        "git push to own sandbox branch should succeed.\nstdout: {}\nstderr: {}",
         stdout,
         stderr
     );
 }
 
 /// Test that pushing to master/main is rejected via HTTP.
+/// Sandboxes can only push to their own namespace.
 #[test]
 fn test_git_http_push_master_rejected() {
     let fixture = SandboxFixture::new("test-git-http-reject");
@@ -133,11 +136,11 @@ fn test_git_http_push_master_rejected() {
     );
 
     // The error message should be in stdout (because we redirected stderr to stdout)
-    // or stderr
+    // or stderr - error message mentions the sandbox namespace
     let combined = format!("{stdout}{stderr}");
     assert!(
-        combined.contains("Only allowed to push to branch"),
-        "Expected rejection message.\nOutput: {}",
+        combined.contains("Only allowed to push to sandbox/"),
+        "Expected rejection message mentioning sandbox namespace.\nOutput: {}",
         combined
     );
 }

@@ -452,6 +452,7 @@ pub fn build_sandbox_ready_image(
 /// - Sets the sandbox remote URL to the git HTTP server
 /// - Fetches the required commit from meta.git
 /// - Creates and checks out the sandbox branch
+/// - Adds a `host` remote for fetching host branches
 /// - Adds the post-commit hook for automatic sync
 ///
 /// # Arguments
@@ -475,13 +476,18 @@ pub fn initialize_sandbox_checkout(
     // Build a shell script to run inside the container
     // This script:
     // 1. Sets the sandbox remote URL
-    // 2. Fetches the required commit
-    // 3. Creates and checks out the sandbox branch (only if it doesn't exist)
-    // 4. Sets up the post-commit hook
+    // 2. Adds a `host` remote for fetching host branches
+    // 3. Fetches the required commit
+    // 4. Creates and checks out the sandbox branch (only if it doesn't exist)
+    // 5. Sets up the post-commit hook
     //
     // Note: We use printf for the hook to avoid heredoc quoting issues.
     // Note: We only create the branch on first initialization. On resume,
     //       the branch already exists and we preserve the user's work.
+    //
+    // The post-commit hook computes the correct target ref based on branch name:
+    // - If branch = sandbox_name: push to sandbox/<sandbox_name>
+    // - Otherwise: push to sandbox/<branch>@<sandbox_name>
     let checkout_path = checkout_path.display();
     let script = formatdoc! {r#"
         set -e
@@ -489,6 +495,15 @@ pub fn initialize_sandbox_checkout(
 
         # Set the sandbox remote URL
         git remote set-url sandbox "{git_http_url}"
+
+        # Add host remote for fetching host branches (if it doesn't exist)
+        if ! git remote get-url host >/dev/null 2>&1; then
+            git remote add host "{git_http_url}"
+        else
+            git remote set-url host "{git_http_url}"
+        fi
+        # Configure fetch refspec for host remote to get host/* branches
+        git config remote.host.fetch "+refs/heads/host/*:refs/remotes/host/*"
 
         # Fetch the required commit (it may be newer than what's in the image)
         git fetch sandbox
@@ -503,8 +518,21 @@ pub fn initialize_sandbox_checkout(
         fi
 
         # Set up the post-commit hook for automatic sync
+        # The hook computes the correct target ref based on branch name:
+        # - Primary branch (name = sandbox_name) -> sandbox/<sandbox_name>
+        # - Other branches -> sandbox/<branch>@<sandbox_name>
         mkdir -p .git/hooks
-        printf '#!/bin/sh\ngit push --force --quiet "{git_http_url}" "HEAD:refs/heads/{sandbox_name}" 2>/dev/null || true\n' > .git/hooks/post-commit
+        cat > .git/hooks/post-commit << 'HOOK_EOF'
+#!/bin/sh
+branch=$(git symbolic-ref --short HEAD 2>/dev/null) || exit 0
+sandbox_name="{sandbox_name}"
+if [ "$branch" = "$sandbox_name" ]; then
+    target="sandbox/$sandbox_name"
+else
+    target="sandbox/$branch@$sandbox_name"
+fi
+git push --force --quiet "{git_http_url}" "HEAD:refs/heads/$target" 2>/dev/null || true
+HOOK_EOF
         chmod +x .git/hooks/post-commit
     "#};
 

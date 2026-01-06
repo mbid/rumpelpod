@@ -155,16 +155,18 @@ fn get_primary_branch(repo: &Path) -> Result<String> {
 /// Sync the primary branch (main/master) from host repo to meta.git.
 /// This is a ONE-WAY sync: host -> meta only.
 /// Uses force-update (+) because host always has precedence over meta.git.
+/// Branches are stored under the `host/` namespace in meta.git.
 pub fn sync_main_to_meta(host_repo: &Path, meta_git_dir: &Path) -> Result<()> {
     let branch = get_primary_branch(host_repo)?;
 
-    // Force-fetch the branch from host into meta.git (+ prefix forces non-fast-forward updates)
+    // Force-fetch the branch from host into meta.git under host/ namespace
+    // (+ prefix forces non-fast-forward updates)
     let status = Command::new("git")
         .current_dir(meta_git_dir)
         .args([
             "fetch",
             &host_repo.to_string_lossy(),
-            &format!("+{branch}:refs/heads/{branch}"),
+            &format!("+{branch}:refs/heads/host/{branch}"),
         ])
         .status()
         .context("Failed to fetch main branch to meta.git")?;
@@ -200,22 +202,23 @@ pub fn sync_sandbox_to_meta(meta_git_dir: &Path, sandbox_repo: &Path, branch: &s
     Ok(())
 }
 
-/// Sync a branch from meta.git to the host repo's remote tracking refs.
-/// Updates refs/remotes/sandbox/<branch> in the host repo.
-pub fn sync_meta_to_host(host_repo: &Path, meta_git_dir: &Path, branch: &str) -> Result<()> {
-    // Fetch the specific branch from meta.git and update the remote tracking ref
+/// Sync all sandbox/* branches from meta.git to the host repo's remote tracking refs.
+/// Updates refs/remotes/sandbox/* in the host repo (handles both `sandbox/foo` and
+/// `sandbox/bar@foo` style branch names).
+pub fn sync_meta_to_host(host_repo: &Path, meta_git_dir: &Path) -> Result<()> {
+    // Fetch all sandbox/* refs from meta.git
     let status = Command::new("git")
         .current_dir(host_repo)
         .args([
             "fetch",
             &meta_git_dir.to_string_lossy(),
-            &format!("+refs/heads/{branch}:refs/remotes/sandbox/{branch}"),
+            "+refs/heads/sandbox/*:refs/remotes/sandbox/*",
         ])
         .status()
-        .context("Failed to sync meta.git branch to host")?;
+        .context("Failed to sync meta.git sandbox branches to host")?;
 
     if !status.success() {
-        bail!("Failed to sync branch {} from meta.git to host", branch);
+        bail!("Failed to sync sandbox branches from meta.git to host");
     }
 
     Ok(())
@@ -268,8 +271,26 @@ pub fn sync_meta_to_sandbox(
 }
 
 /// Setup the "sandbox" remote in the host repo pointing to meta.git.
+/// Configures the fetch refspec to track all sandbox/* branches.
 pub fn setup_host_sandbox_remote(host_repo: &Path, meta_git_dir: &Path) -> Result<()> {
-    add_remote(host_repo, "sandbox", meta_git_dir)
+    add_remote(host_repo, "sandbox", meta_git_dir)?;
+
+    // Configure fetch refspec to get all sandbox/* refs
+    let status = Command::new("git")
+        .current_dir(host_repo)
+        .args([
+            "config",
+            "remote.sandbox.fetch",
+            "+refs/heads/sandbox/*:refs/remotes/sandbox/*",
+        ])
+        .status()
+        .context("Failed to configure sandbox remote fetch refspec")?;
+
+    if !status.success() {
+        bail!("Failed to configure sandbox remote fetch refspec");
+    }
+
+    Ok(())
 }
 
 // --- Git OID helpers using git2 ---
@@ -306,8 +327,7 @@ fn get_remote_ref_oid(repo_path: &Path, remote: &str, branch: &str) -> Option<Oi
 pub fn run_full_sync(info: &SandboxInfo) -> Result<()> {
     sync_main_to_meta(&info.repo_root, &info.meta_git_dir)
         .context("syncing main branch to meta.git")?;
-    sync_meta_to_host(&info.repo_root, &info.meta_git_dir, &info.name)
-        .context("syncing meta.git to host")?;
+    sync_meta_to_host(&info.repo_root, &info.meta_git_dir).context("syncing meta.git to host")?;
     Ok(())
 }
 
@@ -315,13 +335,18 @@ pub fn run_full_sync(info: &SandboxInfo) -> Result<()> {
 fn needs_main_to_meta_sync(info: &SandboxInfo) -> bool {
     let primary_branch = get_primary_branch(&info.repo_root).unwrap_or_else(|_| "main".to_string());
     let host_oid = get_branch_oid(&info.repo_root, &primary_branch);
-    let meta_oid = get_branch_oid(&info.meta_git_dir, &primary_branch);
+    // In meta.git, host branches are stored under host/<branch>
+    let meta_branch = format!("host/{}", primary_branch);
+    let meta_oid = get_branch_oid(&info.meta_git_dir, &meta_branch);
     host_oid != meta_oid
 }
 
 /// Check if sync from meta.git to host remote refs is needed.
+/// Check if sync from meta.git sandbox branches to host remote refs is needed.
+/// Checks the primary sandbox branch (sandbox/<name>).
 fn needs_meta_to_host_sync(info: &SandboxInfo) -> bool {
-    let meta_oid = get_branch_oid(&info.meta_git_dir, &info.name);
+    let sandbox_branch = format!("sandbox/{}", info.name);
+    let meta_oid = get_branch_oid(&info.meta_git_dir, &sandbox_branch);
     let host_remote_oid = get_remote_ref_oid(&info.repo_root, "sandbox", &info.name);
     meta_oid != host_remote_oid
 }

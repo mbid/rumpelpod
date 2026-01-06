@@ -90,6 +90,7 @@ fn test_sync_with_history_rewrite() {
 
 /// Test that host-side history rewrite (amend on master) syncs correctly to meta.git.
 /// This verifies that sync_main_to_meta uses force-update.
+/// Host branches are stored under `host/` namespace in meta.git.
 #[test]
 fn test_host_history_rewrite_syncs_to_sandbox() {
     let repo = TestRepo::init();
@@ -106,10 +107,14 @@ fn test_host_history_rewrite_syncs_to_sandbox() {
     };
 
     // Create sandbox and verify initial state
-    let output = run_in_sandbox(sandbox_name, &["git", "rev-parse", "sandbox/master"]);
+    // First fetch from host remote to get host/* branches, then check host/master
+    let output = run_in_sandbox(
+        sandbox_name,
+        &["sh", "-c", "git fetch host && git rev-parse host/master"],
+    );
     assert!(
         output.status.success(),
-        "Failed to get sandbox/master: {}",
+        "Failed to get host/master: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let initial_master = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -128,8 +133,12 @@ fn test_host_history_rewrite_syncs_to_sandbox() {
     );
 
     // Create a new sandbox - this triggers sync_main_to_meta
+    // Fetch from host remote to get the updated host/master
     let sandbox_name_2 = "test-host-rewrite-2";
-    let output = run_in_sandbox(sandbox_name_2, &["git", "rev-parse", "sandbox/master"]);
+    let output = run_in_sandbox(
+        sandbox_name_2,
+        &["sh", "-c", "git fetch host && git rev-parse host/master"],
+    );
     assert!(
         output.status.success(),
         "Failed to create second sandbox after host history rewrite: {}",

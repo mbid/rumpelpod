@@ -101,24 +101,39 @@ impl Drop for GitHttpServer {
     }
 }
 
-/// Setup the update hook in meta.git to restrict pushes to the allowed branch.
-fn setup_update_hook(meta_git_dir: &Path, allowed_branch: &str) -> Result<()> {
+/// Setup the update hook in meta.git to restrict pushes to allowed branches.
+///
+/// Sandboxes can push to:
+/// - `sandbox/<sandbox-name>` - The primary branch (when branch name = sandbox name)
+/// - `sandbox/<branch>@<sandbox-name>` - Other branches at this sandbox
+///
+/// All `host/*` branches are read-only from sandbox perspective.
+fn setup_update_hook(meta_git_dir: &Path, sandbox_name: &str) -> Result<()> {
     let hooks_dir = meta_git_dir.join("hooks");
     std::fs::create_dir_all(&hooks_dir)?;
 
     let hook_path = hooks_dir.join("update");
+    // The hook allows:
+    // 1. refs/heads/sandbox/<sandbox_name> - primary branch
+    // 2. refs/heads/sandbox/*@<sandbox_name> - other branches at this sandbox
     let hook_script = format!(
         r#"#!/bin/bash
-# Auto-generated hook to restrict pushes to sandbox branch
+# Auto-generated hook to restrict pushes to sandbox namespace
 refname="$1"
-branch="${{refname#refs/heads/}}"
-allowed_branch="{allowed_branch}"
+sandbox_name="{sandbox_name}"
 
-if [ "$branch" != "$allowed_branch" ]; then
-    echo "error: Push rejected. Only allowed to push to branch '$allowed_branch'" >&2
-    exit 1
+# Allow primary sandbox branch: sandbox/<sandbox-name>
+if [ "$refname" = "refs/heads/sandbox/$sandbox_name" ]; then
+    exit 0
 fi
-exit 0
+
+# Allow other branches at this sandbox: sandbox/*@<sandbox-name>
+if [[ "$refname" == refs/heads/sandbox/*@${{sandbox_name}} ]]; then
+    exit 0
+fi
+
+echo "error: Push rejected. Only allowed to push to sandbox/$sandbox_name or sandbox/*@$sandbox_name" >&2
+exit 1
 "#
     );
 
