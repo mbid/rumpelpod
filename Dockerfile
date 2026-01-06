@@ -1,18 +1,22 @@
 FROM debian:trixie
 
-RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
-    build-essential \
-    make \
-    cmake \
-    pkg-config \
-    git \
-    curl \
-    wget \
-    ca-certificates \
-    fish \
-    sudo \
-    locales \
-    gnupg
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install --yes \
+        build-essential \
+        make \
+        cmake \
+        pkg-config \
+        git \
+        curl \
+        wget \
+        ca-certificates \
+        fish \
+        sudo \
+        locales \
+        gnupg \
+        docker.io \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.appimage && \
     chmod +x nvim-linux-x86_64.appimage && \
@@ -22,31 +26,7 @@ RUN curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim-linu
     ln -s /opt/nvim/usr/bin/nvim /usr/local/bin/vim && \
     rm nvim-linux-x86_64.appimage
 
-# Install Node.js (required for Claude Code)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-
-# Install Claude Code
-RUN npm install -g @anthropic-ai/claude-code
-
-# Install Docker with older containerd 1.6.x that has runc 1.1.x (compatible with Sysbox)
-# The newer runc 1.3.x has procfs security checks that break Sysbox's /proc virtualization
-RUN install -m 0755 -d /etc/apt/keyrings \
-    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
-    && chmod a+r /etc/apt/keyrings/docker.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list \
-    && apt-get update \
-    && apt-get install -y \
-        containerd.io=1.6.33-1 \
-        docker-ce=5:28.1.1-1~debian.12~bookworm \
-        docker-ce-cli=5:28.1.1-1~debian.12~bookworm \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Pin containerd and docker-ce to prevent upgrades
-RUN echo 'Package: containerd.io\nPin: version 1.6.*\nPin-Priority: 1001\n\nPackage: docker-ce*\nPin: version 5:28.1.*\nPin-Priority: 1001' > /etc/apt/preferences.d/docker
-
-# Create entrypoint that starts dockerd in background (for sysbox-runc runtime)
+# Create entrypoint that starts dockerd in background.
 RUN printf '#!/bin/bash\n\
 # Start dockerd in background if not already running\n\
 if ! pgrep -x dockerd > /dev/null; then\n\
@@ -72,15 +52,10 @@ RUN groupadd -g ${GROUP_ID} ${USER_NAME} || groupadd ${USER_NAME} && \
     echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     usermod -aG docker ${USER_NAME}
 
-# Switch to the created user
 USER ${USER_NAME}
 WORKDIR /home/${USER_NAME}
 
-# Install Rust via rustup for the user
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-# Add cargo to PATH
 ENV PATH="/home/${USER_NAME}/.cargo/bin:${PATH}"
 
-# Use entrypoint that starts dockerd in background (for sysbox-runc runtime)
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
