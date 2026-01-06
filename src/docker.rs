@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use indoc::formatdoc;
 use log::{debug, info};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -294,104 +295,89 @@ pub fn remove_network(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build a sandbox image with the repository checkout baked into the image layer.
+/// Build a sandbox-ready image with the repository checkout baked in.
 ///
-/// This creates a new image based on the provided base image, with the repository
-/// cloned from meta.git and checked out to the specified commit on a branch named
-/// after the sandbox.
+/// This creates an image based on the provided base image, with the repository
+/// cloned from meta.git. The checkout has:
+/// - All branches from meta.git as remote-tracking branches (sandbox/*)
+/// - No local branches
+/// - A "sandbox" remote with a NULL URL (to be set at container start)
+///
+/// This image can be shared across multiple sandboxes for the same project.
+/// Per-sandbox initialization (branch creation, hook setup) happens at container start.
 ///
 /// # Arguments
 /// * `base_image` - The base Docker image tag to build from
 /// * `meta_git_path` - Path to the meta.git bare repository on the host
 /// * `checkout_path` - Path inside the container where the repo should be cloned
-/// * `sandbox_name` - Name of the sandbox (used for branch name)
-/// * `commit_sha` - The commit SHA to checkout
-/// * `git_http_url` - URL of the git HTTP server for the sandbox remote
-pub fn build_sandbox_image(
+/// * `uid` - User ID for file ownership
+/// * `gid` - Group ID for file ownership
+pub fn build_sandbox_ready_image(
     base_image: &str,
     meta_git_path: &Path,
     checkout_path: &Path,
-    sandbox_name: &str,
-    commit_sha: &str,
-    git_http_url: &str,
     uid: u32,
     gid: u32,
 ) -> Result<String> {
-    // Generate a deterministic image tag based on inputs
-    // Include uid/gid so different users get separate images with correct ownership
+    // Generate a deterministic image tag based on inputs.
+    // Note: We intentionally don't include the meta.git refs in the hash.
+    // The image contains the checkout structure but new commits/branches
+    // are fetched at container initialization time.
     let mut hasher = Sha256::new();
     hasher.update(base_image.as_bytes());
-    hasher.update(commit_sha.as_bytes());
-    hasher.update(sandbox_name.as_bytes());
     hasher.update(checkout_path.to_string_lossy().as_bytes());
     hasher.update(uid.to_le_bytes());
     hasher.update(gid.to_le_bytes());
     let hash = hex::encode(&hasher.finalize()[..16]);
-    let image_tag = format!("sandbox-checkout:{}", hash);
+    let image_tag = format!("sandbox-ready:{}", hash);
 
     // Check if image already exists
     if image_exists(&image_tag)? {
-        debug!("Using existing sandbox image: {}", image_tag);
+        debug!("Using existing sandbox-ready image: {}", image_tag);
         return Ok(image_tag);
     }
 
-    info!("Building sandbox image with checkout: {}", image_tag);
+    info!("Building sandbox-ready image: {}", image_tag);
 
     // Create a temporary directory for the Dockerfile
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory for Dockerfile")?;
     let dockerfile_path = temp_dir.path().join("Dockerfile");
 
     // Write the Dockerfile
-    // We use BuildKit's RUN --mount=type=bind to mount meta.git read-only during the clone
-    // The post-commit hook is written using printf with escaped newlines to avoid Dockerfile parsing issues
+    // We clone from meta.git, set up remote-tracking branches, then:
+    // - Detach HEAD (so we can delete all local branches)
+    // - Delete all local branches
+    // - Rename origin to sandbox
+    // - Set sandbox remote URL to an invalid placeholder (will be set at container start)
     //
-    // TODO: This USER instruction assumes the base image runs as root, which is a breaking change
-    // for images that configure a non-root USER. To fix properly, we should use `docker inspect`
-    // to query the base image's configured USER and only add this instruction if needed.
-    //
-    // We use GIT_CONFIG_GLOBAL to point to a config with safe.directory='*' during clone/fetch,
-    // bypassing ownership checks for /meta.git which has different ownership than our user.
-    //
-    // Note: We add origin pointing to /meta.git for the initial clone, then switch to HTTP remote.
-    // We fetch the refs from meta.git before switching so that sandbox/master etc. are available.
-    let dockerfile_content = format!(
-        r##"# syntax=docker/dockerfile:1
-FROM {base_image}
-USER {uid}:{gid}
-# Clone the repository from the mounted meta.git (read-only bind mount during build)
-RUN --mount=type=bind,from=metagit,source=/,target=/meta.git,readonly \
-    export GIT_CONFIG_GLOBAL=/tmp/gitconfig && \
-    printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_GLOBAL" && \
-    git clone /meta.git {checkout_path} && \
-    cd {checkout_path} && \
-    git checkout {commit_sha} && \
-    git checkout -b {sandbox_name} && \
-    (git branch | grep -v '{sandbox_name}' | xargs -r git branch -D 2>/dev/null || true) && \
-    git remote rename origin sandbox && \
-    git fetch sandbox && \
-    git remote set-url sandbox {git_http_url} && \
-    rm "$GIT_CONFIG_GLOBAL" && \
-    git config uploadpack.allowAnySHA1InWant true && \
-    mkdir -p .git/hooks && \
-    printf '#!/bin/sh\ngit push --force --quiet "{git_http_url}" "HEAD:refs/heads/{sandbox_name}" 2>/dev/null || true\n' > .git/hooks/post-commit && \
-    chmod +x .git/hooks/post-commit
-WORKDIR {checkout_path}
-"##,
-        base_image = base_image,
-        checkout_path = checkout_path.display(),
-        commit_sha = commit_sha,
-        sandbox_name = sandbox_name,
-        git_http_url = git_http_url,
-        uid = uid,
-        gid = gid,
-    );
+    // We use GIT_CONFIG_GLOBAL to bypass ownership checks for /meta.git during build.
+    let checkout_path = checkout_path.display();
+    let dockerfile_content = formatdoc! {r##"
+        # syntax=docker/dockerfile:1
+        FROM {base_image}
+        USER {uid}:{gid}
+        # Clone the repository from the mounted meta.git (read-only bind mount during build)
+        RUN --mount=type=bind,from=metagit,source=/,target=/meta.git,readonly \
+            export GIT_CONFIG_GLOBAL=/tmp/gitconfig && \
+            printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_GLOBAL" && \
+            git clone /meta.git {checkout_path} && \
+            cd {checkout_path} && \
+            git remote rename origin sandbox && \
+            git fetch sandbox && \
+            git remote set-url sandbox "file:///dev/null" && \
+            git checkout --detach HEAD && \
+            for branch in $(git branch | sed 's/^[* ]*//'); do \
+                git branch -D "$branch" 2>/dev/null || true; \
+            done && \
+            rm "$GIT_CONFIG_GLOBAL" && \
+            git config uploadpack.allowAnySHA1InWant true
+        WORKDIR {checkout_path}
+    "##};
 
     std::fs::write(&dockerfile_path, dockerfile_content)
-        .context("Failed to write Dockerfile for sandbox image")?;
+        .context("Failed to write Dockerfile for sandbox-ready image")?;
 
     // Build the image with meta.git as a named build context.
-    // BuildKit requires relative paths for --build-context, so we run docker from
-    // the parent directory of meta.git and use a relative path for it.
     let meta_git_parent = meta_git_path
         .parent()
         .context("meta_git_path has no parent directory")?;
@@ -409,19 +395,98 @@ WORKDIR {checkout_path}
             &dockerfile_path.to_string_lossy(),
             "-t",
             &image_tag,
-            // Provide meta.git as a named build context that can be used in RUN --mount
             "--build-context",
             &format!("metagit={}", meta_git_name),
-            // Use the temp directory as the main build context
             &temp_dir.path().to_string_lossy(),
         ])
         .output()
-        .context("Failed to run docker build for sandbox image")?;
+        .context("Failed to run docker build for sandbox-ready image")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to build sandbox image: {}", stderr);
+        bail!("Failed to build sandbox-ready image: {}", stderr);
     }
 
     Ok(image_tag)
+}
+
+/// Initialize the sandbox checkout inside a running container.
+///
+/// This performs per-sandbox setup that couldn't be done at image build time:
+/// - Sets the sandbox remote URL to the git HTTP server
+/// - Fetches the required commit from meta.git
+/// - Creates and checks out the sandbox branch
+/// - Adds the post-commit hook for automatic sync
+///
+/// # Arguments
+/// * `container_name` - Name of the running container
+/// * `checkout_path` - Path to the checkout inside the container
+/// * `sandbox_name` - Name of the sandbox (used for branch name)
+/// * `commit_sha` - The commit SHA to checkout
+/// * `git_http_url` - URL of the git HTTP server for the sandbox remote
+pub fn initialize_sandbox_checkout(
+    container_name: &str,
+    checkout_path: &Path,
+    sandbox_name: &str,
+    commit_sha: &str,
+    git_http_url: &str,
+) -> Result<()> {
+    info!(
+        "Initializing sandbox checkout in container '{}' for branch '{}'",
+        container_name, sandbox_name
+    );
+
+    // Build a shell script to run inside the container
+    // This script:
+    // 1. Sets the sandbox remote URL
+    // 2. Fetches the required commit
+    // 3. Creates and checks out the sandbox branch (only if it doesn't exist)
+    // 4. Sets up the post-commit hook
+    //
+    // Note: We use printf for the hook to avoid heredoc quoting issues.
+    // Note: We only create the branch on first initialization. On resume,
+    //       the branch already exists and we preserve the user's work.
+    let checkout_path = checkout_path.display();
+    let script = formatdoc! {r#"
+        set -e
+        cd {checkout_path}
+
+        # Set the sandbox remote URL
+        git remote set-url sandbox "{git_http_url}"
+
+        # Fetch the required commit (it may be newer than what's in the image)
+        git fetch sandbox
+
+        # Create and checkout the sandbox branch only if it doesn't exist yet
+        # (This preserves user's work when resuming a stopped container)
+        if ! git show-ref --verify --quiet "refs/heads/{sandbox_name}"; then
+            git checkout -B "{sandbox_name}" "{commit_sha}"
+        else
+            # Branch exists, just make sure we're on it
+            git checkout "{sandbox_name}"
+        fi
+
+        # Set up the post-commit hook for automatic sync
+        mkdir -p .git/hooks
+        printf '#!/bin/sh\ngit push --force --quiet "{git_http_url}" "HEAD:refs/heads/{sandbox_name}" 2>/dev/null || true\n' > .git/hooks/post-commit
+        chmod +x .git/hooks/post-commit
+    "#};
+
+    let output = Command::new("docker")
+        .args(["exec", container_name, "sh", "-c", &script])
+        .output()
+        .context("Failed to initialize sandbox checkout")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        bail!(
+            "Failed to initialize sandbox checkout:\nstdout: {}\nstderr: {}",
+            stdout,
+            stderr
+        );
+    }
+
+    debug!("Sandbox checkout initialized successfully");
+    Ok(())
 }

@@ -135,6 +135,7 @@ pub enum WebSearchResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 pub enum WebFetchResult {
     WebFetchResult {
         url: String,

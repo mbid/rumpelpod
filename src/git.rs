@@ -283,8 +283,6 @@ pub fn setup_host_sandbox_remote(host_repo: &Path, meta_git_dir: &Path) -> Resul
     add_remote(host_repo, "sandbox", meta_git_dir)
 }
 
-/// Setup remotes for a sandbox repo.
-/// Renames the "origin" remote (created by git clone) to "sandbox".
 // --- Git OID helpers using git2 ---
 
 /// Get the OID of a reference in a repository.

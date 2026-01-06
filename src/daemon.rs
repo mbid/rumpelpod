@@ -269,24 +269,24 @@ fn handle_ensure_sandbox(
             crate::git_http::GIT_HTTP_PORT
         );
 
-        // Build the sandbox image with the repository checkout baked in
-        let sandbox_image_tag = match docker::build_sandbox_image(
+        // Build the sandbox-ready image with the checkout (shared across sandboxes)
+        let sandbox_ready_tag = match docker::build_sandbox_ready_image(
             &params.image_tag,
             &info.meta_git_dir,
             &info.repo_root,
-            sandbox_name,
-            &info.head_commit,
-            &git_http_url,
             user_info.uid,
             user_info.gid,
         ) {
             Ok(tag) => tag,
             Err(e) => {
-                error!("Client {}: failed to build sandbox image: {}", client_id, e);
+                error!(
+                    "Client {}: failed to build sandbox-ready image: {}",
+                    client_id, e
+                );
                 let _ = server::send_error(
                     &mut stream,
                     -32000,
-                    &format!("Failed to build sandbox image: {}", e),
+                    &format!("Failed to build sandbox-ready image: {}", e),
                 );
                 return;
             }
@@ -295,7 +295,7 @@ fn handle_ensure_sandbox(
         // Start the container connected to the sandbox's network
         if let Err(e) = start_container(
             &info,
-            &sandbox_image_tag,
+            &sandbox_ready_tag,
             &user_info,
             runtime,
             overlay_mode,
@@ -307,6 +307,28 @@ fn handle_ensure_sandbox(
                 -32000,
                 &format!("Failed to start container: {}", e),
             );
+            return;
+        }
+
+        // Initialize the sandbox checkout (set up remote, branch, hook)
+        if let Err(e) = docker::initialize_sandbox_checkout(
+            &info.container_name,
+            &info.repo_root,
+            sandbox_name,
+            &info.head_commit,
+            &git_http_url,
+        ) {
+            error!(
+                "Client {}: failed to initialize sandbox checkout: {}",
+                client_id, e
+            );
+            let _ = server::send_error(
+                &mut stream,
+                -32000,
+                &format!("Failed to initialize sandbox checkout: {}", e),
+            );
+            // Clean up the container since initialization failed
+            let _ = docker::remove_container(&info.container_name);
             return;
         }
 
