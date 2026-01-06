@@ -101,7 +101,7 @@ fn test_host_history_rewrite_syncs_to_sandbox() {
     let run_in_sandbox = |name: &str, cmd: &[&str]| {
         let mut args = vec!["enter", name, "--runtime", "runc", "--"];
         args.extend(cmd);
-        run_sandbox_in_with_socket(&repo.dir, &daemon.socket_path, &args)
+        run_sandbox_in_with_socket(&repo.dir, &daemon.socket_path, &daemon.state_dir, &args)
     };
 
     // Create sandbox and verify initial state
@@ -142,6 +142,16 @@ fn test_host_history_rewrite_syncs_to_sandbox() {
     );
 
     // Clean up
-    let _ = run_sandbox_in_with_socket(&repo.dir, &daemon.socket_path, &["delete", sandbox_name]);
-    let _ = run_sandbox_in_with_socket(&repo.dir, &daemon.socket_path, &["delete", sandbox_name_2]);
+    let _ = run_sandbox_in_with_socket(
+        &repo.dir,
+        &daemon.socket_path,
+        &daemon.state_dir,
+        &["delete", sandbox_name],
+    );
+    let _ = run_sandbox_in_with_socket(
+        &repo.dir,
+        &daemon.socket_path,
+        &daemon.state_dir,
+        &["delete", sandbox_name_2],
+    );
 }

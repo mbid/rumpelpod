@@ -87,6 +87,7 @@ fn test_enter_passthrough_env() {
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&fixture.repo.dir)
         .env("SANDBOX_DAEMON_SOCKET", &fixture.daemon.socket_path)
+        .env("XDG_STATE_HOME", &fixture.daemon.state_dir)
         .env("MY_TEST_VAR", env_value)
         .args([
             "enter",
@@ -127,6 +128,7 @@ fn test_enter_passthrough_env() {
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&fixture.repo.dir)
         .env("SANDBOX_DAEMON_SOCKET", &fixture.daemon.socket_path)
+        .env("XDG_STATE_HOME", &fixture.daemon.state_dir)
         .args([
             "enter",
             &fixture.name,
@@ -163,6 +165,7 @@ fn test_enter_passthrough_env() {
     let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(&fixture.repo.dir)
         .env("SANDBOX_DAEMON_SOCKET", &fixture.daemon.socket_path)
+        .env("XDG_STATE_HOME", &fixture.daemon.state_dir)
         .env("VAR_ONE", "value1")
         .env("VAR_TWO", "value2")
         .args([

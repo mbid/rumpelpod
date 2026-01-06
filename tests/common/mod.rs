@@ -22,24 +22,32 @@ const DEFAULT_SANDBOX_CONFIG: &str = indoc! {r#"
 /// Environment variable used to configure the daemon socket path.
 const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
 
+/// Environment variable for XDG state directory (where sandbox data is stored).
+const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
+
 /// A test daemon that manages sandboxes for integration tests.
-/// Each test gets its own daemon with an isolated socket to enable parallel execution.
+/// Each test gets its own daemon with an isolated socket and state directory
+/// to enable parallel execution without interference.
 /// On drop, the daemon process is terminated.
 pub struct TestDaemon {
     pub socket_path: PathBuf,
+    /// Isolated state directory for this test's sandbox data.
+    pub state_dir: PathBuf,
     process: Child,
     #[allow(dead_code)]
     temp_dir: tempfile::TempDir,
 }
 
 impl TestDaemon {
-    /// Start a new test daemon with an isolated socket.
+    /// Start a new test daemon with an isolated socket and state directory.
     pub fn start() -> Self {
         let temp_dir = tempfile::tempdir().expect("Failed to create temp directory");
         let socket_path = temp_dir.path().join("sandbox.sock");
+        let state_dir = temp_dir.path().join("state");
 
         let process = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
             .env(SOCKET_PATH_ENV, &socket_path)
+            .env(XDG_STATE_HOME_ENV, &state_dir)
             .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -63,6 +71,7 @@ impl TestDaemon {
 
         TestDaemon {
             socket_path,
+            state_dir,
             process,
             temp_dir,
         }
@@ -172,11 +181,13 @@ pub fn run_git(dir: &PathBuf, args: &[&str]) -> Output {
 pub fn run_sandbox_in_with_socket(
     working_dir: &PathBuf,
     socket_path: &PathBuf,
+    state_dir: &PathBuf,
     args: &[&str],
 ) -> Output {
     Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
         .current_dir(working_dir)
         .env(SOCKET_PATH_ENV, socket_path)
+        .env(XDG_STATE_HOME_ENV, state_dir)
         .args(args)
         .output()
         .expect("Failed to run sandbox command")
@@ -271,7 +282,12 @@ impl SandboxFixture {
 
     /// Run the sandbox binary with the given arguments.
     pub fn run_sandbox(&self, args: &[&str]) -> Output {
-        run_sandbox_in_with_socket(&self.repo.dir, &self.daemon.socket_path, args)
+        run_sandbox_in_with_socket(
+            &self.repo.dir,
+            &self.daemon.socket_path,
+            &self.daemon.state_dir,
+            args,
+        )
     }
 
     fn run_in_sandbox(&self, command: &[&str]) -> Output {
@@ -311,6 +327,7 @@ impl Drop for SandboxFixture {
         let _ = run_sandbox_in_with_socket(
             &self.repo.dir,
             &self.daemon.socket_path,
+            &self.daemon.state_dir,
             &["delete", &self.name],
         );
         // daemon is dropped automatically after this, killing the process
@@ -351,6 +368,7 @@ impl<'a> AgentBuilder<'a> {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
         cmd.current_dir(&self.fixture.repo.dir);
         cmd.env(SOCKET_PATH_ENV, &self.fixture.daemon.socket_path);
+        cmd.env(XDG_STATE_HOME_ENV, &self.fixture.daemon.state_dir);
         cmd.args([
             "agent",
             &self.fixture.name,
