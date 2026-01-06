@@ -269,6 +269,35 @@ fn handle_ensure_sandbox(
             crate::git_http::GIT_HTTP_PORT
         );
 
+        // Resolve directory entries for copying into the image
+        let resolved_dirs: Vec<docker::ResolvedDirEntry> = match sandbox_config
+            .dir
+            .iter()
+            .map(|entry| {
+                entry
+                    .resolve_paths(&info.repo_root, &user_info.username)
+                    .map(|(host, guest)| docker::ResolvedDirEntry {
+                        host_path: host,
+                        guest_path: guest,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(dirs) => dirs,
+            Err(e) => {
+                error!(
+                    "Client {}: failed to resolve directory entries: {}",
+                    client_id, e
+                );
+                let _ = server::send_error(
+                    &mut stream,
+                    -32000,
+                    &format!("Failed to resolve directory entries: {}", e),
+                );
+                return;
+            }
+        };
+
         // Build the sandbox-ready image with the checkout (shared across sandboxes)
         let sandbox_ready_tag = match docker::build_sandbox_ready_image(
             &params.image_tag,
@@ -276,6 +305,7 @@ fn handle_ensure_sandbox(
             &info.repo_root,
             user_info.uid,
             user_info.gid,
+            &resolved_dirs,
         ) {
             Ok(tag) => tag,
             Err(e) => {

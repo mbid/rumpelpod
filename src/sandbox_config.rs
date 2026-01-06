@@ -28,6 +28,10 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub mounts: MountsConfig,
 
+    /// Directories to copy into the image at build time.
+    #[serde(default)]
+    pub dir: Vec<DirEntry>,
+
     #[serde(default)]
     pub image: Option<ImageConfig>,
 
@@ -66,6 +70,61 @@ pub struct MountEntry {
     /// Path inside the container. Defaults to host path if omitted.
     /// Same expansion rules apply.
     pub container: Option<PathBuf>,
+}
+
+/// A directory entry to copy into the image at build time.
+///
+/// Can be specified as either:
+/// - Just `path` (same path on host and in container)
+/// - `host-path` and `guest-path` pair for different paths
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirEntry {
+    /// Path on both host and container (when host-path/guest-path not specified).
+    /// - Relative paths are relative to repo root (host) / kept as-is (container)
+    /// - `~` prefix expands to home directory
+    /// - Absolute paths are used as-is
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+
+    /// Path on the host filesystem.
+    #[serde(default, rename = "host-path")]
+    pub host_path: Option<PathBuf>,
+
+    /// Path inside the container.
+    #[serde(default, rename = "guest-path")]
+    pub guest_path: Option<PathBuf>,
+}
+
+impl DirEntry {
+    /// Get the resolved host and guest paths.
+    /// Returns (host_path, guest_path) after applying the path resolution rules.
+    pub fn resolve_paths(&self, repo_root: &Path, username: &str) -> Result<(PathBuf, PathBuf)> {
+        match (&self.path, &self.host_path, &self.guest_path) {
+            // Simple form: just `path`
+            (Some(path), None, None) => {
+                let host = SandboxConfig::expand_host_path(path, repo_root)?;
+                let guest = SandboxConfig::expand_container_path(path, username);
+                Ok((host, guest))
+            }
+            // Explicit form: `host-path` and `guest-path`
+            (None, Some(host), Some(guest)) => {
+                let host = SandboxConfig::expand_host_path(host, repo_root)?;
+                let guest = SandboxConfig::expand_container_path(guest, username);
+                Ok((host, guest))
+            }
+            // Invalid combinations
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                bail!("Cannot specify both 'path' and 'host-path'/'guest-path' in [[dir]]")
+            }
+            (None, Some(_), None) | (None, None, Some(_)) => {
+                bail!("Must specify both 'host-path' and 'guest-path' together in [[dir]]")
+            }
+            (None, None, None) => {
+                bail!("Must specify either 'path' or 'host-path'/'guest-path' in [[dir]]")
+            }
+        }
+    }
 }
 
 /// Docker image configuration - either a pre-built tag or build from Dockerfile.
@@ -326,5 +385,123 @@ unknown_field = "value"
 
         let result = SandboxConfig::load(dir.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_dir_simple_path() {
+        let dir = TempDir::new().unwrap();
+        create_config(
+            dir.path(),
+            r#"
+[[dir]]
+path = "~/.config/nvim"
+"#,
+        );
+
+        let config = SandboxConfig::load(dir.path()).unwrap();
+        assert_eq!(config.dir.len(), 1);
+        let (host, guest) = config.dir[0].resolve_paths(dir.path(), "testuser").unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(host, home.join(".config/nvim"));
+        assert_eq!(guest, PathBuf::from("/home/testuser/.config/nvim"));
+    }
+
+    #[test]
+    fn test_dir_host_guest_paths() {
+        let dir = TempDir::new().unwrap();
+        create_config(
+            dir.path(),
+            r#"
+[[dir]]
+host-path = "~/.ssh"
+guest-path = "/root/.ssh"
+"#,
+        );
+
+        let config = SandboxConfig::load(dir.path()).unwrap();
+        assert_eq!(config.dir.len(), 1);
+        let (host, guest) = config.dir[0].resolve_paths(dir.path(), "testuser").unwrap();
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(host, home.join(".ssh"));
+        assert_eq!(guest, PathBuf::from("/root/.ssh"));
+    }
+
+    #[test]
+    fn test_dir_multiple_entries() {
+        let dir = TempDir::new().unwrap();
+        create_config(
+            dir.path(),
+            r#"
+[[dir]]
+path = "~/.gitconfig"
+
+[[dir]]
+host-path = "/etc/hosts"
+guest-path = "/etc/hosts"
+"#,
+        );
+
+        let config = SandboxConfig::load(dir.path()).unwrap();
+        assert_eq!(config.dir.len(), 2);
+    }
+
+    #[test]
+    fn test_dir_invalid_both_path_and_host_path() {
+        let dir = TempDir::new().unwrap();
+        create_config(
+            dir.path(),
+            r#"
+[[dir]]
+path = "~/.config"
+host-path = "~/.config"
+"#,
+        );
+
+        let config = SandboxConfig::load(dir.path()).unwrap();
+        let result = config.dir[0].resolve_paths(dir.path(), "testuser");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot specify both"));
+    }
+
+    #[test]
+    fn test_dir_invalid_missing_guest_path() {
+        let dir = TempDir::new().unwrap();
+        create_config(
+            dir.path(),
+            r#"
+[[dir]]
+host-path = "~/.config"
+"#,
+        );
+
+        let config = SandboxConfig::load(dir.path()).unwrap();
+        let result = config.dir[0].resolve_paths(dir.path(), "testuser");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Must specify both"));
+    }
+
+    #[test]
+    fn test_dir_invalid_empty() {
+        let dir = TempDir::new().unwrap();
+        create_config(
+            dir.path(),
+            r#"
+[[dir]]
+"#,
+        );
+
+        let config = SandboxConfig::load(dir.path()).unwrap();
+        let result = config.dir[0].resolve_paths(dir.path(), "testuser");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Must specify either"));
     }
 }
