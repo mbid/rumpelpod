@@ -344,15 +344,24 @@ pub fn build_sandbox_image(
     // Write the Dockerfile
     // We use BuildKit's RUN --mount=type=bind to mount meta.git read-only during the clone
     // The post-commit hook is written using printf with escaped newlines to avoid Dockerfile parsing issues
-    // We chown the checkout to the target user so Docker's overlay will allow writes
+    //
+    // TODO: This USER instruction assumes the base image runs as root, which is a breaking change
+    // for images that configure a non-root USER. To fix properly, we should use `docker inspect`
+    // to query the base image's configured USER and only add this instruction if needed.
+    //
+    // We use GIT_CONFIG_GLOBAL to point to a config with safe.directory='*' during clone/fetch,
+    // bypassing ownership checks for /meta.git which has different ownership than our user.
     //
     // Note: We add origin pointing to /meta.git for the initial clone, then switch to HTTP remote.
     // We fetch the refs from meta.git before switching so that sandbox/master etc. are available.
     let dockerfile_content = format!(
         r##"# syntax=docker/dockerfile:1
 FROM {base_image}
+USER {uid}:{gid}
 # Clone the repository from the mounted meta.git (read-only bind mount during build)
 RUN --mount=type=bind,from=metagit,source=/,target=/meta.git,readonly \
+    export GIT_CONFIG_GLOBAL=/tmp/gitconfig && \
+    printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_GLOBAL" && \
     git clone /meta.git {checkout_path} && \
     cd {checkout_path} && \
     git checkout {commit_sha} && \
@@ -361,12 +370,11 @@ RUN --mount=type=bind,from=metagit,source=/,target=/meta.git,readonly \
     git remote rename origin sandbox && \
     git fetch sandbox && \
     git remote set-url sandbox {git_http_url} && \
+    rm "$GIT_CONFIG_GLOBAL" && \
     git config uploadpack.allowAnySHA1InWant true && \
-    git config --system --add safe.directory {checkout_path} && \
     mkdir -p .git/hooks && \
     printf '#!/bin/sh\ngit push --force --quiet "{git_http_url}" "HEAD:refs/heads/{sandbox_name}" 2>/dev/null || true\n' > .git/hooks/post-commit && \
-    chmod +x .git/hooks/post-commit && \
-    chown -R {uid}:{gid} {checkout_path}
+    chmod +x .git/hooks/post-commit
 WORKDIR {checkout_path}
 "##,
         base_image = base_image,
