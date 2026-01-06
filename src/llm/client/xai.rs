@@ -50,8 +50,8 @@ impl Client {
     fn build_headers(&self, for_cache_key: bool) -> Vec<(&'static str, String)> {
         let mut headers = vec![("content-type", "application/json".to_string())];
         if !for_cache_key {
-            if let Some(ref api_key) = self.api_key {
-                headers.push(("authorization", format!("Bearer {}", api_key)));
+            if let Some(api_key) = &self.api_key {
+                headers.push(("authorization", format!("Bearer {api_key}")));
             }
         }
         headers

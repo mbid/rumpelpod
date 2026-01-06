@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
+use indoc::formatdoc;
 use std::path::{Path, PathBuf};
 
 use crate::agent;
@@ -201,13 +202,14 @@ fn resolve_image_tag(
             // Default: look for Dockerfile in repo root
             let dockerfile_path = repo_root.join("Dockerfile");
             if !dockerfile_path.exists() {
-                bail!(
-                    "No Dockerfile found at {}.\n\
-                     Either create a Dockerfile or specify an image in .sandbox.toml:\n\n\
-                     [image]\n\
-                     tag = \"your-image:tag\"\n",
-                    dockerfile_path.display()
-                );
+                let path = dockerfile_path.display();
+                bail!(formatdoc! {"
+                    No Dockerfile found at {path}.
+                    Either create a Dockerfile or specify an image in .sandbox.toml:
+
+                    [image]
+                    tag = \"your-image:tag\"
+                "});
             }
             docker::build_image(&dockerfile_path, repo_root, user_info)
         }

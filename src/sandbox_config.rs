@@ -4,6 +4,7 @@
 //! mount configurations, image build settings, and agent options.
 
 use anyhow::{bail, Context, Result};
+use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -160,20 +161,22 @@ impl SandboxConfig {
         let config_path = repo_root.join(".sandbox.toml");
 
         if !config_path.exists() {
-            bail!(
-                "No .sandbox.toml config file found at {}.\n\
-                 Please create a .sandbox.toml file to configure the sandbox.\n\
-                 Example minimal config:\n\n\
-                 env = [\"ANTHROPIC_API_KEY\"]\n",
-                config_path.display()
-            );
+            let path = config_path.display();
+            bail!(formatdoc! {"
+                No .sandbox.toml config file found at {path}.
+                Please create a .sandbox.toml file to configure the sandbox.
+                Example minimal config:
+
+                env = [\"ANTHROPIC_API_KEY\"]
+            "});
         }
 
+        let path = config_path.display();
         let contents = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+            .with_context(|| format!("Failed to read {path}"))?;
 
-        let config: SandboxConfig = toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+        let config: SandboxConfig =
+            toml::from_str(&contents).with_context(|| format!("Failed to parse {path}"))?;
 
         Ok(config)
     }
@@ -186,7 +189,7 @@ impl SandboxConfig {
             .map(|name| {
                 std::env::var(name)
                     .map(|value| (name.clone(), value))
-                    .with_context(|| format!("Required environment variable '{}' is not set", name))
+                    .with_context(|| format!("Required environment variable '{name}' is not set"))
             })
             .collect()
     }
@@ -214,9 +217,9 @@ impl SandboxConfig {
     pub fn expand_container_path(path: &Path, username: &str) -> PathBuf {
         let path_str = path.to_string_lossy();
         if let Some(suffix) = path_str.strip_prefix("~/") {
-            PathBuf::from(format!("/home/{}/{}", username, suffix))
+            PathBuf::from(format!("/home/{username}/{suffix}"))
         } else if path_str == "~" {
-            PathBuf::from(format!("/home/{}", username))
+            PathBuf::from(format!("/home/{username}"))
         } else {
             path.to_path_buf()
         }

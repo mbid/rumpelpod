@@ -79,9 +79,8 @@ fn test_git_http_push_own_branch() {
             echo 'test content' > test-file.txt
             git add test-file.txt
             git commit -m "Test commit"
-            git push sandbox HEAD:refs/heads/{}
-            "#,
-            branch_name
+            git push sandbox HEAD:refs/heads/{branch_name}
+            "#
         ),
     ]);
 
@@ -135,7 +134,7 @@ fn test_git_http_push_master_rejected() {
 
     // The error message should be in stdout (because we redirected stderr to stdout)
     // or stderr
-    let combined = format!("{}{}", stdout, stderr);
+    let combined = format!("{stdout}{stderr}");
     assert!(
         combined.contains("Only allowed to push to branch"),
         "Expected rejection message.\nOutput: {}",

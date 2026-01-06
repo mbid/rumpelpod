@@ -77,7 +77,7 @@ impl Mount {
         }
         let hash = hex::encode(&hasher.finalize()[..4]); // 8 hex chars
 
-        format!("{}-{}", last_component, hash)
+        format!("{last_component}-{hash}")
     }
 }
 
@@ -335,7 +335,7 @@ impl SandboxInfo {
             repo_root.file_name().unwrap().to_string_lossy(),
             name
         );
-        let network_name = format!("{}-net", container_name);
+        let network_name = format!("{container_name}-net");
 
         // Create the Docker network and get the gateway IP
         let gateway_ip = docker::ensure_network(&network_name)?;
@@ -359,8 +359,9 @@ impl SandboxInfo {
     /// Load sandbox info from disk.
     pub fn load(sandbox_dir: &Path) -> Result<Self> {
         let info_path = sandbox_dir.join("sandbox.json");
+        let path = info_path.display();
         let contents = std::fs::read_to_string(&info_path)
-            .with_context(|| format!("Failed to read sandbox info: {}", info_path.display()))?;
+            .with_context(|| format!("Failed to read sandbox info: {path}"))?;
         serde_json::from_str(&contents).context("Failed to parse sandbox info")
     }
 
@@ -402,9 +403,10 @@ impl SandboxInfo {
 
     /// Load the mounts configuration for this sandbox.
     pub fn load_mounts_config(&self) -> Result<crate::sandbox_config::MountsConfig> {
-        let path = self.sandbox_dir.join("mounts.json");
-        let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read mounts config: {}", path.display()))?;
+        let mounts_path = self.sandbox_dir.join("mounts.json");
+        let path = mounts_path.display();
+        let contents = std::fs::read_to_string(&mounts_path)
+            .with_context(|| format!("Failed to read mounts config: {path}"))?;
         serde_json::from_str(&contents).context("Failed to parse mounts config")
     }
 }
@@ -443,19 +445,21 @@ fn remove_dir_all_with_permissions(path: &Path) -> Result<()> {
         return Ok(());
     }
 
+    let path_display = path.display();
+
     let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("Failed to get metadata for: {}", path.display()))?;
+        .with_context(|| format!("Failed to get metadata for: {path_display}"))?;
 
     if metadata.is_dir() {
         // Make directory readable/writable/executable so we can list and modify it
         let mut perms = metadata.permissions();
         perms.set_mode(perms.mode() | 0o700);
         std::fs::set_permissions(path, perms)
-            .with_context(|| format!("Failed to set permissions for: {}", path.display()))?;
+            .with_context(|| format!("Failed to set permissions for: {path_display}"))?;
 
         // Recursively delete contents
         for entry in std::fs::read_dir(path)
-            .with_context(|| format!("Failed to read directory: {}", path.display()))?
+            .with_context(|| format!("Failed to read directory: {path_display}"))?
         {
             let entry = entry?;
             remove_dir_all_with_permissions(&entry.path())?;
@@ -463,18 +467,18 @@ fn remove_dir_all_with_permissions(path: &Path) -> Result<()> {
 
         // Remove the now-empty directory
         std::fs::remove_dir(path)
-            .with_context(|| format!("Failed to remove directory: {}", path.display()))?;
+            .with_context(|| format!("Failed to remove directory: {path_display}"))?;
     } else {
         // For files and symlinks, make writable then remove
         if !metadata.is_symlink() {
             let mut perms = metadata.permissions();
             perms.set_mode(perms.mode() | 0o600);
             std::fs::set_permissions(path, perms)
-                .with_context(|| format!("Failed to set permissions for: {}", path.display()))?;
+                .with_context(|| format!("Failed to set permissions for: {path_display}"))?;
         }
 
         std::fs::remove_file(path)
-            .with_context(|| format!("Failed to remove file: {}", path.display()))?;
+            .with_context(|| format!("Failed to remove file: {path_display}"))?;
     }
 
     Ok(())
@@ -510,19 +514,17 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
     }
 
     // Remove remote tracking ref from host repo
+    let name = &info.name;
     let _ = Command::new("git")
         .current_dir(&info.repo_root)
-        .args([
-            "update-ref",
-            "-d",
-            &format!("refs/remotes/sandbox/{}", info.name),
-        ])
+        .args(["update-ref", "-d", &format!("refs/remotes/sandbox/{name}")])
         .status();
 
     // Remove sandbox directory (includes overlay upper/work dirs)
     if info.sandbox_dir.exists() {
+        let sandbox_dir = info.sandbox_dir.display();
         remove_dir_all_with_permissions(&info.sandbox_dir)
-            .with_context(|| format!("Failed to remove: {}", info.sandbox_dir.display()))?;
+            .with_context(|| format!("Failed to remove: {sandbox_dir}"))?;
     }
 
     // Check if this was the last sandbox for this repo
@@ -533,8 +535,9 @@ pub fn delete_sandbox(info: &SandboxInfo) -> Result<()> {
 
         // Remove meta.git
         if info.meta_git_dir.exists() {
+            let meta_git_dir = info.meta_git_dir.display();
             remove_dir_all_with_permissions(&info.meta_git_dir)
-                .with_context(|| format!("Failed to remove: {}", info.meta_git_dir.display()))?;
+                .with_context(|| format!("Failed to remove: {meta_git_dir}"))?;
         }
 
         // Remove sandbox remote from host repo
@@ -701,7 +704,10 @@ pub fn ensure_container_running_internal(
         "--runtime".to_string(),
         runtime.docker_runtime_name().to_string(),
         "--user".to_string(),
-        format!("{}:{}", user_info.uid, user_info.gid),
+        {
+            let (uid, gid) = (user_info.uid, user_info.gid);
+            format!("{uid}:{gid}")
+        },
         "--workdir".to_string(),
         info.repo_root.to_string_lossy().to_string(),
         // Connect to sandbox-specific network
@@ -720,7 +726,7 @@ pub fn ensure_container_running_internal(
 
     for (name, value) in env_vars {
         args.push("-e".to_string());
-        args.push(format!("{}={}", name, value));
+        args.push(format!("{name}={value}"));
     }
 
     args.push(image_tag.to_string());

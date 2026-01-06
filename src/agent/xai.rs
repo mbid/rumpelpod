@@ -215,7 +215,8 @@ pub fn run_grok_agent(container_name: &str, model: Model, cache: Option<LlmCache
                             (output, success)
                         }
                         Err(_) => {
-                            let error_msg = format!("Unknown tool: {}", tool_call.function.name);
+                            let tool_name = &tool_call.function.name;
+                            let error_msg = format!("Unknown tool: {tool_name}");
                             chat_println!(chat_history, "[error] {}", error_msg);
                             (error_msg, false)
                         }

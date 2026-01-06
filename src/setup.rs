@@ -16,11 +16,11 @@ fn systemd_user_dir() -> Result<PathBuf> {
 }
 
 fn socket_unit_path() -> Result<PathBuf> {
-    Ok(systemd_user_dir()?.join(format!("{}.socket", SERVICE_NAME)))
+    Ok(systemd_user_dir()?.join(format!("{SERVICE_NAME}.socket")))
 }
 
 fn service_unit_path() -> Result<PathBuf> {
-    Ok(systemd_user_dir()?.join(format!("{}.service", SERVICE_NAME)))
+    Ok(systemd_user_dir()?.join(format!("{SERVICE_NAME}.service")))
 }
 
 fn socket_unit_content() -> Result<String> {
@@ -40,9 +40,12 @@ fn socket_unit_content() -> Result<String> {
 
 fn service_unit_content() -> Result<String> {
     let exe_path = std::env::current_exe().context("Could not determine executable path")?;
+    let path = exe_path.display();
     let exe_path = exe_path
         .canonicalize()
-        .with_context(|| format!("Could not resolve executable path: {}", exe_path.display()))?;
+        .with_context(|| format!("Could not resolve executable path: {path}"))?;
+    let exe_path = exe_path.display();
+    let service = SERVICE_NAME;
 
     Ok(formatdoc! {"
         [Unit]
@@ -57,7 +60,7 @@ fn service_unit_content() -> Result<String> {
 
         [Install]
         WantedBy=default.target
-    ", service = SERVICE_NAME, exe_path = exe_path.display()})
+    "})
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {
@@ -96,21 +99,23 @@ pub fn system_install() -> Result<()> {
     let socket_path = socket_unit_path()?;
     let service_path = service_unit_path()?;
 
-    fs::create_dir_all(&systemd_dir)
-        .with_context(|| format!("Failed to create {}", systemd_dir.display()))?;
+    let dir = systemd_dir.display();
+    fs::create_dir_all(&systemd_dir).with_context(|| format!("Failed to create {dir}"))?;
 
     let socket_content = socket_unit_content()?;
     let service_content = service_unit_content()?;
 
+    let socket_display = socket_path.display();
     fs::write(&socket_path, &socket_content)
-        .with_context(|| format!("Failed to write {}", socket_path.display()))?;
+        .with_context(|| format!("Failed to write {socket_display}"))?;
 
+    let service_display = service_path.display();
     fs::write(&service_path, &service_content)
-        .with_context(|| format!("Failed to write {}", service_path.display()))?;
+        .with_context(|| format!("Failed to write {service_display}"))?;
 
     systemctl(&["daemon-reload"])?;
-    systemctl(&["enable", &format!("{}.socket", SERVICE_NAME)])?;
-    systemctl(&["start", &format!("{}.socket", SERVICE_NAME)])?;
+    systemctl(&["enable", &format!("{SERVICE_NAME}.socket")])?;
+    systemctl(&["start", &format!("{SERVICE_NAME}.socket")])?;
 
     println!("Installed sandbox daemon.");
 
@@ -123,18 +128,18 @@ pub fn system_uninstall() -> Result<()> {
     let socket_path = socket_unit_path()?;
     let service_path = service_unit_path()?;
 
-    let _ = systemctl(&["stop", &format!("{}.socket", SERVICE_NAME)]);
-    let _ = systemctl(&["stop", &format!("{}.service", SERVICE_NAME)]);
-    let _ = systemctl(&["disable", &format!("{}.socket", SERVICE_NAME)]);
+    let _ = systemctl(&["stop", &format!("{SERVICE_NAME}.socket")]);
+    let _ = systemctl(&["stop", &format!("{SERVICE_NAME}.service")]);
+    let _ = systemctl(&["disable", &format!("{SERVICE_NAME}.socket")]);
 
     if socket_path.exists() {
-        fs::remove_file(&socket_path)
-            .with_context(|| format!("Failed to remove {}", socket_path.display()))?;
+        let path = socket_path.display();
+        fs::remove_file(&socket_path).with_context(|| format!("Failed to remove {path}"))?;
     }
 
     if service_path.exists() {
-        fs::remove_file(&service_path)
-            .with_context(|| format!("Failed to remove {}", service_path.display()))?;
+        let path = service_path.display();
+        fs::remove_file(&service_path).with_context(|| format!("Failed to remove {path}"))?;
     }
 
     systemctl(&["daemon-reload"])?;

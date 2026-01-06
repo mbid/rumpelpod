@@ -106,7 +106,7 @@ pub fn read_agents_md(container_name: &str) -> Option<String> {
 
 pub fn build_system_prompt(agents_md: Option<&str>) -> String {
     match agents_md {
-        Some(content) => format!("{}\n\n{}", BASE_SYSTEM_PROMPT, content),
+        Some(content) => format!("{BASE_SYSTEM_PROMPT}\n\n{content}"),
         None => BASE_SYSTEM_PROMPT.to_string(),
     }
 }
@@ -128,7 +128,7 @@ pub fn execute_edit_in_sandbox(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok((format!("Error reading file: {}", stderr), false));
+        return Ok((format!("Error reading file: {stderr}"), false));
     }
 
     let content = match String::from_utf8(output.stdout) {
@@ -139,14 +139,14 @@ pub fn execute_edit_in_sandbox(
     let count = content.matches(old_string).count();
 
     if count == 0 {
-        return Ok((format!("old_string not found in {}", file_path), false));
+        return Ok((format!("old_string not found in {file_path}"), false));
     }
 
     if count > 1 {
         return Ok((
             format!(
-                "Found {} occurrences of old_string in {}. Provide more context to make the match unique.",
-                count, file_path
+                "Found {count} occurrences of old_string in {file_path}. \
+                 Provide more context to make the match unique."
             ),
             false,
         ));
@@ -155,7 +155,8 @@ pub fn execute_edit_in_sandbox(
     let new_content = content.replacen(old_string, new_string, 1);
 
     debug!("Writing edited file: {}", file_path);
-    let write_cmd = format!("cat > '{}'", file_path.replace('\'', "'\\''"));
+    let escaped_path = file_path.replace('\'', "'\\''");
+    let write_cmd = format!("cat > '{escaped_path}'");
     let mut write_process = Command::new("docker")
         .args(["exec", "-i", container_name, "bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
@@ -181,10 +182,10 @@ pub fn execute_edit_in_sandbox(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok((format!("Error writing file: {}", stderr), false));
+        return Ok((format!("Error writing file: {stderr}"), false));
     }
 
-    Ok((format!("Successfully edited {}", file_path), true))
+    Ok((format!("Successfully edited {file_path}"), true))
 }
 
 pub fn execute_write_in_sandbox(
@@ -199,15 +200,13 @@ pub fn execute_write_in_sandbox(
         .context("Failed to check if file exists")?;
 
     if output.status.success() {
-        return Ok((format!("File {} already exists", file_path), false));
+        return Ok((format!("File {file_path} already exists"), false));
     }
 
     if let Some(parent) = std::path::Path::new(file_path).parent() {
         if !parent.as_os_str().is_empty() {
-            let mkdir_cmd = format!(
-                "mkdir -p '{}'",
-                parent.display().to_string().replace('\'', "'\\''")
-            );
+            let escaped_parent = parent.display().to_string().replace('\'', "'\\''");
+            let mkdir_cmd = format!("mkdir -p '{escaped_parent}'");
             debug!("Creating parent directories for: {}", file_path);
             let _ = Command::new("docker")
                 .args(["exec", container_name, "bash", "-c", &mkdir_cmd])
@@ -216,7 +215,8 @@ pub fn execute_write_in_sandbox(
     }
 
     debug!("Writing new file: {}", file_path);
-    let write_cmd = format!("cat > '{}'", file_path.replace('\'', "'\\''"));
+    let escaped_path = file_path.replace('\'', "'\\''");
+    let write_cmd = format!("cat > '{escaped_path}'");
     let mut write_process = Command::new("docker")
         .args(["exec", "-i", container_name, "bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
@@ -245,7 +245,7 @@ pub fn execute_write_in_sandbox(
         return Ok((format!("Error writing file: {}", stderr), false));
     }
 
-    Ok((format!("Successfully wrote {}", file_path), true))
+    Ok((format!("Successfully wrote {file_path}"), true))
 }
 
 fn save_output_to_file(container_name: &str, data: &[u8]) -> Result<String> {
@@ -255,7 +255,7 @@ fn save_output_to_file(container_name: &str, data: &[u8]) -> Result<String> {
     let hash = hasher.finalize();
     let id = hex::encode(&hash[..6]);
 
-    let output_file = format!("/agent/bash-output-{}", id);
+    let output_file = format!("/agent/bash-output-{id}");
     debug!("Saving large output to file: {}", output_file);
 
     // Create /agent directory if it doesn't exist
@@ -267,7 +267,7 @@ fn save_output_to_file(container_name: &str, data: &[u8]) -> Result<String> {
 
     // Write the output to file
     debug!("Writing output data ({} bytes)", data.len());
-    let write_cmd = format!("cat > {}", output_file);
+    let write_cmd = format!("cat > {output_file}");
     let mut write_process = Command::new("docker")
         .args(["exec", "-i", container_name, "bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
@@ -317,8 +317,7 @@ pub fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(S
     // Check if output exceeds limit - save to file if so
     if combined_bytes.len() > MAX_OUTPUT_SIZE {
         let output_file = save_output_to_file(container_name, &combined_bytes)?;
-        let error_msg = format!("Full output available at {}", output_file);
-        return Ok((error_msg, false));
+        return Ok((format!("Full output available at {output_file}"), false));
     }
 
     // Validate UTF-8 - save to file if invalid
@@ -326,11 +325,10 @@ pub fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(S
         Ok(s) => s,
         Err(_) => {
             let output_file = save_output_to_file(container_name, &combined_bytes)?;
-            let error_msg = format!(
-                "Output is not valid UTF-8. Full output available at {}",
-                output_file
-            );
-            return Ok((error_msg, false));
+            return Ok((
+                format!("Output is not valid UTF-8. Full output available at {output_file}"),
+                false,
+            ));
         }
     };
 
@@ -343,7 +341,7 @@ pub fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(S
             .code()
             .map(|c| c.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        return Ok((format!("exited with status {}", exit_code), false));
+        return Ok((format!("exited with status {exit_code}"), false));
     }
 
     Ok((combined, success))
@@ -377,7 +375,8 @@ pub fn get_input_via_vim(chat_history: &str) -> Result<String> {
 
     loop {
         let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("sandbox-chat-{}.txt", std::process::id()));
+        let pid = std::process::id();
+        let temp_file = temp_dir.join(format!("sandbox-chat-{pid}.txt"));
 
         fs::write(&temp_file, chat_history).context("Failed to write temp file for vim")?;
 

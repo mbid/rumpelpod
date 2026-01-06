@@ -89,8 +89,9 @@ pub fn ensure_meta_git(host_repo: &Path, meta_git_dir: &Path) -> Result<bool> {
 
     // Create parent directory if needed
     if let Some(parent) = meta_git_dir.parent() {
+        let path = parent.display();
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+            .with_context(|| format!("Failed to create directory: {path}"))?;
     }
 
     info!(
@@ -163,7 +164,7 @@ pub fn sync_main_to_meta(host_repo: &Path, meta_git_dir: &Path) -> Result<()> {
         .args([
             "fetch",
             &host_repo.to_string_lossy(),
-            &format!("+{}:refs/heads/{}", branch, branch),
+            &format!("+{branch}:refs/heads/{branch}"),
         ])
         .status()
         .context("Failed to fetch main branch to meta.git")?;
@@ -187,7 +188,7 @@ pub fn sync_sandbox_to_meta(meta_git_dir: &Path, sandbox_repo: &Path, branch: &s
         .args([
             "fetch",
             &sandbox_repo.to_string_lossy(),
-            &format!("+{}:refs/heads/{}", branch, branch),
+            &format!("+{branch}:refs/heads/{branch}"),
         ])
         .status()
         .context("Failed to sync sandbox branch to meta.git")?;
@@ -208,7 +209,7 @@ pub fn sync_meta_to_host(host_repo: &Path, meta_git_dir: &Path, branch: &str) ->
         .args([
             "fetch",
             &meta_git_dir.to_string_lossy(),
-            &format!("+refs/heads/{}:refs/remotes/sandbox/{}", branch, branch),
+            &format!("+refs/heads/{branch}:refs/remotes/sandbox/{branch}"),
         ])
         .status()
         .context("Failed to sync meta.git branch to host")?;
@@ -239,19 +240,13 @@ pub fn sync_meta_to_sandbox(
         .args([
             "fetch",
             &meta_git_dir.to_string_lossy(),
-            &format!(
-                "+refs/heads/{}:refs/remotes/sandbox/{}",
-                primary_branch, primary_branch
-            ),
+            &format!("+refs/heads/{primary_branch}:refs/remotes/sandbox/{primary_branch}"),
         ])
         .status()
         .context("Failed to sync primary branch to sandbox")?;
 
     if !status.success() {
-        bail!(
-            "Failed to sync {} branch from meta.git to sandbox",
-            primary_branch
-        );
+        bail!("Failed to sync {primary_branch} branch from meta.git to sandbox");
     }
 
     // Fetch sandbox branch from meta.git to sandbox's remote tracking ref
@@ -260,19 +255,13 @@ pub fn sync_meta_to_sandbox(
         .args([
             "fetch",
             &meta_git_dir.to_string_lossy(),
-            &format!(
-                "+refs/heads/{}:refs/remotes/sandbox/{}",
-                sandbox_name, sandbox_name
-            ),
+            &format!("+refs/heads/{sandbox_name}:refs/remotes/sandbox/{sandbox_name}"),
         ])
         .status()
         .context("Failed to sync sandbox branch to sandbox remote")?;
 
     if !status.success() {
-        bail!(
-            "Failed to sync {} branch from meta.git to sandbox",
-            sandbox_name
-        );
+        bail!("Failed to sync {sandbox_name} branch from meta.git to sandbox");
     }
 
     Ok(())
@@ -295,12 +284,12 @@ fn get_ref_oid(repo_path: &Path, ref_name: &str) -> Option<Oid> {
 
 /// Get the OID of a branch in a repository.
 fn get_branch_oid(repo_path: &Path, branch_name: &str) -> Option<Oid> {
-    get_ref_oid(repo_path, &format!("refs/heads/{}", branch_name))
+    get_ref_oid(repo_path, &format!("refs/heads/{branch_name}"))
 }
 
 /// Get the OID of a remote tracking ref.
 fn get_remote_ref_oid(repo_path: &Path, remote: &str, branch: &str) -> Option<Oid> {
-    get_ref_oid(repo_path, &format!("refs/remotes/{}/{}", remote, branch))
+    get_ref_oid(repo_path, &format!("refs/remotes/{remote}/{branch}"))
 }
 
 // --- Full git sync ---
@@ -434,10 +423,12 @@ impl GitSync {
         let meta_refs = info.meta_git_dir.join("refs/heads");
 
         // Ensure directories exist
+        let host_refs_display = host_refs.display();
         std::fs::create_dir_all(&host_refs)
-            .with_context(|| format!("creating {}", host_refs.display()))?;
+            .with_context(|| format!("creating {host_refs_display}"))?;
+        let meta_refs_display = meta_refs.display();
         std::fs::create_dir_all(&meta_refs)
-            .with_context(|| format!("creating {}", meta_refs.display()))?;
+            .with_context(|| format!("creating {meta_refs_display}"))?;
 
         let paths_to_watch = vec![host_refs, meta_refs];
 
@@ -454,10 +445,11 @@ impl GitSync {
         // Register watch paths WITHOUT holding the state lock to avoid deadlock
         // (watcher callback also acquires the state lock)
         for path in &paths_to_add {
+            let path_display = path.display();
             self.watcher
                 .watch(path, RecursiveMode::NonRecursive)
-                .with_context(|| format!("watching {}", path.display()))?;
-            info!("Git sync watching: {}", path.display());
+                .with_context(|| format!("watching {path_display}"))?;
+            info!("Git sync watching: {path_display}");
         }
 
         // Now update state

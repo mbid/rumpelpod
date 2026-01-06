@@ -112,15 +112,14 @@ fn setup_update_hook(meta_git_dir: &Path, allowed_branch: &str) -> Result<()> {
 # Auto-generated hook to restrict pushes to sandbox branch
 refname="$1"
 branch="${{refname#refs/heads/}}"
-allowed_branch="{}"
+allowed_branch="{allowed_branch}"
 
 if [ "$branch" != "$allowed_branch" ]; then
     echo "error: Push rejected. Only allowed to push to branch '$allowed_branch'" >&2
     exit 1
 fi
 exit 0
-"#,
-        allowed_branch
+"#
     );
 
     std::fs::write(&hook_path, hook_script)?;
@@ -343,12 +342,9 @@ fn get_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str
 
 /// Send an HTTP error response.
 fn send_error(stream: &mut TcpStream, code: u16, message: &str) -> Result<()> {
+    let len = message.len();
     let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-        code,
-        message,
-        message.len(),
-        message
+        "HTTP/1.1 {code} {message}\r\nContent-Type: text/plain\r\nContent-Length: {len}\r\n\r\n{message}"
     );
     stream.write_all(response.as_bytes())?;
     Ok(())
@@ -369,10 +365,9 @@ fn send_cgi_response(stream: &mut TcpStream, cgi_output: &[u8]) -> Result<()> {
 
     if headers_end == 0 {
         // No proper header/body separation, just send as-is with default headers
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-            cgi_output.len()
-        );
+        let len = cgi_output.len();
+        let response =
+            format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {len}\r\n\r\n");
         stream.write_all(response.as_bytes())?;
         stream.write_all(cgi_output)?;
         return Ok(());
@@ -401,18 +396,19 @@ fn send_cgi_response(stream: &mut TcpStream, cgi_output: &[u8]) -> Result<()> {
                     status_text = text;
                 }
             } else {
-                http_headers.push(format!("{}: {}", key, value));
+                http_headers.push(format!("{key}: {value}"));
             }
         }
     }
 
     // Build HTTP response
-    let mut response = format!("HTTP/1.1 {} {}\r\n", status_code, status_text);
+    let mut response = format!("HTTP/1.1 {status_code} {status_text}\r\n");
     for header in &http_headers {
         response.push_str(header);
         response.push_str("\r\n");
     }
-    response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    let body_len = body.len();
+    response.push_str(&format!("Content-Length: {body_len}\r\n"));
     response.push_str("\r\n");
 
     stream.write_all(response.as_bytes())?;
@@ -532,7 +528,7 @@ mod tests {
 
         // Use git ls-remote to test
         let output = Command::new("git")
-            .args(["ls-remote", &format!("http://{}/meta.git", addr)])
+            .args(["ls-remote", &format!("http://{addr}/meta.git")])
             .output()
             .expect("Failed to run git ls-remote");
 

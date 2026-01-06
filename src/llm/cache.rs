@@ -21,10 +21,12 @@ impl LlmCache {
         let cache_dir = base_dir.join(provider);
         let scratch_dir = base_dir.join("scratch");
 
+        let cache_display = cache_dir.display();
         fs::create_dir_all(&cache_dir)
-            .with_context(|| format!("Failed to create cache dir: {}", cache_dir.display()))?;
+            .with_context(|| format!("Failed to create cache dir: {cache_display}"))?;
+        let scratch_display = scratch_dir.display();
         fs::create_dir_all(&scratch_dir)
-            .with_context(|| format!("Failed to create scratch dir: {}", scratch_dir.display()))?;
+            .with_context(|| format!("Failed to create scratch dir: {scratch_display}"))?;
 
         Ok(Self {
             cache_dir,
@@ -52,7 +54,7 @@ impl LlmCache {
     }
 
     fn cache_path(&self, key: &str) -> PathBuf {
-        self.cache_dir.join(format!("{}.json", key))
+        self.cache_dir.join(format!("{key}.json"))
     }
 
     /// Try to get a cached response.
@@ -75,9 +77,10 @@ impl LlmCache {
 
         fs::write(temp_file.path(), response).context("Failed to write to temp cache file")?;
 
+        let path = final_path.display();
         temp_file
             .persist(&final_path)
-            .with_context(|| format!("Failed to persist cache file to {}", final_path.display()))?;
+            .with_context(|| format!("Failed to persist cache file to {path}"))?;
 
         Ok(())
     }

@@ -41,7 +41,8 @@ fn test_sync_with_history_rewrite() {
     let first_commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     // Wait for sync to propagate to host (poll instead of fixed sleep)
-    let ref_name = format!("refs/remotes/sandbox/{}", fixture.name);
+    let name = &fixture.name;
+    let ref_name = format!("refs/remotes/sandbox/{name}");
     let synced = wait_for(Duration::from_secs(5), Duration::from_millis(100), || {
         let output = run_git(&fixture.repo.dir, &["rev-parse", &ref_name]);
         String::from_utf8_lossy(&output.stdout).trim() == first_commit
@@ -75,7 +76,7 @@ fn test_sync_with_history_rewrite() {
     );
 
     // Wait for amended commit to sync to host (poll instead of fixed sleep)
-    let ref_name = format!("refs/remotes/sandbox/{}", fixture.name);
+    let ref_name = format!("refs/remotes/sandbox/{name}");
     let synced = wait_for(Duration::from_secs(5), Duration::from_millis(100), || {
         let output = run_git(&fixture.repo.dir, &["rev-parse", &ref_name]);
         String::from_utf8_lossy(&output.stdout).trim() == amended_commit

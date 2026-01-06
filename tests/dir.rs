@@ -4,7 +4,7 @@ mod common;
 
 use std::fs;
 
-use indoc::indoc;
+use indoc::formatdoc;
 
 use common::{run_git, SandboxFixture};
 
@@ -20,14 +20,12 @@ fn test_dir_simple_path() {
     fs::write(host_path.join("subdir/nested.txt"), "nested content").unwrap();
 
     // Configure .sandbox.toml to copy the directory
-    let config = format!(
-        indoc! {r#"
-            [[dir]]
-            host-path = "{}"
-            guest-path = "/copied-dir"
-        "#},
-        host_path.display()
-    );
+    let host_display = host_path.display();
+    let config = formatdoc! {r#"
+        [[dir]]
+        host-path = "{host_display}"
+        guest-path = "/copied-dir"
+    "#};
     fs::write(fixture.repo.dir.join(".sandbox.toml"), config).expect("Failed to write config");
 
     run_git(&fixture.repo.dir, &["add", ".sandbox.toml"]);
@@ -69,14 +67,12 @@ fn test_dir_home_expansion() {
 
     // Configure .sandbox.toml to copy to home directory
     // Using the temp dir as host path, and ~ expansion for guest path
-    let config = format!(
-        indoc! {r#"
-            [[dir]]
-            host-path = "{}"
-            guest-path = "~/.myconfig"
-        "#},
-        host_path.display()
-    );
+    let host_display = host_path.display();
+    let config = formatdoc! {r#"
+        [[dir]]
+        host-path = "{host_display}"
+        guest-path = "~/.myconfig"
+    "#};
     fs::write(fixture.repo.dir.join(".sandbox.toml"), config).expect("Failed to write config");
 
     run_git(&fixture.repo.dir, &["add", ".sandbox.toml"]);
@@ -84,9 +80,9 @@ fn test_dir_home_expansion() {
 
     // The username in tests may be the host username or "userNNN" fallback
     // depending on whether $USER is set. Get the actual username to find the file.
-    let username =
-        std::env::var("USER").unwrap_or_else(|_| format!("user{}", nix::unistd::getuid().as_raw()));
-    let expected_path = format!("/home/{}/.myconfig/config.txt", username);
+    let uid = nix::unistd::getuid().as_raw();
+    let username = std::env::var("USER").unwrap_or_else(|_| format!("user{uid}"));
+    let expected_path = format!("/home/{username}/.myconfig/config.txt");
 
     // Verify the file was copied to home directory
     let output = fixture.run(&["cat", &expected_path]);
@@ -114,19 +110,17 @@ fn test_dir_multiple_entries() {
     fs::write(dir2.path().join("file2.txt"), "content2").unwrap();
 
     // Configure .sandbox.toml with multiple dir entries
-    let config = format!(
-        indoc! {r#"
-            [[dir]]
-            host-path = "{}"
-            guest-path = "/dir1"
+    let dir1_display = dir1.path().display();
+    let dir2_display = dir2.path().display();
+    let config = formatdoc! {r#"
+        [[dir]]
+        host-path = "{dir1_display}"
+        guest-path = "/dir1"
 
-            [[dir]]
-            host-path = "{}"
-            guest-path = "/dir2"
-        "#},
-        dir1.path().display(),
-        dir2.path().display()
-    );
+        [[dir]]
+        host-path = "{dir2_display}"
+        guest-path = "/dir2"
+    "#};
     fs::write(fixture.repo.dir.join(".sandbox.toml"), config).expect("Failed to write config");
 
     run_git(&fixture.repo.dir, &["add", ".sandbox.toml"]);

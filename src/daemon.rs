@@ -144,7 +144,8 @@ fn start_container(
 
 /// Unique key for identifying a sandbox (project_dir + sandbox_name).
 fn sandbox_key(project_dir: &Path, sandbox_name: &str) -> String {
-    format!("{}:{}", project_dir.display(), sandbox_name)
+    let project_dir = project_dir.display();
+    format!("{project_dir}:{sandbox_name}")
 }
 
 /// Handle a single client connection in a dedicated thread.
@@ -211,11 +212,11 @@ fn handle_ensure_sandbox(
         let sandbox_config = match SandboxConfig::load(&params.project_dir) {
             Ok(c) => c,
             Err(e) => {
-                error!("Client {}: failed to load sandbox config: {}", client_id, e);
+                error!("Client {client_id}: failed to load sandbox config: {e}");
                 let _ = server::send_error(
                     &mut stream,
                     -32000,
-                    &format!("Failed to load sandbox config: {}", e),
+                    &format!("Failed to load sandbox config: {e}"),
                 );
                 return;
             }
@@ -228,11 +229,11 @@ fn handle_ensure_sandbox(
         ) {
             Ok(i) => i,
             Err(e) => {
-                error!("Client {}: failed to ensure sandbox: {}", client_id, e);
+                error!("Client {client_id}: failed to ensure sandbox: {e}");
                 let _ = server::send_error(
                     &mut stream,
                     -32000,
-                    &format!("Failed to ensure sandbox: {}", e),
+                    &format!("Failed to ensure sandbox: {e}"),
                 );
                 return;
             }
@@ -249,25 +250,20 @@ fn handle_ensure_sandbox(
                     server
                 }
                 Err(e) => {
-                    error!(
-                        "Client {}: failed to start git HTTP server: {}",
-                        client_id, e
-                    );
+                    error!("Client {client_id}: failed to start git HTTP server: {e}");
                     let _ = server::send_error(
                         &mut stream,
                         -32000,
-                        &format!("Failed to start git HTTP server: {}", e),
+                        &format!("Failed to start git HTTP server: {e}"),
                     );
                     return;
                 }
             };
 
         // Build the git HTTP URL for the sandbox remote
-        let git_http_url = format!(
-            "http://{}:{}/meta.git",
-            info.gateway_ip,
-            crate::git_http::GIT_HTTP_PORT
-        );
+        let gateway_ip = info.gateway_ip;
+        let port = crate::git_http::GIT_HTTP_PORT;
+        let git_http_url = format!("http://{gateway_ip}:{port}/meta.git");
 
         // Resolve directory entries for copying into the image
         let resolved_dirs: Vec<docker::ResolvedDirEntry> = match sandbox_config
@@ -285,14 +281,11 @@ fn handle_ensure_sandbox(
         {
             Ok(dirs) => dirs,
             Err(e) => {
-                error!(
-                    "Client {}: failed to resolve directory entries: {}",
-                    client_id, e
-                );
+                error!("Client {client_id}: failed to resolve directory entries: {e}");
                 let _ = server::send_error(
                     &mut stream,
                     -32000,
-                    &format!("Failed to resolve directory entries: {}", e),
+                    &format!("Failed to resolve directory entries: {e}"),
                 );
                 return;
             }
@@ -309,14 +302,11 @@ fn handle_ensure_sandbox(
         ) {
             Ok(tag) => tag,
             Err(e) => {
-                error!(
-                    "Client {}: failed to build sandbox-ready image: {}",
-                    client_id, e
-                );
+                error!("Client {client_id}: failed to build sandbox-ready image: {e}");
                 let _ = server::send_error(
                     &mut stream,
                     -32000,
-                    &format!("Failed to build sandbox-ready image: {}", e),
+                    &format!("Failed to build sandbox-ready image: {e}"),
                 );
                 return;
             }
@@ -331,11 +321,11 @@ fn handle_ensure_sandbox(
             overlay_mode,
             &params.env_vars,
         ) {
-            error!("Client {}: failed to start container: {}", client_id, e);
+            error!("Client {client_id}: failed to start container: {e}");
             let _ = server::send_error(
                 &mut stream,
                 -32000,
-                &format!("Failed to start container: {}", e),
+                &format!("Failed to start container: {e}"),
             );
             return;
         }
@@ -348,14 +338,11 @@ fn handle_ensure_sandbox(
             &info.head_commit,
             &git_http_url,
         ) {
-            error!(
-                "Client {}: failed to initialize sandbox checkout: {}",
-                client_id, e
-            );
+            error!("Client {client_id}: failed to initialize sandbox checkout: {e}");
             let _ = server::send_error(
                 &mut stream,
                 -32000,
-                &format!("Failed to initialize sandbox checkout: {}", e),
+                &format!("Failed to initialize sandbox checkout: {e}"),
             );
             // Clean up the container since initialization failed
             let _ = docker::remove_container(&info.container_name);
@@ -461,18 +448,19 @@ fn get_listener() -> Result<UnixListener> {
     info!("Daemon starting, socket: {}", sock_path.display());
 
     if let Some(parent) = sock_path.parent() {
+        let parent_path = parent.display();
         std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create socket directory: {}", parent.display()))?;
+            .with_context(|| format!("Failed to create socket directory: {parent_path}"))?;
     }
 
+    let path = sock_path.display();
     if sock_path.exists() {
-        std::fs::remove_file(&sock_path).with_context(|| {
-            format!("Failed to remove existing socket: {}", sock_path.display())
-        })?;
+        std::fs::remove_file(&sock_path)
+            .with_context(|| format!("Failed to remove existing socket: {path}"))?;
     }
 
-    let listener = UnixListener::bind(&sock_path)
-        .with_context(|| format!("Failed to bind socket: {}", sock_path.display()))?;
+    let listener =
+        UnixListener::bind(&sock_path).with_context(|| format!("Failed to bind socket: {path}"))?;
 
     Ok(listener)
 }

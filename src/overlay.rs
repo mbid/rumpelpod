@@ -34,16 +34,18 @@ impl Overlay {
             lower: lower.to_path_buf(),
             upper: overlay_dir.join("upper"),
             work: overlay_dir.join("work"),
-            volume_name: format!("{}-{}", volume_prefix, name),
+            volume_name: format!("{volume_prefix}-{name}"),
         }
     }
 
     /// Create the necessary directories for the overlay.
     pub fn create_dirs(&self) -> Result<()> {
+        let upper = self.upper.display();
         std::fs::create_dir_all(&self.upper)
-            .with_context(|| format!("Failed to create upper dir: {}", self.upper.display()))?;
+            .with_context(|| format!("Failed to create upper dir: {upper}"))?;
+        let work = self.work.display();
         std::fs::create_dir_all(&self.work)
-            .with_context(|| format!("Failed to create work dir: {}", self.work.display()))?;
+            .with_context(|| format!("Failed to create work dir: {work}"))?;
         Ok(())
     }
 
@@ -57,12 +59,10 @@ impl Overlay {
             return Ok(());
         }
 
-        let overlay_opts = format!(
-            "lowerdir={},upperdir={},workdir={}",
-            self.lower.display(),
-            self.upper.display(),
-            self.work.display()
-        );
+        let lower = self.lower.display();
+        let upper = self.upper.display();
+        let work = self.work.display();
+        let overlay_opts = format!("lowerdir={lower},upperdir={upper},workdir={work}");
 
         let status = Command::new("docker")
             .args([
@@ -73,7 +73,7 @@ impl Overlay {
                 "-o",
                 "type=overlay",
                 "-o",
-                &format!("o={}", overlay_opts),
+                &format!("o={overlay_opts}"),
                 "-o",
                 "device=overlay",
                 &self.volume_name,
@@ -108,13 +108,11 @@ impl Overlay {
     /// Get Docker mount arguments for this overlay.
     /// Returns the arguments to pass to `docker run`.
     pub fn docker_mount_args(&self, target: &Path) -> Vec<String> {
+        let volume_name = &self.volume_name;
+        let target = target.display();
         vec![
             "--mount".to_string(),
-            format!(
-                "type=volume,source={},target={}",
-                self.volume_name,
-                target.display()
-            ),
+            format!("type=volume,source={volume_name},target={target}"),
         ]
     }
 }

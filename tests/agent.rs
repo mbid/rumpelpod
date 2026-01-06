@@ -96,8 +96,8 @@ fn test_agent_writes_file() {
     let expected_content = "WRITTEN_BY_AGENT_12345";
 
     let output = AgentBuilder::new(&fixture).run_with_prompt(&format!(
-        "Run `echo '{}' > newfile.txt` then run `cat newfile.txt` and tell me the result.",
-        expected_content
+        "Run `echo '{expected_content}' > newfile.txt` \
+         then run `cat newfile.txt` and tell me the result."
     ));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -202,7 +202,8 @@ fn test_agent_vim_input() {
         .expect("Failed to chmod mock vim");
 
     let current_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", mock_bin_dir.display(), current_path);
+    let mock_bin = mock_bin_dir.display();
+    let new_path = format!("{mock_bin}:{current_path}");
 
     // Create PTY - required for agent to use vim input mode
     let pty_system = native_pty_system();

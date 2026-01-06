@@ -24,7 +24,7 @@ pub fn image_exists(tag: &str) -> Result<bool> {
 /// Returns the image tag.
 pub fn build_image(dockerfile_path: &Path, context: &Path, user_info: &UserInfo) -> Result<String> {
     let dockerfile_hash = hash_file(dockerfile_path)?;
-    let image_tag = format!("sandbox:{}", dockerfile_hash);
+    let image_tag = format!("sandbox:{dockerfile_hash}");
 
     // Check if image already exists
     if image_exists(&image_tag)? {
@@ -34,6 +34,7 @@ pub fn build_image(dockerfile_path: &Path, context: &Path, user_info: &UserInfo)
 
     info!("Building Docker image: {}", image_tag);
 
+    let (username, uid, gid) = (&user_info.username, user_info.uid, user_info.gid);
     let status = Command::new("docker")
         .args([
             "build",
@@ -42,11 +43,11 @@ pub fn build_image(dockerfile_path: &Path, context: &Path, user_info: &UserInfo)
             "-t",
             &image_tag,
             "--build-arg",
-            &format!("USER_NAME={}", user_info.username),
+            &format!("USER_NAME={username}"),
             "--build-arg",
-            &format!("USER_ID={}", user_info.uid),
+            &format!("USER_ID={uid}"),
             "--build-arg",
-            &format!("GROUP_ID={}", user_info.gid),
+            &format!("GROUP_ID={gid}"),
             &context.to_string_lossy(),
         ])
         .stdout(Stdio::null())
@@ -107,13 +108,7 @@ pub fn remove_container(name: &str) -> Result<()> {
 /// List all Docker volumes with a specific prefix.
 pub fn list_volumes_with_prefix(prefix: &str) -> Result<Vec<String>> {
     let output = Command::new("docker")
-        .args([
-            "volume",
-            "ls",
-            "-q",
-            "--filter",
-            &format!("name={}", prefix),
-        ])
+        .args(["volume", "ls", "-q", "--filter", &format!("name={prefix}")])
         .output()
         .context("Failed to list Docker volumes")?;
 
@@ -158,7 +153,7 @@ pub fn exec_in_container(
 
     for (k, v) in env_vars {
         args.push("-e".to_string());
-        args.push(format!("{}={}", k, v));
+        args.push(format!("{k}={v}"));
     }
 
     args.push(name.to_string());
@@ -271,7 +266,7 @@ pub fn ensure_network(name: &str) -> Result<std::net::IpAddr> {
     let gateway_ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
     gateway_ip
         .parse()
-        .with_context(|| format!("Invalid gateway IP from network {}: {}", name, gateway_ip))
+        .with_context(|| format!("Invalid gateway IP from network {name}: {gateway_ip}"))
 }
 
 /// Remove a Docker network.
@@ -346,7 +341,7 @@ pub fn build_sandbox_ready_image(
         hasher.update(dir.guest_path.to_string_lossy().as_bytes());
     }
     let hash = hex::encode(&hasher.finalize()[..16]);
-    let image_tag = format!("sandbox-ready:{}", hash);
+    let image_tag = format!("sandbox-ready:{hash}");
 
     // Check if image already exists
     if image_exists(&image_tag)? {
@@ -423,13 +418,14 @@ pub fn build_sandbox_ready_image(
         "-t".to_string(),
         image_tag.clone(),
         "--build-context".to_string(),
-        format!("metagit={}", meta_git_name),
+        format!("metagit={meta_git_name}"),
     ];
 
     // Add build contexts for directory entries
     for (i, dir) in dirs.iter().enumerate() {
+        let host_path = dir.host_path.display();
         args.push("--build-context".to_string());
-        args.push(format!("dir{}={}", i, dir.host_path.display()));
+        args.push(format!("dir{i}={host_path}"));
     }
 
     // Add the main build context (temp directory with Dockerfile)

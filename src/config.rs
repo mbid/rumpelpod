@@ -112,7 +112,7 @@ pub fn get_sandbox_base_dir(repo_root: &Path) -> Result<PathBuf> {
         .to_string_lossy();
     let path_hash = hash_path(repo_root);
 
-    Ok(state_dir.join(format!("{}-{}", repo_name, path_hash)))
+    Ok(state_dir.join(format!("{repo_name}-{path_hash}")))
 }
 
 /// Get the directory for a specific named sandbox instance.
@@ -130,8 +130,9 @@ pub fn get_meta_git_dir(repo_root: &Path) -> Result<PathBuf> {
 
 /// Hash the contents of a file (used for Dockerfile hash-based image tagging).
 pub fn hash_file(path: &Path) -> Result<String> {
+    let path_display = path.display();
     let contents =
-        std::fs::read(path).with_context(|| format!("Failed to read file: {}", path.display()))?;
+        std::fs::read(path).with_context(|| format!("Failed to read file: {path_display}"))?;
     let mut hasher = Sha256::new();
     hasher.update(&contents);
     let result = hasher.finalize();
@@ -153,7 +154,7 @@ impl UserInfo {
 
         let username = std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))
-            .unwrap_or_else(|_| format!("user{}", uid));
+            .unwrap_or_else(|_| format!("user{uid}"));
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
 
