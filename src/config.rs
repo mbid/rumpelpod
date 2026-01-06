@@ -80,18 +80,18 @@ impl Runtime {
     }
 }
 
-/// Get the cache directory for sandbox data.
-/// Uses $XDG_CACHE_HOME/sandbox or ~/.cache/sandbox as fallback.
-pub fn get_cache_dir() -> Result<PathBuf> {
-    let cache_base = std::env::var("XDG_CACHE_HOME")
+/// Get the state directory for sandbox data.
+/// Uses $XDG_STATE_HOME/sandbox or ~/.local/state/sandbox as fallback.
+pub fn get_state_dir() -> Result<PathBuf> {
+    let state_base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             dirs::home_dir()
                 .expect("Could not determine home directory")
-                .join(".cache")
+                .join(".local/state")
         });
 
-    Ok(cache_base.join("sandbox"))
+    Ok(state_base.join("sandbox"))
 }
 
 /// Compute a short hash of a path for use in directory names.
@@ -103,16 +103,16 @@ pub fn hash_path(path: &Path) -> String {
 }
 
 /// Get the sandbox directory for a specific repo.
-/// Format: $XDG_CACHE_HOME/sandbox/<repo-root-dir-name>-<sha2-of-repo-root-absolute-path>
+/// Format: $XDG_STATE_HOME/sandbox/<repo-root-dir-name>-<sha2-of-repo-root-absolute-path>
 pub fn get_sandbox_base_dir(repo_root: &Path) -> Result<PathBuf> {
-    let cache_dir = get_cache_dir()?;
+    let state_dir = get_state_dir()?;
     let repo_name = repo_root
         .file_name()
         .context("Repo root has no file name")?
         .to_string_lossy();
     let path_hash = hash_path(repo_root);
 
-    Ok(cache_dir.join(format!("{}-{}", repo_name, path_hash)))
+    Ok(state_dir.join(format!("{}-{}", repo_name, path_hash)))
 }
 
 /// Get the directory for a specific named sandbox instance.
