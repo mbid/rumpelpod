@@ -356,13 +356,27 @@ pub fn build_sandbox_ready_image(
     let dockerfile_path = temp_dir.path().join("Dockerfile");
 
     // Build COPY instructions for copy entries.
-    // Each entry gets a named build context and a COPY instruction.
+    // Each entry uses the parent directory as build context and specifies the
+    // source name explicitly. This works for both files and directories.
     let mut copy_instructions = String::new();
-    for (i, copy) in copies.iter().enumerate() {
+    let mut copy_contexts: Vec<(&Path, &std::ffi::OsStr)> = Vec::new();
+    for copy in copies {
+        let parent = copy
+            .host_path
+            .parent()
+            .context("Copy host path has no parent directory")?;
+        let name = copy
+            .host_path
+            .file_name()
+            .context("Copy host path has no file name")?;
+        copy_contexts.push((parent, name));
+    }
+    for (i, (copy, (_parent, name))) in copies.iter().zip(copy_contexts.iter()).enumerate() {
         let guest_path = copy.guest_path.display();
-        // COPY from a named build context copies the contents of that context
-        // We copy to the guest path, creating parent directories as needed
-        copy_instructions.push_str(&format!("COPY --from=copy{i} / {guest_path}\n"));
+        let name = name.to_string_lossy();
+        // COPY from a named build context using the specific file/dir name.
+        // The trailing slash on guest_path ensures correct behavior for directories.
+        copy_instructions.push_str(&format!("COPY --from=copy{i} /{name} {guest_path}\n"));
     }
 
     // Write the Dockerfile
@@ -421,11 +435,11 @@ pub fn build_sandbox_ready_image(
         format!("metagit={meta_git_name}"),
     ];
 
-    // Add build contexts for copy entries
-    for (i, copy) in copies.iter().enumerate() {
-        let host_path = copy.host_path.display();
+    // Add build contexts for copy entries (using parent directories)
+    for (i, (parent, _name)) in copy_contexts.iter().enumerate() {
+        let parent = parent.display();
         args.push("--build-context".to_string());
-        args.push(format!("copy{i}={host_path}"));
+        args.push(format!("copy{i}={parent}"));
     }
 
     // Add the main build context (temp directory with Dockerfile)
