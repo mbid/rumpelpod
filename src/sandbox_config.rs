@@ -31,7 +31,7 @@ pub struct SandboxConfig {
 
     /// Directories to copy into the image at build time.
     #[serde(default)]
-    pub dir: Vec<DirEntry>,
+    pub copy: Vec<CopyEntry>,
 
     #[serde(default)]
     pub image: Option<ImageConfig>,
@@ -80,7 +80,7 @@ pub struct MountEntry {
 /// - `host-path` and `guest-path` pair for different paths
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DirEntry {
+pub struct CopyEntry {
     /// Path on both host and container (when host-path/guest-path not specified).
     /// - Relative paths are relative to repo root (host) / kept as-is (container)
     /// - `~` prefix expands to home directory
@@ -97,7 +97,7 @@ pub struct DirEntry {
     pub guest_path: Option<PathBuf>,
 }
 
-impl DirEntry {
+impl CopyEntry {
     /// Get the resolved host and guest paths.
     /// Returns (host_path, guest_path) after applying the path resolution rules.
     pub fn resolve_paths(&self, repo_root: &Path, username: &str) -> Result<(PathBuf, PathBuf)> {
@@ -116,13 +116,13 @@ impl DirEntry {
             }
             // Invalid combinations
             (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
-                bail!("Cannot specify both 'path' and 'host-path'/'guest-path' in [[dir]]")
+                bail!("Cannot specify both 'path' and 'host-path'/'guest-path' in [[copy]]")
             }
             (None, Some(_), None) | (None, None, Some(_)) => {
-                bail!("Must specify both 'host-path' and 'guest-path' together in [[dir]]")
+                bail!("Must specify both 'host-path' and 'guest-path' together in [[copy]]")
             }
             (None, None, None) => {
-                bail!("Must specify either 'path' or 'host-path'/'guest-path' in [[dir]]")
+                bail!("Must specify either 'path' or 'host-path'/'guest-path' in [[copy]]")
             }
         }
     }
@@ -391,77 +391,81 @@ unknown_field = "value"
     }
 
     #[test]
-    fn test_dir_simple_path() {
+    fn test_copy_simple_path() {
         let dir = TempDir::new().unwrap();
         create_config(
             dir.path(),
             r#"
-[[dir]]
+[[copy]]
 path = "~/.config/nvim"
 "#,
         );
 
         let config = SandboxConfig::load(dir.path()).unwrap();
-        assert_eq!(config.dir.len(), 1);
-        let (host, guest) = config.dir[0].resolve_paths(dir.path(), "testuser").unwrap();
+        assert_eq!(config.copy.len(), 1);
+        let (host, guest) = config.copy[0]
+            .resolve_paths(dir.path(), "testuser")
+            .unwrap();
         let home = dirs::home_dir().unwrap();
         assert_eq!(host, home.join(".config/nvim"));
         assert_eq!(guest, PathBuf::from("/home/testuser/.config/nvim"));
     }
 
     #[test]
-    fn test_dir_host_guest_paths() {
+    fn test_copy_host_guest_paths() {
         let dir = TempDir::new().unwrap();
         create_config(
             dir.path(),
             r#"
-[[dir]]
+[[copy]]
 host-path = "~/.ssh"
 guest-path = "/root/.ssh"
 "#,
         );
 
         let config = SandboxConfig::load(dir.path()).unwrap();
-        assert_eq!(config.dir.len(), 1);
-        let (host, guest) = config.dir[0].resolve_paths(dir.path(), "testuser").unwrap();
+        assert_eq!(config.copy.len(), 1);
+        let (host, guest) = config.copy[0]
+            .resolve_paths(dir.path(), "testuser")
+            .unwrap();
         let home = dirs::home_dir().unwrap();
         assert_eq!(host, home.join(".ssh"));
         assert_eq!(guest, PathBuf::from("/root/.ssh"));
     }
 
     #[test]
-    fn test_dir_multiple_entries() {
+    fn test_copy_multiple_entries() {
         let dir = TempDir::new().unwrap();
         create_config(
             dir.path(),
             r#"
-[[dir]]
+[[copy]]
 path = "~/.gitconfig"
 
-[[dir]]
+[[copy]]
 host-path = "/etc/hosts"
 guest-path = "/etc/hosts"
 "#,
         );
 
         let config = SandboxConfig::load(dir.path()).unwrap();
-        assert_eq!(config.dir.len(), 2);
+        assert_eq!(config.copy.len(), 2);
     }
 
     #[test]
-    fn test_dir_invalid_both_path_and_host_path() {
+    fn test_copy_invalid_both_path_and_host_path() {
         let dir = TempDir::new().unwrap();
         create_config(
             dir.path(),
             r#"
-[[dir]]
+[[copy]]
 path = "~/.config"
 host-path = "~/.config"
 "#,
         );
 
         let config = SandboxConfig::load(dir.path()).unwrap();
-        let result = config.dir[0].resolve_paths(dir.path(), "testuser");
+        let result = config.copy[0].resolve_paths(dir.path(), "testuser");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -470,18 +474,18 @@ host-path = "~/.config"
     }
 
     #[test]
-    fn test_dir_invalid_missing_guest_path() {
+    fn test_copy_invalid_missing_guest_path() {
         let dir = TempDir::new().unwrap();
         create_config(
             dir.path(),
             r#"
-[[dir]]
+[[copy]]
 host-path = "~/.config"
 "#,
         );
 
         let config = SandboxConfig::load(dir.path()).unwrap();
-        let result = config.dir[0].resolve_paths(dir.path(), "testuser");
+        let result = config.copy[0].resolve_paths(dir.path(), "testuser");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -490,17 +494,17 @@ host-path = "~/.config"
     }
 
     #[test]
-    fn test_dir_invalid_empty() {
+    fn test_copy_invalid_empty() {
         let dir = TempDir::new().unwrap();
         create_config(
             dir.path(),
             r#"
-[[dir]]
+[[copy]]
 "#,
         );
 
         let config = SandboxConfig::load(dir.path()).unwrap();
-        let result = config.dir[0].resolve_paths(dir.path(), "testuser");
+        let result = config.copy[0].resolve_paths(dir.path(), "testuser");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

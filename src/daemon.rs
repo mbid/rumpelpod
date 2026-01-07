@@ -265,27 +265,27 @@ fn handle_ensure_sandbox(
         let port = crate::git_http::GIT_HTTP_PORT;
         let git_http_url = format!("http://{gateway_ip}:{port}/meta.git");
 
-        // Resolve directory entries for copying into the image
-        let resolved_dirs: Vec<docker::ResolvedDirEntry> = match sandbox_config
-            .dir
+        // Resolve copy entries for copying directories into the image
+        let resolved_copies: Vec<docker::ResolvedCopyEntry> = match sandbox_config
+            .copy
             .iter()
             .map(|entry| {
                 entry
                     .resolve_paths(&info.repo_root, &user_info.username)
-                    .map(|(host, guest)| docker::ResolvedDirEntry {
+                    .map(|(host, guest)| docker::ResolvedCopyEntry {
                         host_path: host,
                         guest_path: guest,
                     })
             })
             .collect::<Result<Vec<_>, _>>()
         {
-            Ok(dirs) => dirs,
+            Ok(copies) => copies,
             Err(e) => {
-                error!("Client {client_id}: failed to resolve directory entries: {e}");
+                error!("Client {client_id}: failed to resolve copy entries: {e}");
                 let _ = server::send_error(
                     &mut stream,
                     -32000,
-                    &format!("Failed to resolve directory entries: {e}"),
+                    &format!("Failed to resolve copy entries: {e}"),
                 );
                 return;
             }
@@ -298,7 +298,7 @@ fn handle_ensure_sandbox(
             &info.repo_root,
             user_info.uid,
             user_info.gid,
-            &resolved_dirs,
+            &resolved_copies,
         ) {
             Ok(tag) => tag,
             Err(e) => {

@@ -1,4 +1,4 @@
-//! Integration tests for the `dir` feature (copying directories into sandbox image).
+//! Integration tests for the `copy` feature (copying directories into sandbox image).
 
 mod common;
 
@@ -9,8 +9,8 @@ use indoc::formatdoc;
 use common::{run_git, SandboxFixture};
 
 #[test]
-fn test_dir_simple_path() {
-    let fixture = SandboxFixture::new("test-dir-simple");
+fn test_copy_simple_path() {
+    let fixture = SandboxFixture::new("test-copy-simple");
 
     // Create a directory on the host to copy
     let host_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -22,7 +22,7 @@ fn test_dir_simple_path() {
     // Configure .sandbox.toml to copy the directory
     let host_display = host_path.display();
     let config = formatdoc! {r#"
-        [[dir]]
+        [[copy]]
         host-path = "{host_display}"
         guest-path = "/copied-dir"
     "#};
@@ -57,8 +57,8 @@ fn test_dir_simple_path() {
 }
 
 #[test]
-fn test_dir_home_expansion() {
-    let fixture = SandboxFixture::new("test-dir-home");
+fn test_copy_home_expansion() {
+    let fixture = SandboxFixture::new("test-copy-home");
 
     // Create a test file in a temp location
     let host_dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -69,7 +69,7 @@ fn test_dir_home_expansion() {
     // Using the temp dir as host path, and ~ expansion for guest path
     let host_display = host_path.display();
     let config = formatdoc! {r#"
-        [[dir]]
+        [[copy]]
         host-path = "{host_display}"
         guest-path = "~/.myconfig"
     "#};
@@ -99,8 +99,8 @@ fn test_dir_home_expansion() {
 }
 
 #[test]
-fn test_dir_multiple_entries() {
-    let fixture = SandboxFixture::new("test-dir-multiple");
+fn test_copy_multiple_entries() {
+    let fixture = SandboxFixture::new("test-copy-multiple");
 
     // Create two directories on the host
     let dir1 = tempfile::tempdir().expect("Failed to create temp dir 1");
@@ -109,15 +109,15 @@ fn test_dir_multiple_entries() {
     fs::write(dir1.path().join("file1.txt"), "content1").unwrap();
     fs::write(dir2.path().join("file2.txt"), "content2").unwrap();
 
-    // Configure .sandbox.toml with multiple dir entries
+    // Configure .sandbox.toml with multiple copy entries
     let dir1_display = dir1.path().display();
     let dir2_display = dir2.path().display();
     let config = formatdoc! {r#"
-        [[dir]]
+        [[copy]]
         host-path = "{dir1_display}"
         guest-path = "/dir1"
 
-        [[dir]]
+        [[copy]]
         host-path = "{dir2_display}"
         guest-path = "/dir2"
     "#};

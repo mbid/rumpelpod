@@ -290,10 +290,10 @@ pub fn remove_network(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// A resolved directory entry to copy into the image.
+/// A resolved copy entry for copying directories into the image.
 /// Contains absolute paths after resolution.
 #[derive(Debug, Clone)]
-pub struct ResolvedDirEntry {
+pub struct ResolvedCopyEntry {
     /// Absolute path on the host filesystem.
     pub host_path: std::path::PathBuf,
     /// Absolute path inside the container.
@@ -317,14 +317,14 @@ pub struct ResolvedDirEntry {
 /// * `checkout_path` - Path inside the container where the repo should be cloned
 /// * `uid` - User ID for file ownership
 /// * `gid` - Group ID for file ownership
-/// * `dirs` - Directories to copy into the image
+/// * `copies` - Directories to copy into the image
 pub fn build_sandbox_ready_image(
     base_image: &str,
     meta_git_path: &Path,
     checkout_path: &Path,
     uid: u32,
     gid: u32,
-    dirs: &[ResolvedDirEntry],
+    copies: &[ResolvedCopyEntry],
 ) -> Result<String> {
     // Generate a deterministic image tag based on inputs.
     // Note: We intentionally don't include the meta.git refs in the hash.
@@ -335,10 +335,10 @@ pub fn build_sandbox_ready_image(
     hasher.update(checkout_path.to_string_lossy().as_bytes());
     hasher.update(uid.to_le_bytes());
     hasher.update(gid.to_le_bytes());
-    // Include dir entries in hash (paths affect the image)
-    for dir in dirs {
-        hasher.update(dir.host_path.to_string_lossy().as_bytes());
-        hasher.update(dir.guest_path.to_string_lossy().as_bytes());
+    // Include copy entries in hash (paths affect the image)
+    for copy in copies {
+        hasher.update(copy.host_path.to_string_lossy().as_bytes());
+        hasher.update(copy.guest_path.to_string_lossy().as_bytes());
     }
     let hash = hex::encode(&hasher.finalize()[..16]);
     let image_tag = format!("sandbox-ready:{hash}");
@@ -355,14 +355,14 @@ pub fn build_sandbox_ready_image(
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory for Dockerfile")?;
     let dockerfile_path = temp_dir.path().join("Dockerfile");
 
-    // Build COPY instructions for directory entries.
-    // Each dir gets a named build context and a COPY instruction.
+    // Build COPY instructions for copy entries.
+    // Each entry gets a named build context and a COPY instruction.
     let mut copy_instructions = String::new();
-    for (i, dir) in dirs.iter().enumerate() {
-        let guest_path = dir.guest_path.display();
+    for (i, copy) in copies.iter().enumerate() {
+        let guest_path = copy.guest_path.display();
         // COPY from a named build context copies the contents of that context
         // We copy to the guest path, creating parent directories as needed
-        copy_instructions.push_str(&format!("COPY --from=dir{i} / {guest_path}\n"));
+        copy_instructions.push_str(&format!("COPY --from=copy{i} / {guest_path}\n"));
     }
 
     // Write the Dockerfile
@@ -421,11 +421,11 @@ pub fn build_sandbox_ready_image(
         format!("metagit={meta_git_name}"),
     ];
 
-    // Add build contexts for directory entries
-    for (i, dir) in dirs.iter().enumerate() {
-        let host_path = dir.host_path.display();
+    // Add build contexts for copy entries
+    for (i, copy) in copies.iter().enumerate() {
+        let host_path = copy.host_path.display();
         args.push("--build-context".to_string());
-        args.push(format!("dir{i}={host_path}"));
+        args.push(format!("copy{i}={host_path}"));
     }
 
     // Add the main build context (temp directory with Dockerfile)
