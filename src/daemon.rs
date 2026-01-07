@@ -46,7 +46,7 @@ pub struct DaemonConnection {
 /// Returns an error if the daemon is not running.
 pub fn connect(
     info: &SandboxInfo,
-    image_tag: &str,
+    image_config: &crate::sandbox_config::ImageConfig,
     user_info: &UserInfo,
     runtime: Runtime,
     overlay_mode: OverlayMode,
@@ -56,7 +56,7 @@ pub fn connect(
 
     let params = SandboxParams {
         project_dir: info.repo_root.clone(),
-        image_tag: image_tag.to_string(),
+        image: image_config.into(),
         user_info: user_info.into(),
         runtime: runtime.into(),
         overlay_mode: overlay_mode.into(),
@@ -291,9 +291,25 @@ fn handle_ensure_sandbox(
             }
         };
 
+        // Resolve the base image tag from config, building from Dockerfile if needed
+        let image_config: crate::sandbox_config::ImageConfig = params.image.clone().into();
+        let base_image_tag =
+            match docker::resolve_image_tag(&params.project_dir, &image_config, &user_info) {
+                Ok(tag) => tag,
+                Err(e) => {
+                    error!("Client {client_id}: failed to resolve base image: {e}");
+                    let _ = server::send_error(
+                        &mut stream,
+                        -32000,
+                        &format!("Failed to resolve base image: {e}"),
+                    );
+                    return;
+                }
+            };
+
         // Build the sandbox-ready image with the checkout (shared across sandboxes)
         let sandbox_ready_tag = match docker::build_sandbox_ready_image(
-            &params.image_tag,
+            &base_image_tag,
             &info.meta_git_dir,
             &info.repo_root,
             user_info.uid,

@@ -671,7 +671,7 @@ pub fn build_mount_list(
 /// Connects to the daemon (launching it if necessary) to manage the container lifecycle.
 pub fn run_sandbox(
     info: &SandboxInfo,
-    image_tag: &str,
+    image_config: &crate::sandbox_config::ImageConfig,
     user_info: &UserInfo,
     runtime: Runtime,
     overlay_mode: OverlayMode,
@@ -686,8 +686,14 @@ pub fn run_sandbox(
         );
     }
 
-    let _daemon_conn =
-        daemon::connect(info, image_tag, user_info, runtime, overlay_mode, env_vars)?;
+    let _daemon_conn = daemon::connect(
+        info,
+        image_config,
+        user_info,
+        runtime,
+        overlay_mode,
+        env_vars,
+    )?;
 
     let default_shell = if user_info.uses_fish() {
         "fish".to_string()
@@ -711,13 +717,20 @@ pub fn run_sandbox(
 /// Returns the daemon connection which must be held to keep the container alive.
 pub fn ensure_container_running(
     info: &SandboxInfo,
-    image_tag: &str,
+    image_config: &crate::sandbox_config::ImageConfig,
     user_info: &UserInfo,
     runtime: Runtime,
     overlay_mode: OverlayMode,
     env_vars: &[(String, String)],
 ) -> Result<DaemonConnection> {
-    daemon::connect(info, image_tag, user_info, runtime, overlay_mode, env_vars)
+    daemon::connect(
+        info,
+        image_config,
+        user_info,
+        runtime,
+        overlay_mode,
+        env_vars,
+    )
 }
 
 /// Internal function to start the container directly (called by daemon).

@@ -10,7 +10,7 @@ use crate::docker;
 use crate::git;
 use crate::llm::cache::LlmCache;
 use crate::sandbox;
-use crate::sandbox_config::SandboxConfig;
+use crate::sandbox_config::{ImageConfig, SandboxConfig};
 use crate::setup;
 
 #[derive(Parser)]
@@ -174,30 +174,13 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Resolve the Docker image tag from config, building if necessary.
-fn resolve_image_tag(
-    repo_root: &Path,
-    config: &SandboxConfig,
-    user_info: &UserInfo,
-) -> Result<String> {
-    use crate::sandbox_config::ImageConfig;
-
+/// Resolve the image configuration from the sandbox config.
+///
+/// If no image is specified in config, defaults to building from Dockerfile
+/// in the repo root.
+fn resolve_image_config(repo_root: &Path, config: &SandboxConfig) -> Result<ImageConfig> {
     match &config.image {
-        Some(ImageConfig::Tag(tag)) => Ok(tag.clone()),
-        Some(ImageConfig::Build {
-            dockerfile,
-            context,
-        }) => {
-            let dockerfile_path = repo_root.join(dockerfile);
-            if !dockerfile_path.exists() {
-                bail!("Dockerfile not found at {}", dockerfile_path.display());
-            }
-            let context_path = context
-                .as_ref()
-                .map(|p| repo_root.join(p))
-                .unwrap_or_else(|| repo_root.to_path_buf());
-            docker::build_image(&dockerfile_path, &context_path, user_info)
-        }
+        Some(image_config) => Ok(image_config.clone()),
         None => {
             // Default: look for Dockerfile in repo root
             let dockerfile_path = repo_root.join("Dockerfile");
@@ -211,7 +194,10 @@ fn resolve_image_tag(
                     tag = \"your-image:tag\"
                 "});
             }
-            docker::build_image(&dockerfile_path, repo_root, user_info)
+            Ok(ImageConfig::Build {
+                dockerfile: PathBuf::from("Dockerfile"),
+                context: None,
+            })
         }
     }
 }
@@ -227,7 +213,7 @@ fn run_sandbox(
     env_vars: &[(String, String)],
     command: Vec<String>,
 ) -> Result<()> {
-    let image_tag = resolve_image_tag(repo_root, config, user_info)?;
+    let image_config = resolve_image_config(repo_root, config)?;
 
     // Ensure sandbox is set up (saves mounts config for daemon to use)
     let info = sandbox::ensure_sandbox(repo_root, name, config)?;
@@ -241,7 +227,7 @@ fn run_sandbox(
 
     sandbox::run_sandbox(
         &info,
-        &image_tag,
+        &image_config,
         user_info,
         runtime,
         overlay_mode,
@@ -315,12 +301,12 @@ fn run_agent(
     env_vars: &[(String, String)],
     llm_cache: Option<LlmCache>,
 ) -> Result<()> {
-    let image_tag = resolve_image_tag(repo_root, config, user_info)?;
+    let image_config = resolve_image_config(repo_root, config)?;
     let info = sandbox::ensure_sandbox(repo_root, name, config)?;
 
     let _daemon_conn = sandbox::ensure_container_running(
         &info,
-        &image_tag,
+        &image_config,
         user_info,
         runtime,
         overlay_mode,

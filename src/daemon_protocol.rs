@@ -6,16 +6,60 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use crate::config::{OverlayMode, Runtime, UserInfo};
+use crate::sandbox_config::ImageConfig;
 
 /// Parameters needed to start a sandbox container.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxParams {
     pub project_dir: PathBuf,
-    pub image_tag: String,
+    pub image: ImageConfigWire,
     pub user_info: UserInfoWire,
     pub runtime: RuntimeWire,
     pub overlay_mode: OverlayModeWire,
     pub env_vars: Vec<(String, String)>,
+}
+
+/// Wire format for ImageConfig (serializable).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageConfigWire {
+    /// Use a pre-built image tag.
+    Tag(String),
+    /// Build from a Dockerfile.
+    Build {
+        dockerfile: PathBuf,
+        context: Option<PathBuf>,
+    },
+}
+
+impl From<&ImageConfig> for ImageConfigWire {
+    fn from(c: &ImageConfig) -> Self {
+        match c {
+            ImageConfig::Tag(tag) => Self::Tag(tag.clone()),
+            ImageConfig::Build {
+                dockerfile,
+                context,
+            } => Self::Build {
+                dockerfile: dockerfile.clone(),
+                context: context.clone(),
+            },
+        }
+    }
+}
+
+impl From<ImageConfigWire> for ImageConfig {
+    fn from(w: ImageConfigWire) -> Self {
+        match w {
+            ImageConfigWire::Tag(tag) => Self::Tag(tag),
+            ImageConfigWire::Build {
+                dockerfile,
+                context,
+            } => Self::Build {
+                dockerfile,
+                context,
+            },
+        }
+    }
 }
 
 /// Wire format for UserInfo (serializable).

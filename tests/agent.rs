@@ -218,7 +218,7 @@ fn test_agent_vim_input() {
 
     let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache");
     let sandbox_bin = assert_cmd::cargo::cargo_bin!("sandbox");
-    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    let mut cmd = CommandBuilder::new(sandbox_bin);
     cmd.cwd(&fixture.repo.dir);
     cmd.env("PATH", &new_path);
     cmd.env(

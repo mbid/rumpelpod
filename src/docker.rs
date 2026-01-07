@@ -568,3 +568,34 @@ HOOK_EOF
     debug!("Sandbox checkout initialized successfully");
     Ok(())
 }
+
+/// Resolve the Docker image tag from config, building if necessary.
+///
+/// This handles two cases:
+/// 1. An explicit image tag in config -> use it directly
+/// 2. A Dockerfile path in config -> build from that Dockerfile
+pub fn resolve_image_tag(
+    repo_root: &Path,
+    image_config: &crate::sandbox_config::ImageConfig,
+    user_info: &crate::config::UserInfo,
+) -> Result<String> {
+    use crate::sandbox_config::ImageConfig;
+
+    match image_config {
+        ImageConfig::Tag(tag) => Ok(tag.clone()),
+        ImageConfig::Build {
+            dockerfile,
+            context,
+        } => {
+            let dockerfile_path = repo_root.join(dockerfile);
+            if !dockerfile_path.exists() {
+                bail!("Dockerfile not found at {}", dockerfile_path.display());
+            }
+            let context_path = context
+                .as_ref()
+                .map(|p| repo_root.join(p))
+                .unwrap_or_else(|| repo_root.to_path_buf());
+            build_image(&dockerfile_path, &context_path, user_info)
+        }
+    }
+}
