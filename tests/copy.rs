@@ -135,3 +135,44 @@ fn test_copy_multiple_entries() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "content2");
 }
+
+#[test]
+fn test_copy_single_file() {
+    let fixture = SandboxFixture::new("test-copy-file");
+
+    // Create a single file on the host to copy (not a directory)
+    let host_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let host_file = host_dir.path().join("myconfig.txt");
+    fs::write(&host_file, "single file content").unwrap();
+
+    // Configure .sandbox.toml to copy the single file
+    let host_display = host_file.display();
+    let config = formatdoc! {r#"
+        [[copy]]
+        host-path = "{host_display}"
+        guest-path = "/etc/myconfig.txt"
+    "#};
+    fs::write(fixture.repo.dir.join(".sandbox.toml"), config).expect("Failed to write config");
+
+    run_git(&fixture.repo.dir, &["add", ".sandbox.toml"]);
+    run_git(&fixture.repo.dir, &["commit", "--amend", "--no-edit"]);
+
+    // Verify the file was copied
+    let output = fixture.run(&["cat", "/etc/myconfig.txt"]);
+    assert!(
+        output.status.success(),
+        "Failed to read copied file: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "single file content"
+    );
+
+    // Verify it's a file, not a directory
+    let output = fixture.run(&["test", "-f", "/etc/myconfig.txt"]);
+    assert!(
+        output.status.success(),
+        "/etc/myconfig.txt should be a file, not a directory"
+    );
+}
