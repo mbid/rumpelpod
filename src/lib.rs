@@ -1,6 +1,7 @@
 #[macro_use]
 mod agent;
 mod cli;
+pub mod command_ext;
 mod config;
 mod daemon;
 mod daemon_protocol;
