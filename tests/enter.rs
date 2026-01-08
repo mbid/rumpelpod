@@ -7,7 +7,7 @@ use std::process::Command;
 
 use indoc::indoc;
 
-use common::{run_git, SandboxFixture};
+use common::{run_git, SandboxFixture, TestDaemon, TestRepo};
 
 #[test]
 fn smoke_test_sandbox_enter() {
@@ -193,4 +193,75 @@ fn test_enter_passthrough_env() {
         "Multiple env vars not passed correctly. Got: '{}'",
         stdout.trim()
     );
+}
+
+/// Dockerfile that creates a user with secondary groups for testing group membership.
+const DOCKERFILE_WITH_GROUPS: &str = r#"FROM debian:trixie
+RUN apt-get update && apt-get install -y git
+
+# Create some test groups
+RUN groupadd testgroup1 && groupadd testgroup2
+
+# Build arguments for user setup (passed by sandbox build)
+ARG USER_NAME=testuser
+ARG USER_ID=1000
+ARG GROUP_ID=1000
+
+# Create user's primary group (may fail if GID already exists) and the user
+RUN groupadd -g ${GROUP_ID} ${USER_NAME} || groupadd ${USER_NAME}
+RUN useradd -m -u ${USER_ID} -g ${USER_NAME} ${USER_NAME} && \
+    usermod -aG testgroup1,testgroup2 ${USER_NAME}
+
+USER ${USER_NAME}
+WORKDIR /home/${USER_NAME}
+"#;
+
+#[test]
+fn test_enter_preserves_secondary_groups() {
+    // Create a test repo with a Dockerfile that sets up secondary groups
+    let repo = TestRepo::init();
+    fs::write(repo.dir.join("Dockerfile"), DOCKERFILE_WITH_GROUPS)
+        .expect("Failed to write Dockerfile");
+    run_git(&repo.dir, &["add", "Dockerfile"]);
+    run_git(&repo.dir, &["commit", "-m", "Add Dockerfile with groups"]);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "test-groups";
+
+    // Run `id` inside the sandbox to check group membership
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(&repo.dir)
+        .env("SANDBOX_DAEMON_SOCKET", &daemon.socket_path)
+        .env("XDG_STATE_HOME", &daemon.state_dir)
+        .args(["enter", sandbox_name, "--runtime", "runc", "--", "id"])
+        .output()
+        .expect("Failed to run sandbox");
+
+    assert!(
+        output.status.success(),
+        "Failed to run id command: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Verify that secondary groups are present
+    assert!(
+        stdout.contains("testgroup1"),
+        "Secondary group testgroup1 not found in id output: '{}'",
+        stdout
+    );
+    assert!(
+        stdout.contains("testgroup2"),
+        "Secondary group testgroup2 not found in id output: '{}'",
+        stdout
+    );
+
+    // Clean up
+    let _ = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
+        .current_dir(&repo.dir)
+        .env("SANDBOX_DAEMON_SOCKET", &daemon.socket_path)
+        .env("XDG_STATE_HOME", &daemon.state_dir)
+        .args(["delete", sandbox_name])
+        .output();
 }
