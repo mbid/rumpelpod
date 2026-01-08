@@ -176,3 +176,83 @@ fn test_copy_single_file() {
         "/etc/myconfig.txt should be a file, not a directory"
     );
 }
+
+/// Test that [[copy]] entries with overlay mode "copy" preserve correct user ownership.
+#[test]
+fn test_copy_preserves_user_ownership() {
+    let fixture = SandboxFixture::new("test-copy-ownership");
+
+    // Create a directory with files to copy
+    let host_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let host_path = host_dir.path();
+    fs::write(host_path.join("file.txt"), "content").unwrap();
+    fs::create_dir_all(host_path.join("subdir")).unwrap();
+    fs::write(host_path.join("subdir/nested.txt"), "nested").unwrap();
+
+    // Configure .sandbox.toml to copy the directory
+    let host_display = host_path.display();
+    let config = formatdoc! {r#"
+        [[copy]]
+        host-path = "{host_display}"
+        guest-path = "/copied-dir"
+    "#};
+    fs::write(fixture.repo.dir.join(".sandbox.toml"), config).expect("Failed to write config");
+
+    run_git(&fixture.repo.dir, &["add", ".sandbox.toml"]);
+    run_git(&fixture.repo.dir, &["commit", "--amend", "--no-edit"]);
+
+    // Get the expected UID (the user running the sandbox)
+    let uid = nix::unistd::getuid().as_raw();
+
+    // Note: [[copy]] entries are baked into the Docker image at build time,
+    // not bind-mounted. The overlay-mode flag doesn't affect them.
+    let output = fixture.run(&["stat", "-c", "%u", "/copied-dir"]);
+    assert!(output.status.success(), "Failed to stat /copied-dir");
+    let dir_uid: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("Failed to parse UID");
+    assert_eq!(
+        dir_uid, uid,
+        "Directory /copied-dir should be owned by uid {uid}, but is owned by {dir_uid}"
+    );
+
+    // Check ownership of a file inside
+    let output = fixture.run_with_mode("copy", &["stat", "-c", "%u", "/copied-dir/file.txt"]);
+    assert!(output.status.success(), "Failed to stat file.txt");
+    let file_uid: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("Failed to parse UID");
+    assert_eq!(
+        file_uid, uid,
+        "File /copied-dir/file.txt should be owned by uid {uid}, but is owned by {file_uid}"
+    );
+
+    // Check ownership of nested directory
+    let output = fixture.run_with_mode("copy", &["stat", "-c", "%u", "/copied-dir/subdir"]);
+    assert!(output.status.success(), "Failed to stat subdir");
+    let subdir_uid: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("Failed to parse UID");
+    assert_eq!(
+        subdir_uid, uid,
+        "Directory /copied-dir/subdir should be owned by uid {uid}, but is owned by {subdir_uid}"
+    );
+
+    // Check ownership of nested file
+    let output = fixture.run_with_mode(
+        "copy",
+        &["stat", "-c", "%u", "/copied-dir/subdir/nested.txt"],
+    );
+    assert!(output.status.success(), "Failed to stat nested.txt");
+    let nested_uid: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("Failed to parse UID");
+    assert_eq!(
+        nested_uid, uid,
+        "File /copied-dir/subdir/nested.txt should be owned by uid {uid}, but is owned by {nested_uid}"
+    );
+}

@@ -376,7 +376,10 @@ pub fn build_sandbox_ready_image(
         let name = name.to_string_lossy();
         // COPY from a named build context using the specific file/dir name.
         // The trailing slash on guest_path ensures correct behavior for directories.
-        copy_instructions.push_str(&format!("COPY --from=copy{i} /{name} {guest_path}\n"));
+        // Use --chown to set correct ownership (COPY defaults to root otherwise).
+        copy_instructions.push_str(&format!(
+            "COPY --chown={uid}:{gid} --from=copy{i} /{name} {guest_path}\n"
+        ));
     }
 
     // Write the Dockerfile
