@@ -510,15 +510,11 @@ pub fn initialize_sandbox_checkout(
     // 2. Adds a `host` remote for fetching host branches
     // 3. Fetches the required commit
     // 4. Creates and checks out the sandbox branch (only if it doesn't exist)
-    // 5. Sets up the post-commit hook
+    // 5. Sets up and runs the post-commit hook (pushes initial branches)
     //
     // Note: We use printf for the hook to avoid heredoc quoting issues.
     // Note: We only create the branch on first initialization. On resume,
     //       the branch already exists and we preserve the user's work.
-    //
-    // The post-commit hook computes the correct target ref based on branch name:
-    // - If branch = sandbox_name: push to sandbox/<sandbox_name>
-    // - Otherwise: push to sandbox/<branch>@<sandbox_name>
     let checkout_path = checkout_path.display();
     let script = formatdoc! {r#"
         set -e
@@ -549,22 +545,25 @@ pub fn initialize_sandbox_checkout(
         fi
 
         # Set up the post-commit hook for automatic sync
-        # The hook computes the correct target ref based on branch name:
-        # - Primary branch (name = sandbox_name) -> sandbox/<sandbox_name>
-        # - Other branches -> sandbox/<branch>@<sandbox_name>
+        # The hook pushes to sandbox/<branch>@<sandbox_name> for all branches,
+        # plus sandbox/<sandbox_name> when on the primary branch.
         mkdir -p .git/hooks
         cat > .git/hooks/post-commit << 'HOOK_EOF'
 #!/bin/sh
 branch=$(git symbolic-ref --short HEAD 2>/dev/null) || exit 0
 sandbox_name="{sandbox_name}"
+git_http_url="{git_http_url}"
+# Always push to sandbox/<branch>@<sandbox_name>
+git push --force --quiet "$git_http_url" "HEAD:refs/heads/sandbox/$branch@$sandbox_name" 2>/dev/null || true
+# Also push to sandbox/<sandbox_name> when on the primary branch
 if [ "$branch" = "$sandbox_name" ]; then
-    target="sandbox/$sandbox_name"
-else
-    target="sandbox/$branch@$sandbox_name"
+    git push --force --quiet "$git_http_url" "HEAD:refs/heads/sandbox/$sandbox_name" 2>/dev/null || true
 fi
-git push --force --quiet "{git_http_url}" "HEAD:refs/heads/$target" 2>/dev/null || true
 HOOK_EOF
         chmod +x .git/hooks/post-commit
+
+        # Run the hook to push initial branches to meta.git
+        .git/hooks/post-commit
     "#};
 
     let output = Command::new("docker")
