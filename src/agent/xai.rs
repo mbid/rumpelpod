@@ -29,7 +29,12 @@ fn make_tool(name: ToolName) -> Tool {
     }
 }
 
-pub fn run_grok_agent(container_name: &str, model: Model, cache: Option<LlmCache>) -> Result<()> {
+pub fn run_grok_agent(
+    container_name: &str,
+    uid: u32,
+    model: Model,
+    cache: Option<LlmCache>,
+) -> Result<()> {
     let client = Client::new_with_cache(cache)?;
 
     let mut stdout = std::io::stdout();
@@ -38,7 +43,7 @@ pub fn run_grok_agent(container_name: &str, model: Model, cache: Option<LlmCache
     let mut chat_history = String::new();
 
     // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name);
+    let agents_md = read_agents_md(container_name, uid);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
     // Add system message at the start
@@ -162,7 +167,7 @@ pub fn run_grok_agent(container_name: &str, model: Model, cache: Option<LlmCache
                             chat_println!(chat_history, "$ {}", command);
 
                             let (output, success) =
-                                execute_bash_in_sandbox(container_name, command)?;
+                                execute_bash_in_sandbox(container_name, uid, command)?;
 
                             if !output.is_empty() {
                                 chat_println!(chat_history, "{}", output);
@@ -184,6 +189,7 @@ pub fn run_grok_agent(container_name: &str, model: Model, cache: Option<LlmCache
 
                             let (output, success) = execute_edit_in_sandbox(
                                 container_name,
+                                uid,
                                 file_path,
                                 old_string,
                                 new_string,
@@ -204,7 +210,7 @@ pub fn run_grok_agent(container_name: &str, model: Model, cache: Option<LlmCache
                                 args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
                             let (output, success) =
-                                execute_write_in_sandbox(container_name, file_path, content)?;
+                                execute_write_in_sandbox(container_name, uid, file_path, content)?;
 
                             if success {
                                 chat_println!(chat_history, "[write] {}", file_path);

@@ -10,6 +10,14 @@ use strum::{Display, EnumString};
 pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
 
+/// Build a docker exec command that runs as the specified user.
+/// This ensures secondary group membership is applied correctly.
+fn docker_exec_cmd(container_name: &str, uid: u32) -> Command {
+    let mut cmd = Command::new("docker");
+    cmd.args(["exec", "-u", &uid.to_string(), container_name]);
+    cmd
+}
+
 pub const BASE_SYSTEM_PROMPT: &str = "You are a helpful assistant running inside a sandboxed environment. You can execute bash commands to help the user.";
 
 // Tool names used by all agent implementations
@@ -86,10 +94,10 @@ impl ToolName {
 }
 
 /// Read AGENTS.md from the sandbox if it exists.
-pub fn read_agents_md(container_name: &str) -> Option<String> {
+pub fn read_agents_md(container_name: &str, uid: u32) -> Option<String> {
     debug!("Reading {} from sandbox", AGENTS_MD_PATH);
-    let output = Command::new("docker")
-        .args(["exec", container_name, "cat", AGENTS_MD_PATH])
+    let output = docker_exec_cmd(container_name, uid)
+        .args(["cat", AGENTS_MD_PATH])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .output()
@@ -113,13 +121,14 @@ pub fn build_system_prompt(agents_md: Option<&str>) -> String {
 
 pub fn execute_edit_in_sandbox(
     container_name: &str,
+    uid: u32,
     file_path: &str,
     old_string: &str,
     new_string: &str,
 ) -> Result<(String, bool)> {
     debug!("Reading file for edit: {}", file_path);
-    let output = Command::new("docker")
-        .args(["exec", container_name, "cat", file_path])
+    let output = docker_exec_cmd(container_name, uid)
+        .args(["cat", file_path])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -157,8 +166,8 @@ pub fn execute_edit_in_sandbox(
     debug!("Writing edited file: {}", file_path);
     let escaped_path = file_path.replace('\'', "'\\''");
     let write_cmd = format!("cat > '{escaped_path}'");
-    let mut write_process = Command::new("docker")
-        .args(["exec", "-i", container_name, "bash", "-c", &write_cmd])
+    let mut write_process = docker_exec_cmd(container_name, uid)
+        .args(["-i", "bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -190,12 +199,13 @@ pub fn execute_edit_in_sandbox(
 
 pub fn execute_write_in_sandbox(
     container_name: &str,
+    uid: u32,
     file_path: &str,
     content: &str,
 ) -> Result<(String, bool)> {
     debug!("Checking if file exists: {}", file_path);
-    let output = Command::new("docker")
-        .args(["exec", container_name, "test", "-e", file_path])
+    let output = docker_exec_cmd(container_name, uid)
+        .args(["test", "-e", file_path])
         .output()
         .context("Failed to check if file exists")?;
 
@@ -208,8 +218,8 @@ pub fn execute_write_in_sandbox(
             let escaped_parent = parent.display().to_string().replace('\'', "'\\''");
             let mkdir_cmd = format!("mkdir -p '{escaped_parent}'");
             debug!("Creating parent directories for: {}", file_path);
-            let _ = Command::new("docker")
-                .args(["exec", container_name, "bash", "-c", &mkdir_cmd])
+            let _ = docker_exec_cmd(container_name, uid)
+                .args(["bash", "-c", &mkdir_cmd])
                 .output();
         }
     }
@@ -217,8 +227,8 @@ pub fn execute_write_in_sandbox(
     debug!("Writing new file: {}", file_path);
     let escaped_path = file_path.replace('\'', "'\\''");
     let write_cmd = format!("cat > '{escaped_path}'");
-    let mut write_process = Command::new("docker")
-        .args(["exec", "-i", container_name, "bash", "-c", &write_cmd])
+    let mut write_process = docker_exec_cmd(container_name, uid)
+        .args(["-i", "bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -248,7 +258,7 @@ pub fn execute_write_in_sandbox(
     Ok((format!("Successfully wrote {file_path}"), true))
 }
 
-fn save_output_to_file(container_name: &str, data: &[u8]) -> Result<String> {
+fn save_output_to_file(container_name: &str, uid: u32, data: &[u8]) -> Result<String> {
     // Generate deterministic ID from content hash for reproducible cache keys
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -260,16 +270,16 @@ fn save_output_to_file(container_name: &str, data: &[u8]) -> Result<String> {
 
     // Create /agent directory if it doesn't exist
     debug!("Creating /agent directory");
-    Command::new("docker")
-        .args(["exec", container_name, "bash", "-c", "mkdir -p /agent"])
+    docker_exec_cmd(container_name, uid)
+        .args(["bash", "-c", "mkdir -p /agent"])
         .output()
         .context("Failed to create /agent directory")?;
 
     // Write the output to file
     debug!("Writing output data ({} bytes)", data.len());
     let write_cmd = format!("cat > {output_file}");
-    let mut write_process = Command::new("docker")
-        .args(["exec", "-i", container_name, "bash", "-c", &write_cmd])
+    let mut write_process = docker_exec_cmd(container_name, uid)
+        .args(["-i", "bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
         .spawn()
         .context("Failed to write output to file")?;
@@ -290,12 +300,16 @@ fn save_output_to_file(container_name: &str, data: &[u8]) -> Result<String> {
     Ok(output_file)
 }
 
-pub fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(String, bool)> {
+pub fn execute_bash_in_sandbox(
+    container_name: &str,
+    uid: u32,
+    command: &str,
+) -> Result<(String, bool)> {
     const MAX_OUTPUT_SIZE: usize = 30000;
 
     debug!("Executing bash in sandbox: {}", command);
-    let output = Command::new("docker")
-        .args(["exec", container_name, "bash", "-c", command])
+    let output = docker_exec_cmd(container_name, uid)
+        .args(["bash", "-c", command])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -316,7 +330,7 @@ pub fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(S
 
     // Check if output exceeds limit - save to file if so
     if combined_bytes.len() > MAX_OUTPUT_SIZE {
-        let output_file = save_output_to_file(container_name, &combined_bytes)?;
+        let output_file = save_output_to_file(container_name, uid, &combined_bytes)?;
         return Ok((format!("Full output available at {output_file}"), false));
     }
 
@@ -324,7 +338,7 @@ pub fn execute_bash_in_sandbox(container_name: &str, command: &str) -> Result<(S
     let combined = match String::from_utf8(combined_bytes.clone()) {
         Ok(s) => s,
         Err(_) => {
-            let output_file = save_output_to_file(container_name, &combined_bytes)?;
+            let output_file = save_output_to_file(container_name, uid, &combined_bytes)?;
             return Ok((
                 format!("Output is not valid UTF-8. Full output available at {output_file}"),
                 false,

@@ -709,7 +709,10 @@ pub fn run_sandbox(
 
     debug!("Executing in container: {}", info.container_name);
 
-    docker::exec_in_container(&info.container_name, &cmd, env_vars)
+    // Pass the UID to docker exec - if a user with this UID exists in /etc/passwd,
+    // Docker will look it up and apply all their groups (primary and secondary)
+    let uid_str = user_info.uid.to_string();
+    docker::exec_in_container(&info.container_name, &cmd, env_vars, Some(&uid_str))
     // _daemon_conn is dropped here, signaling disconnection to daemon
 }
 

@@ -137,10 +137,17 @@ pub fn remove_volume(name: &str) -> Result<()> {
 }
 
 /// Attach to a running container and execute a command.
+///
+/// If `username` is provided, the command runs as that user with all their groups.
+/// When specifying the user explicitly via `-u`, Docker looks up the user in the
+/// container's /etc/passwd and applies all their groups (primary and secondary).
+/// This is necessary because containers started with `--user uid:gid` only have
+/// the primary group set by default.
 pub fn exec_in_container(
     name: &str,
     command: &[&str],
     env_vars: &[(String, String)],
+    username: Option<&str>,
 ) -> Result<()> {
     use std::io::IsTerminal;
 
@@ -149,6 +156,13 @@ pub fn exec_in_container(
     // Only use -it flags when stdin is a TTY
     if std::io::stdin().is_terminal() {
         args.push("-it".to_string());
+    }
+
+    // Run as the specified user - Docker will look up the user in /etc/passwd
+    // and apply all their groups (primary and secondary)
+    if let Some(user) = username {
+        args.push("-u".to_string());
+        args.push(user.to_string());
     }
 
     for (k, v) in env_vars {

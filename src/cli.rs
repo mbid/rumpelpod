@@ -313,6 +313,6 @@ fn run_agent(
         env_vars,
     )?;
 
-    agent::run_agent(&info.container_name, model, llm_cache)
+    agent::run_agent(&info.container_name, user_info.uid, model, llm_cache)
     // _daemon_conn is dropped here, signaling disconnection to daemon
 }
