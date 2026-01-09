@@ -37,6 +37,7 @@ rand = "*"
 tempfile = "*"
 listenfd = "*"
 url = "2.5.8"
+axum = "*"
 
 [dev-dependencies]
 assert_cmd = "*"
