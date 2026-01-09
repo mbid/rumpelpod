@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use tempfile::TempPath;
+use tempfile::TempDir;
 
 /// Environment variable used to configure the daemon socket path.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -22,19 +22,17 @@ pub struct TestDaemon {
     pub socket_path: PathBuf,
     process: Child,
     #[allow(dead_code)]
-    temp_dir: TempPath,
+    temp_dir: TempDir,
 }
 
 impl TestDaemon {
     /// Start a new test daemon with an isolated socket and state directory.
     pub fn start() -> Self {
-        let temp_dir = TempPath::from_path(
-            std::env::temp_dir().join(format!("sandbox-test-{}", std::process::id())),
-        );
-        std::fs::create_dir_all(&temp_dir).expect("Failed to create temp directory");
+        let temp_dir =
+            TempDir::with_prefix("sandbox-test-").expect("Failed to create temp directory");
 
-        let socket_path = temp_dir.join("sandbox.sock");
-        let state_dir = temp_dir.join("state");
+        let socket_path = temp_dir.path().join("sandbox.sock");
+        let state_dir = temp_dir.path().join("state");
 
         let process = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
             .env(SOCKET_PATH_ENV, &socket_path)
@@ -77,20 +75,17 @@ impl Drop for TestDaemon {
 
 /// A temporary directory for tests, cleaned up on drop.
 pub struct TestRepo {
-    #[allow(dead_code)]
-    dir: TempPath,
+    dir: TempDir,
 }
 
 impl TestRepo {
     pub fn new() -> Self {
-        let dir = TempPath::from_path(
-            std::env::temp_dir().join(format!("sandbox-test-repo-{}", std::process::id())),
-        );
-        std::fs::create_dir_all(&dir).expect("Failed to create temp directory");
+        let dir =
+            TempDir::with_prefix("sandbox-test-repo-").expect("Failed to create temp directory");
         TestRepo { dir }
     }
 
     pub fn path(&self) -> &Path {
-        &self.dir
+        self.dir.path()
     }
 }
