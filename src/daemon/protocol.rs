@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::put;
+use axum::routing::{delete, put};
 use axum::serve::Listener;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,19 @@ struct LaunchSandboxResponse {
     container_id: ContainerId,
 }
 
+/// Request body for delete_sandbox endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct DeleteSandboxRequest {
+    sandbox_name: SandboxName,
+    repo_path: PathBuf,
+}
+
+/// Response body for delete_sandbox endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct DeleteSandboxResponse {
+    deleted: bool,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -56,6 +69,10 @@ pub trait Daemon: Send + Sync + 'static {
         image: Image,
         repo_path: PathBuf,
     ) -> Result<ContainerId>;
+
+    // DELETE /sandbox
+    // Stops and removes a sandbox container.
+    fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()>;
 }
 
 pub struct DaemonClient {
@@ -121,6 +138,30 @@ impl Daemon for DaemonClient {
             Err(anyhow::anyhow!("Server error: {}", error.error))
         }
     }
+
+    fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
+        let url = self.url.join("/sandbox")?;
+        let request = DeleteSandboxRequest {
+            sandbox_name,
+            repo_path,
+        };
+
+        let response = self
+            .client
+            .delete(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
 }
 
 /// Handler for PUT /sandbox endpoint.
@@ -134,6 +175,24 @@ async fn launch_sandbox_handler<D: Daemon>(
 
     match result {
         Ok(container_id) => Ok(Json(LaunchSandboxResponse { container_id })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
+/// Handler for DELETE /sandbox endpoint.
+async fn delete_sandbox_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<DeleteSandboxRequest>,
+) -> Result<Json<DeleteSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.delete_sandbox(request.sandbox_name, request.repo_path));
+
+    match result {
+        Ok(()) => Ok(Json(DeleteSandboxResponse { deleted: true })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -170,6 +229,7 @@ where
 
     let app = Router::new()
         .route("/sandbox", put(launch_sandbox_handler::<D>))
+        .route("/sandbox", delete(delete_sandbox_handler::<D>))
         .with_state(daemon);
 
     block_on(async move {
@@ -198,6 +258,10 @@ mod tests {
         ) -> Result<ContainerId> {
             // Return a container ID that encodes the inputs for verification
             Ok(ContainerId(format!("{}:{}", sandbox_name.0, image.0)))
+        }
+
+        fn delete_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
+            Ok(())
         }
     }
 

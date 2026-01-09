@@ -8,6 +8,7 @@ use indoc::indoc;
 use log::error;
 use tokio::net::UnixListener;
 
+use crate::command_ext::CommandExt;
 use protocol::{ContainerId, Daemon, Image, SandboxName};
 
 /// Environment variable to override the daemon socket path for testing.
@@ -169,6 +170,34 @@ impl Daemon for DaemonServer {
 
         // Container doesn't exist - create it
         create_container(&container_name, &image, &repo_path)
+    }
+
+    fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
+        let container_name = container_name(&repo_path, &sandbox_name);
+
+        // Stop the container with immediate SIGKILL (-t 0) because containers typically
+        // run `sleep infinity` which won't handle SIGTERM gracefully anyway.
+        // TODO: For sysbox/systemd containers that don't invoke the provided run command,
+        // we should allow a graceful shutdown period.
+        let _ = Command::new("docker")
+            .args(["stop", "-t", "0", &container_name])
+            .combined_output();
+
+        // Remove the container
+        let output = Command::new("docker")
+            .args(["rm", "-f", &container_name])
+            .combined_output()
+            .context("Failed to execute docker rm")?;
+
+        if !output.status.success() {
+            // Ignore "No such container" errors (already deleted)
+            if !output.combined_output.contains("No such container") {
+                error!("docker rm failed: {}", output.combined_output);
+                anyhow::bail!("docker rm failed: {}", output.combined_output.trim());
+            }
+        }
+
+        Ok(())
     }
 }
 

@@ -5,6 +5,7 @@ mod cli;
 pub mod command_ext;
 mod config;
 mod daemon;
+mod delete;
 mod enter;
 mod llm;
 mod systemd;
@@ -34,8 +35,8 @@ pub fn run() -> Result<()> {
         Command::List => {
             list()?;
         }
-        Command::Delete(_) => {
-            delete()?;
+        Command::Delete(ref cmd) => {
+            delete::delete(cmd)?;
         }
         Command::Agent(_) => {
             agent()?;
@@ -46,10 +47,6 @@ pub fn run() -> Result<()> {
 }
 
 fn list() -> Result<()> {
-    todo!()
-}
-
-fn delete() -> Result<()> {
     todo!()
 }
 
