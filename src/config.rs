@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::ValueEnum;
-use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Container runtime to use for sandboxing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, serde::Deserialize)]
@@ -82,5 +81,3 @@ pub fn get_state_dir() -> Result<PathBuf> {
 
     Ok(state_base.join("sandbox"))
 }
-
-pub use crate::sandbox_config::*;

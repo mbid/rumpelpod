@@ -1,22 +1,10 @@
 mod protocol;
 
 use anyhow::{Context, Result};
-use indoc::{formatdoc, indoc};
-use listenfd::ListenFd;
-use log::{debug, error, info};
-use std::collections::HashMap;
-use std::io::Read;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use indoc::indoc;
+use std::path::PathBuf;
 
-use crate::config::{OverlayMode, Runtime, UserInfo};
-use crate::docker;
-use crate::git::GitSync;
-use crate::git_http::GitHttpServer;
-use crate::sandbox::SandboxInfo;
-use crate::sandbox_config::SandboxConfig;
+use protocol::{ContainerId, Daemon, Image};
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -40,7 +28,7 @@ struct DaemonServer {
 }
 
 impl Daemon for DaemonServer {
-    fn launch_sandbox(image: Image, repo_path: PathBuf) -> Result<ContainerId> {
+    fn launch_sandbox(&self, _image: Image, _repo_path: PathBuf) -> Result<ContainerId> {
         // TODO:
         // - Calculate combined hash for image + repo_path.
         // - Check whether running container with that label exists already.
@@ -48,5 +36,11 @@ impl Daemon for DaemonServer {
         // - If not: docker run.
         //
         // Return container ID of running container.
+        todo!()
     }
+}
+
+pub fn run_daemon() -> Result<()> {
+    let daemon = DaemonServer {};
+    protocol::serve_daemon(daemon);
 }

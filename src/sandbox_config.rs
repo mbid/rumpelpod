@@ -5,10 +5,10 @@
 
 use anyhow::{bail, Context, Result};
 use indoc::formatdoc;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use serde::Deserialize;
+use std::path::Path;
 
-use crate::config::{Model, OverlayMode, Runtime};
+use crate::config::{Model, Runtime};
 
 /// Top-level configuration structure parsed from `.sandbox.toml`.
 #[derive(Debug, Clone, Deserialize, Default)]

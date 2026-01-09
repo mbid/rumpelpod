@@ -1,17 +1,10 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use indoc::formatdoc;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use crate::agent;
-use crate::config::{Model, OverlayMode, Runtime, UserInfo};
+use crate::config::Model;
 use crate::daemon;
-use crate::docker;
-use crate::git;
-use crate::llm::cache::LlmCache;
-use crate::sandbox;
-use crate::sandbox_config::{ImageConfig, SandboxConfig};
-use crate::setup;
+use crate::systemd as setup;
 
 #[derive(Parser)]
 #[command(name = "sandbox")]
@@ -84,16 +77,23 @@ pub fn run() -> Result<()> {
         Commands::SystemUninstall => {
             setup::system_uninstall()?;
         }
-        Commands::Enter { name, command } => {
+        Commands::Enter {
+            name: _,
+            command: _,
+        } => {
             enter()?;
         }
         Commands::List => {
             list()?;
         }
-        Commands::Delete { name } => {
+        Commands::Delete { name: _ } => {
             delete()?;
         }
-        Commands::Agent { name, model, cache } => {
+        Commands::Agent {
+            name: _,
+            model: _,
+            cache: _,
+        } => {
             agent()?;
         }
     }
@@ -101,22 +101,21 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn enter(EnterCommand {}: EnterCommand) -> Result<()> {
+fn enter() -> Result<()> {
     // TODO: Contact daemon to launch sandbox.
     // Then `docker exec /bin/bash` into the container.
-}
-
-fn list(ListCommand {}: ListCommand) -> Result<()> {
-    let repo_root = git::find_repo_root()?;
     todo!()
 }
 
-fn delete(DeleteCommand { name }: DeleteCommand) -> Result<()> {
-    let repo_root = git::find_repo_root()?;
+fn list() -> Result<()> {
     todo!()
 }
 
-fn agent(AgentCommand { name, model, cache }: AgentCommand) -> Result<()> {
+fn delete() -> Result<()> {
+    todo!()
+}
+
+fn agent() -> Result<()> {
     // TODO: Contact daemon to launch sandbox.
     // Then launch agent loop.
     todo!()

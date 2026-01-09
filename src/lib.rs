@@ -1,5 +1,6 @@
 #[macro_use]
 mod agent;
+mod r#async;
 mod cli;
 pub mod command_ext;
 mod config;

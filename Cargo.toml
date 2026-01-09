@@ -36,6 +36,7 @@ backoff = "*"
 rand = "*"
 tempfile = "*"
 listenfd = "*"
+url = "2.5.8"
 
 [dev-dependencies]
 assert_cmd = "*"
