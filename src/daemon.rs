@@ -1,4 +1,4 @@
-mod protocol;
+pub mod protocol;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -95,6 +95,9 @@ pub fn run_daemon() -> Result<()> {
     if socket.exists() {
         std::fs::remove_file(&socket)?;
     }
+
+    // Enter the runtime context so UnixListener::bind can register with the reactor
+    let _guard = crate::r#async::RUNTIME.enter();
 
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("Failed to bind to {}", socket.display()))?;

@@ -1,10 +1,8 @@
-use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
+use clap::{Args, Parser, Subcommand};
+
 use crate::config::Model;
-use crate::daemon;
-use crate::systemd as setup;
 
 #[derive(Parser)]
 #[command(name = "sandbox")]
@@ -68,55 +66,4 @@ pub struct AgentCommand {
     /// See llm-cache/README.md for documentation.
     #[arg(long, hide = true)]
     pub cache: Option<PathBuf>,
-}
-
-pub fn run() -> Result<()> {
-    env_logger::init();
-    let cli = Cli::parse();
-
-    match cli.command {
-        Command::Daemon => {
-            daemon::run_daemon()?;
-        }
-        Command::SystemInstall => {
-            setup::system_install()?;
-        }
-        Command::SystemUninstall => {
-            setup::system_uninstall()?;
-        }
-        Command::Enter(_) => {
-            enter()?;
-        }
-        Command::List => {
-            list()?;
-        }
-        Command::Delete(_) => {
-            delete()?;
-        }
-        Command::Agent(_) => {
-            agent()?;
-        }
-    }
-
-    Ok(())
-}
-
-fn enter() -> Result<()> {
-    // TODO: Contact daemon to launch sandbox.
-    // Then `docker exec /bin/bash` into the container.
-    todo!()
-}
-
-fn list() -> Result<()> {
-    todo!()
-}
-
-fn delete() -> Result<()> {
-    todo!()
-}
-
-fn agent() -> Result<()> {
-    // TODO: Contact daemon to launch sandbox.
-    // Then launch agent loop.
-    todo!()
 }
