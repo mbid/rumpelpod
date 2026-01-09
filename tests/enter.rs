@@ -3,9 +3,8 @@
 mod common;
 
 use std::fs;
-use std::process::Command;
 
-use common::{TestDaemon, TestRepo, SOCKET_PATH_ENV};
+use common::{sandbox_command, TestDaemon, TestRepo};
 
 #[test]
 fn enter_smoke_test() {
@@ -15,9 +14,7 @@ fn enter_smoke_test() {
 
     let daemon = TestDaemon::start();
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
-        .current_dir(repo.path())
-        .env(SOCKET_PATH_ENV, &daemon.socket_path)
+    let output = sandbox_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "123"])
         .output()
         .expect("Failed to run sandbox command");
@@ -41,9 +38,7 @@ fn enter_twice_sequentially() {
     let daemon = TestDaemon::start();
 
     // First enter
-    let output1 = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
-        .current_dir(repo.path())
-        .env(SOCKET_PATH_ENV, &daemon.socket_path)
+    let output1 = sandbox_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "first"])
         .output()
         .expect("Failed to run sandbox command");
@@ -56,9 +51,7 @@ fn enter_twice_sequentially() {
     assert_eq!(String::from_utf8_lossy(&output1.stdout).trim(), "first");
 
     // Second enter - should reuse the existing sandbox
-    let output2 = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
-        .current_dir(repo.path())
-        .env(SOCKET_PATH_ENV, &daemon.socket_path)
+    let output2 = sandbox_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "second"])
         .output()
         .expect("Failed to run sandbox command");

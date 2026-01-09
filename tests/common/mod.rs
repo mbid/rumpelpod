@@ -89,3 +89,11 @@ impl TestRepo {
         self.dir.path()
     }
 }
+
+/// Create a Command for the sandbox binary, pre-configured for testing.
+pub fn sandbox_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
+    cmd.current_dir(repo.path())
+        .env(SOCKET_PATH_ENV, &daemon.socket_path);
+    cmd
+}
