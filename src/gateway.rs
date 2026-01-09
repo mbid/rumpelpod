@@ -1,0 +1,243 @@
+//! Git gateway repository management.
+//!
+//! Creates and maintains a bare "gateway" git repository that acts as an intermediary
+//! between the host repository and sandboxes. This allows sandboxes to fetch commits
+//! without direct access to the host repo.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result};
+use indoc::indoc;
+use sha2::{Digest, Sha256};
+
+use crate::command_ext::CommandExt;
+use crate::config::get_state_dir;
+
+/// Name of the remote added to the host repo pointing to the gateway.
+const SANDBOX_REMOTE: &str = "sandbox";
+
+/// Name of the remote added to the gateway pointing to the host repo.
+const HOST_REMOTE: &str = "host";
+
+/// Post-commit hook script that pushes the current branch to the gateway.
+const POST_COMMIT_HOOK: &str = indoc! {r#"
+    #!/bin/sh
+    # Installed by sandbox to sync commits to the gateway repository.
+    # The gateway allows sandboxes to fetch commits without direct host access.
+
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+    if [ -n "$branch" ]; then
+        git push sandbox "$branch:host/$branch" --force --quiet || true
+    fi
+"#};
+
+/// Compute a hash of the repo path for use in the gateway directory name.
+fn repo_path_hash(repo_path: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(repo_path.as_os_str().as_encoded_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Get the path to the gateway repository for a given host repo.
+pub fn gateway_path(repo_path: &Path) -> Result<PathBuf> {
+    let state_dir = get_state_dir()?;
+    let hash = repo_path_hash(repo_path);
+    Ok(state_dir.join(&hash).join("gateway.git"))
+}
+
+/// Check if the given path is inside a git repository.
+fn is_git_repo(path: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Initialize the gateway repository and set up remotes and hooks.
+///
+/// This function is idempotent - it can be called multiple times safely.
+/// It will:
+/// 1. Create a bare gateway repo if it doesn't exist
+/// 2. Add the "sandbox" remote to the host repo (pointing to gateway)
+/// 3. Add the "host" remote to the gateway (pointing to host repo)
+/// 4. Install a post-commit hook in the host repo
+/// 5. Push all existing branches to the gateway
+///
+/// If the repo_path is not a git repository, this function does nothing.
+///
+/// Note: There's a race condition if called concurrently for the same repo
+/// (e.g. from different processes). Two callers might both attempt to initialize
+/// the gateway simultaneously. This is unlikely in practice and the worst case
+/// is a transient error that resolves on retry.
+pub fn setup_gateway(repo_path: &Path) -> Result<()> {
+    // Only set up gateway if the host is a git repository
+    if !is_git_repo(repo_path) {
+        return Ok(());
+    }
+
+    let gateway = gateway_path(repo_path)?;
+
+    // Create gateway directory and initialize bare repo if needed
+    if !gateway.exists() {
+        fs::create_dir_all(&gateway).with_context(|| {
+            format!("Failed to create gateway directory: {}", gateway.display())
+        })?;
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&gateway)
+            .success()
+            .context("git init --bare failed")?;
+    }
+
+    // Add "sandbox" remote to host repo (pointing to gateway)
+    ensure_remote(repo_path, SANDBOX_REMOTE, &gateway)?;
+
+    // Add "host" remote to gateway (pointing to host repo)
+    ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
+
+    // Install post-commit hook
+    install_post_commit_hook(repo_path)?;
+
+    // Push all existing branches to the gateway
+    push_all_branches(repo_path)?;
+
+    Ok(())
+}
+
+/// Ensure a remote exists with the correct URL, adding or updating as needed.
+fn ensure_remote(repo_path: &Path, remote_name: &str, remote_url: &Path) -> Result<()> {
+    let url_str = remote_url.to_string_lossy();
+
+    // Check if remote already exists (failure expected if it doesn't)
+    let existing_url = Command::new("git")
+        .args(["remote", "get-url", remote_name])
+        .current_dir(repo_path)
+        .success()
+        .ok();
+
+    match existing_url {
+        Some(url) if String::from_utf8_lossy(&url).trim() == url_str => {
+            // Remote exists with correct URL, nothing to do
+        }
+        Some(_) => {
+            // Remote exists with wrong URL, update it
+            Command::new("git")
+                .args(["remote", "set-url", remote_name, &url_str])
+                .current_dir(repo_path)
+                .success()
+                .context("git remote set-url failed")?;
+        }
+        None => {
+            // Remote doesn't exist, add it
+            Command::new("git")
+                .args(["remote", "add", remote_name, &url_str])
+                .current_dir(repo_path)
+                .success()
+                .context("git remote add failed")?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Install the post-commit hook in the host repository.
+///
+/// If a post-commit hook already exists and wasn't installed by us, we append
+/// our hook invocation to it.
+fn install_post_commit_hook(repo_path: &Path) -> Result<()> {
+    let hooks_dir = repo_path.join(".git").join("hooks");
+    let hook_path = hooks_dir.join("post-commit");
+
+    // Ensure hooks directory exists
+    fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path)
+            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+
+        // Check if our hook is already installed (look for our signature comment)
+        if existing.contains("Installed by sandbox to sync commits") {
+            // Already installed, nothing to do
+            return Ok(());
+        }
+
+        // Append our hook to the existing one
+        let combined = format!("{}\n\n{}", existing.trim_end(), POST_COMMIT_HOOK);
+        fs::write(&hook_path, combined)
+            .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
+    } else {
+        // Create new hook
+        fs::write(&hook_path, POST_COMMIT_HOOK)
+            .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+    }
+
+    // Make hook executable
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&hook_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hook_path, perms)?;
+
+    Ok(())
+}
+
+/// Push all local branches to the gateway as host/<branch>.
+fn push_all_branches(repo_path: &Path) -> Result<()> {
+    // Get list of all local branches
+    let output = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+        .current_dir(repo_path)
+        .success()
+        .context("git for-each-ref failed")?;
+
+    let output_str = String::from_utf8_lossy(&output);
+    let branches: Vec<&str> = output_str.lines().filter(|s| !s.is_empty()).collect();
+
+    if branches.is_empty() {
+        return Ok(());
+    }
+
+    // Build refspecs for all branches: branch:host/branch
+    let refspecs: Vec<String> = branches
+        .iter()
+        .map(|b| format!("{}:host/{}", b, b))
+        .collect();
+    let mut args: Vec<&str> = vec!["push", SANDBOX_REMOTE, "--force"];
+    args.extend(refspecs.iter().map(|s| s.as_str()));
+
+    Command::new("git")
+        .args(&args)
+        .current_dir(repo_path)
+        .success()
+        .context("git push to gateway failed")?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_repo_path_hash_deterministic() {
+        let path = Path::new("/home/user/project");
+        let hash1 = repo_path_hash(path);
+        let hash2 = repo_path_hash(path);
+        assert_eq!(hash1, hash2);
+        // Should be a valid hex string of sha256 length
+        assert_eq!(hash1.len(), 64);
+    }
+
+    #[test]
+    fn test_repo_path_hash_different_paths() {
+        let path1 = Path::new("/home/user/project1");
+        let path2 = Path::new("/home/user/project2");
+        assert_ne!(repo_path_hash(path1), repo_path_hash(path2));
+    }
+}

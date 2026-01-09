@@ -9,6 +9,7 @@ use log::error;
 use tokio::net::UnixListener;
 
 use crate::command_ext::CommandExt;
+use crate::gateway;
 use protocol::{ContainerId, Daemon, Image, SandboxInfo, SandboxName, SandboxStatus};
 
 /// Environment variable to override the daemon socket path for testing.
@@ -282,6 +283,9 @@ impl Daemon for DaemonServer {
         image: Image,
         repo_path: PathBuf,
     ) -> Result<ContainerId> {
+        // Set up gateway for git synchronization (idempotent)
+        gateway::setup_gateway(&repo_path)?;
+
         let name = docker_name(&repo_path, &sandbox_name);
 
         // TODO: There's a potential race condition between inspect and

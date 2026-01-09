@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use sandbox::CommandExt;
 use tempfile::TempDir;
 
 /// Environment variable used to configure the daemon socket path.
@@ -73,7 +74,7 @@ impl Drop for TestDaemon {
     }
 }
 
-/// A temporary directory for tests, cleaned up on drop.
+/// A temporary directory initialized as a git repository for tests, cleaned up on drop.
 pub struct TestRepo {
     dir: TempDir,
 }
@@ -82,6 +83,32 @@ impl TestRepo {
     pub fn new() -> Self {
         let dir =
             TempDir::with_prefix("sandbox-test-repo-").expect("Failed to create temp directory");
+
+        // Initialize as a git repository with an initial commit
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .success()
+            .expect("git init failed");
+
+        Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(dir.path())
+            .success()
+            .expect("git config user.email failed");
+
+        Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(dir.path())
+            .success()
+            .expect("git config user.name failed");
+
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "Initial commit"])
+            .current_dir(dir.path())
+            .success()
+            .expect("git commit failed");
+
         TestRepo { dir }
     }
 

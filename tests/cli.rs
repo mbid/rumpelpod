@@ -4,5 +4,7 @@ mod common;
 mod delete;
 #[path = "cli/enter.rs"]
 mod enter;
+#[path = "cli/gateway.rs"]
+mod gateway;
 #[path = "cli/list.rs"]
 mod list;

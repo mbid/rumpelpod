@@ -6,6 +6,8 @@
 use std::io::{self, pipe, BufRead, BufReader};
 use std::process::{Command, ExitStatus, Stdio};
 
+use anyhow::{anyhow, Result};
+
 /// The output of a command with combined stdout and stderr.
 #[derive(Debug)]
 pub struct CombinedOutput {
@@ -23,6 +25,11 @@ pub trait CommandExt {
     /// in the order it was produced by the process. The output is read line by line and
     /// expects valid UTF-8.
     fn combined_output(&mut self) -> io::Result<CombinedOutput>;
+
+    /// Executes the command and returns stdout if it exits successfully.
+    ///
+    /// On failure, returns an error with the command, combined output, and exit status.
+    fn success(&mut self) -> Result<Vec<u8>>;
 }
 
 impl CommandExt for Command {
@@ -57,6 +64,22 @@ impl CommandExt for Command {
             combined_output,
             status,
         })
+    }
+
+    fn success(&mut self) -> Result<Vec<u8>> {
+        let output = self.output()?;
+
+        if output.status.success() {
+            Ok(output.stdout)
+        } else {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let exit_info = match output.status.code() {
+                Some(code) => format!("exit code: {}", code),
+                None => "killed by signal".to_string(),
+            };
+            Err(anyhow!("$ {:?}\n{}{}{}", self, stdout, stderr, exit_info))
+        }
     }
 }
 

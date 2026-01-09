@@ -2,11 +2,14 @@
 mod agent;
 mod r#async;
 mod cli;
-pub mod command_ext;
+mod command_ext;
 mod config;
+
+pub use command_ext::CommandExt;
 mod daemon;
 mod delete;
 mod enter;
+mod gateway;
 mod list;
 mod llm;
 mod systemd;
