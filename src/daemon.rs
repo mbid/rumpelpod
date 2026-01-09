@@ -51,6 +51,87 @@ fn container_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
     format!("{}-{}-{}", repo_dir, sandbox_name.0, hash_prefix)
 }
 
+/// Container state returned by docker inspect.
+struct ContainerState {
+    status: String,
+    image: String,
+    id: String,
+}
+
+/// Inspect an existing container by name. Returns None if container doesn't exist.
+fn inspect_container(container_name: &str) -> Result<Option<ContainerState>> {
+    let output = Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "{{.State.Status}} {{.Config.Image}} {{.Id}}",
+            container_name,
+        ])
+        .output()
+        .context("Failed to execute docker inspect")?;
+
+    if !output.status.success() {
+        // Container doesn't exist
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.trim().splitn(3, ' ').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("Unexpected docker inspect output: {}", stdout);
+    }
+
+    Ok(Some(ContainerState {
+        status: parts[0].to_string(),
+        image: parts[1].to_string(),
+        id: parts[2].to_string(),
+    }))
+}
+
+/// Start a stopped container.
+fn start_container(container_name: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .args(["start", container_name])
+        .output()
+        .context("Failed to execute docker start")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("docker start failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// Create a new container with docker run.
+fn create_container(container_name: &str, image: &Image, repo_path: &Path) -> Result<ContainerId> {
+    let output = Command::new("docker")
+        .args([
+            "run",
+            "-d", // Detach to get container ID
+            "--name",
+            container_name,
+            "--mount",
+            &format!("type=bind,src={},dst=/repo", repo_path.display()),
+            &image.0,
+            "sleep",
+            "infinity", // Keep container running
+        ])
+        .output()
+        .context("Failed to execute docker run")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("docker run failed: {}", stderr);
+        anyhow::bail!("docker run failed: {}", stderr);
+    }
+
+    // Container ID is printed to stdout (without trailing newline)
+    let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    Ok(ContainerId(container_id))
+}
+
 impl Daemon for DaemonServer {
     fn launch_sandbox(
         &self,
@@ -60,31 +141,34 @@ impl Daemon for DaemonServer {
     ) -> Result<ContainerId> {
         let container_name = container_name(&repo_path, &sandbox_name);
 
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "-d", // Detach to get container ID
-                "--name",
-                &container_name,
-                "--mount",
-                &format!("type=bind,src={},dst=/repo", repo_path.display()),
-                &image.0,
-                "sleep",
-                "infinity", // Keep container running
-            ])
-            .output()
-            .context("Failed to execute docker run")?;
+        // TODO: There's a potential race condition between inspect and
+        // start/run. Another process could stop/remove the container after we
+        // inspect it. For robustness, we'd need to retry on specific failures,
+        // but that adds complexity. For now, we accept this limitation.
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("docker run failed: {}", stderr);
-            anyhow::bail!("docker run failed: {}", stderr);
+        if let Some(state) = inspect_container(&container_name)? {
+            // Container exists - check if it has the expected image
+            if state.image != image.0 {
+                anyhow::bail!(
+                    "Container '{}' exists with image '{}', but requested image is '{}'",
+                    container_name,
+                    state.image,
+                    image.0
+                );
+            }
+
+            if state.status == "running" {
+                // Already running with correct image
+                return Ok(ContainerId(state.id));
+            }
+
+            // Container exists but is stopped - restart it
+            start_container(&container_name)?;
+            return Ok(ContainerId(state.id));
         }
 
-        // Container ID is printed to stdout (without trailing newline)
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        Ok(ContainerId(container_id))
+        // Container doesn't exist - create it
+        create_container(&container_name, &image, &repo_path)
     }
 }
 
