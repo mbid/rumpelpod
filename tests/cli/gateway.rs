@@ -4,14 +4,14 @@
 //! repository and the gateway bare repository, and that sandboxes can access
 //! the gateway via HTTP.
 
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use indoc::{formatdoc, indoc};
 use sandbox::CommandExt;
 
-use crate::common::{build_docker_image, sandbox_command, DockerBuild, TestDaemon, TestRepo};
+use crate::common::{
+    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
+};
 
 /// Get the list of branches in a repository.
 fn get_branches(repo_path: &Path) -> Vec<String> {
@@ -98,10 +98,8 @@ fn get_gateway_path(repo_path: &Path) -> Option<std::path::PathBuf> {
 fn gateway_initial_branches_pushed() {
     // Create repo with multiple branches before launching sandbox
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
 
-    // Create additional branches
+    // Create additional branches before building the image
     create_branch(repo.path(), "feature-a");
     create_commit(repo.path(), "Feature A commit");
 
@@ -109,6 +107,9 @@ fn gateway_initial_branches_pushed() {
     create_commit(repo.path(), "Feature B commit");
 
     checkout_branch(repo.path(), "master");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -143,8 +144,8 @@ fn gateway_initial_branches_pushed() {
 #[test]
 fn gateway_commit_updates_branch() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -177,8 +178,8 @@ fn gateway_commit_updates_branch() {
 #[test]
 fn gateway_force_push_updates_branch() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -215,8 +216,8 @@ fn gateway_force_push_updates_branch() {
 #[test]
 fn gateway_new_branch_with_commit_pushed() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -252,13 +253,14 @@ fn gateway_new_branch_with_commit_pushed() {
 #[should_panic = "should be deleted from gateway"]
 fn gateway_branch_deletion_propagates() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
 
-    // Create a branch before launching sandbox
+    // Create a branch before building the image
     create_branch(repo.path(), "to-delete");
     create_commit(repo.path(), "Branch commit");
     checkout_branch(repo.path(), "master");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -289,37 +291,12 @@ fn gateway_branch_deletion_propagates() {
     );
 }
 
-/// Build a Docker image with git installed and a git repo at a custom path.
-fn build_git_image() -> String {
-    let dockerfile = indoc! {r#"
-        FROM debian:13
-        RUN apt-get update && apt-get install -y git curl
-        RUN mkdir -p /workspace
-        WORKDIR /workspace
-        RUN git init && \
-            git config user.email "test@example.com" && \
-            git config user.name "Test" && \
-            git commit --allow-empty -m "init"
-    "#};
-
-    build_docker_image(DockerBuild {
-        dockerfile: dockerfile.to_string(),
-        build_context: None,
-    })
-    .expect("Failed to build docker image with git")
-}
-
 #[test]
 fn gateway_http_remotes_configured_in_container() {
-    // Test that when repo-path is configured, the container gets "host" and "sandbox" remotes
-    let image_id = build_git_image();
-
+    // Test that the container gets "host" and "sandbox" remotes pointing to the gateway
     let repo = TestRepo::new();
-    let config = formatdoc! {r#"
-        image = "{image_id}"
-        repo-path = "/workspace"
-    "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -352,21 +329,16 @@ fn gateway_http_remotes_configured_in_container() {
 #[test]
 fn gateway_http_fetch_works_from_container() {
     // Test that a container can actually fetch from the gateway via HTTP
-    let image_id = build_git_image();
-
     let repo = TestRepo::new();
 
-    // Create a branch with a commit before launching sandbox
+    // Create a branch with a commit before building the image
     create_branch(repo.path(), "test-branch");
     create_commit(repo.path(), "Test commit for fetch");
     let test_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
     checkout_branch(repo.path(), "master");
 
-    let config = formatdoc! {r#"
-        image = "{image_id}"
-        repo-path = "/workspace"
-    "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -408,14 +380,9 @@ fn gateway_http_fetch_works_from_container() {
 #[test]
 fn gateway_http_fetch_new_commits_after_create() {
     // Test that new commits made on host after container creation can be fetched
-    let image_id = build_git_image();
-
     let repo = TestRepo::new();
-    let config = formatdoc! {r#"
-        image = "{image_id}"
-        repo-path = "/workspace"
-    "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -464,40 +431,12 @@ fn gateway_http_fetch_new_commits_after_create() {
     );
 }
 
-/// Build a Docker image with git installed, a non-root user, and a git repo owned by that user.
-fn build_git_image_with_user() -> String {
-    let dockerfile = indoc! {r#"
-        FROM debian:13
-        RUN apt-get update && apt-get install -y git curl
-        RUN useradd -m -s /bin/bash testuser
-        RUN mkdir -p /workspace && chown testuser:testuser /workspace
-        USER testuser
-        WORKDIR /workspace
-        RUN git init && \
-            git config user.email "test@example.com" && \
-            git config user.name "Test" && \
-            git commit --allow-empty -m "init"
-    "#};
-
-    build_docker_image(DockerBuild {
-        dockerfile: dockerfile.to_string(),
-        build_context: None,
-    })
-    .expect("Failed to build docker image with git and user")
-}
-
 #[test]
 fn gateway_http_works_with_non_root_user() {
     // Test that git remotes work when running as a non-root user
-    let image_id = build_git_image_with_user();
-
     let repo = TestRepo::new();
-    let config = formatdoc! {r#"
-        image = "{image_id}"
-        repo-path = "/workspace"
-        user = "testuser"
-    "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 

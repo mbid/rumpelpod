@@ -78,24 +78,21 @@ impl Model {
 }
 
 /// Top-level configuration structure parsed from `.sandbox.toml`.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct SandboxConfig {
     /// Container runtime (runsc, runc, sysbox-runc).
     #[serde(default)]
     pub runtime: Option<Runtime>,
 
-    #[serde(default)]
-    pub image: Option<String>,
+    pub image: String,
 
     /// User to run as inside the sandbox container.
-    #[serde(default)]
-    pub user: Option<String>,
+    pub user: String,
 
     /// Path to the repo checkout inside the container.
-    /// When set, `sandbox enter` will use this as the working directory base.
-    #[serde(default, rename = "repo-path")]
-    pub repo_path: Option<PathBuf>,
+    /// `sandbox enter` will use this as the working directory base.
+    pub repo_path: PathBuf,
 
     #[serde(default)]
     pub agent: AgentConfig,

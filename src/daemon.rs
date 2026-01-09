@@ -281,39 +281,23 @@ fn check_git_directory_ownership(
 fn setup_git_remotes(
     container_id: &str,
     network_name: &str,
-    container_repo_path: Option<&Path>,
-    user: Option<&str>,
+    container_repo_path: &Path,
+    user: &str,
 ) -> Result<()> {
-    let container_repo_path = match container_repo_path {
-        Some(path) => path,
-        None => return Ok(()),
-    };
-
-    // Check .git directory ownership if a user is specified
-    if let Some(user) = user {
-        check_git_directory_ownership(container_id, container_repo_path, user)?;
-    }
+    check_git_directory_ownership(container_id, container_repo_path, user)?;
 
     let git_http_url = git_http_server::git_http_url(network_name)?;
     let repo_path_str = container_repo_path.to_string_lossy();
 
-    // Build the base docker exec command with optional user
-    let mut base_args: Vec<&str> = vec!["exec"];
-    if let Some(user) = user {
-        base_args.push("--user");
-        base_args.push(user);
-    }
-    base_args.push(container_id);
-
     // Helper to run a git command inside the container
     let run_git = |args: &[&str]| -> Result<Vec<u8>> {
-        let mut cmd = Command::new("docker");
-        cmd.args(&base_args);
-        cmd.arg("git");
-        cmd.arg("-C");
-        cmd.arg(&*repo_path_str);
-        cmd.args(args);
-        cmd.success()
+        Command::new("docker")
+            .args(["exec", "--user", user, container_id])
+            .arg("git")
+            .arg("-C")
+            .arg(&*repo_path_str)
+            .args(args)
+            .success()
     };
 
     // Add "host" remote (or update if exists)
@@ -450,8 +434,8 @@ impl Daemon for DaemonServer {
         sandbox_name: SandboxName,
         image: Image,
         repo_path: PathBuf,
-        container_repo_path: Option<PathBuf>,
-        user: Option<String>,
+        container_repo_path: PathBuf,
+        user: String,
     ) -> Result<LaunchResult> {
         // Set up gateway for git synchronization (idempotent)
         gateway::setup_gateway(&repo_path)?;
@@ -479,12 +463,7 @@ impl Daemon for DaemonServer {
                 // Already running with correct image.
                 // Spawn git HTTP server in case daemon was restarted while container was running.
                 spawn_git_http_server(&gateway_path, &name, &state.id)?;
-                setup_git_remotes(
-                    &state.id,
-                    &name,
-                    container_repo_path.as_deref(),
-                    user.as_deref(),
-                )?;
+                setup_git_remotes(&state.id, &name, &container_repo_path, &user)?;
                 return Ok(LaunchResult {
                     container_id: ContainerId(state.id),
                 });
@@ -493,12 +472,7 @@ impl Daemon for DaemonServer {
             // Container exists but is stopped - restart it
             start_container(&name)?;
             spawn_git_http_server(&gateway_path, &name, &state.id)?;
-            setup_git_remotes(
-                &state.id,
-                &name,
-                container_repo_path.as_deref(),
-                user.as_deref(),
-            )?;
+            setup_git_remotes(&state.id, &name, &container_repo_path, &user)?;
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
             });
@@ -509,12 +483,7 @@ impl Daemon for DaemonServer {
 
         let container_id = create_container(&name, &sandbox_name, &image, &repo_path)?;
         spawn_git_http_server(&gateway_path, &name, &container_id.0)?;
-        setup_git_remotes(
-            &container_id.0,
-            &name,
-            container_repo_path.as_deref(),
-            user.as_deref(),
-        )?;
+        setup_git_remotes(&container_id.0, &name, &container_repo_path, &user)?;
         Ok(LaunchResult { container_id })
     }
 

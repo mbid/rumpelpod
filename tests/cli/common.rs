@@ -11,10 +11,20 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context};
+use indoc::formatdoc;
 use sandbox::CommandExt;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use walkdir::WalkDir;
+
+/// Standard test user name used in test images.
+pub const TEST_USER: &str = "testuser";
+
+/// Standard test user UID used in test images.
+pub const TEST_USER_UID: u32 = 1007;
+
+/// Standard repository path inside test containers.
+pub const TEST_REPO_PATH: &str = "/home/testuser/workspace";
 
 /// Environment variable used to configure the daemon socket path.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -297,6 +307,50 @@ fn find_existing_image(label_value: &str) -> Option<String> {
     } else {
         Some(id.to_string())
     }
+}
+
+/// Build a standardized test image from a host repo directory.
+///
+/// This creates a Docker image that:
+/// - Is based on debian:13 with git installed
+/// - Has a non-root user (TEST_USER) with UID TEST_USER_UID
+/// - COPYs the host_repo_dir contents to TEST_REPO_PATH, owned by TEST_USER
+/// - Optionally applies extra_dockerfile_lines at the end
+///
+/// The host repo (including its .git directory) is copied into the container,
+/// so the container has a working git repository.
+pub fn build_test_image(
+    host_repo_dir: &Path,
+    extra_dockerfile_lines: &str,
+) -> anyhow::Result<ImageId> {
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        {extra_dockerfile_lines}
+    "#};
+
+    build_docker_image(DockerBuild {
+        dockerfile,
+        build_context: Some(host_repo_dir.to_path_buf()),
+    })
+}
+
+/// Write a `.sandbox.toml` config file for a test repo using the standard test settings.
+///
+/// This configures:
+/// - The provided image ID
+/// - user = TEST_USER
+/// - repo-path = TEST_REPO_PATH
+pub fn write_test_sandbox_config(repo: &TestRepo, image_id: &ImageId) {
+    let config = formatdoc! {r#"
+        image = "{image_id}"
+        user = "{TEST_USER}"
+        repo-path = "{TEST_REPO_PATH}"
+    "#};
+    std::fs::write(repo.path().join(".sandbox.toml"), config)
+        .expect("Failed to write .sandbox.toml");
 }
 
 /// Build a Docker image from the given DockerBuild configuration.

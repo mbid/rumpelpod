@@ -1,14 +1,14 @@
 //! Integration tests for the `sandbox list` subcommand.
 
-use std::fs;
-
-use crate::common::{sandbox_command, TestDaemon, TestRepo};
+use crate::common::{
+    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
+};
 
 #[test]
 fn list_empty_returns_header_only() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -34,8 +34,8 @@ fn list_empty_returns_header_only() {
 #[test]
 fn list_shows_created_sandbox() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -79,8 +79,8 @@ fn list_shows_created_sandbox() {
 #[test]
 fn list_shows_multiple_sandboxes() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -134,12 +134,12 @@ fn list_shows_multiple_sandboxes() {
 #[test]
 fn list_does_not_show_other_repo_sandboxes() {
     let repo1 = TestRepo::new();
-    fs::write(repo1.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id1 = build_test_image(repo1.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo1, &image_id1);
 
     let repo2 = TestRepo::new();
-    fs::write(repo2.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id2 = build_test_image(repo2.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo2, &image_id2);
 
     let daemon = TestDaemon::start();
 

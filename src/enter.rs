@@ -22,14 +22,12 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
     let config = SandboxConfig::load(&repo_root)?;
 
-    let image = config.image.unwrap_or_else(|| "ubuntu:24.04".to_string());
-
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
     let launch_result = client.launch_sandbox(
         SandboxName(cmd.name.clone()),
-        Image(image),
+        Image(config.image.clone()),
         repo_root.clone(),
         config.repo_path.clone(),
         config.user.clone(),
@@ -42,20 +40,13 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         command.push(shell);
     }
 
+    let relative = relative_path(&repo_root, &current_dir)?;
+    let workdir = config.repo_path.join(relative);
+
     let mut docker_cmd = Command::new("docker");
     docker_cmd.arg("exec");
-
-    // Set user if configured
-    if let Some(ref user) = config.user {
-        docker_cmd.args(["--user", user]);
-    }
-
-    // Set working directory if repo-path is configured
-    if let Some(ref container_repo_path) = config.repo_path {
-        let relative = relative_path(&repo_root, &current_dir)?;
-        let workdir = container_repo_path.join(relative);
-        docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
-    }
+    docker_cmd.args(["--user", &config.user]);
+    docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
     if std::io::stdin().is_terminal() {
         docker_cmd.args(["-it"]);

@@ -2,16 +2,18 @@
 
 use std::fs;
 
-use indoc::{formatdoc, indoc};
 use sandbox::CommandExt;
 
-use crate::common::{build_docker_image, sandbox_command, DockerBuild, TestDaemon, TestRepo};
+use crate::common::{
+    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
+    TEST_REPO_PATH, TEST_USER,
+};
 
 #[test]
 fn enter_smoke_test() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -27,8 +29,8 @@ fn enter_smoke_test() {
 #[test]
 fn enter_twice_sequentially() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -52,12 +54,13 @@ fn enter_from_subdir_uses_same_container() {
     // Entering a sandbox from the repo root vs a subdirectory should result in
     // the same container (we detect the git repo root).
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
 
-    // Create a subdirectory
+    // Create a subdirectory before building the image so it's included
     let subdir = repo.path().join("some/nested/subdir");
     fs::create_dir_all(&subdir).expect("Failed to create subdirectory");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -101,8 +104,14 @@ fn enter_outside_git_repo_fails() {
     // Trying to enter a sandbox outside of a git repository should fail with
     // a clear error message.
     let repo = TestRepo::new_without_git();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+
+    // Write a minimal config (image/user/repo-path are now required but the
+    // command should fail before parsing completes because we're not in a git repo)
+    fs::write(
+        repo.path().join(".sandbox.toml"),
+        "image = \"debian:13\"\nuser = \"root\"\nrepo-path = \"/repo\"",
+    )
+    .expect("Failed to write .sandbox.toml");
 
     let daemon = TestDaemon::start();
 
@@ -125,102 +134,73 @@ fn enter_outside_git_repo_fails() {
 }
 
 #[test]
-fn enter_with_custom_user() {
-    // Build a custom image with a non-root user
-    let dockerfile = indoc! {"
-        FROM debian:13
-        RUN useradd -m -s /bin/bash testuser
-    "};
-
-    let image_id = build_docker_image(DockerBuild {
-        dockerfile: dockerfile.to_string(),
-        build_context: None,
-    })
-    .expect("Failed to build custom docker image");
-
+fn enter_verifies_user_and_repo_path() {
+    // Verify that the standard test image runs as the expected user and in the expected directory
     let repo = TestRepo::new();
-    let config = formatdoc! {r#"
-        image = "{image_id}"
-        user = "testuser"
-    "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
+    // Verify running as the configured user
     let stdout = sandbox_command(&repo, &daemon)
-        .args(["enter", "user-test", "--", "whoami"])
+        .args(["enter", "verify-test", "--", "whoami"])
         .success()
         .expect("sandbox enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
         stdout.trim(),
-        "testuser",
-        "Should be running as testuser, got: {}",
+        TEST_USER,
+        "Should be running as {}, got: {}",
+        TEST_USER,
+        stdout.trim()
+    );
+
+    // Verify working directory is repo-path
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "verify-test", "--", "pwd"])
+        .success()
+        .expect("sandbox enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        TEST_REPO_PATH,
+        "Working directory should be {}, got: {}",
+        TEST_REPO_PATH,
         stdout.trim()
     );
 }
 
 #[test]
-fn enter_with_custom_repo_path() {
-    // Build a custom image with a git repo at a custom path
-    let dockerfile = indoc! {r#"
-        FROM debian:13
-        RUN apt-get update && apt-get install -y git
-        RUN mkdir -p /custom/repo/path/subdir
-        WORKDIR /custom/repo/path
-        RUN git init && \
-            git config user.email "test@example.com" && \
-            git config user.name "Test" && \
-            git commit --allow-empty -m "init"
-    "#};
-
-    let image_id = build_docker_image(DockerBuild {
-        dockerfile: dockerfile.to_string(),
-        build_context: None,
-    })
-    .expect("Failed to build custom docker image");
-
+fn enter_subdir_workdir_is_relative() {
+    // Verify that entering from a subdirectory sets workdir relative to repo-path
     let repo = TestRepo::new();
 
-    // Create a subdirectory in the host repo to test relative path handling
+    // Create a subdirectory before building the image
     let subdir = repo.path().join("subdir");
     fs::create_dir_all(&subdir).expect("Failed to create subdirectory");
 
-    let config = formatdoc! {r#"
-        image = "{image_id}"
-        repo-path = "/custom/repo/path"
-    "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Enter from repo root - should use /custom/repo/path as workdir
-    let stdout = sandbox_command(&repo, &daemon)
-        .args(["enter", "repo-path-test", "--", "pwd"])
-        .success()
-        .expect("sandbox enter from root failed");
-
-    let stdout = String::from_utf8_lossy(&stdout);
-    assert_eq!(
-        stdout.trim(),
-        "/custom/repo/path",
-        "Working directory from root should be /custom/repo/path, got: {}",
-        stdout.trim()
-    );
-
-    // Enter from subdir - should use /custom/repo/path/subdir as workdir
+    // Enter from subdir - should use TEST_REPO_PATH/subdir as workdir
     let stdout = sandbox_command(&repo, &daemon)
         .current_dir(&subdir)
-        .args(["enter", "repo-path-test", "--", "pwd"])
+        .args(["enter", "subdir-test", "--", "pwd"])
         .success()
         .expect("sandbox enter from subdir failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
+    let expected = format!("{}/subdir", TEST_REPO_PATH);
     assert_eq!(
         stdout.trim(),
-        "/custom/repo/path/subdir",
-        "Working directory from subdir should be /custom/repo/path/subdir, got: {}",
+        expected,
+        "Working directory from subdir should be {}, got: {}",
+        expected,
         stdout.trim()
     );
 }

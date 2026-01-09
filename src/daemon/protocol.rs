@@ -54,12 +54,12 @@ struct LaunchSandboxRequest {
     sandbox_name: SandboxName,
     image: Image,
     repo_path: PathBuf,
-    /// Path where the repository is mounted inside the container.
-    /// If set, git remotes will be configured to point to the gateway HTTP server.
-    container_repo_path: Option<PathBuf>,
+    /// Path where the repository is located inside the container.
+    /// Git remotes will be configured to point to the gateway HTTP server.
+    container_repo_path: PathBuf,
     /// User to run git commands as inside the container.
     /// This should match the owner of the .git directory in the container.
-    user: Option<String>,
+    user: String,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -107,8 +107,8 @@ pub trait Daemon: Send + Sync + 'static {
         sandbox_name: SandboxName,
         image: Image,
         repo_path: PathBuf,
-        container_repo_path: Option<PathBuf>,
-        user: Option<String>,
+        container_repo_path: PathBuf,
+        user: String,
     ) -> Result<LaunchResult>;
 
     // DELETE /sandbox
@@ -156,8 +156,8 @@ impl Daemon for DaemonClient {
         sandbox_name: SandboxName,
         image: Image,
         repo_path: PathBuf,
-        container_repo_path: Option<PathBuf>,
-        user: Option<String>,
+        container_repo_path: PathBuf,
+        user: String,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -357,8 +357,8 @@ mod tests {
             sandbox_name: SandboxName,
             image: Image,
             _repo_path: PathBuf,
-            _container_repo_path: Option<PathBuf>,
-            _user: Option<String>,
+            _container_repo_path: PathBuf,
+            _user: String,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -402,8 +402,8 @@ mod tests {
             SandboxName("test-sandbox".to_string()),
             Image("test-image".to_string()),
             PathBuf::from("/tmp/repo"),
-            None,
-            None,
+            PathBuf::from("/workspace"),
+            "testuser".to_string(),
         );
 
         let launch_result = result.unwrap();

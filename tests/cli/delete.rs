@@ -1,14 +1,14 @@
 //! Integration tests for the `sandbox delete` subcommand.
 
-use std::fs;
-
-use crate::common::{sandbox_command, TestDaemon, TestRepo};
+use crate::common::{
+    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
+};
 
 #[test]
 fn delete_smoke_test() {
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -41,8 +41,8 @@ fn delete_smoke_test() {
 fn delete_nonexistent_sandbox_succeeds() {
     // Deleting a sandbox that doesn't exist should succeed (idempotent)
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -63,8 +63,8 @@ fn delete_then_recreate_same_name() {
     // After deleting a sandbox, we should be able to create a new one with the same name.
     // This verifies that all resources (container, network) are properly cleaned up.
     let repo = TestRepo::new();
-    fs::write(repo.path().join(".sandbox.toml"), "image = \"debian:13\"")
-        .expect("Failed to write .sandbox.toml");
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
