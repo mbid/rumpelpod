@@ -1,9 +1,18 @@
-use anyhow::Result;
+//! Configuration types and `.sandbox.toml` parser.
+//!
+//! This module provides:
+//! - Runtime and Model enums for CLI and config file parsing
+//! - SandboxConfig for parsing `.sandbox.toml` at the repository root
+//! - Utility functions for state directory paths
+
+use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
-use std::path::PathBuf;
+use indoc::formatdoc;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 /// Container runtime to use for sandboxing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Runtime {
     /// gVisor runtime (default) - strong isolation via kernel syscall interception
@@ -15,8 +24,19 @@ pub enum Runtime {
     SysboxRunc,
 }
 
+impl Runtime {
+    /// Get the runtime name as used by Docker's --runtime flag.
+    pub fn docker_runtime_name(&self) -> &'static str {
+        match self {
+            Runtime::Runsc => "runsc",
+            Runtime::Runc => "runc",
+            Runtime::SysboxRunc => "sysbox-runc",
+        }
+    }
+}
+
 /// Model to use for the agent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Model {
     // Claude models (Anthropic)
@@ -57,15 +77,52 @@ impl Model {
     }
 }
 
-impl Runtime {
-    /// Get the runtime name as used by Docker's --runtime flag.
-    pub fn docker_runtime_name(&self) -> &'static str {
-        match self {
-            Runtime::Runsc => "runsc",
-            Runtime::Runc => "runc",
-            Runtime::SysboxRunc => "sysbox-runc",
+/// Top-level configuration structure parsed from `.sandbox.toml`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    /// Container runtime (runsc, runc, sysbox-runc).
+    #[serde(default)]
+    pub runtime: Option<Runtime>,
+
+    #[serde(default)]
+    pub image: Option<String>,
+
+    #[serde(default)]
+    pub agent: AgentConfig,
+}
+
+impl SandboxConfig {
+    /// Load config from the `.sandbox.toml` file in the given repo root.
+    /// Returns an error if the file doesn't exist.
+    pub fn load(repo_root: &Path) -> Result<Self> {
+        let config_path = repo_root.join(".sandbox.toml");
+
+        if !config_path.exists() {
+            let path = config_path.display();
+            bail!(formatdoc! {"
+                No .sandbox.toml config file found at {path}.
+                Please create a .sandbox.toml file to configure the sandbox.
+            "});
         }
+
+        let path = config_path.display();
+        let contents = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read {path}"))?;
+
+        let config: SandboxConfig =
+            toml::from_str(&contents).with_context(|| format!("Failed to parse {path}"))?;
+
+        Ok(config)
     }
+}
+
+/// Agent configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AgentConfig {
+    /// Default model.
+    pub model: Option<Model>,
 }
 
 /// Get the state directory for sandbox data.

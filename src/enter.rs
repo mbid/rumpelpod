@@ -4,9 +4,9 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::cli::EnterCommand;
+use crate::config::SandboxConfig;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, Image, SandboxName};
-use crate::sandbox_config::SandboxConfig;
 
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let repo_path = std::env::current_dir().context("Failed to get current directory")?;

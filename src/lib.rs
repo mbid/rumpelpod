@@ -7,7 +7,6 @@ mod config;
 mod daemon;
 mod enter;
 mod llm;
-mod sandbox_config;
 mod systemd;
 
 use anyhow::Result;
