@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::{delete, put};
+use axum::routing::{delete, get, put};
 use axum::serve::Listener;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -26,6 +26,21 @@ pub struct ContainerId(pub String);
 /// Human-readable sandbox name to distinguish multiple sandboxes for the same repo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxName(pub String);
+
+/// Status of a sandbox container.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SandboxStatus {
+    Running,
+    Stopped,
+}
+
+/// Information about a sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxInfo {
+    pub name: String,
+    pub status: SandboxStatus,
+    pub created: String,
+}
 
 /// Request body for launch_sandbox endpoint.
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,6 +69,18 @@ struct DeleteSandboxResponse {
     deleted: bool,
 }
 
+/// Request body for list_sandboxes endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct ListSandboxesRequest {
+    repo_path: PathBuf,
+}
+
+/// Response body for list_sandboxes endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct ListSandboxesResponse {
+    sandboxes: Vec<SandboxInfo>,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -73,6 +100,10 @@ pub trait Daemon: Send + Sync + 'static {
     // DELETE /sandbox
     // Stops and removes a sandbox container.
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()>;
+
+    // GET /sandbox
+    // Lists all sandboxes for a given repository.
+    fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>>;
 }
 
 pub struct DaemonClient {
@@ -162,6 +193,30 @@ impl Daemon for DaemonClient {
             Err(anyhow::anyhow!("Server error: {}", error.error))
         }
     }
+
+    fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+        let url = self.url.join("/sandbox")?;
+        let request = ListSandboxesRequest { repo_path };
+
+        let response = self
+            .client
+            .get(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            let body: ListSandboxesResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+            Ok(body.sandboxes)
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
 }
 
 /// Handler for PUT /sandbox endpoint.
@@ -202,6 +257,24 @@ async fn delete_sandbox_handler<D: Daemon>(
     }
 }
 
+/// Handler for GET /sandbox endpoint.
+async fn list_sandboxes_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ListSandboxesRequest>,
+) -> Result<Json<ListSandboxesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.list_sandboxes(request.repo_path));
+
+    match result {
+        Ok(sandboxes) => Ok(Json(ListSandboxesResponse { sandboxes })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
 /// Serve the daemon using the provided listener.
 ///
 /// The listener can be a `tokio::net::TcpListener` or `tokio::net::UnixListener`.
@@ -230,6 +303,7 @@ where
     let app = Router::new()
         .route("/sandbox", put(launch_sandbox_handler::<D>))
         .route("/sandbox", delete(delete_sandbox_handler::<D>))
+        .route("/sandbox", get(list_sandboxes_handler::<D>))
         .with_state(daemon);
 
     block_on(async move {
@@ -262,6 +336,10 @@ mod tests {
 
         fn delete_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
             Ok(())
+        }
+
+        fn list_sandboxes(&self, _repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+            Ok(vec![])
         }
     }
 

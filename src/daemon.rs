@@ -9,7 +9,7 @@ use log::error;
 use tokio::net::UnixListener;
 
 use crate::command_ext::CommandExt;
-use protocol::{ContainerId, Daemon, Image, SandboxName};
+use protocol::{ContainerId, Daemon, Image, SandboxInfo, SandboxName, SandboxStatus};
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -31,6 +31,12 @@ pub fn socket_path() -> Result<PathBuf> {
 struct DaemonServer {
     // No state for now. State resides in the docker service.
 }
+
+/// Label key used to store the repository path on containers.
+const REPO_PATH_LABEL: &str = "dev.sandbox.repo_path";
+
+/// Label key used to store the sandbox name on containers.
+const SANDBOX_NAME_LABEL: &str = "dev.sandbox.name";
 
 /// Generate a unique container name from repo path and sandbox name.
 /// Format: "<repo_dir>-<sandbox_name>-<hash_prefix>"
@@ -105,13 +111,22 @@ fn start_container(container_name: &str) -> Result<()> {
 }
 
 /// Create a new container with docker run.
-fn create_container(container_name: &str, image: &Image, repo_path: &Path) -> Result<ContainerId> {
+fn create_container(
+    container_name: &str,
+    sandbox_name: &SandboxName,
+    image: &Image,
+    repo_path: &Path,
+) -> Result<ContainerId> {
     let output = Command::new("docker")
         .args([
             "run",
             "-d", // Detach to get container ID
             "--name",
             container_name,
+            "--label",
+            &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
+            "--label",
+            &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
             "--mount",
             &format!("type=bind,src={},dst=/repo", repo_path.display()),
             &image.0,
@@ -131,6 +146,74 @@ fn create_container(container_name: &str, image: &Image, repo_path: &Path) -> Re
     let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     Ok(ContainerId(container_id))
+}
+
+/// List all sandbox containers for a given repository path.
+fn list_sandboxes_for_repo(repo_path: &Path) -> Result<Vec<SandboxInfo>> {
+    // Use docker ps with filter by label to find containers for this repo
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "-a", // Include stopped containers
+            "--filter",
+            &format!("label={}={}", REPO_PATH_LABEL, repo_path.display()),
+            "--format",
+            // Output: name, status, created timestamp, sandbox_name label
+            "{{.Names}}\t{{.Status}}\t{{.CreatedAt}}\t{{.Label \"dev.sandbox.name\"}}",
+        ])
+        .output()
+        .context("Failed to execute docker ps")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("docker ps failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut sandboxes = Vec::new();
+
+    for line in stdout.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+
+        let status_str = parts[1];
+        let status = if status_str.starts_with("Up") {
+            SandboxStatus::Running
+        } else {
+            SandboxStatus::Stopped
+        };
+
+        // Parse created timestamp (format: "2026-01-09 12:58:00 +0000 UTC")
+        // We only want "2026-01-09 12:58"
+        let created_raw = parts[2];
+        let created = if let Some((date_time, _rest)) = created_raw.split_once(" +") {
+            // date_time is "2026-01-09 12:58:00", we want "2026-01-09 12:58"
+            // Find last colon and truncate
+            if let Some(last_colon_idx) = date_time.rfind(':') {
+                date_time[..last_colon_idx].to_string()
+            } else {
+                date_time.to_string()
+            }
+        } else {
+            created_raw.to_string()
+        };
+
+        let sandbox_name = parts[3].to_string();
+
+        sandboxes.push(SandboxInfo {
+            name: sandbox_name,
+            status,
+            created,
+        });
+    }
+
+    Ok(sandboxes)
 }
 
 impl Daemon for DaemonServer {
@@ -169,7 +252,7 @@ impl Daemon for DaemonServer {
         }
 
         // Container doesn't exist - create it
-        create_container(&container_name, &image, &repo_path)
+        create_container(&container_name, &sandbox_name, &image, &repo_path)
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
@@ -198,6 +281,10 @@ impl Daemon for DaemonServer {
         }
 
         Ok(())
+    }
+
+    fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+        list_sandboxes_for_repo(&repo_path)
     }
 }
 

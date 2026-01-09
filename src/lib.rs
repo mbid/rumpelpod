@@ -7,6 +7,7 @@ mod config;
 mod daemon;
 mod delete;
 mod enter;
+mod list;
 mod llm;
 mod systemd;
 
@@ -33,7 +34,7 @@ pub fn run() -> Result<()> {
             enter::enter(cmd)?;
         }
         Command::List => {
-            list()?;
+            list::list()?;
         }
         Command::Delete(ref cmd) => {
             delete::delete(cmd)?;
@@ -44,10 +45,6 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn list() -> Result<()> {
-    todo!()
 }
 
 fn agent() -> Result<()> {
