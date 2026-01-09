@@ -16,6 +16,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         locales \
         gnupg \
         docker.io \
+        lighttpd \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.appimage && \
