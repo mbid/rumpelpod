@@ -27,11 +27,14 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    let container_id = client.launch_sandbox(
+    let launch_result = client.launch_sandbox(
         SandboxName(cmd.name.clone()),
         Image(image),
         repo_root.clone(),
+        config.repo_path.clone(),
+        config.user.clone(),
     )?;
+    let container_id = launch_result.container_id;
 
     let mut command = cmd.command.clone();
     if command.is_empty() {

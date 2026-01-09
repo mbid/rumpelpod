@@ -10,7 +10,8 @@ use tokio::net::UnixListener;
 
 use crate::command_ext::CommandExt;
 use crate::gateway;
-use protocol::{ContainerId, Daemon, Image, SandboxInfo, SandboxName, SandboxStatus};
+use crate::git_http_server;
+use protocol::{ContainerId, Daemon, Image, LaunchResult, SandboxInfo, SandboxName, SandboxStatus};
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -99,16 +100,10 @@ fn inspect_container(container_name: &str) -> Result<Option<ContainerState>> {
 
 /// Start a stopped container.
 fn start_container(container_name: &str) -> Result<()> {
-    let output = Command::new("docker")
+    Command::new("docker")
         .args(["start", container_name])
-        .output()
-        .context("Failed to execute docker start")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("docker start failed: {}", stderr);
-    }
-
+        .success()
+        .context("starting container")?;
     Ok(())
 }
 
@@ -121,7 +116,13 @@ fn start_container(container_name: &str) -> Result<()> {
 /// The subnet is derived deterministically from the network name's hash to
 /// ensure the same sandbox always gets the same subnet. The `attempt` parameter
 /// allows trying different subnets if the first one collides.
-fn compute_subnet(name: &str, attempt: u32) -> String {
+/// Subnet and gateway configuration for a docker network.
+struct SubnetConfig {
+    subnet: String,
+    gateway: String,
+}
+
+fn compute_subnet(name: &str, attempt: u32) -> SubnetConfig {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
@@ -136,12 +137,18 @@ fn compute_subnet(name: &str, attempt: u32) -> String {
     //
     // Layout: 172.(16 + high_nibble).(byte2).(byte3 & 0xF8)/29
     // where high_nibble is 0-15 (4 bits), giving us 172.16.x.x to 172.31.x.x
+    //
+    // In a /29 subnet, the first usable IP (base + 1) is the gateway.
 
     let high_nibble = (hash[0] >> 4) & 0x0F; // 0-15, maps to 172.16-172.31
     let byte2 = hash[1];
     let byte3 = hash[2] & 0xF8; // Align to /29 boundary (multiples of 8)
 
-    format!("172.{}.{}.{}/29", 16 + high_nibble, byte2, byte3)
+    let octet2 = 16 + high_nibble;
+    SubnetConfig {
+        subnet: format!("172.{}.{}.{}/29", octet2, byte2, byte3),
+        gateway: format!("172.{}.{}.{}", octet2, byte2, byte3 + 1),
+    }
 }
 
 /// Maximum number of subnet collision retries before giving up.
@@ -162,14 +169,16 @@ fn create_network(name: &str, sandbox_name: &SandboxName, repo_path: &Path) -> R
 
     // Try creating the network with different subnets if we hit collisions
     for attempt in 0..MAX_SUBNET_RETRIES {
-        let subnet = compute_subnet(name, attempt);
+        let config = compute_subnet(name, attempt);
 
         let output = Command::new("docker")
             .args([
                 "network",
                 "create",
                 "--subnet",
-                &subnet,
+                &config.subnet,
+                "--gateway",
+                &config.gateway,
                 "--label",
                 &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
                 "--label",
@@ -218,6 +227,126 @@ fn delete_network(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Spawn a git HTTP server for the container.
+/// This is required for the container to fetch from the gateway repository.
+fn spawn_git_http_server(
+    gateway_path: &Path,
+    network_name: &str,
+    container_id: &str,
+) -> Result<()> {
+    git_http_server::spawn_git_http_server(gateway_path, network_name, container_id)
+        .with_context(|| format!("starting git HTTP server for container {}", container_id))
+}
+
+/// Check that the .git directory inside the container is owned by the expected user.
+/// Returns an error with a helpful message if ownership doesn't match.
+fn check_git_directory_ownership(
+    container_id: &str,
+    container_repo_path: &Path,
+    user: &str,
+) -> Result<()> {
+    let git_dir = container_repo_path.join(".git");
+    let git_dir_str = git_dir.to_string_lossy();
+
+    // Get the owner of the .git directory
+    let owner_output = Command::new("docker")
+        .args(["exec", container_id, "stat", "-c", "%U", &git_dir_str])
+        .success()
+        .with_context(|| format!("checking ownership of {}", git_dir_str))?;
+
+    let owner = String::from_utf8_lossy(&owner_output).trim().to_string();
+
+    // Extract just the username part if user is in "user:group" format
+    let expected_user = user.split(':').next().unwrap_or(user);
+
+    if owner != expected_user {
+        anyhow::bail!(
+            "Git directory {} is owned by '{}', but sandbox is configured to run as '{}'.\n\
+             Please ensure the repository inside the container is owned by the configured user.\n\
+             You can fix this by running: chown -R {} {}",
+            git_dir_str,
+            owner,
+            expected_user,
+            user,
+            container_repo_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+/// Set up git remotes inside the container for the gateway repository.
+/// Adds "host" and "sandbox" remotes pointing to the git HTTP server.
+/// Git commands are run as the specified user to avoid permission issues.
+fn setup_git_remotes(
+    container_id: &str,
+    network_name: &str,
+    container_repo_path: Option<&Path>,
+    user: Option<&str>,
+) -> Result<()> {
+    let container_repo_path = match container_repo_path {
+        Some(path) => path,
+        None => return Ok(()),
+    };
+
+    // Check .git directory ownership if a user is specified
+    if let Some(user) = user {
+        check_git_directory_ownership(container_id, container_repo_path, user)?;
+    }
+
+    let git_http_url = git_http_server::git_http_url(network_name)?;
+    let repo_path_str = container_repo_path.to_string_lossy();
+
+    // Build the base docker exec command with optional user
+    let mut base_args: Vec<&str> = vec!["exec"];
+    if let Some(user) = user {
+        base_args.push("--user");
+        base_args.push(user);
+    }
+    base_args.push(container_id);
+
+    // Helper to run a git command inside the container
+    let run_git = |args: &[&str]| -> Result<Vec<u8>> {
+        let mut cmd = Command::new("docker");
+        cmd.args(&base_args);
+        cmd.arg("git");
+        cmd.arg("-C");
+        cmd.arg(&*repo_path_str);
+        cmd.args(args);
+        cmd.success()
+    };
+
+    // Add "host" remote (or update if exists)
+    match run_git(&["remote", "add", "host", &git_http_url]) {
+        Ok(_) => {}
+        Err(e) => {
+            let error_msg = e.to_string();
+            if error_msg.contains("already exists") {
+                run_git(&["remote", "set-url", "host", &git_http_url])
+                    .context("updating host remote URL")?;
+            } else {
+                return Err(e).context("adding host remote");
+            }
+        }
+    }
+
+    // Add "sandbox" remote (same URL, for symmetry with host repo which has "sandbox" remote)
+    match run_git(&["remote", "add", "sandbox", &git_http_url]) {
+        Ok(_) => {}
+        Err(e) => {
+            let error_msg = e.to_string();
+            if error_msg.contains("already exists") {
+                run_git(&["remote", "set-url", "sandbox", &git_http_url])
+                    .context("updating sandbox remote URL")?;
+            } else {
+                return Err(e).context("adding sandbox remote");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Create a new container with docker run.
 fn create_container(
     name: &str,
@@ -243,17 +372,11 @@ fn create_container(
             "sleep",
             "infinity", // Keep container running
         ])
-        .output()
-        .context("Failed to execute docker run")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        error!("docker run failed: {}", stderr);
-        anyhow::bail!("docker run failed: {}", stderr);
-    }
+        .success()
+        .context("creating container")?;
 
     // Container ID is printed to stdout (without trailing newline)
-    let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let container_id = String::from_utf8_lossy(&output).trim().to_string();
 
     Ok(ContainerId(container_id))
 }
@@ -271,15 +394,10 @@ fn list_sandboxes_for_repo(repo_path: &Path) -> Result<Vec<SandboxInfo>> {
             // Output: name, status, created timestamp, sandbox_name label
             "{{.Names}}\t{{.Status}}\t{{.CreatedAt}}\t{{.Label \"dev.sandbox.name\"}}",
         ])
-        .output()
-        .context("Failed to execute docker ps")?;
+        .success()
+        .context("listing containers")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("docker ps failed: {}", stderr);
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output);
     let mut sandboxes = Vec::new();
 
     for line in stdout.lines() {
@@ -332,11 +450,14 @@ impl Daemon for DaemonServer {
         sandbox_name: SandboxName,
         image: Image,
         repo_path: PathBuf,
-    ) -> Result<ContainerId> {
+        container_repo_path: Option<PathBuf>,
+        user: Option<String>,
+    ) -> Result<LaunchResult> {
         // Set up gateway for git synchronization (idempotent)
         gateway::setup_gateway(&repo_path)?;
 
         let name = docker_name(&repo_path, &sandbox_name);
+        let gateway_path = gateway::gateway_path(&repo_path)?;
 
         // TODO: There's a potential race condition between inspect and
         // start/run. Another process could stop/remove the container after we
@@ -355,18 +476,46 @@ impl Daemon for DaemonServer {
             }
 
             if state.status == "running" {
-                // Already running with correct image
-                return Ok(ContainerId(state.id));
+                // Already running with correct image.
+                // Spawn git HTTP server in case daemon was restarted while container was running.
+                spawn_git_http_server(&gateway_path, &name, &state.id)?;
+                setup_git_remotes(
+                    &state.id,
+                    &name,
+                    container_repo_path.as_deref(),
+                    user.as_deref(),
+                )?;
+                return Ok(LaunchResult {
+                    container_id: ContainerId(state.id),
+                });
             }
 
             // Container exists but is stopped - restart it
             start_container(&name)?;
-            return Ok(ContainerId(state.id));
+            spawn_git_http_server(&gateway_path, &name, &state.id)?;
+            setup_git_remotes(
+                &state.id,
+                &name,
+                container_repo_path.as_deref(),
+                user.as_deref(),
+            )?;
+            return Ok(LaunchResult {
+                container_id: ContainerId(state.id),
+            });
         }
 
         // Create network and container (both use the same name)
         create_network(&name, &sandbox_name, &repo_path)?;
-        create_container(&name, &sandbox_name, &image, &repo_path)
+
+        let container_id = create_container(&name, &sandbox_name, &image, &repo_path)?;
+        spawn_git_http_server(&gateway_path, &name, &container_id.0)?;
+        setup_git_remotes(
+            &container_id.0,
+            &name,
+            container_repo_path.as_deref(),
+            user.as_deref(),
+        )?;
+        Ok(LaunchResult { container_id })
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {

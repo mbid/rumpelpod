@@ -1,15 +1,17 @@
 //! Integration tests for the git gateway functionality.
 //!
 //! Tests verify that commits and branches are synchronized between the host
-//! repository and the gateway bare repository.
+//! repository and the gateway bare repository, and that sandboxes can access
+//! the gateway via HTTP.
 
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use indoc::{formatdoc, indoc};
 use sandbox::CommandExt;
 
-use crate::common::{sandbox_command, TestDaemon, TestRepo};
+use crate::common::{build_docker_image, sandbox_command, DockerBuild, TestDaemon, TestRepo};
 
 /// Get the list of branches in a repository.
 fn get_branches(repo_path: &Path) -> Vec<String> {
@@ -285,4 +287,243 @@ fn gateway_branch_deletion_propagates() {
         "host/to-delete should be deleted from gateway, got: {:?}",
         branches_after
     );
+}
+
+/// Build a Docker image with git installed and a git repo at a custom path.
+fn build_git_image() -> String {
+    let dockerfile = indoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git curl
+        RUN mkdir -p /workspace
+        WORKDIR /workspace
+        RUN git init && \
+            git config user.email "test@example.com" && \
+            git config user.name "Test" && \
+            git commit --allow-empty -m "init"
+    "#};
+
+    build_docker_image(DockerBuild {
+        dockerfile: dockerfile.to_string(),
+        build_context: None,
+    })
+    .expect("Failed to build docker image with git")
+}
+
+#[test]
+fn gateway_http_remotes_configured_in_container() {
+    // Test that when repo-path is configured, the container gets "host" and "sandbox" remotes
+    let image_id = build_git_image();
+
+    let repo = TestRepo::new();
+    let config = formatdoc! {r#"
+        image = "{image_id}"
+        repo-path = "/workspace"
+    "#};
+    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "http-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Check that remotes are configured
+    let remotes_output = sandbox_command(&repo, &daemon)
+        .args(["enter", "http-test", "--", "git", "remote"])
+        .success()
+        .expect("Failed to get git remotes");
+
+    let remotes = String::from_utf8_lossy(&remotes_output);
+
+    assert!(
+        remotes.contains("host"),
+        "Container should have 'host' remote, got: {}",
+        remotes
+    );
+    assert!(
+        remotes.contains("sandbox"),
+        "Container should have 'sandbox' remote, got: {}",
+        remotes
+    );
+}
+
+#[test]
+fn gateway_http_fetch_works_from_container() {
+    // Test that a container can actually fetch from the gateway via HTTP
+    let image_id = build_git_image();
+
+    let repo = TestRepo::new();
+
+    // Create a branch with a commit before launching sandbox
+    create_branch(repo.path(), "test-branch");
+    create_commit(repo.path(), "Test commit for fetch");
+    let test_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+    checkout_branch(repo.path(), "master");
+
+    let config = formatdoc! {r#"
+        image = "{image_id}"
+        repo-path = "/workspace"
+    "#};
+    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox (this sets up gateway and pushes branches)
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "fetch-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Fetch from host remote inside the container
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "fetch-test", "--", "git", "fetch", "host"])
+        .success()
+        .expect("Failed to fetch from host remote");
+
+    // Verify the fetched commit matches
+    let fetched_commit_output = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "fetch-test",
+            "--",
+            "git",
+            "rev-parse",
+            "host/host/test-branch",
+        ])
+        .success()
+        .expect("Failed to get fetched commit");
+
+    let fetched_commit = String::from_utf8_lossy(&fetched_commit_output)
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        fetched_commit, test_commit,
+        "Fetched commit should match host commit"
+    );
+}
+
+#[test]
+fn gateway_http_fetch_new_commits_after_create() {
+    // Test that new commits made on host after container creation can be fetched
+    let image_id = build_git_image();
+
+    let repo = TestRepo::new();
+    let config = formatdoc! {r#"
+        image = "{image_id}"
+        repo-path = "/workspace"
+    "#};
+    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox first
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "new-commits-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Initial fetch
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "new-commits-test", "--", "git", "fetch", "host"])
+        .success()
+        .expect("Failed to initial fetch");
+
+    // Now create a new commit on host (after container exists)
+    create_commit(repo.path(), "New commit after container creation");
+    let new_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Fetch again - should get the new commit
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "new-commits-test", "--", "git", "fetch", "host"])
+        .success()
+        .expect("Failed to fetch new commits");
+
+    // Verify we got the new commit
+    let fetched_commit_output = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "new-commits-test",
+            "--",
+            "git",
+            "rev-parse",
+            "host/host/master",
+        ])
+        .success()
+        .expect("Failed to get fetched commit");
+
+    let fetched_commit = String::from_utf8_lossy(&fetched_commit_output)
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        fetched_commit, new_commit,
+        "Should be able to fetch new commits made after container creation"
+    );
+}
+
+/// Build a Docker image with git installed, a non-root user, and a git repo owned by that user.
+fn build_git_image_with_user() -> String {
+    let dockerfile = indoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git curl
+        RUN useradd -m -s /bin/bash testuser
+        RUN mkdir -p /workspace && chown testuser:testuser /workspace
+        USER testuser
+        WORKDIR /workspace
+        RUN git init && \
+            git config user.email "test@example.com" && \
+            git config user.name "Test" && \
+            git commit --allow-empty -m "init"
+    "#};
+
+    build_docker_image(DockerBuild {
+        dockerfile: dockerfile.to_string(),
+        build_context: None,
+    })
+    .expect("Failed to build docker image with git and user")
+}
+
+#[test]
+fn gateway_http_works_with_non_root_user() {
+    // Test that git remotes work when running as a non-root user
+    let image_id = build_git_image_with_user();
+
+    let repo = TestRepo::new();
+    let config = formatdoc! {r#"
+        image = "{image_id}"
+        repo-path = "/workspace"
+        user = "testuser"
+    "#};
+    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "user-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Check that remotes are configured
+    let remotes_output = sandbox_command(&repo, &daemon)
+        .args(["enter", "user-test", "--", "git", "remote", "-v"])
+        .success()
+        .expect("Failed to get git remotes");
+
+    let remotes = String::from_utf8_lossy(&remotes_output);
+
+    assert!(
+        remotes.contains("host"),
+        "Container should have 'host' remote, got: {}",
+        remotes
+    );
+
+    // Fetch should work
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "user-test", "--", "git", "fetch", "host"])
+        .success()
+        .expect("Failed to fetch from host remote");
 }

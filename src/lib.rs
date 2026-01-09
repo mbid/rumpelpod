@@ -11,6 +11,7 @@ mod delete;
 mod enter;
 mod gateway;
 mod git;
+mod git_http_server;
 mod list;
 mod llm;
 mod systemd;

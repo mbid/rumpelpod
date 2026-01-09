@@ -23,6 +23,12 @@ pub struct Image(pub String);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerId(pub String);
 
+/// Result of launching a sandbox.
+#[derive(Debug, Clone)]
+pub struct LaunchResult {
+    pub container_id: ContainerId,
+}
+
 /// Human-readable sandbox name to distinguish multiple sandboxes for the same repo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxName(pub String);
@@ -48,6 +54,12 @@ struct LaunchSandboxRequest {
     sandbox_name: SandboxName,
     image: Image,
     repo_path: PathBuf,
+    /// Path where the repository is mounted inside the container.
+    /// If set, git remotes will be configured to point to the gateway HTTP server.
+    container_repo_path: Option<PathBuf>,
+    /// User to run git commands as inside the container.
+    /// This should match the owner of the .git directory in the container.
+    user: Option<String>,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -95,7 +107,9 @@ pub trait Daemon: Send + Sync + 'static {
         sandbox_name: SandboxName,
         image: Image,
         repo_path: PathBuf,
-    ) -> Result<ContainerId>;
+        container_repo_path: Option<PathBuf>,
+        user: Option<String>,
+    ) -> Result<LaunchResult>;
 
     // DELETE /sandbox
     // Stops and removes a sandbox container.
@@ -142,12 +156,16 @@ impl Daemon for DaemonClient {
         sandbox_name: SandboxName,
         image: Image,
         repo_path: PathBuf,
-    ) -> Result<ContainerId> {
+        container_repo_path: Option<PathBuf>,
+        user: Option<String>,
+    ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
             sandbox_name,
             image,
             repo_path,
+            container_repo_path,
+            user,
         };
 
         let response = self
@@ -161,7 +179,9 @@ impl Daemon for DaemonClient {
             let body: LaunchSandboxResponse = response
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
-            Ok(body.container_id)
+            Ok(LaunchResult {
+                container_id: body.container_id,
+            })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
@@ -225,11 +245,19 @@ async fn launch_sandbox_handler<D: Daemon>(
     Json(request): Json<LaunchSandboxRequest>,
 ) -> Result<Json<LaunchSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
     let result = block_in_place(|| {
-        daemon.launch_sandbox(request.sandbox_name, request.image, request.repo_path)
+        daemon.launch_sandbox(
+            request.sandbox_name,
+            request.image,
+            request.repo_path,
+            request.container_repo_path,
+            request.user,
+        )
     });
 
     match result {
-        Ok(container_id) => Ok(Json(LaunchSandboxResponse { container_id })),
+        Ok(launch_result) => Ok(Json(LaunchSandboxResponse {
+            container_id: launch_result.container_id,
+        })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -329,9 +357,13 @@ mod tests {
             sandbox_name: SandboxName,
             image: Image,
             _repo_path: PathBuf,
-        ) -> Result<ContainerId> {
+            _container_repo_path: Option<PathBuf>,
+            _user: Option<String>,
+        ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
-            Ok(ContainerId(format!("{}:{}", sandbox_name.0, image.0)))
+            Ok(LaunchResult {
+                container_id: ContainerId(format!("{}:{}", sandbox_name.0, image.0)),
+            })
         }
 
         fn delete_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
@@ -370,10 +402,12 @@ mod tests {
             SandboxName("test-sandbox".to_string()),
             Image("test-image".to_string()),
             PathBuf::from("/tmp/repo"),
+            None,
+            None,
         );
 
-        let container_id = result.unwrap();
-        assert_eq!(container_id.0, "test-sandbox:test-image");
+        let launch_result = result.unwrap();
+        assert_eq!(launch_result.container_id.0, "test-sandbox:test-image");
 
         shutdown_tx.send(()).unwrap();
         server_handle.join().unwrap();
