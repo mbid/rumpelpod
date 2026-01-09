@@ -16,17 +16,6 @@ pub enum Runtime {
     SysboxRunc,
 }
 
-/// Strategy for copy-on-write mounts (writes inside container don't propagate to host).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OverlayMode {
-    /// Use overlayfs (default) - efficient but may have permission issues with sysbox
-    #[default]
-    Overlayfs,
-    /// Eagerly copy the directory - works with all runtimes but uses more disk space
-    Copy,
-}
-
 /// Model to use for the agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -94,98 +83,4 @@ pub fn get_state_dir() -> Result<PathBuf> {
     Ok(state_base.join("sandbox"))
 }
 
-/// Compute a short hash of a path for use in directory names.
-pub fn hash_path(path: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(path.to_string_lossy().as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..8]) // Use first 8 bytes (16 hex chars)
-}
-
-/// Get the sandbox directory for a specific repo.
-/// Format: $XDG_STATE_HOME/sandbox/<repo-root-dir-name>-<sha2-of-repo-root-absolute-path>
-pub fn get_sandbox_base_dir(repo_root: &Path) -> Result<PathBuf> {
-    let state_dir = get_state_dir()?;
-    let repo_name = repo_root
-        .file_name()
-        .context("Repo root has no file name")?
-        .to_string_lossy();
-    let path_hash = hash_path(repo_root);
-
-    Ok(state_dir.join(format!("{repo_name}-{path_hash}")))
-}
-
-/// Get the directory for a specific named sandbox instance.
-pub fn get_sandbox_instance_dir(repo_root: &Path, name: &str) -> Result<PathBuf> {
-    let base = get_sandbox_base_dir(repo_root)?;
-    Ok(base.join(name))
-}
-
-/// Get the path to the meta.git bare repository for a repo.
-/// This bare repo is shared across all sandboxes for the same repository.
-pub fn get_meta_git_dir(repo_root: &Path) -> Result<PathBuf> {
-    let base = get_sandbox_base_dir(repo_root)?;
-    Ok(base.join("meta.git"))
-}
-
-/// Hash the contents of a file (used for Dockerfile hash-based image tagging).
-pub fn hash_file(path: &Path) -> Result<String> {
-    let path_display = path.display();
-    let contents =
-        std::fs::read(path).with_context(|| format!("Failed to read file: {path_display}"))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&contents);
-    let result = hasher.finalize();
-    Ok(hex::encode(&result[..16])) // Use first 16 bytes (32 hex chars)
-}
-
-/// Get current user information.
-pub struct UserInfo {
-    pub uid: u32,
-    pub gid: u32,
-    pub username: String,
-    pub shell: String,
-}
-
-impl UserInfo {
-    pub fn current() -> Result<Self> {
-        let uid = nix::unistd::getuid().as_raw();
-        let gid = nix::unistd::getgid().as_raw();
-
-        let username = std::env::var("USER")
-            .or_else(|_| std::env::var("LOGNAME"))
-            .unwrap_or_else(|_| format!("user{uid}"));
-
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-
-        Ok(UserInfo {
-            uid,
-            gid,
-            username,
-            shell,
-        })
-    }
-
-    pub fn uses_fish(&self) -> bool {
-        self.shell.ends_with("/fish") || self.shell == "fish"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hash_path() {
-        let path = Path::new("/home/user/project");
-        let hash = hash_path(path);
-        assert_eq!(hash.len(), 16);
-    }
-
-    #[test]
-    fn test_get_sandbox_base_dir() {
-        let repo_root = Path::new("/home/user/myproject");
-        let base_dir = get_sandbox_base_dir(repo_root).unwrap();
-        assert!(base_dir.to_string_lossy().contains("myproject-"));
-    }
-}
+pub use crate::sandbox_config::*;

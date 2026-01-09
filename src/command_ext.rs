@@ -22,12 +22,6 @@ pub trait CommandExt {
     /// Both stdout and stderr are written to the same pipe, so the output is interleaved
     /// in the order it was produced by the process. The output is read line by line and
     /// expects valid UTF-8.
-    ///
-    /// # Deadlock Prevention
-    ///
-    /// The pipe's write ends are moved into the child process when spawning. Since we
-    /// don't retain any copies of the write end, the pipe will properly close when the
-    /// child process exits, allowing the read to complete.
     fn combined_output(&mut self) -> io::Result<CombinedOutput>;
 }
 
@@ -47,8 +41,8 @@ impl CommandExt for Command {
         self.stderr(Stdio::null());
 
         // Read line by line from the combined pipe.
-        // The read will complete once the child closes both stdout and stderr
-        // (which happens when it exits).
+        // The read will complete once the child closes both stdout and stderr, typically when it
+        // exits.
         let mut combined_output = String::new();
         let buf_reader = BufReader::new(reader);
         for line in buf_reader.lines() {
@@ -57,8 +51,6 @@ impl CommandExt for Command {
             combined_output.push('\n');
         }
 
-        // Wait for the process to finish. It should already be done since we've
-        // exhausted the pipe (which only happens after the child closes its writers).
         let status = child.wait()?;
 
         Ok(CombinedOutput {
