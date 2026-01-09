@@ -1,10 +1,8 @@
 //! Integration tests for the `sandbox list` subcommand.
 
-mod common;
-
 use std::fs;
 
-use common::{sandbox_command, TestDaemon, TestRepo};
+use crate::common::{sandbox_command, TestDaemon, TestRepo};
 
 #[test]
 fn list_empty_returns_header_only() {

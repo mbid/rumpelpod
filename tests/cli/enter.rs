@@ -1,10 +1,8 @@
 //! Integration tests for the `sandbox enter` subcommand.
 
-mod common;
-
 use std::fs;
 
-use common::{sandbox_command, TestDaemon, TestRepo};
+use crate::common::{sandbox_command, TestDaemon, TestRepo};
 
 #[test]
 fn enter_smoke_test() {
