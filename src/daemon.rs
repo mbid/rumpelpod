@@ -32,16 +32,16 @@ struct DaemonServer {
     // No state for now. State resides in the docker service.
 }
 
-/// Label key used to store the repository path on containers.
+/// Label key used to store the repository path on containers and networks.
 const REPO_PATH_LABEL: &str = "dev.sandbox.repo_path";
 
-/// Label key used to store the sandbox name on containers.
+/// Label key used to store the sandbox name on containers and networks.
 const SANDBOX_NAME_LABEL: &str = "dev.sandbox.name";
 
-/// Generate a unique container name from repo path and sandbox name.
+/// Generate a unique base name from repo path and sandbox name.
 /// Format: "<repo_dir>-<sandbox_name>-<hash_prefix>"
 /// where hash is sha256(repo_path + sandbox_name) truncated to 12 hex chars.
-fn container_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
+fn sandbox_base_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
     use sha2::{Digest, Sha256};
 
     let repo_dir = repo_path
@@ -56,6 +56,16 @@ fn container_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
     let hash_prefix = &hash[..12];
 
     format!("{}-{}-{}", repo_dir, sandbox_name.0, hash_prefix)
+}
+
+/// Generate a unique container name from repo path and sandbox name.
+fn container_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
+    sandbox_base_name(repo_path, sandbox_name)
+}
+
+/// Generate a unique network name from repo path and sandbox name.
+fn network_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
+    format!("{}-net", sandbox_base_name(repo_path, sandbox_name))
 }
 
 /// Container state returned by docker inspect.
@@ -110,9 +120,66 @@ fn start_container(container_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Create a docker network for the sandbox.
+/// If the network already exists, returns success.
+fn create_network(network_name: &str, sandbox_name: &SandboxName, repo_path: &Path) -> Result<()> {
+    // Check if network already exists
+    let check = Command::new("docker")
+        .args(["network", "inspect", network_name])
+        .output()
+        .context("Failed to execute docker network inspect")?;
+
+    if check.status.success() {
+        return Ok(());
+    }
+
+    let output = Command::new("docker")
+        .args([
+            "network",
+            "create",
+            "--label",
+            &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
+            "--label",
+            &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
+            network_name,
+        ])
+        .output()
+        .context("Failed to execute docker network create")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("docker network create failed: {}", stderr);
+        anyhow::bail!("docker network create failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
+/// Delete a docker network.
+fn delete_network(network_name: &str) -> Result<()> {
+    let output = Command::new("docker")
+        .args(["network", "rm", network_name])
+        .combined_output()
+        .context("Failed to execute docker network rm")?;
+
+    if !output.status.success() {
+        // Ignore "not found" errors (already deleted or never existed)
+        if !output.combined_output.contains("not found") {
+            error!("docker network rm failed: {}", output.combined_output);
+            anyhow::bail!(
+                "docker network rm failed: {}",
+                output.combined_output.trim()
+            );
+        }
+    }
+
+    Ok(())
+}
+
 /// Create a new container with docker run.
 fn create_container(
     container_name: &str,
+    network_name: &str,
     sandbox_name: &SandboxName,
     image: &Image,
     repo_path: &Path,
@@ -123,6 +190,8 @@ fn create_container(
             "-d", // Detach to get container ID
             "--name",
             container_name,
+            "--network",
+            network_name,
             "--label",
             &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
             "--label",
@@ -224,6 +293,7 @@ impl Daemon for DaemonServer {
         repo_path: PathBuf,
     ) -> Result<ContainerId> {
         let container_name = container_name(&repo_path, &sandbox_name);
+        let network_name = network_name(&repo_path, &sandbox_name);
 
         // TODO: There's a potential race condition between inspect and
         // start/run. Another process could stop/remove the container after we
@@ -251,12 +321,20 @@ impl Daemon for DaemonServer {
             return Ok(ContainerId(state.id));
         }
 
-        // Container doesn't exist - create it
-        create_container(&container_name, &sandbox_name, &image, &repo_path)
+        // Create network and container
+        create_network(&network_name, &sandbox_name, &repo_path)?;
+        create_container(
+            &container_name,
+            &network_name,
+            &sandbox_name,
+            &image,
+            &repo_path,
+        )
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
         let container_name = container_name(&repo_path, &sandbox_name);
+        let network_name = network_name(&repo_path, &sandbox_name);
 
         // Stop the container with immediate SIGKILL (-t 0) because containers typically
         // run `sleep infinity` which won't handle SIGTERM gracefully anyway.
@@ -279,6 +357,9 @@ impl Daemon for DaemonServer {
                 anyhow::bail!("docker rm failed: {}", output.combined_output.trim());
             }
         }
+
+        // Remove the network (must be done after removing the container)
+        delete_network(&network_name)?;
 
         Ok(())
     }
