@@ -112,6 +112,41 @@ fn start_container(container_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Compute a /29 subnet in 172.16.0.0/12 range from the network name's hash.
+///
+/// Docker by default assigns /16 or /20 subnets from the 172.17.0.0/12 range,
+/// which quickly exhausts available IP space when running many tests. By using
+/// /29 subnets (8 IPs each), we can support ~1M networks in the same IP range.
+///
+/// The subnet is derived deterministically from the network name's hash to
+/// ensure the same sandbox always gets the same subnet. The `attempt` parameter
+/// allows trying different subnets if the first one collides.
+fn compute_subnet(name: &str, attempt: u32) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_bytes());
+    hasher.update(attempt.to_le_bytes());
+    let hash = hasher.finalize();
+
+    // Use first 20 bits of hash to select a /29 subnet within 172.16.0.0/12
+    // 172.16.0.0/12 spans 172.16.0.0 - 172.31.255.255 (20 bits of host space)
+    // With /29 subnets (3 bits for hosts), we have 17 bits for network selection
+    // But we'll use 20 bits and mask to /29 boundaries for simplicity
+    //
+    // Layout: 172.(16 + high_nibble).(byte2).(byte3 & 0xF8)/29
+    // where high_nibble is 0-15 (4 bits), giving us 172.16.x.x to 172.31.x.x
+
+    let high_nibble = (hash[0] >> 4) & 0x0F; // 0-15, maps to 172.16-172.31
+    let byte2 = hash[1];
+    let byte3 = hash[2] & 0xF8; // Align to /29 boundary (multiples of 8)
+
+    format!("172.{}.{}.{}/29", 16 + high_nibble, byte2, byte3)
+}
+
+/// Maximum number of subnet collision retries before giving up.
+const MAX_SUBNET_RETRIES: u32 = 10;
+
 /// Create a docker network for the sandbox.
 /// If the network already exists, returns success.
 fn create_network(name: &str, sandbox_name: &SandboxName, repo_path: &Path) -> Result<()> {
@@ -125,26 +160,41 @@ fn create_network(name: &str, sandbox_name: &SandboxName, repo_path: &Path) -> R
         return Ok(());
     }
 
-    let output = Command::new("docker")
-        .args([
-            "network",
-            "create",
-            "--label",
-            &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
-            "--label",
-            &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
-            name,
-        ])
-        .output()
-        .context("Failed to execute docker network create")?;
+    // Try creating the network with different subnets if we hit collisions
+    for attempt in 0..MAX_SUBNET_RETRIES {
+        let subnet = compute_subnet(name, attempt);
 
-    if !output.status.success() {
+        let output = Command::new("docker")
+            .args([
+                "network",
+                "create",
+                "--subnet",
+                &subnet,
+                "--label",
+                &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
+                "--label",
+                &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
+                name,
+            ])
+            .output()
+            .context("Failed to execute docker network create")?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
         let stderr = String::from_utf8_lossy(&output.stderr);
-        error!("docker network create failed: {}", stderr);
-        anyhow::bail!("docker network create failed: {}", stderr);
+        // Retry on subnet collision, fail on other errors
+        if !stderr.contains("Pool overlaps") {
+            error!("docker network create failed: {}", stderr);
+            anyhow::bail!("docker network create failed: {}", stderr);
+        }
     }
 
-    Ok(())
+    anyhow::bail!(
+        "docker network create failed: could not find non-overlapping subnet after {} attempts",
+        MAX_SUBNET_RETRIES
+    );
 }
 
 /// Delete a docker network.
