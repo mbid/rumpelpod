@@ -38,10 +38,11 @@ const REPO_PATH_LABEL: &str = "dev.sandbox.repo_path";
 /// Label key used to store the sandbox name on containers and networks.
 const SANDBOX_NAME_LABEL: &str = "dev.sandbox.name";
 
-/// Generate a unique base name from repo path and sandbox name.
+/// Generate a unique docker resource name from repo path and sandbox name.
+/// Used for both the container and network (they can share the same name).
 /// Format: "<repo_dir>-<sandbox_name>-<hash_prefix>"
 /// where hash is sha256(repo_path + sandbox_name) truncated to 12 hex chars.
-fn sandbox_base_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
+fn docker_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
     use sha2::{Digest, Sha256};
 
     let repo_dir = repo_path
@@ -56,16 +57,6 @@ fn sandbox_base_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
     let hash_prefix = &hash[..12];
 
     format!("{}-{}-{}", repo_dir, sandbox_name.0, hash_prefix)
-}
-
-/// Generate a unique container name from repo path and sandbox name.
-fn container_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
-    sandbox_base_name(repo_path, sandbox_name)
-}
-
-/// Generate a unique network name from repo path and sandbox name.
-fn network_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
-    format!("{}-net", sandbox_base_name(repo_path, sandbox_name))
 }
 
 /// Container state returned by docker inspect.
@@ -122,10 +113,10 @@ fn start_container(container_name: &str) -> Result<()> {
 
 /// Create a docker network for the sandbox.
 /// If the network already exists, returns success.
-fn create_network(network_name: &str, sandbox_name: &SandboxName, repo_path: &Path) -> Result<()> {
+fn create_network(name: &str, sandbox_name: &SandboxName, repo_path: &Path) -> Result<()> {
     // Check if network already exists
     let check = Command::new("docker")
-        .args(["network", "inspect", network_name])
+        .args(["network", "inspect", name])
         .output()
         .context("Failed to execute docker network inspect")?;
 
@@ -141,7 +132,7 @@ fn create_network(network_name: &str, sandbox_name: &SandboxName, repo_path: &Pa
             &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
             "--label",
             &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
-            network_name,
+            name,
         ])
         .output()
         .context("Failed to execute docker network create")?;
@@ -156,9 +147,9 @@ fn create_network(network_name: &str, sandbox_name: &SandboxName, repo_path: &Pa
 }
 
 /// Delete a docker network.
-fn delete_network(network_name: &str) -> Result<()> {
+fn delete_network(name: &str) -> Result<()> {
     let output = Command::new("docker")
-        .args(["network", "rm", network_name])
+        .args(["network", "rm", name])
         .combined_output()
         .context("Failed to execute docker network rm")?;
 
@@ -178,8 +169,7 @@ fn delete_network(network_name: &str) -> Result<()> {
 
 /// Create a new container with docker run.
 fn create_container(
-    container_name: &str,
-    network_name: &str,
+    name: &str,
     sandbox_name: &SandboxName,
     image: &Image,
     repo_path: &Path,
@@ -189,9 +179,9 @@ fn create_container(
             "run",
             "-d", // Detach to get container ID
             "--name",
-            container_name,
+            name,
             "--network",
-            network_name,
+            name, // Container and network share the same name
             "--label",
             &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
             "--label",
@@ -292,20 +282,19 @@ impl Daemon for DaemonServer {
         image: Image,
         repo_path: PathBuf,
     ) -> Result<ContainerId> {
-        let container_name = container_name(&repo_path, &sandbox_name);
-        let network_name = network_name(&repo_path, &sandbox_name);
+        let name = docker_name(&repo_path, &sandbox_name);
 
         // TODO: There's a potential race condition between inspect and
         // start/run. Another process could stop/remove the container after we
         // inspect it. For robustness, we'd need to retry on specific failures,
         // but that adds complexity. For now, we accept this limitation.
 
-        if let Some(state) = inspect_container(&container_name)? {
+        if let Some(state) = inspect_container(&name)? {
             // Container exists - check if it has the expected image
             if state.image != image.0 {
                 anyhow::bail!(
                     "Container '{}' exists with image '{}', but requested image is '{}'",
-                    container_name,
+                    name,
                     state.image,
                     image.0
                 );
@@ -317,36 +306,29 @@ impl Daemon for DaemonServer {
             }
 
             // Container exists but is stopped - restart it
-            start_container(&container_name)?;
+            start_container(&name)?;
             return Ok(ContainerId(state.id));
         }
 
-        // Create network and container
-        create_network(&network_name, &sandbox_name, &repo_path)?;
-        create_container(
-            &container_name,
-            &network_name,
-            &sandbox_name,
-            &image,
-            &repo_path,
-        )
+        // Create network and container (both use the same name)
+        create_network(&name, &sandbox_name, &repo_path)?;
+        create_container(&name, &sandbox_name, &image, &repo_path)
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
-        let container_name = container_name(&repo_path, &sandbox_name);
-        let network_name = network_name(&repo_path, &sandbox_name);
+        let name = docker_name(&repo_path, &sandbox_name);
 
         // Stop the container with immediate SIGKILL (-t 0) because containers typically
         // run `sleep infinity` which won't handle SIGTERM gracefully anyway.
         // TODO: For sysbox/systemd containers that don't invoke the provided run command,
         // we should allow a graceful shutdown period.
         let _ = Command::new("docker")
-            .args(["stop", "-t", "0", &container_name])
+            .args(["stop", "-t", "0", &name])
             .combined_output();
 
         // Remove the container
         let output = Command::new("docker")
-            .args(["rm", "-f", &container_name])
+            .args(["rm", "-f", &name])
             .combined_output()
             .context("Failed to execute docker rm")?;
 
@@ -359,7 +341,7 @@ impl Daemon for DaemonServer {
         }
 
         // Remove the network (must be done after removing the container)
-        delete_network(&network_name)?;
+        delete_network(&name)?;
 
         Ok(())
     }
