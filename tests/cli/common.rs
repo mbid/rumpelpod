@@ -112,6 +112,14 @@ impl TestRepo {
         TestRepo { dir }
     }
 
+    /// Create a temporary directory without git initialization.
+    /// Useful for testing behavior outside of a git repository.
+    pub fn new_without_git() -> Self {
+        let dir =
+            TempDir::with_prefix("sandbox-test-repo-").expect("Failed to create temp directory");
+        TestRepo { dir }
+    }
+
     pub fn path(&self) -> &Path {
         self.dir.path()
     }

@@ -1,15 +1,16 @@
 use std::io::IsTerminal;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::cli::EnterCommand;
 use crate::config::SandboxConfig;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, Image, SandboxName};
+use crate::git::get_repo_root;
 
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
-    let repo_path = std::env::current_dir().context("Failed to get current directory")?;
+    let repo_path = get_repo_root()?;
     let config = SandboxConfig::load(&repo_path)?;
 
     let image = config.image.unwrap_or_else(|| "ubuntu:24.04".to_string());

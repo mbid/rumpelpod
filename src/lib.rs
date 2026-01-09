@@ -10,6 +10,7 @@ mod daemon;
 mod delete;
 mod enter;
 mod gateway;
+mod git;
 mod list;
 mod llm;
 mod systemd;

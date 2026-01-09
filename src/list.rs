@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, SandboxStatus};
+use crate::git::get_repo_root;
 
 pub fn list() -> Result<()> {
-    let repo_path = std::env::current_dir().context("Failed to get current directory")?;
+    let repo_path = get_repo_root()?;
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
