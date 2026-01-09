@@ -88,7 +88,10 @@ pub struct SandboxConfig {
     pub image: String,
 
     /// User to run as inside the sandbox container.
-    pub user: String,
+    /// If not specified, the image's USER directive is used.
+    /// The image must have a non-root USER set, or this field must be explicitly provided.
+    #[serde(default)]
+    pub user: Option<String>,
 
     /// Path to the repo checkout inside the container.
     /// `sandbox enter` will use this as the working directory base.

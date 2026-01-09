@@ -27,6 +27,9 @@ pub struct ContainerId(pub String);
 #[derive(Debug, Clone)]
 pub struct LaunchResult {
     pub container_id: ContainerId,
+    /// The resolved user for the sandbox. This is either the user specified in the config,
+    /// or the user from the image's USER directive.
+    pub user: String,
 }
 
 /// Human-readable sandbox name to distinguish multiple sandboxes for the same repo.
@@ -57,15 +60,17 @@ struct LaunchSandboxRequest {
     /// Path where the repository is located inside the container.
     /// Git remotes will be configured to point to the gateway HTTP server.
     container_repo_path: PathBuf,
-    /// User to run git commands as inside the container.
-    /// This should match the owner of the .git directory in the container.
-    user: String,
+    /// User to run as inside the container, if explicitly specified.
+    /// If None, the daemon will use the image's USER directive.
+    user: Option<String>,
 }
 
 /// Response body for launch_sandbox endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct LaunchSandboxResponse {
     container_id: ContainerId,
+    /// The resolved user for the sandbox.
+    user: String,
 }
 
 /// Request body for delete_sandbox endpoint.
@@ -108,7 +113,7 @@ pub trait Daemon: Send + Sync + 'static {
         image: Image,
         repo_path: PathBuf,
         container_repo_path: PathBuf,
-        user: String,
+        user: Option<String>,
     ) -> Result<LaunchResult>;
 
     // DELETE /sandbox
@@ -157,7 +162,7 @@ impl Daemon for DaemonClient {
         image: Image,
         repo_path: PathBuf,
         container_repo_path: PathBuf,
-        user: String,
+        user: Option<String>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -181,6 +186,7 @@ impl Daemon for DaemonClient {
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
             Ok(LaunchResult {
                 container_id: body.container_id,
+                user: body.user,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -257,6 +263,7 @@ async fn launch_sandbox_handler<D: Daemon>(
     match result {
         Ok(launch_result) => Ok(Json(LaunchSandboxResponse {
             container_id: launch_result.container_id,
+            user: launch_result.user,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -358,11 +365,12 @@ mod tests {
             image: Image,
             _repo_path: PathBuf,
             _container_repo_path: PathBuf,
-            _user: String,
+            user: Option<String>,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
                 container_id: ContainerId(format!("{}:{}", sandbox_name.0, image.0)),
+                user: user.unwrap_or_else(|| "mockuser".to_string()),
             })
         }
 
@@ -403,7 +411,7 @@ mod tests {
             Image("test-image".to_string()),
             PathBuf::from("/tmp/repo"),
             PathBuf::from("/workspace"),
-            "testuser".to_string(),
+            Some("testuser".to_string()),
         );
 
         let launch_result = result.unwrap();

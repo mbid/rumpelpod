@@ -68,6 +68,61 @@ struct ContainerState {
     id: String,
 }
 
+/// Get the USER directive from a Docker image.
+/// Returns None if the image has no USER set (defaults to root).
+fn get_image_user(image: &str) -> Result<Option<String>> {
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.Config.User}}", image])
+        .output()
+        .context("Failed to execute docker inspect on image")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to inspect image '{}': {}", image, stderr.trim());
+    }
+
+    let user = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if user.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(user))
+    }
+}
+
+/// Resolve the user for a sandbox.
+///
+/// If `user` is provided, it is used directly.
+/// Otherwise, the image's USER directive is used.
+/// Returns an error if no user is specified and the image has no USER or uses root.
+fn resolve_user(user: Option<String>, image: &str) -> Result<String> {
+    if let Some(user) = user {
+        return Ok(user);
+    }
+
+    let image_user = get_image_user(image)?;
+
+    match image_user {
+        Some(user) if user != "root" && !user.starts_with("0:") && user != "0" => Ok(user),
+        Some(user) => {
+            anyhow::bail!(
+                "Image '{}' has USER set to '{}' (root). \
+                 For security, sandboxes must run as a non-root user.\n\
+                 Either set 'user' in .sandbox.toml, or change the image's USER directive.",
+                image,
+                user
+            );
+        }
+        None => {
+            anyhow::bail!(
+                "Image '{}' has no USER directive (defaults to root). \
+                 For security, sandboxes must run as a non-root user.\n\
+                 Either set 'user' in .sandbox.toml, or add a USER directive to the Dockerfile.",
+                image
+            );
+        }
+    }
+}
+
 /// Inspect an existing container by name. Returns None if container doesn't exist.
 fn inspect_container(container_name: &str) -> Result<Option<ContainerState>> {
     let output = Command::new("docker")
@@ -435,8 +490,11 @@ impl Daemon for DaemonServer {
         image: Image,
         repo_path: PathBuf,
         container_repo_path: PathBuf,
-        user: String,
+        user: Option<String>,
     ) -> Result<LaunchResult> {
+        // Resolve the user first, before any container operations
+        let user = resolve_user(user, &image.0)?;
+
         // Set up gateway for git synchronization (idempotent)
         gateway::setup_gateway(&repo_path)?;
 
@@ -466,6 +524,7 @@ impl Daemon for DaemonServer {
                 setup_git_remotes(&state.id, &name, &container_repo_path, &user)?;
                 return Ok(LaunchResult {
                     container_id: ContainerId(state.id),
+                    user,
                 });
             }
 
@@ -475,6 +534,7 @@ impl Daemon for DaemonServer {
             setup_git_remotes(&state.id, &name, &container_repo_path, &user)?;
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
+                user,
             });
         }
 
@@ -484,7 +544,7 @@ impl Daemon for DaemonServer {
         let container_id = create_container(&name, &sandbox_name, &image, &repo_path)?;
         spawn_git_http_server(&gateway_path, &name, &container_id.0)?;
         setup_git_remotes(&container_id.0, &name, &container_repo_path, &user)?;
-        Ok(LaunchResult { container_id })
+        Ok(LaunchResult { container_id, user })
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {

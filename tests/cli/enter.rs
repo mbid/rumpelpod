@@ -5,8 +5,8 @@ use std::fs;
 use sandbox::CommandExt;
 
 use crate::common::{
-    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
-    TEST_REPO_PATH, TEST_USER,
+    build_test_image, build_test_image_without_user, sandbox_command, write_test_sandbox_config,
+    write_test_sandbox_config_with_user, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
 };
 
 #[test]
@@ -105,8 +105,8 @@ fn enter_outside_git_repo_fails() {
     // a clear error message.
     let repo = TestRepo::new_without_git();
 
-    // Write a minimal config (image/user/repo-path are now required but the
-    // command should fail before parsing completes because we're not in a git repo)
+    // Write a minimal config (command should fail before parsing completes
+    // because we're not in a git repo)
     fs::write(
         repo.path().join(".sandbox.toml"),
         "image = \"debian:13\"\nuser = \"root\"\nrepo-path = \"/repo\"",
@@ -201,6 +201,126 @@ fn enter_subdir_workdir_is_relative() {
         expected,
         "Working directory from subdir should be {}, got: {}",
         expected,
+        stdout.trim()
+    );
+}
+
+#[test]
+fn enter_uses_image_user_when_not_specified_in_config() {
+    // When the config doesn't specify a user, the sandbox should use the
+    // image's USER directive.
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Verify running as the user from the image's USER directive
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "image-user-test", "--", "whoami"])
+        .success()
+        .expect("sandbox enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        TEST_USER,
+        "Should be running as {} (from image USER), got: {}",
+        TEST_USER,
+        stdout.trim()
+    );
+}
+
+#[test]
+fn enter_fails_when_image_has_no_user_and_config_omits_user() {
+    // When neither the config nor the image specifies a user, the sandbox
+    // should fail with an error about requiring a non-root user.
+    let repo = TestRepo::new();
+    // Build an image WITHOUT the USER directive
+    let image_id =
+        build_test_image_without_user(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", "no-user-test", "--", "whoami"])
+        .output()
+        .expect("Failed to run sandbox command");
+
+    assert!(
+        !output.status.success(),
+        "sandbox enter should fail when no user is specified"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no USER directive") || stderr.contains("non-root user"),
+        "Error should mention missing USER directive or non-root user requirement: {}",
+        stderr
+    );
+}
+
+#[test]
+fn enter_fails_when_image_has_root_user_and_config_omits_user() {
+    // When the image explicitly sets USER to root and the config doesn't
+    // specify a user, the sandbox should fail.
+    let repo = TestRepo::new();
+    let image_id = build_test_image_without_user(repo.path(), "USER root")
+        .expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", "root-user-test", "--", "whoami"])
+        .output()
+        .expect("Failed to run sandbox command");
+
+    assert!(
+        !output.status.success(),
+        "sandbox enter should fail when image USER is root"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("root") && stderr.contains("non-root user"),
+        "Error should mention root user and non-root requirement: {}",
+        stderr
+    );
+}
+
+#[test]
+fn enter_allows_explicit_root_user_in_config() {
+    // When the config explicitly sets user = "root", it should be allowed
+    // (the user made a conscious choice to run as root).
+    let repo = TestRepo::new();
+    // Build an image where root owns the repo (COPY without --chown defaults to root)
+    let image_id = crate::common::build_docker_image(crate::common::DockerBuild {
+        dockerfile: format!(
+            "FROM debian:13\n\
+             RUN apt-get update && apt-get install -y git\n\
+             COPY . {}\n",
+            TEST_REPO_PATH
+        ),
+        build_context: Some(repo.path().to_path_buf()),
+    })
+    .expect("Failed to build test image");
+
+    write_test_sandbox_config_with_user(&repo, &image_id, "root");
+
+    let daemon = TestDaemon::start();
+
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "explicit-root-test", "--", "whoami"])
+        .success()
+        .expect("sandbox enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "root",
+        "Should be running as root when explicitly configured, got: {}",
         stdout.trim()
     );
 }

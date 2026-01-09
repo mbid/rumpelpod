@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use crate::cli::EnterCommand;
 use crate::config::SandboxConfig;
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, Image, SandboxName};
+use crate::daemon::protocol::{Daemon, DaemonClient, Image, LaunchResult, SandboxName};
 use crate::git::get_repo_root;
 
 /// Compute the path relative from `base` to `path`.
@@ -25,14 +25,13 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    let launch_result = client.launch_sandbox(
+    let LaunchResult { container_id, user } = client.launch_sandbox(
         SandboxName(cmd.name.clone()),
         Image(config.image.clone()),
         repo_root.clone(),
         config.repo_path.clone(),
         config.user.clone(),
     )?;
-    let container_id = launch_result.container_id;
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
@@ -45,7 +44,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
     let mut docker_cmd = Command::new("docker");
     docker_cmd.arg("exec");
-    docker_cmd.args(["--user", &config.user]);
+    docker_cmd.args(["--user", &user]);
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
     if std::io::stdin().is_terminal() {

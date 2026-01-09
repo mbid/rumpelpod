@@ -315,11 +315,35 @@ fn find_existing_image(label_value: &str) -> Option<String> {
 /// - Is based on debian:13 with git installed
 /// - Has a non-root user (TEST_USER) with UID TEST_USER_UID
 /// - COPYs the host_repo_dir contents to TEST_REPO_PATH, owned by TEST_USER
-/// - Optionally applies extra_dockerfile_lines at the end
+/// - Sets USER to TEST_USER
+/// - Optionally applies extra_dockerfile_lines before the USER directive
 ///
 /// The host repo (including its .git directory) is copied into the container,
 /// so the container has a working git repository.
 pub fn build_test_image(
+    host_repo_dir: &Path,
+    extra_dockerfile_lines: &str,
+) -> anyhow::Result<ImageId> {
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        USER {TEST_USER}
+        {extra_dockerfile_lines}
+    "#};
+
+    build_docker_image(DockerBuild {
+        dockerfile,
+        build_context: Some(host_repo_dir.to_path_buf()),
+    })
+}
+
+/// Build a test image without a USER directive.
+///
+/// Similar to `build_test_image`, but does NOT set the USER directive.
+/// Use this to test behavior when the image has no USER set.
+pub fn build_test_image_without_user(
     host_repo_dir: &Path,
     extra_dockerfile_lines: &str,
 ) -> anyhow::Result<ImageId> {
@@ -341,12 +365,24 @@ pub fn build_test_image(
 ///
 /// This configures:
 /// - The provided image ID
-/// - user = TEST_USER
 /// - repo-path = TEST_REPO_PATH
+///
+/// The user is not specified, so the sandbox will use the image's USER directive.
+/// Use `write_test_sandbox_config_with_user` if you need to specify a user explicitly.
 pub fn write_test_sandbox_config(repo: &TestRepo, image_id: &ImageId) {
     let config = formatdoc! {r#"
         image = "{image_id}"
-        user = "{TEST_USER}"
+        repo-path = "{TEST_REPO_PATH}"
+    "#};
+    std::fs::write(repo.path().join(".sandbox.toml"), config)
+        .expect("Failed to write .sandbox.toml");
+}
+
+/// Write a `.sandbox.toml` config file with an explicit user.
+pub fn write_test_sandbox_config_with_user(repo: &TestRepo, image_id: &ImageId, user: &str) {
+    let config = formatdoc! {r#"
+        image = "{image_id}"
+        user = "{user}"
         repo-path = "{TEST_REPO_PATH}"
     "#};
     std::fs::write(repo.path().join(".sandbox.toml"), config)
