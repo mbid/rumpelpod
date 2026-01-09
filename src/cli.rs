@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::config::Model;
@@ -11,46 +11,22 @@ use crate::systemd as setup;
 #[command(about = "Docker-based sandbox for untrusted LLM agents")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Command,
 }
 
-// TODO: Refactor these commands so that there's e.g. an EnterCommand struct, and the Enter variant
-// here is just Enter(EnterCommand).
 #[derive(Subcommand)]
-pub enum Commands {
+pub enum Command {
     /// Enter a sandbox (create if needed)
-    Enter {
-        /// Name for this sandbox instance
-        name: String,
-
-        /// Command to run inside the sandbox (default: interactive shell)
-        #[arg(last = true)]
-        command: Vec<String>,
-    },
+    Enter(EnterCommand),
 
     /// List all sandboxes for the current repository
     List,
 
     /// Delete a sandbox
-    Delete {
-        /// Name of the sandbox to delete
-        name: String,
-    },
+    Delete(DeleteCommand),
 
     /// Run an LLM agent inside a sandbox
-    Agent {
-        /// Name of the sandbox to use
-        name: String,
-
-        /// Claude model to use (overrides config file)
-        #[arg(short, long, value_enum)]
-        model: Option<Model>,
-
-        /// LLM response cache directory for deterministic testing.
-        /// See llm-cache/README.md for documentation.
-        #[arg(long, hide = true)]
-        cache: Option<PathBuf>,
-    },
+    Agent(AgentCommand),
 
     /// Run the sandbox daemon (manages sandboxes across all projects)
     #[command(hide = true)]
@@ -63,37 +39,61 @@ pub enum Commands {
     SystemUninstall,
 }
 
+#[derive(Args)]
+pub struct EnterCommand {
+    /// Name for this sandbox instance
+    pub name: String,
+
+    /// Command to run inside the sandbox (default: interactive shell)
+    #[arg(last = true)]
+    pub command: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct DeleteCommand {
+    /// Name of the sandbox to delete
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct AgentCommand {
+    /// Name of the sandbox to use
+    pub name: String,
+
+    /// Claude model to use (overrides config file)
+    #[arg(short, long, value_enum)]
+    pub model: Option<Model>,
+
+    /// LLM response cache directory for deterministic testing.
+    /// See llm-cache/README.md for documentation.
+    #[arg(long, hide = true)]
+    pub cache: Option<PathBuf>,
+}
+
 pub fn run() -> Result<()> {
     env_logger::init();
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon => {
+        Command::Daemon => {
             daemon::run_daemon()?;
         }
-        Commands::SystemInstall => {
+        Command::SystemInstall => {
             setup::system_install()?;
         }
-        Commands::SystemUninstall => {
+        Command::SystemUninstall => {
             setup::system_uninstall()?;
         }
-        Commands::Enter {
-            name: _,
-            command: _,
-        } => {
+        Command::Enter(_) => {
             enter()?;
         }
-        Commands::List => {
+        Command::List => {
             list()?;
         }
-        Commands::Delete { name: _ } => {
+        Command::Delete(_) => {
             delete()?;
         }
-        Commands::Agent {
-            name: _,
-            model: _,
-            cache: _,
-        } => {
+        Command::Agent(_) => {
             agent()?;
         }
     }
