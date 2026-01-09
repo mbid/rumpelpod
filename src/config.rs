@@ -88,6 +88,15 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub image: Option<String>,
 
+    /// User to run as inside the sandbox container.
+    #[serde(default)]
+    pub user: Option<String>,
+
+    /// Path to the repo checkout inside the container.
+    /// When set, `sandbox enter` will use this as the working directory base.
+    #[serde(default, rename = "repo-path")]
+    pub repo_path: Option<PathBuf>,
+
     #[serde(default)]
     pub agent: AgentConfig,
 }
