@@ -42,3 +42,4 @@ axum = "*"
 [dev-dependencies]
 assert_cmd = "*"
 portable-pty = "*"
+walkdir = "*"
