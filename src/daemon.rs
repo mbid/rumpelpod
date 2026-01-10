@@ -385,6 +385,10 @@ fn setup_git_remotes(
     ])
     .context("configuring host remote fetch refspec")?;
 
+    // Disable pushing to the host remote - it's fetch-only.
+    run_git(&["config", "remote.host.pushurl", "PUSH_DISABLED"])
+        .context("disabling push for host remote")?;
+
     // Add "sandbox" remote (same URL, for symmetry with host repo which has "sandbox" remote)
     match run_git(&["remote", "add", "sandbox", &git_http_url]) {
         Ok(_) => {}
