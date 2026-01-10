@@ -3,6 +3,37 @@
 //! Creates and maintains a bare "gateway" git repository that acts as an intermediary
 //! between the host repository and sandboxes. This allows sandboxes to fetch commits
 //! without direct access to the host repo.
+//!
+//! # Repository sync architecture
+//!
+//! There are three types repositories involved:
+//!
+//! 1. **Host repo**: The user's working repository on the host machine.
+//! 2. **Gateway repo**: A bare repository at `~/.local/state/sandbox/<hash>/gateway.git`
+//!    that acts as an intermediary. Sandboxes cannot access the host repo directly.
+//! 3. **Sandbox repos**: The repositories inside each sandbox container.
+//!
+//! ## Current sync: Host -> Gateway (implemented)
+//!
+//! Commits are synced from the host repo to the gateway repo:
+//!
+//! - On setup, all local branches are pushed to the gateway as `refs/heads/host/<branch>`.
+//! - A post-commit hook in the host repo automatically pushes new commits to the gateway.
+//! - The push uses the "sandbox" remote (host repo -> gateway repo).
+//!
+//! The gateway repo stores these as local branches (not remote refs), e.g.:
+//! - Host branch `main` becomes gateway branch `host/main`
+//! - Host branch `feature` becomes gateway branch `host/feature`
+//!
+//! ## Sandbox access to gateway
+//!
+//! Sandbox repos have a "host" remote pointing to the gateway (via HTTP server on the
+//! docker network gateway IP). Sandboxes can fetch with `git fetch host` to get branches
+//! as `refs/remotes/host/host/<branch>` (the remote is "host", the branch is "host/<x>").
+//!
+//! ## Future: Sandbox -> Gateway sync (not yet implemented)
+//!
+//! Sandboxes will be able to push their changes to the gateway for the host to pull.
 
 use std::fs;
 use std::path::{Path, PathBuf};
