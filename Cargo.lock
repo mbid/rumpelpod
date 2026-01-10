@@ -247,6 +247,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "cgi-service"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8c04ae50fb5dc3310e0eae301c4f2bfd7c589b684c88fad731fc765397561bb"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
+ "thiserror 2.0.17",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1616,6 +1632,7 @@ dependencies = [
  "assert_cmd",
  "axum",
  "backoff",
+ "cgi-service",
  "chrono",
  "clap",
  "dirs",

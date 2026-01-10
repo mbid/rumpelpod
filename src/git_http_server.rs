@@ -1,19 +1,20 @@
 //! Git HTTP server for exposing the gateway repository to sandboxes.
 //!
-//! Spawns a lighttpd process that serves the gateway git repository via
+//! Runs an axum server that serves the gateway git repository via
 //! git-http-backend CGI, allowing containers to fetch from the host.
 
-use std::io::Write;
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::thread;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
-use indoc::formatdoc;
+use axum::Router;
+use cgi_service::{CgiConfig, CgiService};
 use log::{debug, error};
-use tempfile::{NamedTempFile, TempPath};
+use tokio::task::JoinHandle;
 
 use crate::command_ext::CommandExt;
+use crate::r#async::RUNTIME;
 
 /// Port used for the git HTTP server on each container's network.
 pub const GIT_HTTP_PORT: u16 = 8417;
@@ -21,49 +22,11 @@ pub const GIT_HTTP_PORT: u16 = 8417;
 /// Path to git-http-backend CGI script.
 const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";
 
-/// Generate a lighttpd configuration file for serving a git repository.
-fn generate_lighttpd_config(gateway_path: &Path, bind_address: &str, port: u16) -> String {
-    let gateway_parent = gateway_path
-        .parent()
-        .map(|p| p.to_string_lossy())
-        .unwrap_or_else(|| "/".into());
-
-    // lighttpd config for git-http-backend.
-    // The entire domain/port is dedicated to git-http-backend. We alias "" (root)
-    // to the git-http-backend script.
-    formatdoc! {r#"
-        server.modules = (
-            "mod_setenv",
-            "mod_cgi",
-            "mod_alias"
-        )
-
-        server.document-root = "/var/empty"
-        server.bind = "{bind_address}"
-        server.port = {port}
-
-        # Disable logging to avoid noise
-        server.errorlog = "/dev/null"
-
-        # CGI configuration for git-http-backend
-        # The entire server is dedicated to git, so we alias root to git-http-backend
-        alias.url = ( "" => "{GIT_HTTP_BACKEND}" )
-        setenv.set-environment = (
-            "GIT_PROJECT_ROOT" => "{gateway_parent}",
-            "GIT_HTTP_EXPORT_ALL" => ""
-        )
-        cgi.assign = ( "" => "" )
-    "#}
-}
-
 /// A running git HTTP server instance.
 /// Stops the server when dropped.
 pub struct GitHttpServer {
-    /// The lighttpd process.
-    process: Child,
-    /// Path to the temp config file. The file is deleted when this is dropped.
-    /// We don't keep the file handle open because lighttpd needs to read it.
-    _config_path: TempPath,
+    /// Handle to the spawned tokio task running the server.
+    task_handle: JoinHandle<()>,
 }
 
 impl GitHttpServer {
@@ -72,55 +35,57 @@ impl GitHttpServer {
     /// The server binds to the specified address (typically the docker network
     /// gateway IP) and serves the gateway repo via git-http-backend.
     pub fn start(gateway_path: &Path, bind_address: &str) -> Result<Self> {
-        let config_content = generate_lighttpd_config(gateway_path, bind_address, GIT_HTTP_PORT);
+        let gateway_parent = gateway_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("/"));
 
-        // Create temp config file
-        let mut config_file = NamedTempFile::new().context("creating temp config file")?;
-        config_file
-            .write_all(config_content.as_bytes())
-            .context("writing lighttpd config")?;
-        config_file.flush()?;
-
-        let config_path = config_file.path().to_owned();
-
-        // Close the file handle but keep the TempPath for cleanup on drop
-        let temp_path = config_file.into_temp_path();
+        let addr: SocketAddr = format!("{}:{}", bind_address, GIT_HTTP_PORT)
+            .parse()
+            .context("parsing bind address")?;
 
         debug!(
-            "Starting lighttpd with config:\n{}",
-            config_content.trim_start()
+            "Starting git HTTP server on {} for {}",
+            addr,
+            gateway_path.display()
         );
 
-        // Start lighttpd with the config
-        // -D = don't daemonize (run in foreground)
-        let process = Command::new("lighttpd")
-            .args(["-D", "-f"])
-            .arg(&config_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawning lighttpd")?;
+        // Configure the CGI service for git-http-backend.
+        // git-http-backend expects:
+        //   - GIT_PROJECT_ROOT: parent directory containing the bare repo
+        //   - PATH_INFO: full request path including repo name (e.g., /gateway.git/info/refs)
+        //   - SCRIPT_NAME: empty (the script itself is at root)
+        let cgi_config = CgiConfig::new(GIT_HTTP_BACKEND)
+            .env("GIT_PROJECT_ROOT", gateway_parent.to_string_lossy())
+            .env("GIT_HTTP_EXPORT_ALL", "")
+            .script_name("");
 
-        Ok(GitHttpServer {
-            process,
-            _config_path: temp_path,
-        })
+        let cgi_service = CgiService::with_config(cgi_config);
+
+        // Build router that handles all requests via CGI
+        let app = Router::new().fallback_service(cgi_service);
+
+        // Spawn the server in the background
+        let task_handle = RUNTIME.spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("Failed to bind git HTTP server to {}: {}", addr, e);
+                    return;
+                }
+            };
+
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("Git HTTP server error: {}", e);
+            }
+        });
+
+        Ok(GitHttpServer { task_handle })
     }
 
     /// Stop the server.
     pub fn stop(&mut self) {
-        if let Err(e) = self.process.kill() {
-            // ESRCH (no such process) is expected if process already exited
-            if e.kind() != std::io::ErrorKind::InvalidInput
-                && !e.to_string().contains("No such process")
-            {
-                error!("Failed to kill lighttpd process: {}", e);
-            }
-        }
-        if let Err(e) = self.process.wait() {
-            error!("Failed to wait for lighttpd process: {}", e);
-        }
+        self.task_handle.abort();
     }
 }
 
@@ -156,9 +121,9 @@ pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
 ///
 /// This function:
 /// 1. Gets the gateway IP for the container's network
-/// 2. Starts a lighttpd server bound to that IP
-/// 3. Spawns a background thread that waits for the container to stop and then
-///    kills the lighttpd process
+/// 2. Starts an axum server bound to that IP serving git-http-backend via CGI
+/// 3. Spawns a background task that waits for the container to stop and then
+///    shuts down the server
 pub fn spawn_git_http_server(
     gateway_path: &Path,
     network_name: &str,
@@ -173,35 +138,38 @@ pub fn spawn_git_http_server(
 
     let server = GitHttpServer::start(gateway_path, &gateway_ip)?;
 
-    // Spawn a thread to wait for the container to stop and then kill the server
+    // Spawn a task to wait for the container to stop and then shut down the server
     let container_id = container_id.to_string();
-    thread::spawn(move || {
-        // Move server into this thread so it lives until we're done
+    RUNTIME.spawn(async move {
+        // Move server into this task so it lives until we're done
         let mut server = server;
 
         // docker wait blocks until the container stops
-        let result = Command::new("docker")
+        let result = tokio::process::Command::new("docker")
             .args(["wait", &container_id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+            .output()
+            .await;
 
         match result {
-            Ok(status) if status.success() => {
-                debug!(
-                    "Container {} stopped, stopping git HTTP server",
-                    container_id
-                );
-            }
-            Ok(status) => {
-                // docker wait exited non-zero (container might not exist)
-                error!(
-                    "docker wait for {} exited with {}, stopping server",
-                    container_id, status
-                );
+            Ok(output) => {
+                if output.status.success() {
+                    debug!(
+                        "Container {} stopped, stopping git HTTP server",
+                        container_id
+                    );
+                } else {
+                    let combined = String::from_utf8_lossy(&output.stdout).to_string()
+                        + &String::from_utf8_lossy(&output.stderr);
+                    error!(
+                        "docker wait for {} exited with {}: {}",
+                        container_id,
+                        output.status,
+                        combined.trim()
+                    );
+                }
             }
             Err(e) => {
-                error!("docker wait failed: {}, stopping server", e);
+                error!("docker wait failed: {}", e);
             }
         }
 
