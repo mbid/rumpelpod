@@ -1,8 +1,10 @@
 //! Anthropic (Claude) agent implementation.
 
-use anyhow::{Context, Result};
 use std::io::{IsTerminal, Read, Write};
+use std::path::Path;
 use std::str::FromStr;
+
+use anyhow::{Context, Result};
 
 use crate::chat_println;
 use crate::config::Model;
@@ -15,7 +17,8 @@ use crate::llm::types::anthropic::{
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_vim, read_agents_md, ToolName, MAX_TOKENS,
+    execute_write_in_sandbox, get_input_via_vim, model_api_id, read_agents_md, ToolName,
+    MAX_TOKENS,
 };
 
 fn make_tool(name: ToolName) -> Tool {
@@ -48,7 +51,8 @@ fn fetch_tool() -> Tool {
 
 pub fn run_claude_agent(
     container_name: &str,
-    uid: u32,
+    user: &str,
+    repo_path: &Path,
     model: Model,
     cache: Option<LlmCache>,
 ) -> Result<()> {
@@ -60,7 +64,7 @@ pub fn run_claude_agent(
     let mut chat_history = String::new();
 
     // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, uid);
+    let agents_md = read_agents_md(container_name, user, repo_path);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
     let is_tty = std::io::stdin().is_terminal();
@@ -125,7 +129,7 @@ pub fn run_claude_agent(
             }
 
             let request = MessagesRequest {
-                model: model.api_model_id().to_string(),
+                model: model_api_id(model).to_string(),
                 max_tokens: MAX_TOKENS,
                 system: Some(SystemPrompt::Blocks(vec![SystemBlock::Text {
                     text: system_prompt.clone(),
@@ -166,8 +170,12 @@ pub fn run_claude_agent(
 
                                 chat_println!(chat_history, "$ {}", command);
 
-                                let (output, success) =
-                                    execute_bash_in_sandbox(container_name, uid, command)?;
+                                let (output, success) = execute_bash_in_sandbox(
+                                    container_name,
+                                    user,
+                                    repo_path,
+                                    command,
+                                )?;
 
                                 if !output.is_empty() {
                                     chat_println!(chat_history, "{}", output);
@@ -191,7 +199,8 @@ pub fn run_claude_agent(
 
                                 let (output, success) = execute_edit_in_sandbox(
                                     container_name,
-                                    uid,
+                                    user,
+                                    repo_path,
                                     file_path,
                                     old_string,
                                     new_string,
@@ -215,7 +224,8 @@ pub fn run_claude_agent(
 
                                 let (output, success) = execute_write_in_sandbox(
                                     container_name,
-                                    uid,
+                                    user,
+                                    repo_path,
                                     file_path,
                                     content,
                                 )?;

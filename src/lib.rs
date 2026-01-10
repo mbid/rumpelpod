@@ -44,16 +44,10 @@ pub fn run() -> Result<()> {
         Command::Delete(ref cmd) => {
             delete::delete(cmd)?;
         }
-        Command::Agent(_) => {
-            agent()?;
+        Command::Agent(ref cmd) => {
+            agent::agent(cmd)?;
         }
     }
 
     Ok(())
-}
-
-fn agent() -> Result<()> {
-    // TODO: Contact daemon to launch sandbox.
-    // Then launch agent loop.
-    todo!()
 }

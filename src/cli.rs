@@ -79,11 +79,9 @@ Any uncommitted changes in the sandbox will be lost.
 ")]
     Delete(DeleteCommand),
 
-    /// Run an LLM agent inside a sandbox [not yet available]
+    /// Run an LLM agent inside a sandbox
     #[command(long_about = "\
 Run an LLM agent inside a sandbox.
-
-NOTE: This feature is currently being refactored and is not yet available.
 
 The agent runs autonomously, executing commands in the sandbox. All changes \
 are isolated - safety comes from the sandbox, not from asking for permission.

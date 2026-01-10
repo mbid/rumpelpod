@@ -17,21 +17,30 @@ fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
         .with_context(|| format!("{} is not under {}", path.display(), base.display()))
 }
 
-pub fn enter(cmd: &EnterCommand) -> Result<()> {
-    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+/// Launch a sandbox and return the container ID and user.
+/// This is shared logic between `enter` and `agent` commands.
+pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
     let repo_root = get_repo_root()?;
     let config = SandboxConfig::load(&repo_root)?;
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    let LaunchResult { container_id, user } = client.launch_sandbox(
-        SandboxName(cmd.name.clone()),
+    client.launch_sandbox(
+        SandboxName(sandbox_name.to_string()),
         Image(config.image.clone()),
-        repo_root.clone(),
-        config.repo_path.clone(),
-        config.user.clone(),
-    )?;
+        repo_root,
+        config.repo_path,
+        config.user,
+    )
+}
+
+pub fn enter(cmd: &EnterCommand) -> Result<()> {
+    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+    let repo_root = get_repo_root()?;
+    let config = SandboxConfig::load(&repo_root)?;
+
+    let LaunchResult { container_id, user } = launch_sandbox(&cmd.name)?;
 
     let mut command = cmd.command.clone();
     if command.is_empty() {

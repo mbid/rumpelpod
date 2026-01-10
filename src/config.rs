@@ -24,17 +24,6 @@ pub enum Runtime {
     SysboxRunc,
 }
 
-impl Runtime {
-    /// Get the runtime name as used by Docker's --runtime flag.
-    pub fn docker_runtime_name(&self) -> &'static str {
-        match self {
-            Runtime::Runsc => "runsc",
-            Runtime::Runc => "runc",
-            Runtime::SysboxRunc => "sysbox-runc",
-        }
-    }
-}
-
 /// Model to use for the agent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,20 +50,6 @@ pub enum Model {
     /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
     #[value(name = "grok-4.1-fast")]
     Grok41Fast,
-}
-
-impl Model {
-    /// Get the model identifier as used by the provider's API.
-    pub fn api_model_id(&self) -> &'static str {
-        match self {
-            Model::Opus => "claude-opus-4-5-20251101",
-            Model::Sonnet => "claude-sonnet-4-5-20250929",
-            Model::Haiku => "claude-haiku-4-5-20251001",
-            Model::Grok3Mini => "grok-3-mini",
-            Model::Grok4 => "grok-4",
-            Model::Grok41Fast => "grok-4-1-fast",
-        }
-    }
 }
 
 /// Top-level configuration structure parsed from `.sandbox.toml`.

@@ -1,8 +1,10 @@
 //! xAI (Grok) agent implementation.
 
-use anyhow::{Context, Result};
 use std::io::{IsTerminal, Read, Write};
+use std::path::Path;
 use std::str::FromStr;
+
+use anyhow::{Context, Result};
 
 use crate::chat_println;
 use crate::config::Model;
@@ -15,7 +17,8 @@ use crate::llm::types::xai::{
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_vim, read_agents_md, ToolName, MAX_TOKENS,
+    execute_write_in_sandbox, get_input_via_vim, model_api_id, read_agents_md, ToolName,
+    MAX_TOKENS,
 };
 
 fn make_tool(name: ToolName) -> Tool {
@@ -31,7 +34,8 @@ fn make_tool(name: ToolName) -> Tool {
 
 pub fn run_grok_agent(
     container_name: &str,
-    uid: u32,
+    user: &str,
+    repo_path: &Path,
     model: Model,
     cache: Option<LlmCache>,
 ) -> Result<()> {
@@ -43,7 +47,7 @@ pub fn run_grok_agent(
     let mut chat_history = String::new();
 
     // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, uid);
+    let agents_md = read_agents_md(container_name, user, repo_path);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
     // Add system message at the start
@@ -100,7 +104,7 @@ pub fn run_grok_agent(
 
         loop {
             let request = ChatCompletionRequest {
-                model: model.api_model_id().to_string(),
+                model: model_api_id(model).to_string(),
                 messages: messages.clone(),
                 max_tokens: Some(MAX_TOKENS),
                 temperature: Some(0.0),
@@ -167,7 +171,7 @@ pub fn run_grok_agent(
                             chat_println!(chat_history, "$ {}", command);
 
                             let (output, success) =
-                                execute_bash_in_sandbox(container_name, uid, command)?;
+                                execute_bash_in_sandbox(container_name, user, repo_path, command)?;
 
                             if !output.is_empty() {
                                 chat_println!(chat_history, "{}", output);
@@ -189,7 +193,8 @@ pub fn run_grok_agent(
 
                             let (output, success) = execute_edit_in_sandbox(
                                 container_name,
-                                uid,
+                                user,
+                                repo_path,
                                 file_path,
                                 old_string,
                                 new_string,
@@ -209,8 +214,13 @@ pub fn run_grok_agent(
                             let content =
                                 args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-                            let (output, success) =
-                                execute_write_in_sandbox(container_name, uid, file_path, content)?;
+                            let (output, success) = execute_write_in_sandbox(
+                                container_name,
+                                user,
+                                repo_path,
+                                file_path,
+                                content,
+                            )?;
 
                             if success {
                                 chat_println!(chat_history, "[write] {}", file_path);

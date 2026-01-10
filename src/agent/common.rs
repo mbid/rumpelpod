@@ -1,20 +1,56 @@
 //! Common utilities shared between agent implementations.
 
+use std::io::{Read, Write};
+use std::path::Path;
+use std::process::{Command, Stdio};
+
 use anyhow::{Context, Result};
 use log::debug;
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
 use strum::{Display, EnumString};
+
+use crate::config::Model;
 
 pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
 
-/// Build a docker exec command that runs as the specified user.
+/// Get the model identifier as used by the provider's API.
+pub fn model_api_id(model: Model) -> &'static str {
+    match model {
+        Model::Opus => "claude-opus-4-5-20251101",
+        Model::Sonnet => "claude-sonnet-4-5-20250929",
+        Model::Haiku => "claude-haiku-4-5-20251001",
+        Model::Grok3Mini => "grok-3-mini",
+        Model::Grok4 => "grok-4",
+        Model::Grok41Fast => "grok-4-1-fast",
+    }
+}
+
+/// Get the provider name for this model (used for cache directories).
+pub fn model_provider(model: Model) -> &'static str {
+    match model {
+        Model::Opus | Model::Sonnet | Model::Haiku => "anthropic",
+        Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => "xai",
+    }
+}
+
+/// Build a docker exec command that runs as the specified user in the given repo_path.
 /// This ensures secondary group membership is applied correctly.
-fn docker_exec_cmd(container_name: &str, uid: u32) -> Command {
+///
+/// If `interactive` is true, adds the `-i` flag for commands that need stdin.
+fn docker_exec_cmd(
+    container_name: &str,
+    user: &str,
+    repo_path: &Path,
+    interactive: bool,
+) -> Command {
     let mut cmd = Command::new("docker");
-    cmd.args(["exec", "-u", &uid.to_string(), container_name]);
+    cmd.args(["exec", "--user", user, "--workdir"]);
+    cmd.arg(repo_path);
+    if interactive {
+        cmd.arg("-i");
+    }
+    cmd.arg(container_name);
     cmd
 }
 
@@ -94,9 +130,9 @@ impl ToolName {
 }
 
 /// Read AGENTS.md from the sandbox if it exists.
-pub fn read_agents_md(container_name: &str, uid: u32) -> Option<String> {
+pub fn read_agents_md(container_name: &str, user: &str, repo_path: &Path) -> Option<String> {
     debug!("Reading {} from sandbox", AGENTS_MD_PATH);
-    let output = docker_exec_cmd(container_name, uid)
+    let output = docker_exec_cmd(container_name, user, repo_path, false)
         .args(["cat", AGENTS_MD_PATH])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -121,13 +157,14 @@ pub fn build_system_prompt(agents_md: Option<&str>) -> String {
 
 pub fn execute_edit_in_sandbox(
     container_name: &str,
-    uid: u32,
+    user: &str,
+    repo_path: &Path,
     file_path: &str,
     old_string: &str,
     new_string: &str,
 ) -> Result<(String, bool)> {
     debug!("Reading file for edit: {}", file_path);
-    let output = docker_exec_cmd(container_name, uid)
+    let output = docker_exec_cmd(container_name, user, repo_path, false)
         .args(["cat", file_path])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -166,8 +203,8 @@ pub fn execute_edit_in_sandbox(
     debug!("Writing edited file: {}", file_path);
     let escaped_path = file_path.replace('\'', "'\\''");
     let write_cmd = format!("cat > '{escaped_path}'");
-    let mut write_process = docker_exec_cmd(container_name, uid)
-        .args(["-i", "bash", "-c", &write_cmd])
+    let mut write_process = docker_exec_cmd(container_name, user, repo_path, true)
+        .args(["bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -199,12 +236,13 @@ pub fn execute_edit_in_sandbox(
 
 pub fn execute_write_in_sandbox(
     container_name: &str,
-    uid: u32,
+    user: &str,
+    repo_path: &Path,
     file_path: &str,
     content: &str,
 ) -> Result<(String, bool)> {
     debug!("Checking if file exists: {}", file_path);
-    let output = docker_exec_cmd(container_name, uid)
+    let output = docker_exec_cmd(container_name, user, repo_path, false)
         .args(["test", "-e", file_path])
         .output()
         .context("Failed to check if file exists")?;
@@ -218,7 +256,7 @@ pub fn execute_write_in_sandbox(
             let escaped_parent = parent.display().to_string().replace('\'', "'\\''");
             let mkdir_cmd = format!("mkdir -p '{escaped_parent}'");
             debug!("Creating parent directories for: {}", file_path);
-            let _ = docker_exec_cmd(container_name, uid)
+            let _ = docker_exec_cmd(container_name, user, repo_path, false)
                 .args(["bash", "-c", &mkdir_cmd])
                 .output();
         }
@@ -227,8 +265,8 @@ pub fn execute_write_in_sandbox(
     debug!("Writing new file: {}", file_path);
     let escaped_path = file_path.replace('\'', "'\\''");
     let write_cmd = format!("cat > '{escaped_path}'");
-    let mut write_process = docker_exec_cmd(container_name, uid)
-        .args(["-i", "bash", "-c", &write_cmd])
+    let mut write_process = docker_exec_cmd(container_name, user, repo_path, true)
+        .args(["bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -258,7 +296,12 @@ pub fn execute_write_in_sandbox(
     Ok((format!("Successfully wrote {file_path}"), true))
 }
 
-fn save_output_to_file(container_name: &str, uid: u32, data: &[u8]) -> Result<String> {
+fn save_output_to_file(
+    container_name: &str,
+    user: &str,
+    repo_path: &Path,
+    data: &[u8],
+) -> Result<String> {
     // Generate deterministic ID from content hash for reproducible cache keys
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -270,7 +313,7 @@ fn save_output_to_file(container_name: &str, uid: u32, data: &[u8]) -> Result<St
 
     // Create /agent directory if it doesn't exist
     debug!("Creating /agent directory");
-    docker_exec_cmd(container_name, uid)
+    docker_exec_cmd(container_name, user, repo_path, false)
         .args(["bash", "-c", "mkdir -p /agent"])
         .output()
         .context("Failed to create /agent directory")?;
@@ -278,8 +321,8 @@ fn save_output_to_file(container_name: &str, uid: u32, data: &[u8]) -> Result<St
     // Write the output to file
     debug!("Writing output data ({} bytes)", data.len());
     let write_cmd = format!("cat > {output_file}");
-    let mut write_process = docker_exec_cmd(container_name, uid)
-        .args(["-i", "bash", "-c", &write_cmd])
+    let mut write_process = docker_exec_cmd(container_name, user, repo_path, true)
+        .args(["bash", "-c", &write_cmd])
         .stdin(Stdio::piped())
         .spawn()
         .context("Failed to write output to file")?;
@@ -302,13 +345,14 @@ fn save_output_to_file(container_name: &str, uid: u32, data: &[u8]) -> Result<St
 
 pub fn execute_bash_in_sandbox(
     container_name: &str,
-    uid: u32,
+    user: &str,
+    repo_path: &Path,
     command: &str,
 ) -> Result<(String, bool)> {
     const MAX_OUTPUT_SIZE: usize = 30000;
 
     debug!("Executing bash in sandbox: {}", command);
-    let output = docker_exec_cmd(container_name, uid)
+    let output = docker_exec_cmd(container_name, user, repo_path, false)
         .args(["bash", "-c", command])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -330,7 +374,7 @@ pub fn execute_bash_in_sandbox(
 
     // Check if output exceeds limit - save to file if so
     if combined_bytes.len() > MAX_OUTPUT_SIZE {
-        let output_file = save_output_to_file(container_name, uid, &combined_bytes)?;
+        let output_file = save_output_to_file(container_name, user, repo_path, &combined_bytes)?;
         return Ok((format!("Full output available at {output_file}"), false));
     }
 
@@ -338,7 +382,8 @@ pub fn execute_bash_in_sandbox(
     let combined = match String::from_utf8(combined_bytes.clone()) {
         Ok(s) => s,
         Err(_) => {
-            let output_file = save_output_to_file(container_name, uid, &combined_bytes)?;
+            let output_file =
+                save_output_to_file(container_name, user, repo_path, &combined_bytes)?;
             return Ok((
                 format!("Output is not valid UTF-8. Full output available at {output_file}"),
                 false,

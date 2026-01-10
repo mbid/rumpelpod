@@ -6,29 +6,45 @@ mod xai;
 
 use anyhow::Result;
 
-use crate::config::Model;
+use crate::cli::AgentCommand;
+use crate::config::{Model, SandboxConfig};
+use crate::enter;
+use crate::git::get_repo_root;
 use crate::llm::cache::LlmCache;
 
-pub use anthropic::run_claude_agent;
-pub use xai::run_grok_agent;
+use anthropic::run_claude_agent;
+use common::model_provider;
+use xai::run_grok_agent;
 
-/// Run an agent with the specified model.
-/// Routes to the appropriate provider implementation based on the model.
-///
-/// The `uid` parameter specifies the user ID to run commands as inside the container.
-/// This ensures secondary group membership is applied correctly.
-pub fn run_agent(
-    container_name: &str,
-    uid: u32,
-    model: Model,
-    cache: Option<LlmCache>,
-) -> Result<()> {
+/// Entry point for the `sandbox agent` CLI subcommand.
+pub fn agent(cmd: &AgentCommand) -> Result<()> {
+    let repo_root = get_repo_root()?;
+    let sandbox_config = SandboxConfig::load(&repo_root)?;
+
+    // Determine the model to use (CLI flag takes precedence over config)
+    let model = cmd.model.or(sandbox_config.agent.model).unwrap_or_default();
+
+    // Launch the sandbox container
+    let launch_result = enter::launch_sandbox(&cmd.name)?;
+
+    // Set up LLM cache if specified
+    let cache = cmd
+        .cache
+        .as_ref()
+        .map(|path| LlmCache::new(path, model_provider(model)))
+        .transpose()?;
+
+    // Run the agent loop
+    let container_name = &launch_result.container_id.0;
+    let user = &launch_result.user;
+    let repo_path = &sandbox_config.repo_path;
+
     match model {
         Model::Opus | Model::Sonnet | Model::Haiku => {
-            run_claude_agent(container_name, uid, model, cache)
+            run_claude_agent(container_name, user, repo_path, model, cache)
         }
         Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => {
-            run_grok_agent(container_name, uid, model, cache)
+            run_grok_agent(container_name, user, repo_path, model, cache)
         }
     }
 }
