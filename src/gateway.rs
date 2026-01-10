@@ -28,8 +28,13 @@
 //! ## Sandbox access to gateway
 //!
 //! Sandbox repos have a "host" remote pointing to the gateway (via HTTP server on the
-//! docker network gateway IP). Sandboxes can fetch with `git fetch host` to get branches
-//! as `refs/remotes/host/host/<branch>` (the remote is "host", the branch is "host/<x>").
+//! docker network gateway IP). The remote is configured with a custom fetch refspec
+//! (`+refs/heads/host/*:refs/remotes/host/*`) that strips the `host/` prefix, so:
+//! - Gateway branch `host/main` → Sandbox remote ref `host/main`
+//! - Gateway branch `host/feature` → Sandbox remote ref `host/feature`
+//!
+//! This means `git fetch host` in the sandbox gives clean remote ref names like
+//! `host/main` rather than the redundant `host/host/main`.
 //!
 //! ## Future: Sandbox -> Gateway sync (not yet implemented)
 //!

@@ -334,6 +334,11 @@ fn check_git_directory_ownership(
 /// Set up git remotes inside the container for the gateway repository.
 /// Adds "host" and "sandbox" remotes pointing to the git HTTP server.
 /// Git commands are run as the specified user to avoid permission issues.
+///
+/// The "host" remote is configured with a custom fetch refspec that maps
+/// `host/*` branches from the gateway to `host/*` remote refs in the sandbox.
+/// This way, when the host's `main` branch is stored as `host/main` in the
+/// gateway, it appears as `host/main` (not `host/host/main`) after fetching.
 fn setup_git_remotes(
     container_id: &str,
     network_name: &str,
@@ -369,6 +374,16 @@ fn setup_git_remotes(
             }
         }
     }
+
+    // Configure fetch refspec: map gateway's host/* branches to host/* remote refs.
+    // This strips the "host/" prefix from the gateway branch names, so the host's
+    // "main" branch (stored as "host/main" in gateway) becomes "host/main" in sandbox.
+    run_git(&[
+        "config",
+        "remote.host.fetch",
+        "+refs/heads/host/*:refs/remotes/host/*",
+    ])
+    .context("configuring host remote fetch refspec")?;
 
     // Add "sandbox" remote (same URL, for symmetry with host repo which has "sandbox" remote)
     match run_git(&["remote", "add", "sandbox", &git_http_url]) {

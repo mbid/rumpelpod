@@ -362,7 +362,7 @@ fn gateway_http_fetch_works_from_container() {
             "--",
             "git",
             "rev-parse",
-            "host/host/test-branch",
+            "host/test-branch",
         ])
         .success()
         .expect("Failed to get fetched commit");
@@ -416,7 +416,7 @@ fn gateway_http_fetch_new_commits_after_create() {
             "--",
             "git",
             "rev-parse",
-            "host/host/master",
+            "host/master",
         ])
         .success()
         .expect("Failed to get fetched commit");
