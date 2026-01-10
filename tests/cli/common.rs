@@ -366,11 +366,13 @@ pub fn build_test_image_without_user(
 /// This configures:
 /// - The provided image ID
 /// - repo-path = TEST_REPO_PATH
+/// - runtime = "runc" (tests run inside sysbox where only runc works)
 ///
 /// The user is not specified, so the sandbox will use the image's USER directive.
 /// Use `write_test_sandbox_config_with_user` if you need to specify a user explicitly.
 pub fn write_test_sandbox_config(repo: &TestRepo, image_id: &ImageId) {
     let config = formatdoc! {r#"
+        runtime = "runc"
         image = "{image_id}"
         repo-path = "{TEST_REPO_PATH}"
     "#};
@@ -381,6 +383,7 @@ pub fn write_test_sandbox_config(repo: &TestRepo, image_id: &ImageId) {
 /// Write a `.sandbox.toml` config file with an explicit user.
 pub fn write_test_sandbox_config_with_user(repo: &TestRepo, image_id: &ImageId, user: &str) {
     let config = formatdoc! {r#"
+        runtime = "runc"
         image = "{image_id}"
         user = "{user}"
         repo-path = "{TEST_REPO_PATH}"

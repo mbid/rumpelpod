@@ -2,6 +2,7 @@
 
 use std::fs;
 
+use indoc::indoc;
 use sandbox::CommandExt;
 
 use crate::common::{
@@ -109,7 +110,12 @@ fn enter_outside_git_repo_fails() {
     // because we're not in a git repo)
     fs::write(
         repo.path().join(".sandbox.toml"),
-        "image = \"debian:13\"\nuser = \"root\"\nrepo-path = \"/repo\"",
+        indoc! {r#"
+            runtime = "runc"
+            image = "debian:13"
+            user = "root"
+            repo-path = "/repo"
+        "#},
     )
     .expect("Failed to write .sandbox.toml");
 

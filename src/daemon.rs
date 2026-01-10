@@ -9,6 +9,7 @@ use log::error;
 use tokio::net::UnixListener;
 
 use crate::command_ext::CommandExt;
+use crate::config::Runtime;
 use crate::gateway;
 use crate::git_http_server;
 use protocol::{ContainerId, Daemon, Image, LaunchResult, SandboxInfo, SandboxName, SandboxStatus};
@@ -386,17 +387,29 @@ fn setup_git_remotes(
     Ok(())
 }
 
+/// Returns the docker runtime name to pass to `docker run --runtime`.
+fn docker_runtime_flag(runtime: Runtime) -> &'static str {
+    match runtime {
+        Runtime::Runsc => "runsc",
+        Runtime::Runc => "runc",
+        Runtime::SysboxRunc => "sysbox-runc",
+    }
+}
+
 /// Create a new container with docker run.
 fn create_container(
     name: &str,
     sandbox_name: &SandboxName,
     image: &Image,
     repo_path: &Path,
+    runtime: Runtime,
 ) -> Result<ContainerId> {
     let output = Command::new("docker")
         .args([
             "run",
             "-d", // Detach to get container ID
+            "--runtime",
+            docker_runtime_flag(runtime),
             "--name",
             name,
             "--network",
@@ -491,6 +504,7 @@ impl Daemon for DaemonServer {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
+        runtime: Runtime,
     ) -> Result<LaunchResult> {
         // Resolve the user first, before any container operations
         let user = resolve_user(user, &image.0)?;
@@ -541,7 +555,7 @@ impl Daemon for DaemonServer {
         // Create network and container (both use the same name)
         create_network(&name, &sandbox_name, &repo_path)?;
 
-        let container_id = create_container(&name, &sandbox_name, &image, &repo_path)?;
+        let container_id = create_container(&name, &sandbox_name, &image, &repo_path, runtime)?;
         spawn_git_http_server(&gateway_path, &name, &container_id.0)?;
         setup_git_remotes(&container_id.0, &name, &container_repo_path, &user)?;
         Ok(LaunchResult { container_id, user })

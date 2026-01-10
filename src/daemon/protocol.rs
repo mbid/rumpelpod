@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
 use url::Url;
 
+use crate::config::Runtime;
 use crate::r#async::block_on;
 
 /// Opaque wrapper for docker image names.
@@ -63,6 +64,8 @@ struct LaunchSandboxRequest {
     /// User to run as inside the container, if explicitly specified.
     /// If None, the daemon will use the image's USER directive.
     user: Option<String>,
+    /// Container runtime to use (runsc, runc, sysbox-runc).
+    runtime: Runtime,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -114,6 +117,7 @@ pub trait Daemon: Send + Sync + 'static {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
+        runtime: Runtime,
     ) -> Result<LaunchResult>;
 
     // DELETE /sandbox
@@ -163,6 +167,7 @@ impl Daemon for DaemonClient {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
+        runtime: Runtime,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -171,6 +176,7 @@ impl Daemon for DaemonClient {
             repo_path,
             container_repo_path,
             user,
+            runtime,
         };
 
         let response = self
@@ -257,6 +263,7 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.repo_path,
             request.container_repo_path,
             request.user,
+            request.runtime,
         )
     });
 
@@ -366,6 +373,7 @@ mod tests {
             _repo_path: PathBuf,
             _container_repo_path: PathBuf,
             user: Option<String>,
+            _runtime: Runtime,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -412,6 +420,7 @@ mod tests {
             PathBuf::from("/tmp/repo"),
             PathBuf::from("/workspace"),
             Some("testuser".to_string()),
+            Runtime::Runc, // Use runc for tests (works inside sysbox)
         );
 
         let launch_result = result.unwrap();

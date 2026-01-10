@@ -26,12 +26,15 @@ pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
+    let runtime = config.runtime.unwrap_or_default();
+
     client.launch_sandbox(
         SandboxName(sandbox_name.to_string()),
         Image(config.image.clone()),
         repo_root,
         config.repo_path,
         config.user,
+        runtime,
     )
 }
 
