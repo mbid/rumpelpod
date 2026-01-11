@@ -56,7 +56,7 @@ RUN groupadd -g ${GROUP_ID} ${USER_NAME} || groupadd ${USER_NAME} && \
 USER ${USER_NAME}
 WORKDIR /home/${USER_NAME}
 
-RUN git clone https://github.com/Mofiqul/adwaita.nvim.git ~/.local/share/nvim/site/pack/plugins/start/adwaita.nvim
+RUN git clone https://github.com/mbid/adwaita.nvim.git ~/.local/share/nvim/site/pack/plugins/start/adwaita.nvim
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/${USER_NAME}/.cargo/bin:${PATH}"
 
