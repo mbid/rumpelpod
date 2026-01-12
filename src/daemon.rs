@@ -422,42 +422,58 @@ fn setup_git_remotes(
     run_git(&["config", "remote.sandbox.push", &push_refspec])
         .context("configuring sandbox remote push refspec")?;
 
-    // Install post-commit hook to auto-push to gateway
-    install_sandbox_post_commit_hook(container_id, container_repo_path, sandbox_name, user)?;
+    // Install reference-transaction hook to auto-push to gateway on any ref update
+    install_sandbox_reference_transaction_hook(
+        container_id,
+        container_repo_path,
+        sandbox_name,
+        user,
+    )?;
 
     Ok(())
 }
 
-/// Generate the post-commit hook script for a sandbox.
+/// Reference-transaction hook script for sandbox repos that pushes branch updates to the gateway.
 ///
-/// The hook pushes the current branch to the gateway repository.
-/// It includes the sandbox name as a push option for access control.
-fn sandbox_post_commit_hook(_sandbox_name: &SandboxName) -> String {
-    // Note: The sandbox name is not needed in the hook because access control
-    // is enforced server-side via the SANDBOX_NAME environment variable set
-    // by the git HTTP server. The sandbox cannot forge its identity.
-    indoc::indoc! {r#"
-        #!/bin/sh
-        # Installed by sandbox to sync commits to the gateway repository.
-        # This allows the host to pull sandbox changes.
+/// This hook is invoked whenever any reference is updated (commits, branch creation,
+/// deletion, resets, etc). It runs in the "committed" state after the reference
+/// transaction has been committed.
+const SANDBOX_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
+    #!/bin/sh
+    # Installed by sandbox to sync branch updates to the gateway repository.
+    # This allows the host to pull sandbox changes.
+    # This hook runs on reference-transaction events.
 
-        branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-        if [ -n "$branch" ]; then
-            git push sandbox "$branch" --force --quiet 2>/dev/null || true
-        fi
-    "#}
-    .to_string()
-}
+    # Only process after the transaction is committed
+    [ "$1" = "committed" ] || exit 0
 
-/// Install the post-commit hook in the sandbox repository.
-fn install_sandbox_post_commit_hook(
+    # Process each ref update from stdin
+    while read oldvalue newvalue refname; do
+        # Only handle local branches (refs/heads/*)
+        case "$refname" in
+            refs/heads/*)
+                branch="${refname#refs/heads/}"
+                if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
+                    # Branch deleted - remove from gateway
+                    git push sandbox --delete "$branch" --quiet 2>/dev/null || true
+                else
+                    # Branch updated or created - push to gateway
+                    git push sandbox "$branch" --force --quiet 2>/dev/null || true
+                fi
+                ;;
+        esac
+    done
+"#};
+
+/// Install the reference-transaction hook in the sandbox repository.
+fn install_sandbox_reference_transaction_hook(
     container_id: &str,
     container_repo_path: &Path,
-    sandbox_name: &SandboxName,
+    _sandbox_name: &SandboxName,
     user: &str,
 ) -> Result<()> {
     let hooks_dir = container_repo_path.join(".git").join("hooks");
-    let hook_path = hooks_dir.join("post-commit");
+    let hook_path = hooks_dir.join("reference-transaction");
     let hooks_dir_str = hooks_dir.to_string_lossy();
     let hook_path_str = hook_path.to_string_lossy();
 
@@ -476,8 +492,7 @@ fn install_sandbox_post_commit_hook(
         .ok()
         .map(|b| String::from_utf8_lossy(&b).to_string());
 
-    let hook_signature = "Installed by sandbox to sync commits";
-    let new_hook = sandbox_post_commit_hook(sandbox_name);
+    let hook_signature = "Installed by sandbox to sync branch updates";
 
     let final_hook = match existing_hook {
         Some(existing) if existing.contains(hook_signature) => {
@@ -486,9 +501,13 @@ fn install_sandbox_post_commit_hook(
         }
         Some(existing) => {
             // Append to existing hook
-            format!("{}\n\n{}", existing.trim_end(), new_hook)
+            format!(
+                "{}\n\n{}",
+                existing.trim_end(),
+                SANDBOX_REFERENCE_TRANSACTION_HOOK
+            )
         }
-        None => new_hook,
+        None => SANDBOX_REFERENCE_TRANSACTION_HOOK.to_string(),
     };
 
     // Write the hook using sh -c with echo to avoid stdin piping issues
@@ -502,14 +521,14 @@ fn install_sandbox_post_commit_hook(
             &format!("printf '%s' '{}' > '{}'", escaped_hook, hook_path_str),
         ])
         .success()
-        .context("writing post-commit hook")?;
+        .context("writing reference-transaction hook")?;
 
     // Make hook executable
     Command::new("docker")
         .args(["exec", "--user", user, container_id])
         .args(["chmod", "+x", &hook_path_str])
         .success()
-        .context("making post-commit hook executable")?;
+        .context("making reference-transaction hook executable")?;
 
     Ok(())
 }

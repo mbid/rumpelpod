@@ -18,7 +18,8 @@
 //! Commits are synced from the host repo to the gateway repo:
 //!
 //! - On setup, all local branches are pushed to the gateway as `refs/heads/host/<branch>`.
-//! - A post-commit hook in the host repo automatically pushes new commits to the gateway.
+//! - A reference-transaction hook in the host repo automatically pushes branch updates
+//!   to the gateway whenever any reference changes (commits, branch creation/deletion, resets).
 //! - The push uses the "sandbox" remote (host repo -> gateway repo).
 //!
 //! The gateway repo stores these as local branches (not remote refs), e.g.:
@@ -51,7 +52,7 @@
 //! To make accessing more ergonomic, the host can fetch just branch `bar` (instead of
 //! `sandbox/bar@bar`) from the gateway via custom refspecs.
 //!
-//! A post-commit hook in the sandbox automatically pushes new commits to the gateway.
+//! A reference-transaction hook in the sandbox automatically pushes branch updates to the gateway.
 //!
 //! ## Access control
 //!
@@ -85,16 +86,43 @@ const SANDBOX_REMOTE: &str = "sandbox";
 /// Name of the remote added to the gateway pointing to the host repo.
 const HOST_REMOTE: &str = "host";
 
-/// Post-commit hook script that pushes the current branch to the gateway.
-const POST_COMMIT_HOOK: &str = indoc! {r#"
+/// Reference-transaction hook script that pushes branch updates to the gateway.
+///
+/// This hook is invoked whenever any reference is updated (commits, branch creation,
+/// deletion, resets, etc). It runs in the "committed" state after the reference
+/// transaction has been committed.
+///
+/// The hook reads updated refs from stdin in the format:
+/// `<old-value> <new-value> <ref-name>`
+///
+/// For branch updates (refs/heads/*), it pushes the change to the gateway:
+/// - For updates/creates: push the new commit
+/// - For deletes (new-value is all zeros): delete the branch from gateway
+const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
     #!/bin/sh
-    # Installed by sandbox to sync commits to the gateway repository.
+    # Installed by sandbox to sync branch updates to the gateway repository.
     # The gateway allows sandboxes to fetch commits without direct host access.
+    # This hook runs on reference-transaction events.
 
-    branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-    if [ -n "$branch" ]; then
-        git push sandbox "$branch:host/$branch" --force --quiet || true
-    fi
+    # Only process after the transaction is committed
+    [ "$1" = "committed" ] || exit 0
+
+    # Process each ref update from stdin
+    while read oldvalue newvalue refname; do
+        # Only handle local branches (refs/heads/*)
+        case "$refname" in
+            refs/heads/*)
+                branch="${refname#refs/heads/}"
+                if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
+                    # Branch deleted - remove from gateway
+                    git push sandbox --delete "host/$branch" --quiet 2>/dev/null || true
+                else
+                    # Branch updated or created - push to gateway
+                    git push sandbox "$branch:host/$branch" --force --quiet 2>/dev/null || true
+                fi
+                ;;
+        esac
+    done
 "#};
 
 /// Pre-receive hook for the gateway repository.
@@ -234,8 +262,8 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     // Add "host" remote to gateway (pointing to host repo)
     ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
 
-    // Install post-commit hook
-    install_post_commit_hook(repo_path)?;
+    // Install reference-transaction hook to sync branch updates
+    install_reference_transaction_hook(repo_path)?;
 
     // Push all existing branches to the gateway
     push_all_branches(repo_path)?;
@@ -302,11 +330,11 @@ fn install_gateway_pre_receive_hook(gateway_path: &Path) -> Result<()> {
 
 /// Install the post-commit hook in the host repository.
 ///
-/// If a post-commit hook already exists and wasn't installed by us, we append
+/// If a reference-transaction hook already exists and wasn't installed by us, we append
 /// our hook invocation to it.
-fn install_post_commit_hook(repo_path: &Path) -> Result<()> {
+fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
     let hooks_dir = repo_path.join(".git").join("hooks");
-    let hook_path = hooks_dir.join("post-commit");
+    let hook_path = hooks_dir.join("reference-transaction");
 
     // Ensure hooks directory exists
     fs::create_dir_all(&hooks_dir)
@@ -317,18 +345,18 @@ fn install_post_commit_hook(repo_path: &Path) -> Result<()> {
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
 
         // Check if our hook is already installed (look for our signature comment)
-        if existing.contains("Installed by sandbox to sync commits") {
+        if existing.contains("Installed by sandbox to sync branch updates") {
             // Already installed, nothing to do
             return Ok(());
         }
 
         // Append our hook to the existing one
-        let combined = format!("{}\n\n{}", existing.trim_end(), POST_COMMIT_HOOK);
+        let combined = format!("{}\n\n{}", existing.trim_end(), REFERENCE_TRANSACTION_HOOK);
         fs::write(&hook_path, combined)
             .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
     } else {
         // Create new hook
-        fs::write(&hook_path, POST_COMMIT_HOOK)
+        fs::write(&hook_path, REFERENCE_TRANSACTION_HOOK)
             .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
     }
 

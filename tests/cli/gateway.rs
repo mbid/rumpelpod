@@ -223,7 +223,8 @@ fn gateway_force_push_updates_branch() {
 }
 
 #[test]
-fn gateway_new_branch_with_commit_pushed() {
+fn gateway_new_branch_creation_pushed() {
+    // Test that creating a new branch (without making a commit) is immediately pushed
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
     write_test_sandbox_config(&repo, &image_id);
@@ -245,21 +246,28 @@ fn gateway_new_branch_with_commit_pushed() {
         "host/new-feature should not exist yet"
     );
 
-    // Create new branch and make a commit (triggers post-commit hook)
+    // Create new branch WITHOUT making a commit - should still be pushed
     create_branch(repo.path(), "new-feature");
-    create_commit(repo.path(), "New feature commit");
 
-    // Gateway should now have the new branch
+    // Gateway should now have the new branch (reference-transaction hook triggers on branch creation)
     let branches_after = get_branches(&gateway);
     assert!(
         branches_after.contains(&"host/new-feature".to_string()),
-        "Gateway should have host/new-feature after commit on new branch, got: {:?}",
+        "Gateway should have host/new-feature after branch creation (no commit needed), got: {:?}",
         branches_after
+    );
+
+    // Verify the commit is the same as master
+    let master_commit = get_branch_commit(repo.path(), "master").unwrap();
+    let gateway_commit = get_branch_commit(&gateway, "host/new-feature");
+    assert_eq!(
+        gateway_commit,
+        Some(master_commit),
+        "New branch should point to same commit as master"
     );
 }
 
 #[test]
-#[should_panic = "should be deleted from gateway"]
 fn gateway_branch_deletion_propagates() {
     let repo = TestRepo::new();
 
@@ -297,6 +305,50 @@ fn gateway_branch_deletion_propagates() {
         !branches_after.contains(&"host/to-delete".to_string()),
         "host/to-delete should be deleted from gateway, got: {:?}",
         branches_after
+    );
+}
+
+#[test]
+fn gateway_host_reset_propagates() {
+    // Test that resetting a branch (without making a new commit) updates the gateway
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox to set up gateway
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    // Create some commits
+    create_commit(repo.path(), "Commit 1");
+    let commit1 = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    create_commit(repo.path(), "Commit 2");
+    let commit2 = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Verify gateway has commit2
+    let gateway_commit = get_branch_commit(&gateway, "host/master");
+    assert_eq!(
+        gateway_commit,
+        Some(commit2.clone()),
+        "Gateway should have commit2"
+    );
+
+    // Reset back to commit1 (no new commit created)
+    reset_to(repo.path(), &commit1);
+
+    // Gateway should now have commit1 (reference-transaction hook triggers on reset)
+    let gateway_commit_after_reset = get_branch_commit(&gateway, "host/master");
+    assert_eq!(
+        gateway_commit_after_reset,
+        Some(commit1),
+        "Gateway should have commit1 after reset"
     );
 }
 
@@ -1044,5 +1096,150 @@ fn gateway_sandbox_can_push_to_own_namespace() {
         Some(commit),
         "Gateway should have our commit on {}",
         expected_branch
+    );
+}
+
+#[test]
+fn gateway_sandbox_reset_triggers_push() {
+    // Test that resetting in the sandbox (without making a new commit) triggers a push to the gateway
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "reset-push-test";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Create two commits in the sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Commit 1",
+        ])
+        .success()
+        .expect("Failed to create commit 1");
+
+    let commit1_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get commit1");
+    let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Commit 2",
+        ])
+        .success()
+        .expect("Failed to create commit 2");
+
+    // Verify gateway has commit2
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let expected_branch = format!("sandbox/master@{}", sandbox_name);
+
+    // Reset back to commit1 (no new commit created)
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "reset",
+            "--hard",
+            &commit1,
+        ])
+        .success()
+        .expect("Failed to reset in sandbox");
+
+    // Gateway should now have commit1 (reference-transaction hook triggers on reset)
+    let gateway_commit_after_reset = get_branch_commit(&gateway, &expected_branch);
+    assert_eq!(
+        gateway_commit_after_reset,
+        Some(commit1),
+        "Gateway should have commit1 after reset"
+    );
+}
+
+#[test]
+fn gateway_sandbox_branch_creation_triggers_push() {
+    // Test that creating a new branch (without making a commit) in the sandbox triggers a push
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "branch-create-test";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    // Verify branch doesn't exist yet
+    let expected_branch = format!("sandbox/new-feature@{}", sandbox_name);
+    let branches_before = get_branches(&gateway);
+    assert!(
+        !branches_before.contains(&expected_branch),
+        "Branch should not exist yet"
+    );
+
+    // Get the current commit
+    let current_commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get current commit");
+    let current_commit = String::from_utf8_lossy(&current_commit_output)
+        .trim()
+        .to_string();
+
+    // Create a new branch WITHOUT making a commit
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            "new-feature",
+        ])
+        .success()
+        .expect("Failed to create branch in sandbox");
+
+    // Gateway should now have the new branch (reference-transaction hook triggers on branch creation)
+    let branches_after = get_branches(&gateway);
+    assert!(
+        branches_after.contains(&expected_branch),
+        "Gateway should have branch {} after creation (no commit needed), got: {:?}",
+        expected_branch,
+        branches_after
+    );
+
+    // Verify the commit is the same as before
+    let gateway_commit = get_branch_commit(&gateway, &expected_branch);
+    assert_eq!(
+        gateway_commit,
+        Some(current_commit),
+        "New branch should point to same commit as before"
     );
 }
