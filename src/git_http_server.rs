@@ -2,6 +2,12 @@
 //!
 //! Runs an axum server that serves the gateway git repository via
 //! git-http-backend CGI, allowing containers to fetch from the host.
+//!
+//! Each sandbox gets its own HTTP server bound to its docker network's gateway IP.
+//! The server sets the `SANDBOX_NAME` environment variable when invoking git-http-backend,
+//! which is then available to git hooks for access control. This is secure because:
+//! - The sandbox cannot modify this variable (it's set by the server, not the client)
+//! - The sandbox can only reach its own network's HTTP server (network isolation)
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,6 +28,10 @@ pub const GIT_HTTP_PORT: u16 = 8417;
 /// Path to git-http-backend CGI script.
 const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";
 
+/// Environment variable set by the HTTP server to identify the sandbox.
+/// This is used by the pre-receive hook for access control.
+pub const SANDBOX_NAME_ENV: &str = "SANDBOX_NAME";
+
 /// A running git HTTP server instance.
 /// Stops the server when dropped.
 pub struct GitHttpServer {
@@ -34,7 +44,11 @@ impl GitHttpServer {
     ///
     /// The server binds to the specified address (typically the docker network
     /// gateway IP) and serves the gateway repo via git-http-backend.
-    pub fn start(gateway_path: &Path, bind_address: &str) -> Result<Self> {
+    ///
+    /// The `sandbox_name` is passed to git-http-backend as an environment variable,
+    /// which hooks can use for access control. This is secure because the sandbox
+    /// cannot modify this variable - it's set server-side based on network identity.
+    pub fn start(gateway_path: &Path, bind_address: &str, sandbox_name: &str) -> Result<Self> {
         let gateway_parent = gateway_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -45,9 +59,10 @@ impl GitHttpServer {
             .context("parsing bind address")?;
 
         debug!(
-            "Starting git HTTP server on {} for {}",
+            "Starting git HTTP server on {} for {} (sandbox: {})",
             addr,
-            gateway_path.display()
+            gateway_path.display(),
+            sandbox_name
         );
 
         // Configure the CGI service for git-http-backend.
@@ -55,9 +70,13 @@ impl GitHttpServer {
         //   - GIT_PROJECT_ROOT: parent directory containing the bare repo
         //   - PATH_INFO: full request path including repo name (e.g., /gateway.git/info/refs)
         //   - SCRIPT_NAME: empty (the script itself is at root)
+        //
+        // We also set SANDBOX_NAME so the pre-receive hook can enforce access control.
+        // This is secure because the sandbox cannot modify this - it's set by the server.
         let cgi_config = CgiConfig::new(GIT_HTTP_BACKEND)
             .env("GIT_PROJECT_ROOT", gateway_parent.to_string_lossy())
             .env("GIT_HTTP_EXPORT_ALL", "")
+            .env(SANDBOX_NAME_ENV, sandbox_name)
             .script_name("");
 
         let cgi_service = CgiService::with_config(cgi_config);
@@ -124,19 +143,23 @@ pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
 /// 2. Starts an axum server bound to that IP serving git-http-backend via CGI
 /// 3. Spawns a background task that waits for the container to stop and then
 ///    shuts down the server
+///
+/// The `sandbox_name` is passed to the server so it can set the SANDBOX_NAME
+/// environment variable for access control in git hooks.
 pub fn spawn_git_http_server(
     gateway_path: &Path,
     network_name: &str,
+    sandbox_name: &str,
     container_id: &str,
 ) -> Result<()> {
     let gateway_ip = get_network_gateway_ip(network_name)?;
 
     debug!(
-        "Starting git HTTP server on {}:{} for container {}",
-        gateway_ip, GIT_HTTP_PORT, container_id
+        "Starting git HTTP server on {}:{} for container {} (sandbox: {})",
+        gateway_ip, GIT_HTTP_PORT, container_id, sandbox_name
     );
 
-    let server = GitHttpServer::start(gateway_path, &gateway_ip)?;
+    let server = GitHttpServer::start(gateway_path, &gateway_ip, sandbox_name)?;
 
     // Spawn a task to wait for the container to stop and then shut down the server
     let container_id = container_id.to_string();

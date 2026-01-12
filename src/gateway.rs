@@ -52,8 +52,23 @@
 //! `sandbox/bar@bar`) from the gateway via custom refspecs.
 //!
 //! A post-commit hook in the sandbox automatically pushes new commits to the gateway.
+//!
+//! ## Access control
+//!
+//! The gateway enforces that each sandbox can only write to its own namespace:
+//! - Sandboxes can only push to `refs/heads/sandbox/*@<sandbox_name>` where `<sandbox_name>`
+//!   is their own sandbox name.
+//! - The host can push to `refs/heads/host/*` branches.
+//! - Reading (fetch) is unrestricted - all branches are visible to everyone.
+//!
+//! This is enforced by a pre-receive hook in the gateway that validates the sandbox name.
+//! The sandbox name is determined server-side by the git HTTP server based on which
+//! docker network the request came from. Each sandbox has its own isolated network and
+//! can only reach the HTTP server bound to that network's gateway IP. The server sets
+//! the SANDBOX_NAME environment variable which hooks can trust (the client cannot forge it).
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -80,6 +95,63 @@ const POST_COMMIT_HOOK: &str = indoc! {r#"
     if [ -n "$branch" ]; then
         git push sandbox "$branch:host/$branch" --force --quiet || true
     fi
+"#};
+
+/// Pre-receive hook for the gateway repository.
+///
+/// Enforces access control: sandboxes can only push to their own namespace.
+/// The sandbox name is provided via the SANDBOX_NAME environment variable,
+/// which is set by the git HTTP server (not by the client). This is secure
+/// because the sandbox cannot modify this variable.
+///
+/// Access rules:
+/// - If SANDBOX_NAME is set, only allow refs matching `refs/heads/sandbox/*@<name>`
+/// - If SANDBOX_NAME is not set (host push), only allow refs matching `refs/heads/host/*`
+const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
+    #!/bin/sh
+    # Gateway access control: sandboxes can only write to their own namespace.
+    #
+    # SANDBOX_NAME is set by the git HTTP server based on network identity.
+    # The sandbox cannot forge this - it's set server-side.
+
+    sandbox_name="$SANDBOX_NAME"
+
+    # Read all refs being pushed
+    while read old_oid new_oid refname; do
+        # Skip deletions (new_oid is all zeros)
+        if echo "$new_oid" | grep -q '^0\{40\}$'; then
+            continue
+        fi
+
+        if [ -n "$sandbox_name" ]; then
+            # Sandbox push: only allow sandbox/*@<sandbox_name>
+            expected_suffix="@$sandbox_name"
+            case "$refname" in
+                refs/heads/sandbox/*"$expected_suffix")
+                    # OK: matches sandbox namespace
+                    ;;
+                *)
+                    echo "error: sandbox '$sandbox_name' cannot push to '$refname'"
+                    echo "error: sandboxes can only push to refs/heads/sandbox/*@$sandbox_name"
+                    exit 1
+                    ;;
+            esac
+        else
+            # Host push (no SANDBOX_NAME): only allow host/*
+            case "$refname" in
+                refs/heads/host/*)
+                    # OK: host namespace
+                    ;;
+                *)
+                    echo "error: host can only push to refs/heads/host/*"
+                    echo "error: attempted to push to '$refname'"
+                    exit 1
+                    ;;
+            esac
+        fi
+    done
+
+    exit 0
 "#};
 
 /// Compute a hash of the repo path for use in the gateway directory name.
@@ -142,15 +214,19 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
             .current_dir(&gateway)
             .success()
             .context("git init --bare failed")?;
-
-        // Enable anonymous pushes via HTTP for sandboxes to push to gateway.
-        // This is safe because the gateway is only accessible from our sandboxes.
-        Command::new("git")
-            .args(["config", "http.receivepack", "true"])
-            .current_dir(&gateway)
-            .success()
-            .context("enabling http.receivepack failed")?;
     }
+
+    // Configure gateway settings (idempotent - safe to run on every call).
+    // Enable anonymous pushes via HTTP for sandboxes to push to gateway.
+    // This is safe because the gateway is only accessible from our sandboxes.
+    Command::new("git")
+        .args(["config", "http.receivepack", "true"])
+        .current_dir(&gateway)
+        .success()
+        .context("enabling http.receivepack failed")?;
+
+    // Install access control hook (overwrites any existing hook).
+    install_gateway_pre_receive_hook(&gateway)?;
 
     // Add "sandbox" remote to host repo (pointing to gateway)
     ensure_remote(repo_path, SANDBOX_REMOTE, &gateway)?;
@@ -203,6 +279,27 @@ fn ensure_remote(repo_path: &Path, remote_name: &str, remote_url: &Path) -> Resu
     Ok(())
 }
 
+/// Install the pre-receive hook in the gateway repository for access control.
+fn install_gateway_pre_receive_hook(gateway_path: &Path) -> Result<()> {
+    let hooks_dir = gateway_path.join("hooks");
+    let hook_path = hooks_dir.join("pre-receive");
+
+    // Ensure hooks directory exists
+    fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+
+    // Always overwrite the hook (we own this file completely)
+    fs::write(&hook_path, GATEWAY_PRE_RECEIVE_HOOK)
+        .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+
+    // Make hook executable
+    let mut perms = fs::metadata(&hook_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hook_path, perms)?;
+
+    Ok(())
+}
+
 /// Install the post-commit hook in the host repository.
 ///
 /// If a post-commit hook already exists and wasn't installed by us, we append
@@ -236,7 +333,6 @@ fn install_post_commit_hook(repo_path: &Path) -> Result<()> {
     }
 
     // Make hook executable
-    use std::os::unix::fs::PermissionsExt;
     let mut perms = fs::metadata(&hook_path)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&hook_path, perms)?;

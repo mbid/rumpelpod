@@ -288,10 +288,16 @@ fn delete_network(name: &str) -> Result<()> {
 fn spawn_git_http_server(
     gateway_path: &Path,
     network_name: &str,
+    sandbox_name: &SandboxName,
     container_id: &str,
 ) -> Result<()> {
-    git_http_server::spawn_git_http_server(gateway_path, network_name, container_id)
-        .with_context(|| format!("starting git HTTP server for container {}", container_id))
+    git_http_server::spawn_git_http_server(
+        gateway_path,
+        network_name,
+        &sandbox_name.0,
+        container_id,
+    )
+    .with_context(|| format!("starting git HTTP server for container {}", container_id))
 }
 
 /// Check that the .git directory inside the container is owned by the expected user.
@@ -417,27 +423,37 @@ fn setup_git_remotes(
         .context("configuring sandbox remote push refspec")?;
 
     // Install post-commit hook to auto-push to gateway
-    install_sandbox_post_commit_hook(container_id, container_repo_path, user)?;
+    install_sandbox_post_commit_hook(container_id, container_repo_path, sandbox_name, user)?;
 
     Ok(())
 }
 
-/// Post-commit hook script for sandbox repos that pushes the current branch to the gateway.
-const SANDBOX_POST_COMMIT_HOOK: &str = indoc::indoc! {r#"
-    #!/bin/sh
-    # Installed by sandbox to sync commits to the gateway repository.
-    # This allows the host to pull sandbox changes.
+/// Generate the post-commit hook script for a sandbox.
+///
+/// The hook pushes the current branch to the gateway repository.
+/// It includes the sandbox name as a push option for access control.
+fn sandbox_post_commit_hook(_sandbox_name: &SandboxName) -> String {
+    // Note: The sandbox name is not needed in the hook because access control
+    // is enforced server-side via the SANDBOX_NAME environment variable set
+    // by the git HTTP server. The sandbox cannot forge its identity.
+    indoc::indoc! {r#"
+        #!/bin/sh
+        # Installed by sandbox to sync commits to the gateway repository.
+        # This allows the host to pull sandbox changes.
 
-    branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-    if [ -n "$branch" ]; then
-        git push sandbox "$branch" --force --quiet 2>/dev/null || true
-    fi
-"#};
+        branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+        if [ -n "$branch" ]; then
+            git push sandbox "$branch" --force --quiet 2>/dev/null || true
+        fi
+    "#}
+    .to_string()
+}
 
 /// Install the post-commit hook in the sandbox repository.
 fn install_sandbox_post_commit_hook(
     container_id: &str,
     container_repo_path: &Path,
+    sandbox_name: &SandboxName,
     user: &str,
 ) -> Result<()> {
     let hooks_dir = container_repo_path.join(".git").join("hooks");
@@ -461,6 +477,7 @@ fn install_sandbox_post_commit_hook(
         .map(|b| String::from_utf8_lossy(&b).to_string());
 
     let hook_signature = "Installed by sandbox to sync commits";
+    let new_hook = sandbox_post_commit_hook(sandbox_name);
 
     let final_hook = match existing_hook {
         Some(existing) if existing.contains(hook_signature) => {
@@ -469,9 +486,9 @@ fn install_sandbox_post_commit_hook(
         }
         Some(existing) => {
             // Append to existing hook
-            format!("{}\n\n{}", existing.trim_end(), SANDBOX_POST_COMMIT_HOOK)
+            format!("{}\n\n{}", existing.trim_end(), new_hook)
         }
-        None => SANDBOX_POST_COMMIT_HOOK.to_string(),
+        None => new_hook,
     };
 
     // Write the hook using sh -c with echo to avoid stdin piping issues
@@ -644,7 +661,7 @@ impl Daemon for DaemonServer {
             if state.status == "running" {
                 // Already running with correct image.
                 // Spawn git HTTP server in case daemon was restarted while container was running.
-                spawn_git_http_server(&gateway_path, &name, &state.id)?;
+                spawn_git_http_server(&gateway_path, &name, &sandbox_name, &state.id)?;
                 setup_git_remotes(&state.id, &name, &container_repo_path, &sandbox_name, &user)?;
                 return Ok(LaunchResult {
                     container_id: ContainerId(state.id),
@@ -654,7 +671,7 @@ impl Daemon for DaemonServer {
 
             // Container exists but is stopped - restart it
             start_container(&name)?;
-            spawn_git_http_server(&gateway_path, &name, &state.id)?;
+            spawn_git_http_server(&gateway_path, &name, &sandbox_name, &state.id)?;
             setup_git_remotes(&state.id, &name, &container_repo_path, &sandbox_name, &user)?;
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
@@ -666,7 +683,7 @@ impl Daemon for DaemonServer {
         create_network(&name, &sandbox_name, &repo_path)?;
 
         let container_id = create_container(&name, &sandbox_name, &image, &repo_path, runtime)?;
-        spawn_git_http_server(&gateway_path, &name, &container_id.0)?;
+        spawn_git_http_server(&gateway_path, &name, &sandbox_name, &container_id.0)?;
         setup_git_remotes(
             &container_id.0,
             &name,

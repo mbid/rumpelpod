@@ -802,3 +802,247 @@ fn gateway_host_amend_updates_branch() {
         "Gateway should have the amended commit"
     );
 }
+
+#[test]
+fn gateway_sandbox_cannot_push_to_other_sandbox_namespace() {
+    // Test that sandbox-a cannot push to sandbox-b's namespace
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox-a
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-a", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox-a enter");
+
+    // Launch sandbox-b and create a commit so it has a branch in the gateway
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-b", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox-b enter");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "sandbox-b",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Commit from B",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox-b");
+
+    // Get sandbox-b's commit
+    let commit_b_output = sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-b", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get sandbox-b commit");
+    let commit_b = String::from_utf8_lossy(&commit_b_output).trim().to_string();
+
+    // Verify sandbox-b's branch exists in gateway
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/master@sandbox-b");
+    assert_eq!(
+        gateway_commit_b,
+        Some(commit_b.clone()),
+        "Gateway should have sandbox-b's commit"
+    );
+
+    // Now try to have sandbox-a push directly to sandbox-b's namespace
+    // This should fail because of access control
+    let result = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "sandbox-a",
+            "--",
+            "git",
+            "push",
+            "sandbox",
+            "HEAD:refs/heads/sandbox/master@sandbox-b",
+            "--force",
+        ])
+        .output()
+        .expect("Failed to execute push command");
+
+    // The push should fail
+    assert!(
+        !result.status.success(),
+        "Push to another sandbox's namespace should fail, but it succeeded"
+    );
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("sandbox 'sandbox-a' cannot push to") || stderr.contains("cannot push"),
+        "Error message should mention access control, got: {}",
+        stderr
+    );
+
+    // Verify sandbox-b's branch still has its original commit (not overwritten)
+    let gateway_commit_b_after = get_branch_commit(&gateway, "sandbox/master@sandbox-b");
+    assert_eq!(
+        gateway_commit_b_after,
+        Some(commit_b),
+        "sandbox-b's branch should not have been modified"
+    );
+}
+
+#[test]
+fn gateway_sandbox_cannot_push_to_host_namespace() {
+    // Test that a sandbox cannot push to the host/* namespace
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Get host/master commit before the attack
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let host_commit_before = get_branch_commit(&gateway, "host/master");
+
+    // Create a commit in sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "test",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Malicious commit",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    // Try to push to host/master - should be rejected
+    let result = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "test",
+            "--",
+            "git",
+            "push",
+            "sandbox",
+            "HEAD:refs/heads/host/master",
+            "--force",
+        ])
+        .output()
+        .expect("Failed to execute push command");
+
+    // The push should fail
+    assert!(
+        !result.status.success(),
+        "Push to host namespace should fail, but it succeeded"
+    );
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("cannot push to") || stderr.contains("sandbox"),
+        "Error message should mention access control, got: {}",
+        stderr
+    );
+
+    // Verify host/master still has its original commit
+    let host_commit_after = get_branch_commit(&gateway, "host/master");
+    assert_eq!(
+        host_commit_after, host_commit_before,
+        "host/master should not have been modified"
+    );
+}
+
+#[test]
+fn gateway_sandbox_can_push_to_own_namespace() {
+    // Test that a sandbox can push to its own namespace (positive test)
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "my-sandbox";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Create a new branch and commit
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            "feature",
+        ])
+        .success()
+        .expect("Failed to create branch");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Feature commit",
+        ])
+        .success()
+        .expect("Failed to create commit");
+
+    // Get the commit hash
+    let commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get commit");
+    let commit = String::from_utf8_lossy(&commit_output).trim().to_string();
+
+    // Manually push to our own namespace with explicit refspec
+    let explicit_push = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "push",
+            "sandbox",
+            &format!("HEAD:refs/heads/sandbox/feature@{}", sandbox_name),
+            "--force",
+        ])
+        .output()
+        .expect("Failed to execute push command");
+
+    assert!(
+        explicit_push.status.success(),
+        "Push to own namespace should succeed, but failed: {}",
+        String::from_utf8_lossy(&explicit_push.stderr)
+    );
+
+    // Verify the branch exists with our commit
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let expected_branch = format!("sandbox/feature@{}", sandbox_name);
+    let gateway_commit = get_branch_commit(&gateway, &expected_branch);
+
+    assert_eq!(
+        gateway_commit,
+        Some(commit),
+        "Gateway should have our commit on {}",
+        expected_branch
+    );
+}
