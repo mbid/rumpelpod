@@ -84,6 +84,15 @@ fn reset_to(repo_path: &Path, commit: &str) {
         .expect("git reset failed");
 }
 
+/// Amend the current commit with a new message.
+fn amend_commit(repo_path: &Path, message: &str) {
+    Command::new("git")
+        .args(["commit", "--amend", "--allow-empty", "-m", message])
+        .current_dir(repo_path)
+        .success()
+        .expect("git commit --amend failed");
+}
+
 /// Get the gateway path for a repo by reading the sandbox remote URL.
 fn get_gateway_path(repo_path: &Path) -> Option<std::path::PathBuf> {
     Command::new("git")
@@ -465,4 +474,331 @@ fn gateway_http_works_with_non_root_user() {
         .args(["enter", "user-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch from host remote");
+}
+
+#[test]
+fn gateway_sandbox_commit_triggers_push() {
+    // Test that creating a commit in the sandbox triggers a push to the gateway
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "commit-push-test";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Create a commit in the sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Sandbox commit",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    // Get the commit hash from the sandbox
+    let sandbox_commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get sandbox commit");
+
+    let sandbox_commit = String::from_utf8_lossy(&sandbox_commit_output)
+        .trim()
+        .to_string();
+
+    // Check that the gateway has the branch sandbox/master@<sandbox_name>
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let expected_branch = format!("sandbox/master@{}", sandbox_name);
+    let gateway_commit = get_branch_commit(&gateway, &expected_branch);
+
+    assert_eq!(
+        gateway_commit,
+        Some(sandbox_commit),
+        "Gateway should have branch '{}' with sandbox's commit",
+        expected_branch
+    );
+}
+
+#[test]
+fn gateway_sandbox_push_works_from_new_branch() {
+    // Test that pushing from a new branch in sandbox works
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "new-branch-push";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Create a new branch and commit in the sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            "feature-from-sandbox",
+        ])
+        .success()
+        .expect("Failed to create branch in sandbox");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Feature commit",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    // Get the commit hash from the sandbox
+    let sandbox_commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get sandbox commit");
+
+    let sandbox_commit = String::from_utf8_lossy(&sandbox_commit_output)
+        .trim()
+        .to_string();
+
+    // Check that the gateway has the branch
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let expected_branch = format!("sandbox/feature-from-sandbox@{}", sandbox_name);
+    let gateway_commit = get_branch_commit(&gateway, &expected_branch);
+
+    assert_eq!(
+        gateway_commit,
+        Some(sandbox_commit),
+        "Gateway should have branch '{}' with sandbox's commit",
+        expected_branch
+    );
+}
+
+#[test]
+fn gateway_multiple_sandboxes_push_independently() {
+    // Test that multiple sandboxes can push to the gateway without conflicts
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch two sandboxes
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-a", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox-a enter");
+
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-b", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox-b enter");
+
+    // Create commits in both sandboxes on the same branch name
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "sandbox-a",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Commit from A",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox-a");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "sandbox-b",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Commit from B",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox-b");
+
+    // Get commit hashes
+    let commit_a_output = sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-a", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get sandbox-a commit");
+    let commit_a = String::from_utf8_lossy(&commit_a_output).trim().to_string();
+
+    let commit_b_output = sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-b", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get sandbox-b commit");
+    let commit_b = String::from_utf8_lossy(&commit_b_output).trim().to_string();
+
+    // Check that the gateway has both branches with different commits
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    let gateway_commit_a = get_branch_commit(&gateway, "sandbox/master@sandbox-a");
+    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/master@sandbox-b");
+
+    assert_eq!(
+        gateway_commit_a,
+        Some(commit_a.clone()),
+        "Gateway should have sandbox-a's commit"
+    );
+    assert_eq!(
+        gateway_commit_b,
+        Some(commit_b.clone()),
+        "Gateway should have sandbox-b's commit"
+    );
+
+    // The commits should be different
+    assert_ne!(
+        commit_a, commit_b,
+        "Commits from different sandboxes should be different"
+    );
+}
+
+#[test]
+fn gateway_sandbox_amend_triggers_push() {
+    // Test that amending a commit in the sandbox triggers a push to the gateway
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "amend-push-test";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Create a commit in the sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Original commit",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    let original_commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get original commit");
+    let original_commit = String::from_utf8_lossy(&original_commit_output)
+        .trim()
+        .to_string();
+
+    // Amend the commit
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--amend",
+            "--allow-empty",
+            "-m",
+            "Amended commit",
+        ])
+        .success()
+        .expect("Failed to amend commit in sandbox");
+
+    let amended_commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get amended commit");
+    let amended_commit = String::from_utf8_lossy(&amended_commit_output)
+        .trim()
+        .to_string();
+
+    // Commits should differ
+    assert_ne!(
+        original_commit, amended_commit,
+        "Amended commit should have different hash"
+    );
+
+    // Check that the gateway has the amended commit
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let expected_branch = format!("sandbox/master@{}", sandbox_name);
+    let gateway_commit = get_branch_commit(&gateway, &expected_branch);
+
+    assert_eq!(
+        gateway_commit,
+        Some(amended_commit),
+        "Gateway should have the amended commit, not the original"
+    );
+}
+
+#[test]
+fn gateway_host_amend_updates_branch() {
+    // Test that amending a commit on the host updates the gateway
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox to set up gateway
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    // Create a commit on the host
+    create_commit(repo.path(), "Original commit");
+    let original_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Amend the commit
+    amend_commit(repo.path(), "Amended commit");
+    let amended_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    assert_ne!(
+        original_commit, amended_commit,
+        "Amended commit should have different hash"
+    );
+
+    // Gateway should have the amended commit
+    let gateway_commit = get_branch_commit(&gateway, "host/master");
+    assert_eq!(
+        gateway_commit,
+        Some(amended_commit),
+        "Gateway should have the amended commit"
+    );
 }

@@ -331,7 +331,7 @@ fn check_git_directory_ownership(
     Ok(())
 }
 
-/// Set up git remotes inside the container for the gateway repository.
+/// Set up git remotes and hooks inside the container for the gateway repository.
 /// Adds "host" and "sandbox" remotes pointing to the git HTTP server.
 /// Git commands are run as the specified user to avoid permission issues.
 ///
@@ -339,10 +339,17 @@ fn check_git_directory_ownership(
 /// `host/*` branches from the gateway to `host/*` remote refs in the sandbox.
 /// This way, when the host's `main` branch is stored as `host/main` in the
 /// gateway, it appears as `host/main` (not `host/host/main`) after fetching.
+///
+/// The "sandbox" remote is configured with a push refspec that maps local branches
+/// to `sandbox/<branch>@<sandbox_name>` in the gateway, allowing multiple sandboxes
+/// to push branches without conflicts.
+///
+/// A post-commit hook is installed to automatically push commits to the gateway.
 fn setup_git_remotes(
     container_id: &str,
     network_name: &str,
     container_repo_path: &Path,
+    sandbox_name: &SandboxName,
     user: &str,
 ) -> Result<()> {
     check_git_directory_ownership(container_id, container_repo_path, user)?;
@@ -389,7 +396,7 @@ fn setup_git_remotes(
     run_git(&["config", "remote.host.pushurl", "PUSH_DISABLED"])
         .context("disabling push for host remote")?;
 
-    // Add "sandbox" remote (same URL, for symmetry with host repo which has "sandbox" remote)
+    // Add "sandbox" remote (same URL, for pushing sandbox commits to gateway)
     match run_git(&["remote", "add", "sandbox", &git_http_url]) {
         Ok(_) => {}
         Err(e) => {
@@ -402,6 +409,90 @@ fn setup_git_remotes(
             }
         }
     }
+
+    // Configure push refspec: map local branches to sandbox/<branch>@<sandbox_name>.
+    // This namespaces sandbox branches to avoid conflicts between different sandboxes.
+    let push_refspec = format!("+refs/heads/*:refs/heads/sandbox/*@{}", sandbox_name.0);
+    run_git(&["config", "remote.sandbox.push", &push_refspec])
+        .context("configuring sandbox remote push refspec")?;
+
+    // Install post-commit hook to auto-push to gateway
+    install_sandbox_post_commit_hook(container_id, container_repo_path, user)?;
+
+    Ok(())
+}
+
+/// Post-commit hook script for sandbox repos that pushes the current branch to the gateway.
+const SANDBOX_POST_COMMIT_HOOK: &str = indoc::indoc! {r#"
+    #!/bin/sh
+    # Installed by sandbox to sync commits to the gateway repository.
+    # This allows the host to pull sandbox changes.
+
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+    if [ -n "$branch" ]; then
+        git push sandbox "$branch" --force --quiet 2>/dev/null || true
+    fi
+"#};
+
+/// Install the post-commit hook in the sandbox repository.
+fn install_sandbox_post_commit_hook(
+    container_id: &str,
+    container_repo_path: &Path,
+    user: &str,
+) -> Result<()> {
+    let hooks_dir = container_repo_path.join(".git").join("hooks");
+    let hook_path = hooks_dir.join("post-commit");
+    let hooks_dir_str = hooks_dir.to_string_lossy();
+    let hook_path_str = hook_path.to_string_lossy();
+
+    // Ensure hooks directory exists
+    Command::new("docker")
+        .args(["exec", "--user", user, container_id])
+        .args(["mkdir", "-p", &hooks_dir_str])
+        .success()
+        .context("creating hooks directory")?;
+
+    // Check if hook already exists and contains our signature
+    let existing_hook = Command::new("docker")
+        .args(["exec", "--user", user, container_id])
+        .args(["cat", &hook_path_str])
+        .success()
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).to_string());
+
+    let hook_signature = "Installed by sandbox to sync commits";
+
+    let final_hook = match existing_hook {
+        Some(existing) if existing.contains(hook_signature) => {
+            // Already installed
+            return Ok(());
+        }
+        Some(existing) => {
+            // Append to existing hook
+            format!("{}\n\n{}", existing.trim_end(), SANDBOX_POST_COMMIT_HOOK)
+        }
+        None => SANDBOX_POST_COMMIT_HOOK.to_string(),
+    };
+
+    // Write the hook using sh -c with echo to avoid stdin piping issues
+    // Use printf to handle the hook content properly
+    let escaped_hook = final_hook.replace('\\', "\\\\").replace('\'', "'\\''");
+    Command::new("docker")
+        .args(["exec", "--user", user, container_id])
+        .args([
+            "sh",
+            "-c",
+            &format!("printf '%s' '{}' > '{}'", escaped_hook, hook_path_str),
+        ])
+        .success()
+        .context("writing post-commit hook")?;
+
+    // Make hook executable
+    Command::new("docker")
+        .args(["exec", "--user", user, container_id])
+        .args(["chmod", "+x", &hook_path_str])
+        .success()
+        .context("making post-commit hook executable")?;
 
     Ok(())
 }
@@ -554,7 +645,7 @@ impl Daemon for DaemonServer {
                 // Already running with correct image.
                 // Spawn git HTTP server in case daemon was restarted while container was running.
                 spawn_git_http_server(&gateway_path, &name, &state.id)?;
-                setup_git_remotes(&state.id, &name, &container_repo_path, &user)?;
+                setup_git_remotes(&state.id, &name, &container_repo_path, &sandbox_name, &user)?;
                 return Ok(LaunchResult {
                     container_id: ContainerId(state.id),
                     user,
@@ -564,7 +655,7 @@ impl Daemon for DaemonServer {
             // Container exists but is stopped - restart it
             start_container(&name)?;
             spawn_git_http_server(&gateway_path, &name, &state.id)?;
-            setup_git_remotes(&state.id, &name, &container_repo_path, &user)?;
+            setup_git_remotes(&state.id, &name, &container_repo_path, &sandbox_name, &user)?;
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
@@ -576,7 +667,13 @@ impl Daemon for DaemonServer {
 
         let container_id = create_container(&name, &sandbox_name, &image, &repo_path, runtime)?;
         spawn_git_http_server(&gateway_path, &name, &container_id.0)?;
-        setup_git_remotes(&container_id.0, &name, &container_repo_path, &user)?;
+        setup_git_remotes(
+            &container_id.0,
+            &name,
+            &container_repo_path,
+            &sandbox_name,
+            &user,
+        )?;
         Ok(LaunchResult { container_id, user })
     }
 

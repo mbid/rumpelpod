@@ -36,9 +36,22 @@
 //! This means `git fetch host` in the sandbox gives clean remote ref names like
 //! `host/main` rather than the redundant `host/host/main`.
 //!
-//! ## Future: Sandbox -> Gateway sync (not yet implemented)
+//! ## Sandbox -> Gateway sync
 //!
-//! Sandboxes will be able to push their changes to the gateway for the host to pull.
+//! Sandboxes can push their changes to the gateway for the host to pull.
+//!
+//! Sandbox branches in the gateway repo are in a separate namespace "sandbox/" to distinguish
+//! them from host branches, and are annotated with the name of the sandbox to distinguish them
+//! from a branch with the same name in another sandbox.
+//! A branch `foo` in a sandbox `bar` thus becomes branch `sandbox/foo@bar`. Note the `@` here.
+//! To keep this unambiguous, sandbox names must not contain the `@` character.
+//! By default, every sandbox is launched with the sandbox name as the branch, the *primary* branch
+//! of a sandbox.
+//!
+//! To make accessing more ergonomic, the host can fetch just branch `bar` (instead of
+//! `sandbox/bar@bar`) from the gateway via custom refspecs.
+//!
+//! A post-commit hook in the sandbox automatically pushes new commits to the gateway.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -129,6 +142,14 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
             .current_dir(&gateway)
             .success()
             .context("git init --bare failed")?;
+
+        // Enable anonymous pushes via HTTP for sandboxes to push to gateway.
+        // This is safe because the gateway is only accessible from our sandboxes.
+        Command::new("git")
+            .args(["config", "http.receivepack", "true"])
+            .current_dir(&gateway)
+            .success()
+            .context("enabling http.receivepack failed")?;
     }
 
     // Add "sandbox" remote to host repo (pointing to gateway)
