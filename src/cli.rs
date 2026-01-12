@@ -144,6 +144,14 @@ pub struct AgentCommand {
     #[arg(short, long, value_enum)]
     pub model: Option<Model>,
 
+    /// Start a new conversation instead of resuming
+    #[arg(long, conflicts_with = "continue")]
+    pub new: bool,
+
+    /// Continue a specific conversation by recency (0 = most recent)
+    #[arg(long = "continue", value_name = "N")]
+    pub r#continue: Option<u32>,
+
     /// LLM response cache directory for deterministic testing.
     /// See llm-cache/README.md for documentation.
     #[arg(long, hide = true)]

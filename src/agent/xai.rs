@@ -20,6 +20,7 @@ use super::common::{
     execute_write_in_sandbox, get_input_via_vim, model_api_id, read_agents_md, ToolName,
     MAX_TOKENS,
 };
+use super::history::ConversationTracker;
 
 fn make_tool(name: ToolName) -> Tool {
     Tool {
@@ -32,31 +33,42 @@ fn make_tool(name: ToolName) -> Tool {
     }
 }
 
+/// Convert the internal messages to JSON for persistence.
 pub fn run_grok_agent(
     container_name: &str,
     user: &str,
     repo_path: &Path,
     model: Model,
     cache: Option<LlmCache>,
+    initial_history: Option<serde_json::Value>,
+    mut tracker: ConversationTracker,
 ) -> Result<()> {
     let client = Client::new_with_cache(cache)?;
 
     let mut stdout = std::io::stdout();
 
-    let mut messages: Vec<Message> = Vec::new();
     let mut chat_history = String::new();
 
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(container_name, user, repo_path);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
-    // Add system message at the start
-    messages.push(Message {
-        role: Role::System,
-        content: Some(MessageContent::Text(system_prompt)),
-        tool_calls: None,
-        tool_call_id: None,
-    });
+    // Load initial history if resuming, otherwise start with system message
+    let mut messages: Vec<Message> = match initial_history {
+        Some(ref json) => serde_json::from_value(json.clone())
+            .context("Failed to deserialize messages from JSON")?,
+        None => Vec::new(),
+    };
+
+    // Add system message at the start if not resuming
+    if messages.is_empty() {
+        messages.push(Message {
+            role: Role::System,
+            content: Some(MessageContent::Text(system_prompt)),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
 
     let is_tty = std::io::stdin().is_terminal();
 
@@ -259,6 +271,11 @@ pub fn run_grok_agent(
                     tool_call_id: None,
                 });
             }
+
+            // Save conversation after each assistant turn (including tool results)
+            tracker.save(
+                &serde_json::to_value(&messages).context("Failed to serialize messages to JSON")?,
+            )?;
 
             // Check if we should continue (tool calls) or break
             if choice.finish_reason != Some(FinishReason::ToolCalls) {

@@ -39,6 +39,7 @@ listenfd = "*"
 url = "*"
 axum = "*"
 cgi-service = "*"
+rusqlite = { version = "*", features = ["bundled"] }
 
 [dev-dependencies]
 assert_cmd = "*"

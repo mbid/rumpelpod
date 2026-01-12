@@ -22,6 +22,16 @@ fn run_agent_with_prompt(
     daemon: &TestDaemon,
     prompt: &str,
 ) -> std::process::Output {
+    run_agent_with_prompt_and_args(repo, daemon, prompt, &[])
+}
+
+/// Helper to run agent with a prompt and extra CLI arguments.
+fn run_agent_with_prompt_and_args(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    prompt: &str,
+    extra_args: &[&str],
+) -> std::process::Output {
     let cache_dir = llm_cache_dir();
     let mut cmd = sandbox_command(repo, daemon);
     cmd.args([
@@ -32,6 +42,7 @@ fn run_agent_with_prompt(
         "--cache",
         cache_dir.to_str().unwrap(),
     ]);
+    cmd.args(extra_args);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -43,6 +54,14 @@ fn run_agent_with_prompt(
     drop(child.stdin.take());
 
     child.wait_with_output().expect("Failed to wait for agent")
+}
+
+/// Set up a basic test repo with sandbox config.
+fn setup_test_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+    repo
 }
 
 #[test]
@@ -223,5 +242,178 @@ fn agent_large_file_output() {
         "Agent should report that output was saved to a file.\nstdout: {}\nstderr: {}",
         stdout,
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ============================================================================
+// Conversation history tests
+// ============================================================================
+
+#[test]
+fn agent_new_flag_starts_fresh_conversation() {
+    // Running with --new should always start a new conversation,
+    // even if previous conversations exist.
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // First run creates a conversation
+    let output1 = run_agent_with_prompt(&repo, &daemon, "Say 'first conversation'");
+    assert!(output1.status.success(), "First agent run should succeed");
+
+    // Second run with --new should start fresh (not resume)
+    let output2 =
+        run_agent_with_prompt_and_args(&repo, &daemon, "Say 'second conversation'", &["--new"]);
+    assert!(
+        output2.status.success(),
+        "Second agent run with --new should succeed"
+    );
+
+    // The second conversation shouldn't see context from the first
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    assert!(
+        !stdout2.contains("first conversation"),
+        "--new should start fresh without previous context"
+    );
+}
+
+#[test]
+fn agent_continue_flag_resumes_conversation() {
+    // Running with --continue=0 should resume the most recent conversation.
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // First run: tell the agent a secret code to remember
+    let output1 = run_agent_with_prompt(
+        &repo,
+        &daemon,
+        "Remember this secret code: ZEBRA_DELTA_9876. Just acknowledge you've memorized it.",
+    );
+    assert!(output1.status.success(), "First agent run should succeed");
+
+    // Second run with --continue=0: resume and ask about the code
+    let output2 = run_agent_with_prompt_and_args(
+        &repo,
+        &daemon,
+        "What was the secret code I asked you to remember?",
+        &["--continue=0"],
+    );
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    assert!(
+        output2.status.success(),
+        "Second agent run should succeed.\nstdout: {}\nstderr: {}",
+        stdout2,
+        stderr2
+    );
+
+    // The resumed conversation should have context from the first run
+    assert!(
+        stdout2.contains("ZEBRA") || stdout2.contains("DELTA") || stdout2.contains("9876"),
+        "Resumed conversation should remember the secret code.\nstdout: {}\nstderr: {}",
+        stdout2,
+        stderr2
+    );
+}
+
+#[test]
+fn agent_auto_resumes_single_conversation() {
+    // Without flags, agent should auto-resume if there's exactly one conversation.
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // First run: tell the agent a secret
+    let output1 = run_agent_with_prompt(
+        &repo,
+        &daemon,
+        "Remember: the secret code is FOXTROT_HOTEL_2468. Acknowledge.",
+    );
+    assert!(output1.status.success(), "First agent run should succeed");
+
+    // Second run without flags should auto-resume the single conversation
+    let output2 = run_agent_with_prompt(&repo, &daemon, "What was the secret code I mentioned?");
+    assert!(output2.status.success(), "Second agent run should succeed");
+
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    assert!(
+        stdout2.contains("FOXTROT") || stdout2.contains("HOTEL") || stdout2.contains("2468"),
+        "Auto-resumed conversation should remember the secret code.\nstdout: {}",
+        stdout2
+    );
+}
+
+#[test]
+fn agent_errors_with_multiple_conversations_no_flag() {
+    // Without flags and multiple conversations, non-TTY mode should error.
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // Create first conversation
+    let output1 = run_agent_with_prompt(&repo, &daemon, "First conversation");
+    assert!(output1.status.success(), "First agent run should succeed");
+
+    // Create second conversation with --new
+    let output2 = run_agent_with_prompt_and_args(&repo, &daemon, "Second conversation", &["--new"]);
+    assert!(output2.status.success(), "Second agent run should succeed");
+
+    // Third run without flags should fail (multiple conversations, non-TTY)
+    let output3 = run_agent_with_prompt(&repo, &daemon, "Which conversation am I in?");
+    assert!(
+        !output3.status.success(),
+        "Agent should fail when multiple conversations exist without flags"
+    );
+
+    let stderr3 = String::from_utf8_lossy(&output3.stderr);
+    assert!(
+        stderr3.contains("Multiple conversations") || stderr3.contains("--continue"),
+        "Error should mention multiple conversations.\nstderr: {}",
+        stderr3
+    );
+}
+
+#[test]
+fn agent_continue_out_of_range_errors() {
+    // --continue=N with N out of range should error.
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // Create one conversation
+    let output1 = run_agent_with_prompt(&repo, &daemon, "Single conversation");
+    assert!(output1.status.success(), "First agent run should succeed");
+
+    // Try to continue conversation index 5 (only index 0 exists)
+    let output2 =
+        run_agent_with_prompt_and_args(&repo, &daemon, "This should fail", &["--continue=5"]);
+    assert!(
+        !output2.status.success(),
+        "Agent should fail with out-of-range conversation index"
+    );
+
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        stderr2.contains("out of range") || stderr2.contains("Only 1 conversation"),
+        "Error should mention index out of range.\nstderr: {}",
+        stderr2
+    );
+}
+
+#[test]
+fn agent_continue_no_conversations_errors() {
+    // --continue=0 with no existing conversations should error.
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // Try to continue when no conversations exist
+    let output =
+        run_agent_with_prompt_and_args(&repo, &daemon, "This should fail", &["--continue=0"]);
+    assert!(
+        !output.status.success(),
+        "Agent should fail with --continue when no conversations exist"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("No conversations") || stderr.contains("no conversation"),
+        "Error should mention no conversations exist.\nstderr: {}",
+        stderr
     );
 }

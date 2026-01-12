@@ -1,3 +1,4 @@
+pub mod db;
 pub mod protocol;
 
 use std::path::{Path, PathBuf};
@@ -12,7 +13,12 @@ use crate::command_ext::CommandExt;
 use crate::config::Runtime;
 use crate::gateway;
 use crate::git_http_server;
-use protocol::{ContainerId, Daemon, Image, LaunchResult, SandboxInfo, SandboxName, SandboxStatus};
+use protocol::{
+    ContainerId, ConversationSummary, Daemon, GetConversationResponse, Image, LaunchResult,
+    SandboxInfo, SandboxName, SandboxStatus,
+};
+use rusqlite::Connection;
+use std::sync::Mutex;
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -32,7 +38,8 @@ pub fn socket_path() -> Result<PathBuf> {
 }
 
 struct DaemonServer {
-    // No state for now. State resides in the docker service.
+    /// SQLite connection for conversation history.
+    db: Mutex<Connection>,
 }
 
 /// Label key used to store the repository path on containers and networks.
@@ -747,6 +754,44 @@ impl Daemon for DaemonServer {
     fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
         list_sandboxes_for_repo(&repo_path)
     }
+
+    fn save_conversation(
+        &self,
+        id: Option<i64>,
+        repo_path: PathBuf,
+        sandbox_name: String,
+        model: String,
+        history: serde_json::Value,
+    ) -> Result<i64> {
+        let conn = self.db.lock().unwrap();
+        db::save_conversation(&conn, id, &repo_path, &sandbox_name, &model, &history)
+    }
+
+    fn list_conversations(
+        &self,
+        repo_path: PathBuf,
+        sandbox_name: String,
+    ) -> Result<Vec<ConversationSummary>> {
+        let conn = self.db.lock().unwrap();
+        let summaries = db::list_conversations(&conn, &repo_path, &sandbox_name)?;
+        Ok(summaries
+            .into_iter()
+            .map(|s| ConversationSummary {
+                id: s.id,
+                model: s.model,
+                updated_at: s.updated_at,
+            })
+            .collect())
+    }
+
+    fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>> {
+        let conn = self.db.lock().unwrap();
+        let conv = db::get_conversation(&conn, id)?;
+        Ok(conv.map(|c| GetConversationResponse {
+            model: c.model,
+            history: c.history,
+        }))
+    }
 }
 
 pub fn run_daemon() -> Result<()> {
@@ -757,12 +802,18 @@ pub fn run_daemon() -> Result<()> {
         std::fs::remove_file(&socket)?;
     }
 
+    // Initialize database
+    let db_path = db::db_path()?;
+    let db_conn = db::open_db(&db_path)?;
+
     // Enter the runtime context so UnixListener::bind can register with the reactor
     let _guard = crate::r#async::RUNTIME.enter();
 
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("Failed to bind to {}", socket.display()))?;
 
-    let daemon = DaemonServer {};
+    let daemon = DaemonServer {
+        db: Mutex::new(db_conn),
+    };
     protocol::serve_daemon(daemon, listener);
 }

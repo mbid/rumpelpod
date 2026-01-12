@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use axum::routing::{delete, get, put};
+use axum::routing::{delete, get, post, put};
 use axum::serve::Listener;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -101,6 +101,51 @@ struct ListSandboxesResponse {
     sandboxes: Vec<SandboxInfo>,
 }
 
+/// Request body for save_conversation endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SaveConversationRequest {
+    /// If present, update existing conversation; otherwise create new.
+    pub id: Option<i64>,
+    pub repo_path: PathBuf,
+    pub sandbox_name: String,
+    pub model: String,
+    pub history: serde_json::Value,
+}
+
+/// Response body for save_conversation endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SaveConversationResponse {
+    pub id: i64,
+}
+
+/// Request body for list_conversations endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListConversationsRequest {
+    pub repo_path: PathBuf,
+    pub sandbox_name: String,
+}
+
+/// Summary of a conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationSummary {
+    pub id: i64,
+    pub model: String,
+    pub updated_at: String,
+}
+
+/// Response body for list_conversations endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListConversationsResponse {
+    pub conversations: Vec<ConversationSummary>,
+}
+
+/// Response body for get_conversation endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetConversationResponse {
+    pub model: String,
+    pub history: serde_json::Value,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -127,6 +172,29 @@ pub trait Daemon: Send + Sync + 'static {
     // GET /sandbox
     // Lists all sandboxes for a given repository.
     fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>>;
+
+    // POST /conversation
+    // Save or update a conversation.
+    fn save_conversation(
+        &self,
+        id: Option<i64>,
+        repo_path: PathBuf,
+        sandbox_name: String,
+        model: String,
+        history: serde_json::Value,
+    ) -> Result<i64>;
+
+    // GET /conversations
+    // List all conversations for a sandbox.
+    fn list_conversations(
+        &self,
+        repo_path: PathBuf,
+        sandbox_name: String,
+    ) -> Result<Vec<ConversationSummary>>;
+
+    // GET /conversation/<id>
+    // Get a conversation by ID.
+    fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>>;
 }
 
 pub struct DaemonClient {
@@ -249,6 +317,100 @@ impl Daemon for DaemonClient {
             Err(anyhow::anyhow!("Server error: {}", error.error))
         }
     }
+
+    fn save_conversation(
+        &self,
+        id: Option<i64>,
+        repo_path: PathBuf,
+        sandbox_name: String,
+        model: String,
+        history: serde_json::Value,
+    ) -> Result<i64> {
+        let url = self.url.join("/conversation")?;
+        let request = SaveConversationRequest {
+            id,
+            repo_path,
+            sandbox_name,
+            model,
+            history,
+        };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            let body: SaveConversationResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+            Ok(body.id)
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
+
+    fn list_conversations(
+        &self,
+        repo_path: PathBuf,
+        sandbox_name: String,
+    ) -> Result<Vec<ConversationSummary>> {
+        let url = self.url.join("/conversations")?;
+        let request = ListConversationsRequest {
+            repo_path,
+            sandbox_name,
+        };
+
+        let response = self
+            .client
+            .get(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            let body: ListConversationsResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+            Ok(body.conversations)
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
+
+    fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>> {
+        let url = self.url.join(&format!("/conversation/{}", id))?;
+
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+
+        if response.status().is_success() {
+            let body: GetConversationResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+            Ok(Some(body))
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
 }
 
 /// Handler for PUT /sandbox endpoint.
@@ -317,6 +479,75 @@ async fn list_sandboxes_handler<D: Daemon>(
     }
 }
 
+/// Handler for POST /conversation endpoint.
+async fn save_conversation_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<SaveConversationRequest>,
+) -> Result<Json<SaveConversationResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| {
+        daemon.save_conversation(
+            request.id,
+            request.repo_path,
+            request.sandbox_name,
+            request.model,
+            request.history,
+        )
+    });
+
+    match result {
+        Ok(id) => Ok(Json(SaveConversationResponse { id })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
+/// Handler for GET /conversations endpoint.
+async fn list_conversations_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ListConversationsRequest>,
+) -> Result<Json<ListConversationsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result =
+        block_in_place(|| daemon.list_conversations(request.repo_path, request.sandbox_name));
+
+    match result {
+        Ok(conversations) => Ok(Json(ListConversationsResponse { conversations })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
+/// Handler for GET /conversation/<id> endpoint.
+async fn get_conversation_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    AxumPath(id): AxumPath<i64>,
+) -> Result<Json<GetConversationResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.get_conversation(id));
+
+    match result {
+        Ok(Some(conversation)) => Ok(Json(conversation)),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Conversation {} not found", id),
+            }),
+        )),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )),
+    }
+}
+
 /// Serve the daemon using the provided listener.
 ///
 /// The listener can be a `tokio::net::TcpListener` or `tokio::net::UnixListener`.
@@ -346,6 +577,9 @@ where
         .route("/sandbox", put(launch_sandbox_handler::<D>))
         .route("/sandbox", delete(delete_sandbox_handler::<D>))
         .route("/sandbox", get(list_sandboxes_handler::<D>))
+        .route("/conversation", post(save_conversation_handler::<D>))
+        .route("/conversations", get(list_conversations_handler::<D>))
+        .route("/conversation/{id}", get(get_conversation_handler::<D>))
         .with_state(daemon);
 
     block_on(async move {
@@ -389,30 +623,86 @@ mod tests {
         fn list_sandboxes(&self, _repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
             Ok(vec![])
         }
+
+        fn save_conversation(
+            &self,
+            id: Option<i64>,
+            _repo_path: PathBuf,
+            _sandbox_name: String,
+            _model: String,
+            _history: serde_json::Value,
+        ) -> Result<i64> {
+            Ok(id.unwrap_or(1))
+        }
+
+        fn list_conversations(
+            &self,
+            _repo_path: PathBuf,
+            _sandbox_name: String,
+        ) -> Result<Vec<ConversationSummary>> {
+            Ok(vec![])
+        }
+
+        fn get_conversation(&self, _id: i64) -> Result<Option<GetConversationResponse>> {
+            Ok(None)
+        }
+    }
+
+    /// Helper to start a daemon server in a background thread.
+    struct TestServer {
+        socket_path: PathBuf,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        handle: Option<thread::JoinHandle<()>>,
+        #[allow(dead_code)]
+        temp_dir: tempfile::TempDir,
+    }
+
+    impl TestServer {
+        fn start<D: Daemon>(daemon: D) -> Self {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let socket_path = temp_dir.path().join("daemon.sock");
+            let socket_path_clone = socket_path.clone();
+
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let listener = block_on(async { UnixListener::bind(&socket_path_clone).unwrap() });
+
+            let handle = thread::spawn(move || {
+                serve_daemon_until(daemon, listener, async {
+                    let _ = shutdown_rx.await;
+                });
+            });
+
+            // Wait for socket to be ready
+            thread::sleep(std::time::Duration::from_millis(50));
+
+            TestServer {
+                socket_path,
+                shutdown_tx: Some(shutdown_tx),
+                handle: Some(handle),
+                temp_dir,
+            }
+        }
+
+        fn client(&self) -> DaemonClient {
+            DaemonClient::new_unix(&self.socket_path)
+        }
+    }
+
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown_tx.take() {
+                let _ = tx.send(());
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     #[test]
     fn test_client_server_roundtrip() {
-        // TempDir cleans up on drop, including the socket file inside
-        let temp_dir = tempfile::tempdir().unwrap();
-        let socket_path = temp_dir.path().join("daemon.sock");
-
-        // Create shutdown channel and listener
-        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let listener = block_on(async { UnixListener::bind(&socket_path).unwrap() });
-
-        // Spawn server in background thread
-        let server_handle = thread::spawn(move || {
-            serve_daemon_until(MockDaemon, listener, async {
-                let _ = shutdown_rx.await;
-            });
-        });
-
-        // Give server a moment to start
-        thread::sleep(std::time::Duration::from_millis(50));
-
-        // Create client and make request
-        let client = DaemonClient::new_unix(&socket_path);
+        let server = TestServer::start(MockDaemon);
+        let client = server.client();
 
         let result = client.launch_sandbox(
             SandboxName("test-sandbox".to_string()),
@@ -420,13 +710,182 @@ mod tests {
             PathBuf::from("/tmp/repo"),
             PathBuf::from("/workspace"),
             Some("testuser".to_string()),
-            Runtime::Runc, // Use runc for tests (works inside sysbox)
+            Runtime::Runc,
         );
 
         let launch_result = result.unwrap();
         assert_eq!(launch_result.container_id.0, "test-sandbox:test-image");
+    }
 
-        shutdown_tx.send(()).unwrap();
-        server_handle.join().unwrap();
+    /// A mock daemon that uses a real database for conversation operations.
+    struct MockDaemonWithDb {
+        db: std::sync::Mutex<rusqlite::Connection>,
+    }
+
+    impl MockDaemonWithDb {
+        fn new(db_path: &std::path::Path) -> Self {
+            let conn = crate::daemon::db::open_db(db_path).unwrap();
+            Self {
+                db: std::sync::Mutex::new(conn),
+            }
+        }
+    }
+
+    impl Daemon for MockDaemonWithDb {
+        fn launch_sandbox(
+            &self,
+            _sandbox_name: SandboxName,
+            _image: Image,
+            _repo_path: PathBuf,
+            _container_repo_path: PathBuf,
+            _user: Option<String>,
+            _runtime: Runtime,
+        ) -> Result<LaunchResult> {
+            unimplemented!("not needed for conversation tests")
+        }
+
+        fn delete_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
+            unimplemented!("not needed for conversation tests")
+        }
+
+        fn list_sandboxes(&self, _repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+            unimplemented!("not needed for conversation tests")
+        }
+
+        fn save_conversation(
+            &self,
+            id: Option<i64>,
+            repo_path: PathBuf,
+            sandbox_name: String,
+            model: String,
+            history: serde_json::Value,
+        ) -> Result<i64> {
+            let conn = self.db.lock().unwrap();
+            crate::daemon::db::save_conversation(
+                &conn,
+                id,
+                &repo_path,
+                &sandbox_name,
+                &model,
+                &history,
+            )
+        }
+
+        fn list_conversations(
+            &self,
+            repo_path: PathBuf,
+            sandbox_name: String,
+        ) -> Result<Vec<ConversationSummary>> {
+            let conn = self.db.lock().unwrap();
+            let summaries =
+                crate::daemon::db::list_conversations(&conn, &repo_path, &sandbox_name)?;
+            Ok(summaries
+                .into_iter()
+                .map(|s| ConversationSummary {
+                    id: s.id,
+                    model: s.model,
+                    updated_at: s.updated_at,
+                })
+                .collect())
+        }
+
+        fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>> {
+            let conn = self.db.lock().unwrap();
+            let conv = crate::daemon::db::get_conversation(&conn, id)?;
+            Ok(conv.map(|c| GetConversationResponse {
+                model: c.model,
+                history: c.history,
+            }))
+        }
+    }
+
+    #[test]
+    fn test_conversation_save_and_list() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let server = TestServer::start(MockDaemonWithDb::new(&db_path));
+        let client = server.client();
+
+        let repo_path = PathBuf::from("/home/user/project");
+        let history = serde_json::json!([{"role": "user", "content": "hello"}]);
+
+        // Save a conversation
+        let id = client
+            .save_conversation(
+                None,
+                repo_path.clone(),
+                "dev".to_string(),
+                "sonnet".to_string(),
+                history.clone(),
+            )
+            .unwrap();
+        assert!(id > 0);
+
+        // List conversations
+        let list = client
+            .list_conversations(repo_path.clone(), "dev".to_string())
+            .unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, id);
+        assert_eq!(list[0].model, "sonnet");
+
+        // Get the conversation back
+        let conv = client.get_conversation(id).unwrap().unwrap();
+        assert_eq!(conv.model, "sonnet");
+        assert_eq!(conv.history, history);
+    }
+
+    #[test]
+    fn test_conversation_update() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let server = TestServer::start(MockDaemonWithDb::new(&db_path));
+        let client = server.client();
+
+        let repo_path = PathBuf::from("/home/user/project");
+        let history1 = serde_json::json!([{"role": "user", "content": "hello"}]);
+        let history2 = serde_json::json!([
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"}
+        ]);
+
+        // Save initial
+        let id = client
+            .save_conversation(
+                None,
+                repo_path.clone(),
+                "dev".to_string(),
+                "sonnet".to_string(),
+                history1,
+            )
+            .unwrap();
+
+        // Update
+        let id2 = client
+            .save_conversation(
+                Some(id),
+                repo_path.clone(),
+                "dev".to_string(),
+                "opus".to_string(),
+                history2.clone(),
+            )
+            .unwrap();
+        assert_eq!(id, id2);
+
+        // Verify update
+        let conv = client.get_conversation(id).unwrap().unwrap();
+        assert_eq!(conv.model, "opus");
+        assert_eq!(conv.history, history2);
+    }
+
+    #[test]
+    fn test_conversation_not_found() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let server = TestServer::start(MockDaemonWithDb::new(&db_path));
+        let client = server.client();
+
+        let conv = client.get_conversation(999).unwrap();
+        assert!(conv.is_none());
     }
 }

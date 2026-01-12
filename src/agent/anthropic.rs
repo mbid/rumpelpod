@@ -20,6 +20,7 @@ use super::common::{
     execute_write_in_sandbox, get_input_via_vim, model_api_id, read_agents_md, ToolName,
     MAX_TOKENS,
 };
+use super::history::ConversationTracker;
 
 fn make_tool(name: ToolName) -> Tool {
     Tool::Custom(CustomTool {
@@ -74,12 +75,20 @@ pub fn run_claude_agent(
     repo_path: &Path,
     model: Model,
     cache: Option<LlmCache>,
+    initial_history: Option<serde_json::Value>,
+    mut tracker: ConversationTracker,
 ) -> Result<()> {
     let client = Client::new_with_cache(cache)?;
 
     let mut stdout = std::io::stdout();
 
-    let mut messages: Vec<Message> = Vec::new();
+    // Load initial history if resuming a conversation
+    let mut messages: Vec<Message> = match initial_history {
+        Some(ref json) => serde_json::from_value(json.clone())
+            .context("Failed to deserialize messages from JSON")?,
+        None => Vec::new(),
+    };
+
     let mut chat_history = String::new();
 
     // Read AGENTS.md once at startup to include project-specific instructions
@@ -99,11 +108,15 @@ pub fn run_claude_agent(
         None
     };
 
+    // Track whether we've processed the initial prompt (for non-TTY mode)
+    let mut processed_initial = false;
+
     loop {
         let user_input = if let Some(ref prompt) = initial_prompt {
-            if !messages.is_empty() {
+            if processed_initial {
                 break;
             }
+            processed_initial = true;
             prompt.clone()
         } else {
             let input = get_input_via_vim(&chat_history)?;
@@ -318,6 +331,11 @@ pub fn run_claude_agent(
                     content: tool_results,
                 });
             }
+
+            // Save conversation after each assistant turn (including tool results)
+            tracker.save(
+                &serde_json::to_value(&messages).context("Failed to serialize messages to JSON")?,
+            )?;
 
             if response.stop_reason != StopReason::ToolUse {
                 break;
