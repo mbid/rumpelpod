@@ -49,6 +49,25 @@ fn fetch_tool() -> Tool {
     })
 }
 
+/// The Anthropic API can return empty text blocks but rejects them on input.
+/// See: https://github.com/anthropics/anthropic-sdk-python/issues/461
+/// Returns None if the message would be empty after filtering.
+fn filter_invalid_content(Message { role, content }: Message) -> Option<Message> {
+    let content: Vec<ContentBlock> = content
+        .into_iter()
+        .filter(|block| match block {
+            ContentBlock::Text { text, .. } => !text.trim().is_empty(),
+            _ => true,
+        })
+        .collect();
+
+    if content.is_empty() {
+        None
+    } else {
+        Some(Message { role, content })
+    }
+}
+
 pub fn run_claude_agent(
     container_name: &str,
     user: &str,
@@ -283,10 +302,15 @@ pub fn run_claude_agent(
                 }
             }
 
-            messages.push(Message {
+            // Filter out invalid content blocks (e.g., empty text blocks) that the API
+            // returns but then rejects on subsequent requests.
+            let assistant_message = Message {
                 role: Role::Assistant,
                 content: response.content.clone(),
-            });
+            };
+            if let Some(filtered) = filter_invalid_content(assistant_message) {
+                messages.push(filtered);
+            }
 
             if has_tool_use && !tool_results.is_empty() {
                 messages.push(Message {
@@ -302,4 +326,69 @@ pub fn run_claude_agent(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_removes_empty_text_blocks() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::ToolUse {
+                    id: "test".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"command": "ls"}),
+                },
+            ],
+        };
+
+        let filtered = filter_invalid_content(message).unwrap();
+        assert_eq!(filtered.content.len(), 1);
+        assert!(matches!(filtered.content[0], ContentBlock::ToolUse { .. }));
+    }
+
+    #[test]
+    fn test_filter_returns_none_if_all_blocks_invalid() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "".to_string(),
+                cache_control: None,
+            }],
+        };
+
+        assert!(filter_invalid_content(message).is_none());
+    }
+
+    #[test]
+    fn test_filter_preserves_valid_text_blocks() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text: "valid text".to_string(),
+                    cache_control: None,
+                },
+            ],
+        };
+
+        let filtered = filter_invalid_content(message).unwrap();
+        assert_eq!(filtered.content.len(), 1);
+        if let ContentBlock::Text { text, .. } = &filtered.content[0] {
+            assert_eq!(text, "valid text");
+        } else {
+            panic!("Expected Text block");
+        }
+    }
 }
