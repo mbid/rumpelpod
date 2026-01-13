@@ -29,6 +29,40 @@ fn get_branches(repo_path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Get the list of sandbox remote-tracking refs in a repository.
+/// These are refs pushed by sandboxes, matching the pattern refs/remotes/sandbox/*@*
+/// (excludes refs/remotes/sandbox/host/* which are created by host pushes).
+fn get_sandbox_remote_refs(repo_path: &Path) -> Vec<String> {
+    let output: String = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/remotes/sandbox/",
+        ])
+        .current_dir(repo_path)
+        .success()
+        .expect("Failed to list remote refs")
+        .try_into()
+        .unwrap();
+    output
+        .lines()
+        .filter(|s| !s.is_empty())
+        // Filter to only sandbox refs with @ (exclude host/* refs)
+        .filter(|s| s.contains('@'))
+        .map(String::from)
+        .collect()
+}
+
+/// Get the commit hash at a remote-tracking ref.
+fn get_remote_ref_commit(repo_path: &Path, ref_name: &str) -> Option<String> {
+    Command::new("git")
+        .args(["rev-parse", &format!("refs/remotes/{}", ref_name)])
+        .current_dir(repo_path)
+        .success()
+        .ok()
+        .map(|b| String::try_from(b).unwrap().trim().to_string())
+}
+
 /// Get the commit hash at HEAD of a branch.
 fn get_branch_commit(repo_path: &Path, branch: &str) -> Option<String> {
     Command::new("git")
@@ -1241,5 +1275,276 @@ fn gateway_sandbox_branch_creation_triggers_push() {
         gateway_commit,
         Some(current_commit),
         "New branch should point to same commit as before"
+    );
+}
+
+#[test]
+fn gateway_sandbox_push_syncs_to_host_remote_ref() {
+    // Test that when a sandbox pushes to gateway, it appears as a remote-tracking ref in host
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "sync-test";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Verify no sandbox remote refs exist yet in host
+    let refs_before = get_sandbox_remote_refs(repo.path());
+    assert!(
+        refs_before.is_empty(),
+        "No sandbox remote refs should exist initially, got: {:?}",
+        refs_before
+    );
+
+    // Create a commit in the sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Sandbox commit",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    // Get the commit hash
+    let commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get commit");
+    let commit = String::from_utf8_lossy(&commit_output).trim().to_string();
+
+    // Host should now have the sandbox commit as a remote-tracking ref
+    let expected_ref = format!("sandbox/master@{}", sandbox_name);
+    let refs_after = get_sandbox_remote_refs(repo.path());
+    assert!(
+        refs_after.contains(&expected_ref),
+        "Host should have remote ref {}, got: {:?}",
+        expected_ref,
+        refs_after
+    );
+
+    // Verify the commit matches
+    let host_commit = get_remote_ref_commit(repo.path(), &expected_ref);
+    assert_eq!(
+        host_commit,
+        Some(commit),
+        "Host remote ref should point to sandbox commit"
+    );
+}
+
+#[test]
+fn gateway_sandbox_branch_sync_to_host() {
+    // Test that creating a new branch in sandbox syncs to host remote refs
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "branch-sync-test";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Create a new branch in sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            "feature-x",
+        ])
+        .success()
+        .expect("Failed to create branch in sandbox");
+
+    // Host should have the new branch as a remote-tracking ref
+    let expected_ref = format!("sandbox/feature-x@{}", sandbox_name);
+    let refs = get_sandbox_remote_refs(repo.path());
+    assert!(
+        refs.contains(&expected_ref),
+        "Host should have remote ref {}, got: {:?}",
+        expected_ref,
+        refs
+    );
+}
+
+#[test]
+fn gateway_multiple_sandboxes_sync_to_host() {
+    // Test that multiple sandboxes can sync independently to host remote refs
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Create first sandbox and commit
+    let sandbox1 = "multi-sync-1";
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox1,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Commit from sandbox 1",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox 1");
+
+    let commit1_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox1, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get commit 1");
+    let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
+
+    // Create second sandbox and commit
+    let sandbox2 = "multi-sync-2";
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox2,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Commit from sandbox 2",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox 2");
+
+    let commit2_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox2, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get commit 2");
+    let commit2 = String::from_utf8_lossy(&commit2_output).trim().to_string();
+
+    // Host should have both remote refs
+    let refs = get_sandbox_remote_refs(repo.path());
+    let expected_ref1 = format!("sandbox/master@{}", sandbox1);
+    let expected_ref2 = format!("sandbox/master@{}", sandbox2);
+
+    assert!(
+        refs.contains(&expected_ref1),
+        "Host should have remote ref {}, got: {:?}",
+        expected_ref1,
+        refs
+    );
+    assert!(
+        refs.contains(&expected_ref2),
+        "Host should have remote ref {}, got: {:?}",
+        expected_ref2,
+        refs
+    );
+
+    // Verify commits match
+    assert_eq!(
+        get_remote_ref_commit(repo.path(), &expected_ref1),
+        Some(commit1),
+        "First sandbox remote ref should have correct commit"
+    );
+    assert_eq!(
+        get_remote_ref_commit(repo.path(), &expected_ref2),
+        Some(commit2),
+        "Second sandbox remote ref should have correct commit"
+    );
+}
+
+#[test]
+fn gateway_sandbox_reset_syncs_to_host_via_force_push() {
+    // Test that resetting in sandbox (requiring force push) syncs to host remote refs
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "force-push-test";
+
+    // Launch sandbox and create two commits
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "First commit",
+        ])
+        .success()
+        .expect("Failed to create first commit");
+
+    let commit1_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get commit1");
+    let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Second commit",
+        ])
+        .success()
+        .expect("Failed to create second commit");
+
+    let commit2_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get commit2");
+    let commit2 = String::from_utf8_lossy(&commit2_output).trim().to_string();
+
+    // Verify host has commit2
+    let expected_ref = format!("sandbox/master@{}", sandbox_name);
+    assert_eq!(
+        get_remote_ref_commit(repo.path(), &expected_ref),
+        Some(commit2.clone()),
+        "Host should have commit2 before reset"
+    );
+
+    // Reset back to commit1 (requires force push to update host remote ref)
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "reset",
+            "--hard",
+            &commit1,
+        ])
+        .success()
+        .expect("Failed to reset in sandbox");
+
+    // Host remote ref should now point to commit1 (force push succeeded)
+    assert_eq!(
+        get_remote_ref_commit(repo.path(), &expected_ref),
+        Some(commit1),
+        "Host remote ref should be updated to commit1 after reset (force push)"
     );
 }

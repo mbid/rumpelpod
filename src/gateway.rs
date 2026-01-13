@@ -182,6 +182,39 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
     exit 0
 "#};
 
+/// Post-receive hook for the gateway repository.
+///
+/// Syncs sandbox refs from the gateway to the host repo's remote-tracking refs.
+/// When a sandbox pushes `refs/heads/sandbox/*@<name>`, this hook mirrors it to
+/// the host repo as `refs/remotes/sandbox/*@<name>`.
+///
+/// The post-receive hook runs after refs are updated but before git-receive-pack
+/// sends the response to the client. This means the pushing sandbox's `git push`
+/// blocks until this hook completes, ensuring refs are visible in the host repo
+/// immediately after the push returns.
+const GATEWAY_POST_RECEIVE_HOOK: &str = indoc! {r#"
+    #!/bin/sh
+    # Sync sandbox refs from gateway to host repo's remote-tracking refs.
+    # When sandbox pushes refs/heads/sandbox/*@<name>, mirror to host as
+    # refs/remotes/sandbox/*@<name>.
+
+    while read oldvalue newvalue refname; do
+        case "$refname" in
+            refs/heads/sandbox/*)
+                # Extract branch name (sandbox/foo@bar)
+                branch="${refname#refs/heads/}"
+                if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
+                    # Deletion - remove from host
+                    git push host --delete "refs/remotes/$branch" --quiet 2>/dev/null || true
+                else
+                    # Update - push to host as remote-tracking ref
+                    git push host "$refname:refs/remotes/$branch" --force --quiet 2>/dev/null || true
+                fi
+                ;;
+        esac
+    done
+"#};
+
 /// Compute a hash of the repo path for use in the gateway directory name.
 fn repo_path_hash(repo_path: &Path) -> String {
     let mut hasher = Sha256::new();
@@ -253,8 +286,9 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
         .success()
         .context("enabling http.receivepack failed")?;
 
-    // Install access control hook (overwrites any existing hook).
+    // Install gateway hooks (overwrites any existing hooks).
     install_gateway_pre_receive_hook(&gateway)?;
+    install_gateway_post_receive_hook(&gateway)?;
 
     // Add "sandbox" remote to host repo (pointing to gateway)
     ensure_remote(repo_path, SANDBOX_REMOTE, &gateway)?;
@@ -309,15 +343,26 @@ fn ensure_remote(repo_path: &Path, remote_name: &str, remote_url: &Path) -> Resu
 
 /// Install the pre-receive hook in the gateway repository for access control.
 fn install_gateway_pre_receive_hook(gateway_path: &Path) -> Result<()> {
+    install_gateway_hook(gateway_path, "pre-receive", GATEWAY_PRE_RECEIVE_HOOK)
+}
+
+/// Install the post-receive hook in the gateway repository.
+/// This hook syncs sandbox refs to the host repo as remote-tracking refs.
+fn install_gateway_post_receive_hook(gateway_path: &Path) -> Result<()> {
+    install_gateway_hook(gateway_path, "post-receive", GATEWAY_POST_RECEIVE_HOOK)
+}
+
+/// Install a hook script in the gateway repository.
+fn install_gateway_hook(gateway_path: &Path, hook_name: &str, hook_content: &str) -> Result<()> {
     let hooks_dir = gateway_path.join("hooks");
-    let hook_path = hooks_dir.join("pre-receive");
+    let hook_path = hooks_dir.join(hook_name);
 
     // Ensure hooks directory exists
     fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
 
     // Always overwrite the hook (we own this file completely)
-    fs::write(&hook_path, GATEWAY_PRE_RECEIVE_HOOK)
+    fs::write(&hook_path, hook_content)
         .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
 
     // Make hook executable
