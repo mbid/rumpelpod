@@ -565,6 +565,8 @@ fn create_container(
             docker_runtime_flag(runtime),
             "--name",
             name,
+            "--hostname",
+            &sandbox_name.0,
             "--network",
             name, // Container and network share the same name
             "--label",

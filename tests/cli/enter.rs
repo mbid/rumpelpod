@@ -330,3 +330,26 @@ fn enter_allows_explicit_root_user_in_config() {
         stdout.trim()
     );
 }
+
+#[test]
+fn enter_sets_hostname_to_sandbox_name() {
+    // The container's hostname should be set to the sandbox name.
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "my-sandbox", "--", "hostname"])
+        .success()
+        .expect("sandbox enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "my-sandbox",
+        "Hostname should be the sandbox name, got: {}",
+        stdout.trim()
+    );
+}
