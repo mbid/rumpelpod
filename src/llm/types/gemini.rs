@@ -211,11 +211,21 @@ pub struct FunctionDeclaration {
     pub parameters: serde_json::Value,
 }
 
-/// Tool definition containing function declarations.
+/// Google Search tool configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleSearch {}
+
+/// Tool definition - can contain function declarations or server-side tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Tool {
-    pub function_declarations: Vec<FunctionDeclaration>,
+    /// Function declarations for custom tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function_declarations: Option<Vec<FunctionDeclaration>>,
+    /// Google Search grounding tool (server-side).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_search: Option<GoogleSearch>,
 }
 
 /// Function calling mode.
@@ -329,6 +339,8 @@ pub struct Candidate {
     #[serde(default)]
     pub citation_metadata: Option<CitationMetadata>,
     #[serde(default)]
+    pub grounding_metadata: Option<GroundingMetadata>,
+    #[serde(default)]
     pub index: Option<u32>,
 }
 
@@ -339,6 +351,61 @@ pub struct UsageMetadata {
     pub prompt_token_count: u32,
     pub candidates_token_count: u32,
     pub total_token_count: u32,
+}
+
+/// Web source information in grounding chunks.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebSource {
+    pub uri: String,
+    pub title: String,
+}
+
+/// A grounding chunk containing a web source.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GroundingChunk {
+    pub web: Option<WebSource>,
+}
+
+/// A segment of text that is supported by grounding.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroundingSegment {
+    pub start_index: Option<u32>,
+    pub end_index: Option<u32>,
+    pub text: Option<String>,
+}
+
+/// Support information linking text segments to grounding chunks.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroundingSupport {
+    pub segment: Option<GroundingSegment>,
+    pub grounding_chunk_indices: Option<Vec<u32>>,
+}
+
+/// Search entry point for displaying search suggestions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchEntryPoint {
+    pub rendered_content: Option<String>,
+}
+
+/// Metadata about grounding with Google Search.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroundingMetadata {
+    /// Search queries that were executed.
+    #[serde(default)]
+    pub web_search_queries: Vec<String>,
+    /// HTML/CSS for rendering search suggestions.
+    #[serde(default)]
+    pub search_entry_point: Option<SearchEntryPoint>,
+    /// Web sources used for grounding.
+    #[serde(default)]
+    pub grounding_chunks: Vec<GroundingChunk>,
+    /// Links between text segments and their sources.
+    #[serde(default)]
+    pub grounding_supports: Vec<GroundingSupport>,
 }
 
 /// Response from the generateContent endpoint.

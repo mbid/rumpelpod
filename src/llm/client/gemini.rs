@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use crate::llm::types::gemini::{
         Content, FinishReason, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
-        GenerationConfig, Part, Role, SystemInstruction, Tool, ToolConfig,
+        GenerationConfig, GoogleSearch, Part, Role, SystemInstruction, Tool, ToolConfig,
     };
     use std::path::PathBuf;
 
@@ -277,7 +277,7 @@ mod tests {
 
         // Define a simple tool
         let tool = Tool {
-            function_declarations: vec![FunctionDeclaration {
+            function_declarations: Some(vec![FunctionDeclaration {
                 name: "get_weather".to_string(),
                 description: "Get the current weather in a city".to_string(),
                 parameters: serde_json::json!({
@@ -290,7 +290,8 @@ mod tests {
                     },
                     "required": ["city"]
                 }),
-            }],
+            }]),
+            google_search: None,
         };
 
         let request = GenerateContentRequest {
@@ -364,6 +365,60 @@ mod tests {
         assert!(
             text.to_lowercase().contains("claude"),
             "Response should mention Claude, got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn test_google_search() {
+        let cache = get_cache();
+        let client = Client::new_with_cache(Some(cache)).expect("Failed to create client");
+
+        // Use Google Search to find recent information
+        let tool = Tool {
+            function_declarations: None,
+            google_search: Some(GoogleSearch::default()),
+        };
+
+        let request = GenerateContentRequest {
+            contents: vec![Content {
+                role: Role::User,
+                parts: vec![Part::text(
+                    "Who won the UEFA Euro 2024 football championship?",
+                )],
+            }],
+            tools: Some(vec![tool]),
+            tool_config: None,
+            system_instruction: None,
+            generation_config: Some(GenerationConfig {
+                temperature: Some(0.0),
+                max_output_tokens: Some(200),
+                ..Default::default()
+            }),
+        };
+
+        let response = client
+            .generate_content("gemini-2.5-flash", request)
+            .expect("API call failed");
+
+        // Check that we got grounding metadata (search was performed)
+        let candidate = &response.candidates[0];
+        assert!(
+            candidate.grounding_metadata.is_some(),
+            "Expected grounding metadata from Google Search"
+        );
+
+        let grounding = candidate.grounding_metadata.as_ref().unwrap();
+        assert!(
+            !grounding.web_search_queries.is_empty(),
+            "Expected web search queries to be populated"
+        );
+
+        // The response should mention Spain (the winner)
+        let text = response.text().expect("Expected text response");
+        assert!(
+            text.to_lowercase().contains("spain"),
+            "Response should mention Spain as Euro 2024 winner, got: {}",
             text
         );
     }

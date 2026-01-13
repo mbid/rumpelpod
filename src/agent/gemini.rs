@@ -12,7 +12,8 @@ use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
 use crate::llm::types::gemini::{
     Content, FinishReason, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
-    GenerateContentRequest, GenerationConfig, Part, Role, SystemInstruction, Tool, ToolConfig,
+    GenerateContentRequest, GenerationConfig, GoogleSearch, Part, Role, SystemInstruction, Tool,
+    ToolConfig,
 };
 
 use super::common::{
@@ -72,14 +73,21 @@ pub fn run_gemini_agent(
     // Track if we've processed the initial prompt (for non-TTY mode)
     let mut processed_initial = false;
 
-    // Build the tools list
-    let tools = vec![Tool {
-        function_declarations: vec![
-            make_function_declaration(ToolName::Bash),
-            make_function_declaration(ToolName::Edit),
-            make_function_declaration(ToolName::Write),
-        ],
-    }];
+    // Build the tools list - function declarations and Google Search
+    let tools = vec![
+        Tool {
+            function_declarations: Some(vec![
+                make_function_declaration(ToolName::Bash),
+                make_function_declaration(ToolName::Edit),
+                make_function_declaration(ToolName::Write),
+            ]),
+            google_search: None,
+        },
+        Tool {
+            function_declarations: None,
+            google_search: Some(GoogleSearch::default()),
+        },
+    ];
 
     loop {
         let user_input = if let Some(ref prompt) = initial_prompt {
@@ -135,6 +143,13 @@ pub fn run_gemini_agent(
 
             let candidate = &response.candidates[0];
             let response_content = &candidate.content;
+
+            // Log Google Search queries if grounding was used
+            if let Some(ref grounding) = candidate.grounding_metadata {
+                for query in &grounding.web_search_queries {
+                    chat_println!(chat_history, "[search] {}", query);
+                }
+            }
 
             // Process the response parts
             let mut has_function_call = false;
