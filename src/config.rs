@@ -50,6 +50,17 @@ pub enum Model {
     /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
     #[value(name = "grok-4.1-fast")]
     Grok41Fast,
+
+    // Gemini models (Google)
+    /// Gemini 2.5 Flash - fast, stable, best price-performance
+    #[value(name = "gemini-2.5-flash")]
+    Gemini25Flash,
+    /// Gemini 3 Flash - frontier model built for speed and scale
+    #[value(name = "gemini-3-flash")]
+    Gemini3Flash,
+    /// Gemini 3 Pro - most intelligent frontier model
+    #[value(name = "gemini-3-pro")]
+    Gemini3Pro,
 }
 
 /// Top-level configuration structure parsed from `.sandbox.toml`.

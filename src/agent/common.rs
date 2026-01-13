@@ -23,6 +23,9 @@ pub fn model_api_id(model: Model) -> &'static str {
         Model::Grok3Mini => "grok-3-mini",
         Model::Grok4 => "grok-4",
         Model::Grok41Fast => "grok-4-1-fast",
+        Model::Gemini25Flash => "gemini-2.5-flash",
+        Model::Gemini3Flash => "gemini-3-flash-preview",
+        Model::Gemini3Pro => "gemini-3-pro-preview",
     }
 }
 
@@ -31,6 +34,7 @@ pub fn model_provider(model: Model) -> &'static str {
     match model {
         Model::Opus | Model::Sonnet | Model::Haiku => "anthropic",
         Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => "xai",
+        Model::Gemini25Flash | Model::Gemini3Flash | Model::Gemini3Pro => "gemini",
     }
 }
 

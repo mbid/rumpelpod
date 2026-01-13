@@ -2,6 +2,7 @@
 
 mod anthropic;
 pub mod common;
+mod gemini;
 pub mod history;
 mod xai;
 
@@ -15,6 +16,7 @@ use crate::llm::cache::LlmCache;
 
 use anthropic::run_claude_agent;
 use common::{model_api_id, model_provider};
+use gemini::run_gemini_agent;
 use history::{resolve_conversation, ConversationChoice, ConversationTracker};
 use xai::run_grok_agent;
 
@@ -71,6 +73,15 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             tracker,
         ),
         Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => run_grok_agent(
+            container_name,
+            user,
+            repo_path,
+            model,
+            cache,
+            initial_history,
+            tracker,
+        ),
+        Model::Gemini25Flash | Model::Gemini3Flash | Model::Gemini3Pro => run_gemini_agent(
             container_name,
             user,
             repo_path,

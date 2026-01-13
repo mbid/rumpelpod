@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "get_weather",
+              "args": {
+                "city": "Paris"
+              }
+            },
+            "thoughtSignature": "CuMBAXLI2nwHodyMlvO82L7Wn/agxDdWxtDyOktqjHQDqSb0b+L0GYFj3BXFNRYvy62QSKHcvnP5CMm8EcFNSdtQGnHUy3XM75XbSI3jmmRrD+/ZrAUBO1ajpIfUGAWI799w5MdstKB1PTn/ubYdTfEZme/2FkgjYQqpbGLOcvx/tjP0oc2por3YDhs7lUe7dNLhuOLOIjruJztWeyZSFNJa+z1dXR+ZgMGfToHXoijiSII7t7BQ8DHeT9OZYOTb9TDICMtW2Y6OXYWOiC5sUjfp4AoefcxOJPkgaI1LZqcKaazxVrg="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 50,
+    "candidatesTokenCount": 15,
+    "totalTokenCount": 112,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 50
+      }
+    ],
+    "thoughtsTokenCount": 47
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "cJtmaYH-DKeixN8P4JrG-QQ"
+}

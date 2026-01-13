@@ -86,8 +86,8 @@ Run an LLM agent inside a sandbox.
 The agent runs autonomously, executing commands in the sandbox. All changes \
 are isolated - safety comes from the sandbox, not from asking for permission.
 
-Requires ANTHROPIC_API_KEY or XAI_API_KEY environment variable depending on \
-the model. Project-specific instructions can be provided in an AGENTS.md file.
+Requires ANTHROPIC_API_KEY, XAI_API_KEY, or GEMINI_API_KEY environment variable \
+depending on the model. Project-specific instructions can be provided in an AGENTS.md file.
 ")]
     Agent(AgentCommand),
 
