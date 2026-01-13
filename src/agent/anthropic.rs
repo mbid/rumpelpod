@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::chat_println;
 use crate::config::Model;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
@@ -17,7 +16,7 @@ use crate::llm::types::anthropic::{
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_vim, model_api_id, read_agents_md, ToolName,
+    execute_write_in_sandbox, get_input_via_editor, model_api_id, read_agents_md, ToolName,
     MAX_TOKENS,
 };
 use super::history::ConversationTracker;
@@ -57,8 +56,16 @@ fn filter_invalid_content(Message { role, content }: Message) -> Option<Message>
     let content: Vec<ContentBlock> = content
         .into_iter()
         .filter(|block| match block {
+            // Filter empty text blocks
             ContentBlock::Text { text, .. } => !text.trim().is_empty(),
-            _ => true,
+            // Keep all other content block types
+            ContentBlock::Image { .. }
+            | ContentBlock::ToolUse { .. }
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::ServerToolUse { .. }
+            | ContentBlock::WebSearchToolResult { .. }
+            | ContentBlock::WebFetchToolResult { .. }
+            | ContentBlock::WebFetchToolResultError { .. } => true,
         })
         .collect();
 
@@ -89,8 +96,6 @@ pub fn run_claude_agent(
         None => Vec::new(),
     };
 
-    let mut chat_history = String::new();
-
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(container_name, user, repo_path);
     let system_prompt = build_system_prompt(agents_md.as_deref());
@@ -119,7 +124,8 @@ pub fn run_claude_agent(
             processed_initial = true;
             prompt.clone()
         } else {
-            let input = get_input_via_vim(&chat_history)?;
+            let chat_history = format_anthropic_history(&messages);
+            let input = get_input_via_editor(&chat_history)?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;
@@ -129,7 +135,7 @@ pub fn run_claude_agent(
             input
         };
 
-        chat_println!(chat_history, "> {}", user_input);
+        println!("> {user_input}");
         stdout.flush()?;
 
         messages.push(Message {
@@ -148,13 +154,17 @@ pub fn run_claude_agent(
                 if last_msg.role == Role::User {
                     if let Some(last_content) = last_msg.content.last_mut() {
                         match last_content {
-                            ContentBlock::Text { cache_control, .. } => {
+                            ContentBlock::Text { cache_control, .. }
+                            | ContentBlock::Image { cache_control, .. }
+                            | ContentBlock::ToolResult { cache_control, .. } => {
                                 *cache_control = Some(CacheControl::default());
                             }
-                            ContentBlock::ToolResult { cache_control, .. } => {
-                                *cache_control = Some(CacheControl::default());
-                            }
-                            _ => {}
+                            // Tool use and server tool blocks don't support cache control
+                            ContentBlock::ToolUse { .. }
+                            | ContentBlock::ServerToolUse { .. }
+                            | ContentBlock::WebSearchToolResult { .. }
+                            | ContentBlock::WebFetchToolResult { .. }
+                            | ContentBlock::WebFetchToolResultError { .. } => {}
                         }
                     }
                 }
@@ -188,7 +198,7 @@ pub fn run_claude_agent(
             for block in &response.content {
                 match block {
                     ContentBlock::Text { text, .. } => {
-                        chat_println!(chat_history, "{}", text);
+                        println!("{text}");
                     }
                     ContentBlock::ToolUse { id, name, input } => {
                         has_tool_use = true;
@@ -200,7 +210,7 @@ pub fn run_claude_agent(
                                 let command =
                                     input.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
-                                chat_println!(chat_history, "$ {}", command);
+                                println!("$ {command}");
 
                                 let (output, success) = execute_bash_in_sandbox(
                                     container_name,
@@ -210,7 +220,7 @@ pub fn run_claude_agent(
                                 )?;
 
                                 if !output.is_empty() {
-                                    chat_println!(chat_history, "{}", output);
+                                    println!("{output}");
                                 }
 
                                 (output, success)
@@ -239,10 +249,10 @@ pub fn run_claude_agent(
                                 )?;
 
                                 if success {
-                                    chat_println!(chat_history, "[edit] {}", file_path);
+                                    println!("[edit] {file_path}");
                                 } else {
-                                    chat_println!(chat_history, "[edit] {} (failed)", file_path);
-                                    chat_println!(chat_history, "{}", output);
+                                    println!("[edit] {file_path} (failed)");
+                                    println!("{output}");
                                 }
                                 (output, success)
                             }
@@ -263,10 +273,10 @@ pub fn run_claude_agent(
                                 )?;
 
                                 if success {
-                                    chat_println!(chat_history, "[write] {}", file_path);
+                                    println!("[write] {file_path}");
                                 } else {
-                                    chat_println!(chat_history, "[write] {} (failed)", file_path);
-                                    chat_println!(chat_history, "{}", output);
+                                    println!("[write] {file_path} (failed)");
+                                    println!("{output}");
                                 }
                                 (output, success)
                             }
@@ -292,10 +302,10 @@ pub fn run_claude_agent(
                     ContentBlock::ServerToolUse { name, input, .. } => {
                         if name == "web_search" {
                             let query = input.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                            chat_println!(chat_history, "[search] {}", query);
+                            println!("[search] {query}");
                         } else if name == "web_fetch" {
                             let url = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
-                            chat_println!(chat_history, "[fetch] {}", url);
+                            println!("[fetch] {url}");
                         }
                     }
                     ContentBlock::WebSearchToolResult { .. } => {}
@@ -304,13 +314,13 @@ pub fn run_claude_agent(
                         match content {
                             WebFetchResult::WebFetchToolError { error_code }
                             | WebFetchResult::WebFetchToolResultError { error_code } => {
-                                chat_println!(chat_history, "[fetch] (failed: {})", error_code);
+                                println!("[fetch] (failed: {error_code})");
                             }
                             WebFetchResult::WebFetchResult { .. } => {}
                         }
                     }
                     ContentBlock::WebFetchToolResultError { error_code, .. } => {
-                        chat_println!(chat_history, "[fetch] (failed: {})", error_code);
+                        println!("[fetch] (failed: {error_code})");
                     }
                 }
             }
@@ -346,9 +356,137 @@ pub fn run_claude_agent(
     Ok(())
 }
 
+/// Format Anthropic messages into human-readable chat history.
+fn format_anthropic_history(messages: &[Message]) -> String {
+    let mut output = String::new();
+
+    for msg in messages {
+        match msg.role {
+            Role::User => {
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text, .. } => {
+                            output.push_str(&format!("> {text}\n"));
+                        }
+                        ContentBlock::ToolResult { content, .. } => {
+                            // Tool results are shown inline when tools are executed,
+                            // no need to show again
+                            if !content.is_empty() {
+                                output.push_str(&format!("{content}\n"));
+                            }
+                        }
+                        // Images are not displayed in chat history
+                        ContentBlock::Image { .. }
+                        | ContentBlock::ToolUse { .. }
+                        | ContentBlock::ServerToolUse { .. }
+                        | ContentBlock::WebSearchToolResult { .. }
+                        | ContentBlock::WebFetchToolResult { .. }
+                        | ContentBlock::WebFetchToolResultError { .. } => {}
+                    }
+                }
+            }
+            Role::Assistant => {
+                for block in &msg.content {
+                    match block {
+                        ContentBlock::Text { text, .. } => {
+                            if !text.trim().is_empty() {
+                                output.push_str(&format!("{text}\n"));
+                            }
+                        }
+                        ContentBlock::ToolUse { name, input, .. } => {
+                            if name == "bash" {
+                                if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("$ {cmd}\n"));
+                                }
+                            } else if name == "edit" {
+                                if let Some(path) = input.get("file_path").and_then(|v| v.as_str())
+                                {
+                                    output.push_str(&format!("[edit] {path}\n"));
+                                }
+                            } else if name == "write" {
+                                if let Some(path) = input.get("file_path").and_then(|v| v.as_str())
+                                {
+                                    output.push_str(&format!("[write] {path}\n"));
+                                }
+                            }
+                        }
+                        ContentBlock::ServerToolUse { name, input, .. } => {
+                            if name == "web_search" {
+                                if let Some(query) = input.get("query").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("[search] {query}\n"));
+                                }
+                            } else if name == "web_fetch" {
+                                if let Some(url) = input.get("url").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("[fetch] {url}\n"));
+                                }
+                            }
+                        }
+                        // Results from server tools are not displayed in chat history
+                        ContentBlock::Image { .. }
+                        | ContentBlock::ToolResult { .. }
+                        | ContentBlock::WebSearchToolResult { .. }
+                        | ContentBlock::WebFetchToolResult { .. }
+                        | ContentBlock::WebFetchToolResultError { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_format_anthropic_history_user_message() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text {
+                text: "Hello, how are you?".to_string(),
+                cache_control: None,
+            }],
+        }];
+
+        let result = format_anthropic_history(&messages);
+        assert_eq!(result, "> Hello, how are you?\n");
+    }
+
+    #[test]
+    fn test_format_anthropic_history_assistant_text() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Text {
+                text: "I'm doing well!".to_string(),
+                cache_control: None,
+            }],
+        }];
+
+        let result = format_anthropic_history(&messages);
+        assert_eq!(result, "I'm doing well!\n");
+    }
+
+    #[test]
+    fn test_format_anthropic_history_tool_use() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "test-123".to_string(),
+                name: "bash".to_string(),
+                input: serde_json::json!({"command": "ls -la"}),
+            }],
+        }];
+
+        let result = format_anthropic_history(&messages);
+        assert_eq!(result, "$ ls -la\n");
+    }
+
+    #[test]
+    fn test_format_anthropic_history_empty() {
+        assert_eq!(format_anthropic_history(&[]), "");
+    }
 
     #[test]
     fn test_filter_removes_empty_text_blocks() {

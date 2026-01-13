@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::chat_println;
 use crate::config::Model;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::xai::Client;
@@ -17,7 +16,7 @@ use crate::llm::types::xai::{
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_vim, model_api_id, read_agents_md, ToolName,
+    execute_write_in_sandbox, get_input_via_editor, model_api_id, read_agents_md, ToolName,
     MAX_TOKENS,
 };
 use super::history::ConversationTracker;
@@ -46,8 +45,6 @@ pub fn run_grok_agent(
     let client = Client::new_with_cache(cache)?;
 
     let mut stdout = std::io::stdout();
-
-    let mut chat_history = String::new();
 
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(container_name, user, repo_path);
@@ -94,7 +91,8 @@ pub fn run_grok_agent(
             processed_initial = true;
             prompt.clone()
         } else {
-            let input = get_input_via_vim(&chat_history)?;
+            let chat_history = format_xai_history(&messages);
+            let input = get_input_via_editor(&chat_history)?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;
@@ -104,7 +102,7 @@ pub fn run_grok_agent(
             input
         };
 
-        chat_println!(chat_history, "> {}", user_input);
+        println!("> {user_input}");
         stdout.flush()?;
 
         messages.push(Message {
@@ -148,7 +146,7 @@ pub fn run_grok_agent(
             // Handle text content if present
             if let Some(ref content) = assistant_message.content {
                 if !content.is_empty() {
-                    chat_println!(chat_history, "{}", content);
+                    println!("{content}");
                 }
             }
 
@@ -180,13 +178,13 @@ pub fn run_grok_agent(
                             let command =
                                 args.get("command").and_then(|v| v.as_str()).unwrap_or("");
 
-                            chat_println!(chat_history, "$ {}", command);
+                            println!("$ {command}");
 
                             let (output, success) =
                                 execute_bash_in_sandbox(container_name, user, repo_path, command)?;
 
                             if !output.is_empty() {
-                                chat_println!(chat_history, "{}", output);
+                                println!("{output}");
                             }
 
                             (output, success)
@@ -213,10 +211,10 @@ pub fn run_grok_agent(
                             )?;
 
                             if success {
-                                chat_println!(chat_history, "[edit] {}", file_path);
+                                println!("[edit] {file_path}");
                             } else {
-                                chat_println!(chat_history, "[edit] {} (failed)", file_path);
-                                chat_println!(chat_history, "{}", output);
+                                println!("[edit] {file_path} (failed)");
+                                println!("{output}");
                             }
                             (output, success)
                         }
@@ -235,17 +233,17 @@ pub fn run_grok_agent(
                             )?;
 
                             if success {
-                                chat_println!(chat_history, "[write] {}", file_path);
+                                println!("[write] {file_path}");
                             } else {
-                                chat_println!(chat_history, "[write] {} (failed)", file_path);
-                                chat_println!(chat_history, "{}", output);
+                                println!("[write] {file_path} (failed)");
+                                println!("{output}");
                             }
                             (output, success)
                         }
                         Err(_) => {
                             let tool_name = &tool_call.function.name;
                             let error_msg = format!("Unknown tool: {tool_name}");
-                            chat_println!(chat_history, "[error] {}", error_msg);
+                            println!("[error] {error_msg}");
                             (error_msg, false)
                         }
                     };
@@ -285,4 +283,168 @@ pub fn run_grok_agent(
     }
 
     Ok(())
+}
+
+/// Format xAI messages into human-readable chat history.
+fn format_xai_history(messages: &[Message]) -> String {
+    use crate::llm::types::xai::ContentPart;
+
+    let mut output = String::new();
+
+    for msg in messages {
+        match msg.role {
+            Role::System => {
+                // Skip system messages - they're not part of chat history display
+            }
+            Role::User => {
+                if let Some(ref content) = msg.content {
+                    let text = match content {
+                        MessageContent::Text(s) => s.as_str(),
+                        MessageContent::Parts(parts) => {
+                            // Take first text part if available
+                            parts
+                                .iter()
+                                .find_map(|p| match p {
+                                    ContentPart::Text { text } => Some(text.as_str()),
+                                    // Images are not displayed in text history
+                                    ContentPart::ImageUrl { .. } => None,
+                                })
+                                .unwrap_or("")
+                        }
+                    };
+                    if !text.is_empty() {
+                        output.push_str(&format!("> {text}\n"));
+                    }
+                }
+            }
+            Role::Assistant => {
+                // Handle text content
+                if let Some(ref content) = msg.content {
+                    let text = match content {
+                        MessageContent::Text(s) => s.as_str(),
+                        MessageContent::Parts(parts) => parts
+                            .iter()
+                            .find_map(|p| match p {
+                                ContentPart::Text { text } => Some(text.as_str()),
+                                // Images are not displayed in text history
+                                ContentPart::ImageUrl { .. } => None,
+                            })
+                            .unwrap_or(""),
+                    };
+                    if !text.is_empty() {
+                        output.push_str(&format!("{text}\n"));
+                    }
+                }
+
+                // Handle tool calls
+                if let Some(ref tool_calls) = msg.tool_calls {
+                    for tc in tool_calls {
+                        let args: serde_json::Value =
+                            serde_json::from_str(&tc.function.arguments).unwrap_or_default();
+                        match tc.function.name.as_str() {
+                            "bash" => {
+                                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("$ {cmd}\n"));
+                                }
+                            }
+                            "edit" => {
+                                if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("[edit] {path}\n"));
+                                }
+                            }
+                            "write" => {
+                                if let Some(path) = args.get("file_path").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("[write] {path}\n"));
+                                }
+                            }
+                            // Unknown tools are ignored in history display
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Role::Tool => {
+                // Tool results are shown inline after commands
+                if let Some(ref content) = msg.content {
+                    let text = match content {
+                        MessageContent::Text(s) => s.as_str(),
+                        MessageContent::Parts(parts) => parts
+                            .iter()
+                            .find_map(|p| match p {
+                                ContentPart::Text { text } => Some(text.as_str()),
+                                // Images are not displayed in text history
+                                ContentPart::ImageUrl { .. } => None,
+                            })
+                            .unwrap_or(""),
+                    };
+                    if !text.is_empty() {
+                        output.push_str(&format!("{text}\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::types::xai::{FunctionCall, ToolCall, ToolCallType};
+
+    #[test]
+    fn test_format_xai_history_conversation() {
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: Some(MessageContent::Text(
+                    "You are a helpful assistant.".to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("Hello".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: Some(MessageContent::Text("Hi there!".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+        ];
+
+        let result = format_xai_history(&messages);
+        // System messages should be skipped
+        assert_eq!(result, "> Hello\nHi there!\n");
+    }
+
+    #[test]
+    fn test_format_xai_history_tool_calls() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call-123".to_string(),
+                tool_type: ToolCallType::Function,
+                function: FunctionCall {
+                    name: "bash".to_string(),
+                    arguments: r#"{"command": "pwd"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        }];
+
+        let result = format_xai_history(&messages);
+        assert_eq!(result, "$ pwd\n");
+    }
+
+    #[test]
+    fn test_format_xai_history_empty() {
+        assert_eq!(format_xai_history(&[]), "");
+    }
 }

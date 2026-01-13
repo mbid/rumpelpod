@@ -16,7 +16,7 @@ use std::process::Stdio;
 use crate::common::{sandbox_command, TestDaemon, TestRepo};
 
 /// Get the llm-cache directory path.
-fn llm_cache_dir() -> PathBuf {
+pub(super) fn llm_cache_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache")
 }
 

@@ -430,29 +430,34 @@ pub fn confirm_exit() -> Result<bool> {
     Ok(false)
 }
 
-/// Get user input by launching vim on a temp file containing the chat history.
+/// Get user input by launching an editor on a temp file containing the chat history.
 /// Returns the new message (content after the chat history prefix).
 /// If the user doesn't preserve the chat history prefix, prompts to retry.
-pub fn get_input_via_vim(chat_history: &str) -> Result<String> {
+///
+/// The editor can be overridden via the `EDITOR` environment variable,
+/// defaulting to `vim`.
+pub fn get_input_via_editor(chat_history: &str) -> Result<String> {
     use std::fs;
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
 
     loop {
         let temp_dir = std::env::temp_dir();
         let pid = std::process::id();
         let temp_file = temp_dir.join(format!("sandbox-chat-{pid}.txt"));
 
-        fs::write(&temp_file, chat_history).context("Failed to write temp file for vim")?;
+        fs::write(&temp_file, chat_history).context("Failed to write temp file for editor")?;
 
-        let status = Command::new("vim")
+        let status = Command::new(&editor)
             .arg(&temp_file)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()
-            .context("Failed to launch vim")?;
+            .context("Failed to launch editor")?;
 
         if !status.success() {
-            anyhow::bail!("vim exited with non-zero status");
+            anyhow::bail!("editor exited with non-zero status");
         }
 
         let edited_content = fs::read_to_string(&temp_file).context("Failed to read temp file")?;
@@ -472,19 +477,4 @@ pub fn get_input_via_vim(chat_history: &str) -> Result<String> {
         let new_message = edited_content[chat_history.len()..].trim().to_string();
         return Ok(new_message);
     }
-}
-
-/// Helper macro to append to chat history and print to stdout
-#[macro_export]
-macro_rules! chat_println {
-    ($history:expr) => {{
-        println!();
-        $history.push('\n');
-    }};
-    ($history:expr, $($arg:tt)*) => {{
-        let s = format!($($arg)*);
-        println!("{}", s);
-        $history.push_str(&s);
-        $history.push('\n');
-    }};
 }

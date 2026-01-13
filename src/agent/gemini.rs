@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::chat_println;
 use crate::config::Model;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
@@ -17,7 +16,7 @@ use crate::llm::types::gemini::{
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_vim, model_api_id, read_agents_md, ToolName,
+    execute_write_in_sandbox, get_input_via_editor, model_api_id, read_agents_md, ToolName,
     MAX_TOKENS,
 };
 use super::history::ConversationTracker;
@@ -47,8 +46,6 @@ pub fn run_gemini_agent(
     let client = Client::new_with_cache(cache)?;
 
     let mut stdout = std::io::stdout();
-
-    let mut chat_history = String::new();
 
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(container_name, user, repo_path);
@@ -98,7 +95,8 @@ pub fn run_gemini_agent(
             processed_initial = true;
             prompt.clone()
         } else {
-            let input = get_input_via_vim(&chat_history)?;
+            let chat_history = format_gemini_history(&contents);
+            let input = get_input_via_editor(&chat_history)?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;
@@ -108,7 +106,7 @@ pub fn run_gemini_agent(
             input
         };
 
-        chat_println!(chat_history, "> {}", user_input);
+        println!("> {user_input}");
         stdout.flush()?;
 
         contents.push(Content {
@@ -148,7 +146,7 @@ pub fn run_gemini_agent(
             // Log Google Search queries if grounding was used
             if let Some(ref grounding) = candidate.grounding_metadata {
                 for query in &grounding.web_search_queries {
-                    chat_println!(chat_history, "[search] {}", query);
+                    println!("[search] {query}");
                 }
             }
 
@@ -160,7 +158,7 @@ pub fn run_gemini_agent(
                 match part {
                     Part::Text(text) => {
                         if !text.is_empty() {
-                            chat_println!(chat_history, "{}", text);
+                            println!("{text}");
                         }
                     }
                     Part::FunctionCall(fc) => {
@@ -175,7 +173,7 @@ pub fn run_gemini_agent(
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
 
-                                chat_println!(chat_history, "$ {}", command);
+                                println!("$ {command}");
 
                                 let (output, success) = execute_bash_in_sandbox(
                                     container_name,
@@ -185,7 +183,7 @@ pub fn run_gemini_agent(
                                 )?;
 
                                 if !output.is_empty() {
-                                    chat_println!(chat_history, "{}", output);
+                                    println!("{output}");
                                 }
 
                                 (output, success)
@@ -217,10 +215,10 @@ pub fn run_gemini_agent(
                                 )?;
 
                                 if success {
-                                    chat_println!(chat_history, "[edit] {}", file_path);
+                                    println!("[edit] {file_path}");
                                 } else {
-                                    chat_println!(chat_history, "[edit] {} (failed)", file_path);
-                                    chat_println!(chat_history, "{}", output);
+                                    println!("[edit] {file_path} (failed)");
+                                    println!("{output}");
                                 }
                                 (output, success)
                             }
@@ -245,16 +243,16 @@ pub fn run_gemini_agent(
                                 )?;
 
                                 if success {
-                                    chat_println!(chat_history, "[write] {}", file_path);
+                                    println!("[write] {file_path}");
                                 } else {
-                                    chat_println!(chat_history, "[write] {} (failed)", file_path);
-                                    chat_println!(chat_history, "{}", output);
+                                    println!("[write] {file_path} (failed)");
+                                    println!("{output}");
                                 }
                                 (output, success)
                             }
                             Err(_) => {
                                 let error_msg = format!("Unknown tool: {}", fc.name);
-                                chat_println!(chat_history, "[error] {}", error_msg);
+                                println!("[error] {error_msg}");
                                 (error_msg, false)
                             }
                         };
@@ -268,7 +266,8 @@ pub fn run_gemini_agent(
 
                         function_responses.push(Part::function_response(&fc.name, response_value));
                     }
-                    _ => {}
+                    // Model responses don't contain inline data or function responses
+                    Part::InlineData(_) | Part::FunctionResponse(_) => {}
                 }
             }
 
@@ -304,4 +303,142 @@ pub fn run_gemini_agent(
     }
 
     Ok(())
+}
+
+/// Format Gemini contents into human-readable chat history.
+fn format_gemini_history(contents: &[Content]) -> String {
+    let mut output = String::new();
+
+    for content in contents {
+        match content.role {
+            Role::User => {
+                for part in &content.parts {
+                    match part {
+                        Part::Text(text) => {
+                            // User text messages (but not function responses)
+                            if !text.is_empty() {
+                                output.push_str(&format!("> {text}\n"));
+                            }
+                        }
+                        Part::FunctionResponse(fr) => {
+                            // Function response - show result or error inline
+                            if let Some(result) = fr.response.get("result").and_then(|v| v.as_str())
+                            {
+                                if !result.is_empty() {
+                                    output.push_str(&format!("{result}\n"));
+                                }
+                            } else if let Some(error) =
+                                fr.response.get("error").and_then(|v| v.as_str())
+                            {
+                                if !error.is_empty() {
+                                    output.push_str(&format!("{error}\n"));
+                                }
+                            }
+                        }
+                        // User messages don't contain function calls or inline data
+                        Part::InlineData(_) | Part::FunctionCall(_) => {}
+                    }
+                }
+            }
+            Role::Model => {
+                for part in &content.parts {
+                    match part {
+                        Part::Text(text) => {
+                            if !text.is_empty() {
+                                output.push_str(&format!("{text}\n"));
+                            }
+                        }
+                        Part::FunctionCall(fc) => match fc.name.as_str() {
+                            "bash" => {
+                                if let Some(cmd) = fc.args.get("command").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("$ {cmd}\n"));
+                                }
+                            }
+                            "edit" => {
+                                if let Some(path) =
+                                    fc.args.get("file_path").and_then(|v| v.as_str())
+                                {
+                                    output.push_str(&format!("[edit] {path}\n"));
+                                }
+                            }
+                            "write" => {
+                                if let Some(path) =
+                                    fc.args.get("file_path").and_then(|v| v.as_str())
+                                {
+                                    output.push_str(&format!("[write] {path}\n"));
+                                }
+                            }
+                            // Unknown tools are ignored in history display
+                            _ => {}
+                        },
+                        // Model responses don't contain function responses or inline data
+                        Part::InlineData(_) | Part::FunctionResponse(_) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::types::gemini::{FunctionCall, FunctionResponse};
+
+    #[test]
+    fn test_format_gemini_history_conversation() {
+        let contents = vec![
+            Content {
+                role: Role::User,
+                parts: vec![Part::Text("What time is it?".to_string())],
+            },
+            Content {
+                role: Role::Model,
+                parts: vec![Part::Text(
+                    "I don't have access to the current time.".to_string(),
+                )],
+            },
+        ];
+
+        let result = format_gemini_history(&contents);
+        assert_eq!(
+            result,
+            "> What time is it?\nI don't have access to the current time.\n"
+        );
+    }
+
+    #[test]
+    fn test_format_gemini_history_function_call() {
+        let contents = vec![Content {
+            role: Role::Model,
+            parts: vec![Part::FunctionCall(FunctionCall {
+                name: "edit".to_string(),
+                args: serde_json::json!({"file_path": "src/main.rs"}),
+            })],
+        }];
+
+        let result = format_gemini_history(&contents);
+        assert_eq!(result, "[edit] src/main.rs\n");
+    }
+
+    #[test]
+    fn test_format_gemini_history_function_response() {
+        let contents = vec![Content {
+            role: Role::User,
+            parts: vec![Part::FunctionResponse(FunctionResponse {
+                name: "bash".to_string(),
+                response: serde_json::json!({"result": "file1.txt\nfile2.txt"}),
+            })],
+        }];
+
+        let result = format_gemini_history(&contents);
+        assert_eq!(result, "file1.txt\nfile2.txt\n");
+    }
+
+    #[test]
+    fn test_format_gemini_history_empty() {
+        assert_eq!(format_gemini_history(&[]), "");
+    }
 }

@@ -1,11 +1,14 @@
 //! Integration tests for the agent using Anthropic Claude models.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use indoc::formatdoc;
 use sandbox::CommandExt;
 
-use super::run_agent_with_prompt_model_and_args;
+use super::{llm_cache_dir, run_agent_with_prompt_model_and_args};
 use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
 
 const MODEL: &str = "haiku";
@@ -388,5 +391,139 @@ fn agent_continue_no_conversations_errors() {
         stderr.contains("No conversations") || stderr.contains("no conversation"),
         "Error should mention no conversations exist.\nstderr: {}",
         stderr
+    );
+}
+
+// ============================================================================
+// Interactive mode / editor tests
+// ============================================================================
+
+/// Create a mock editor script that saves original content for verification
+/// and exits immediately (simulating user not typing anything = empty input = exit).
+fn create_mock_editor_exit(script_dir: &Path, verify_file: &Path) -> PathBuf {
+    let script_path = script_dir.join("mock-editor.sh");
+    let verify_file_str = verify_file.to_string_lossy();
+    let script_content = formatdoc! {r#"
+        #!/bin/bash
+        # Mock editor: save original content for verification, then exit without changes
+        # (simulating user closing editor without adding new input)
+        FILE="$1"
+        cp "$FILE" "{verify_file_str}"
+        # Exit successfully, file unchanged means empty input -> agent will prompt for exit
+    "#};
+    fs::write(&script_path, &script_content).expect("Failed to write mock editor script");
+
+    let perms = std::fs::Permissions::from_mode(0o755);
+    fs::set_permissions(&script_path, perms).expect("Failed to set script permissions");
+
+    script_path
+}
+
+#[test]
+fn agent_interactive_resume_shows_history() {
+    // When resuming a conversation in interactive mode, the editor should show
+    // the previous chat history.
+    //
+    // This test uses a PTY to simulate a real terminal, allowing us to test the
+    // interactive code path where get_input_via_vim is called.
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+    use std::io::Write as IoWrite;
+    use std::time::Duration;
+
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // First run: create a conversation with a unique identifier via non-TTY mode
+    let unique_marker = "UNIQUE_HISTORY_MARKER_XYZ123";
+    let output1 = run_agent_with_prompt(
+        &repo,
+        &daemon,
+        &format!("Remember this marker: {unique_marker}. Just acknowledge."),
+    );
+    assert!(output1.status.success(), "First agent run should succeed");
+
+    // Create temp directory for mock editor script and verification file
+    let temp_dir = tempfile::TempDir::new().expect("Failed to create temp dir");
+    let verify_file = temp_dir.path().join("editor-content.txt");
+
+    // Create mock editor that saves the initial content and exits
+    let editor_path = create_mock_editor_exit(temp_dir.path(), &verify_file);
+
+    // Second run: resume in interactive mode with PTY
+    let cache_dir = llm_cache_dir();
+    let pty_system = native_pty_system();
+
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("Failed to create PTY");
+
+    let sandbox_bin = assert_cmd::cargo::cargo_bin!("sandbox");
+
+    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    cmd.cwd(repo.path());
+    cmd.env(
+        "SANDBOX_DAEMON_SOCKET",
+        daemon.socket_path.to_str().unwrap(),
+    );
+    cmd.env("EDITOR", editor_path.to_str().unwrap());
+    cmd.args([
+        "agent",
+        "test",
+        "--model",
+        MODEL,
+        "--cache",
+        cache_dir.to_str().unwrap(),
+        "--continue=0",
+    ]);
+
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .expect("Failed to spawn command");
+
+    // Wait for the mock editor to run and capture the content
+    std::thread::sleep(Duration::from_secs(2));
+
+    // After editor exits with empty input, agent prompts "Exit? [Y/n]"
+    // Send 'y' + Enter to confirm exit
+    {
+        let mut writer = pair.master.take_writer().expect("Failed to get writer");
+        writeln!(writer, "y").expect("Failed to write to PTY");
+    }
+
+    // Wait for process to complete with timeout
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => break,
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    panic!("Process did not exit within timeout");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => panic!("Error waiting for process: {}", e),
+        }
+    }
+
+    // Check that the verification file was created and contains the history
+    assert!(
+        verify_file.exists(),
+        "Verification file should exist (editor was invoked)"
+    );
+
+    let editor_content =
+        fs::read_to_string(&verify_file).expect("Failed to read verification file");
+    assert!(
+        editor_content.contains(unique_marker),
+        "Editor should have received chat history containing the unique marker.\nEditor content:\n{}",
+        editor_content
     );
 }
