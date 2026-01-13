@@ -1,8 +1,18 @@
-FROM debian:trixie
+ARG BASE_IMAGE=debian:trixie
+
+FROM $BASE_IMAGE
 
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install --yes \
+        systemd \
+        systemd-sysv \
+        libsystemd0 \
+        dbus \
+        kmod \
+        iptables \
+        iproute2 \
+        udev \
         build-essential \
         make \
         cmake \
@@ -15,49 +25,61 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         sudo \
         locales \
         gnupg \
-        docker.io \
-        lighttpd \
-    && rm -rf /var/lib/apt/lists/*
+        docker.io
 
-RUN curl -LO https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.appimage && \
-    chmod +x nvim-linux-x86_64.appimage && \
-    ./nvim-linux-x86_64.appimage --appimage-extract && \
-    mv squashfs-root /opt/nvim && \
-    ln -s /opt/nvim/usr/bin/nvim /usr/local/bin/nvim && \
-    ln -s /opt/nvim/usr/bin/nvim /usr/local/bin/vim && \
-    rm nvim-linux-x86_64.appimage
+RUN echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
+    && systemctl mask \
+        proc-sys-fs-binfmt_misc.automount \
+        apparmor.service \
+        tmp.mount \
+        systemd-udevd.service \
+        systemd-sysctl.service \
+        systemd-udevd-kernel.socket \
+        systemd-udevd-control.socket \
+        systemd-modules-load.service \
+        sys-kernel-debug.mount \
+        sys-kernel-tracing.mount \
+        sys-kernel-config.mount \
+        e2scrub_reap.service \
+        e2scrub_all.timer
 
-# Create entrypoint that starts dockerd in background.
-RUN printf '#!/bin/bash\n\
-# Start dockerd in background if not already running\n\
-if ! pgrep -x dockerd > /dev/null; then\n\
-    sudo sh -c "dockerd > /var/log/dockerd.log 2>&1" &\n\
-    # Wait for docker to be ready (max 30s)\n\
-    for i in $(seq 1 30); do\n\
-        if docker info > /dev/null 2>&1; then\n\
-            break\n\
-        fi\n\
-        sleep 1\n\
-    done\n\
-    # Make socket world-accessible (needed because --user bypasses /etc/group)\n\
-    sudo chmod 666 /var/run/docker.sock\n\
-fi\n\
-exec "$@"\n' > /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+STOPSIGNAL SIGRTMIN+3
 
-ARG USER_NAME=developer
+ARG USER=dev
 ARG USER_ID=1000
 ARG GROUP_ID=1000
 
-RUN groupadd -g ${GROUP_ID} ${USER_NAME} || groupadd ${USER_NAME} && \
-    useradd -m -u ${USER_ID} -g ${USER_NAME} -s /usr/bin/fish ${USER_NAME} && \
-    echo "${USER_NAME} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
-    usermod -aG docker ${USER_NAME}
+ENV USER=${USER}
+ENV USER_ID=${USER_ID}
+ENV GROUP_ID=${GROUP_ID}
 
-USER ${USER_NAME}
-WORKDIR /home/${USER_NAME}
+RUN groupadd -g ${GROUP_ID} ${USER} || groupadd ${USER} && \
+    useradd -m -u ${USER_ID} -g ${USER} -s /usr/bin/fish ${USER} && \
+    echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
+    usermod -aG docker ${USER}
 
-RUN git clone https://github.com/mbid/adwaita.nvim.git ~/.local/share/nvim/site/pack/plugins/start/adwaita.nvim
+USER ${USER}
+
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/home/${USER_NAME}/.cargo/bin:${PATH}"
+ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+RUN --mount=type=bind,target=/meta.git \
+    export GIT_CONFIG_GLOBAL=/tmp/gitconfig && \
+    printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_GLOBAL" && \
+    git clone /meta.git /home/$USER/sandbox && \
+    rm /tmp/gitconfig
+
+ARG ANTHROPIC_API_KEY
+ARG XAI_API_KEY
+ARG GEMINI_API_KEY
+
+ENV ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+ENV XAI_API_KEY=${XAI_API_KEY}
+ENV GEMINI_API_KEY=${GEMINI_API_KEY}
+
+# Initialize cargo crate registry, populate target/ so that incremental builds will be fast.
+RUN cargo build || cargo test --no-run || true
+
+USER root
+
+ENTRYPOINT ["/sbin/init"]

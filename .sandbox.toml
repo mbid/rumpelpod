@@ -1,28 +1,4 @@
-# Sandbox configuration for this repository.
-# See src/sandbox_config.rs for the schema documentation.
-
-env = ["ANTHROPIC_API_KEY", "XAI_API_KEY"]
-
-# Use sysbox-runc runtime for Docker-in-Docker support
+image = "sandbox-dev"
 runtime = "sysbox-runc"
-
-# Use copy mode for overlays (required for sysbox-runc compatibility)
-overlay-mode = "copy"
-
-# Read-only config file mounts
-[[mounts.readonly]]
-host = "~/.gitconfig"
-
-[[mounts.readonly]]
-host = "~/.config/fish"
-
-[[mounts.readonly]]
-host = "~/.config/nvim"
-
-# Build artifacts as overlay (copy-on-write)
-[[mounts.overlay]]
-host = "target"
-
-# Cargo registry and crate cache
-[[mounts.overlay]]
-host = "~/.cargo/registry"
+user = "dev"
+repo-path = "/home/dev/sandbox"
