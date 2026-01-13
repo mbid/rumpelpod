@@ -8,7 +8,7 @@ use std::process::Command;
 use indoc::formatdoc;
 use sandbox::CommandExt;
 
-use super::{llm_cache_dir, run_agent_with_prompt_model_and_args};
+use super::{llm_cache_dir, run_agent_with_prompt_and_model, run_agent_with_prompt_model_and_args};
 use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
 
 const MODEL: &str = "haiku";
@@ -19,7 +19,7 @@ fn run_agent_with_prompt(
     daemon: &TestDaemon,
     prompt: &str,
 ) -> std::process::Output {
-    run_agent_with_prompt_model_and_args(repo, daemon, prompt, MODEL, &[])
+    run_agent_with_prompt_and_model(repo, daemon, prompt, MODEL)
 }
 
 /// Helper to run agent with a prompt and extra CLI arguments.
@@ -146,6 +146,32 @@ fn agent_writes_file() {
     assert!(
         stdout.contains(expected_content),
         "Agent output should contain the written content.\nstdout: {}\nstderr: {}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn agent_web_search() {
+    // Test that the Anthropic agent can use web search to find information past its knowledge cutoff.
+    // The US penny production ended in November 2025, after the model's training data.
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    let output = run_agent_with_prompt(
+        &repo,
+        &daemon,
+        "Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // The last US penny was minted on November 12, 2025
+    assert!(
+        stdout.contains("2025-11-12"),
+        "Agent should find that the last US penny was minted on 2025-11-12.\nstdout: {}\nstderr: {}",
         stdout,
         String::from_utf8_lossy(&output.stderr)
     );
