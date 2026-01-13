@@ -1548,3 +1548,265 @@ fn gateway_sandbox_reset_syncs_to_host_via_force_push() {
         "Host remote ref should be updated to commit1 after reset (force push)"
     );
 }
+
+#[test]
+fn gateway_host_head_synced_on_setup() {
+    // Test that host/HEAD is synced to the gateway when the gateway is set up
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Get the current HEAD commit before launching sandbox
+    let head_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Launch sandbox - this triggers gateway setup
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "head-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    // Verify gateway has host/HEAD
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+    let gateway_branches = get_branches(&gateway);
+    assert!(
+        gateway_branches.contains(&"host/HEAD".to_string()),
+        "Gateway should have host/HEAD, got: {:?}",
+        gateway_branches
+    );
+
+    // Verify host/HEAD points to the correct commit
+    let gateway_head_commit = get_branch_commit(&gateway, "host/HEAD");
+    assert_eq!(
+        gateway_head_commit,
+        Some(head_commit.clone()),
+        "Gateway host/HEAD should point to the host's current HEAD"
+    );
+}
+
+#[test]
+fn gateway_host_head_available_in_sandbox() {
+    // Test that sandbox can access host/HEAD as a remote-tracking ref
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Get the current HEAD commit
+    let head_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Launch sandbox and fetch host refs
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "sandbox-head-test", "--", "git", "fetch", "host"])
+        .success()
+        .expect("Failed to fetch host refs");
+
+    // Verify sandbox can resolve host/HEAD
+    let sandbox_head_output = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "sandbox-head-test",
+            "--",
+            "git",
+            "rev-parse",
+            "host/HEAD",
+        ])
+        .success()
+        .expect("Failed to resolve host/HEAD in sandbox");
+
+    let sandbox_head_commit = String::from_utf8_lossy(&sandbox_head_output)
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        sandbox_head_commit, head_commit,
+        "Sandbox should be able to resolve host/HEAD to the host's current commit"
+    );
+}
+
+#[test]
+fn gateway_host_head_updates_on_commit() {
+    // Test that host/HEAD is updated when a new commit is made
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox to set up gateway
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "head-commit-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    // Get initial host/HEAD commit
+    let initial_head = get_branch_commit(&gateway, "host/HEAD").unwrap();
+
+    // Make a new commit on host
+    create_commit(repo.path(), "Test commit for HEAD update");
+    let new_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Verify gateway's host/HEAD is updated
+    let updated_head = get_branch_commit(&gateway, "host/HEAD").unwrap();
+
+    assert_ne!(
+        initial_head, updated_head,
+        "host/HEAD should be updated after commit"
+    );
+    assert_eq!(
+        updated_head, new_commit,
+        "host/HEAD should point to the new commit"
+    );
+}
+
+#[test]
+fn gateway_host_head_updates_on_branch_switch() {
+    // Test that host/HEAD is updated when switching branches
+    let repo = TestRepo::new();
+
+    // Create a feature branch with different commit
+    create_branch(repo.path(), "feature");
+    create_commit(repo.path(), "Feature commit");
+    let feature_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    checkout_branch(repo.path(), "master");
+    let master_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Sanity check: different commits
+    assert_ne!(master_commit, feature_commit);
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox to set up gateway (currently on master)
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "branch-switch-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    // Verify host/HEAD points to master commit
+    assert_eq!(
+        get_branch_commit(&gateway, "host/HEAD"),
+        Some(master_commit.clone()),
+        "host/HEAD should point to master commit initially"
+    );
+
+    // Switch to feature branch
+    checkout_branch(repo.path(), "feature");
+
+    // Verify host/HEAD now points to feature commit
+    assert_eq!(
+        get_branch_commit(&gateway, "host/HEAD"),
+        Some(feature_commit.clone()),
+        "host/HEAD should point to feature commit after branch switch"
+    );
+
+    // Sandbox should see the updated HEAD after fetch
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "branch-switch-test", "--", "git", "fetch", "host"])
+        .success()
+        .expect("Failed to fetch after branch switch");
+
+    let sandbox_head_output = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "branch-switch-test",
+            "--",
+            "git",
+            "rev-parse",
+            "host/HEAD",
+        ])
+        .success()
+        .expect("Failed to resolve host/HEAD");
+
+    let sandbox_head = String::from_utf8_lossy(&sandbox_head_output)
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        sandbox_head, feature_commit,
+        "Sandbox host/HEAD should reflect the branch switch"
+    );
+}
+
+#[test]
+fn gateway_host_head_works_in_detached_state() {
+    // Test that host/HEAD works correctly when host is in detached HEAD state
+    let repo = TestRepo::new();
+
+    // Create a few commits to have history
+    create_commit(repo.path(), "First commit");
+    let first_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    create_commit(repo.path(), "Second commit");
+    let second_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Launch sandbox to set up gateway (on master at second_commit)
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "detached-head-test", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run sandbox enter");
+
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    // Verify host/HEAD points to second_commit
+    assert_eq!(
+        get_branch_commit(&gateway, "host/HEAD"),
+        Some(second_commit.clone()),
+        "host/HEAD should point to second_commit initially"
+    );
+
+    // Checkout first commit in detached HEAD state
+    Command::new("git")
+        .args(["checkout", &first_commit])
+        .current_dir(repo.path())
+        .success()
+        .expect("git checkout (detached) failed");
+
+    // Verify host/HEAD now points to first_commit
+    assert_eq!(
+        get_branch_commit(&gateway, "host/HEAD"),
+        Some(first_commit.clone()),
+        "host/HEAD should point to first_commit in detached HEAD state"
+    );
+
+    // Sandbox should be able to fetch and resolve the detached HEAD commit
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "detached-head-test", "--", "git", "fetch", "host"])
+        .success()
+        .expect("Failed to fetch in detached HEAD state");
+
+    let sandbox_head_output = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "detached-head-test",
+            "--",
+            "git",
+            "rev-parse",
+            "host/HEAD",
+        ])
+        .success()
+        .expect("Failed to resolve host/HEAD");
+
+    let sandbox_head = String::from_utf8_lossy(&sandbox_head_output)
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        sandbox_head, first_commit,
+        "Sandbox host/HEAD should resolve to the detached HEAD commit"
+    );
+}

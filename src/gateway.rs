@@ -18,6 +18,8 @@
 //! Commits are synced from the host repo to the gateway repo:
 //!
 //! - On setup, all local branches are pushed to the gateway as `refs/heads/host/<branch>`.
+//! - The current HEAD commit is also pushed as `refs/heads/host/HEAD`, allowing sandboxes
+//!   to find the host's current commit even when in detached HEAD state.
 //! - A reference-transaction hook in the host repo automatically pushes branch updates
 //!   to the gateway whenever any reference changes (commits, branch creation/deletion, resets).
 //! - The push uses the "sandbox" remote (host repo -> gateway repo).
@@ -25,6 +27,7 @@
 //! The gateway repo stores these as local branches (not remote refs), e.g.:
 //! - Host branch `main` becomes gateway branch `host/main`
 //! - Host branch `feature` becomes gateway branch `host/feature`
+//! - Host HEAD commit becomes gateway branch `host/HEAD`
 //!
 //! ## Sandbox access to gateway
 //!
@@ -98,6 +101,10 @@ const HOST_REMOTE: &str = "host";
 /// For branch updates (refs/heads/*), it pushes the change to the gateway:
 /// - For updates/creates: push the new commit
 /// - For deletes (new-value is all zeros): delete the branch from gateway
+///
+/// For HEAD updates, it pushes the current HEAD commit to `host/HEAD` in the gateway.
+/// This ensures sandboxes can always find the host's current commit, even when
+/// the host is in detached HEAD state.
 const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
     #!/bin/sh
     # Installed by sandbox to sync branch updates to the gateway repository.
@@ -109,8 +116,16 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
 
     # Process each ref update from stdin
     while read oldvalue newvalue refname; do
-        # Only handle local branches (refs/heads/*)
         case "$refname" in
+            HEAD)
+                # HEAD changed - sync current commit to host/HEAD in gateway.
+                # The newvalue may be a symbolic ref (e.g., "ref:refs/heads/main")
+                # or a commit hash (detached HEAD). We always resolve to the commit.
+                head_commit=$(git rev-parse HEAD 2>/dev/null)
+                if [ -n "$head_commit" ]; then
+                    git push sandbox "$head_commit:host/HEAD" --force --quiet 2>/dev/null || true
+                fi
+                ;;
             refs/heads/*)
                 branch="${refname#refs/heads/}"
                 if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
@@ -413,7 +428,11 @@ fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Push all local branches to the gateway as host/<branch>.
+/// Push all local branches and current HEAD to the gateway.
+///
+/// Branches are pushed as `host/<branch>`, and HEAD is pushed as `host/HEAD`.
+/// The `host/HEAD` ref allows sandboxes to find the host's current commit
+/// even when the host is in detached HEAD state.
 fn push_all_branches(repo_path: &Path) -> Result<()> {
     // Get list of all local branches
     let output = Command::new("git")
@@ -430,10 +449,14 @@ fn push_all_branches(repo_path: &Path) -> Result<()> {
     }
 
     // Build refspecs for all branches: branch:host/branch
-    let refspecs: Vec<String> = branches
+    let mut refspecs: Vec<String> = branches
         .iter()
         .map(|b| format!("{}:host/{}", b, b))
         .collect();
+
+    // Also push HEAD to host/HEAD so sandboxes can find the current commit
+    refspecs.push("HEAD:host/HEAD".to_string());
+
     let mut args: Vec<&str> = vec!["push", SANDBOX_REMOTE, "--force"];
     args.extend(refspecs.iter().map(|s| s.as_str()));
 
