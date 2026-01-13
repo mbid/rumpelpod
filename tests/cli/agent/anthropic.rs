@@ -1,28 +1,22 @@
-//! Integration tests for the `sandbox agent` subcommand.
+//! Integration tests for the agent using Anthropic Claude models.
 
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use sandbox::CommandExt;
 
-use crate::common::{
-    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
-};
+use super::run_agent_with_prompt_model_and_args;
+use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
 
-/// Get the llm-cache directory path.
-fn llm_cache_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache")
-}
+const MODEL: &str = "haiku";
 
-/// Helper to run agent with a prompt via stdin.
+/// Helper to run agent with a prompt using Claude Haiku.
 fn run_agent_with_prompt(
     repo: &TestRepo,
     daemon: &TestDaemon,
     prompt: &str,
 ) -> std::process::Output {
-    run_agent_with_prompt_and_args(repo, daemon, prompt, &[])
+    run_agent_with_prompt_model_and_args(repo, daemon, prompt, MODEL, &[])
 }
 
 /// Helper to run agent with a prompt and extra CLI arguments.
@@ -32,28 +26,7 @@ fn run_agent_with_prompt_and_args(
     prompt: &str,
     extra_args: &[&str],
 ) -> std::process::Output {
-    let cache_dir = llm_cache_dir();
-    let mut cmd = sandbox_command(repo, daemon);
-    cmd.args([
-        "agent",
-        "test",
-        "--model",
-        "haiku",
-        "--cache",
-        cache_dir.to_str().unwrap(),
-    ]);
-    cmd.args(extra_args);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().expect("Failed to spawn agent");
-
-    let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-    writeln!(stdin, "{}", prompt).expect("Failed to write to stdin");
-    drop(child.stdin.take());
-
-    child.wait_with_output().expect("Failed to wait for agent")
+    run_agent_with_prompt_model_and_args(repo, daemon, prompt, MODEL, extra_args)
 }
 
 /// Set up a basic test repo with sandbox config.

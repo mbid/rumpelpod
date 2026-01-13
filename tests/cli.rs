@@ -1,4 +1,4 @@
-#[path = "cli/agent.rs"]
+#[path = "cli/agent/mod.rs"]
 mod agent;
 #[path = "cli/common.rs"]
 mod common;

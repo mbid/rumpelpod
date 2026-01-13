@@ -12,8 +12,7 @@ use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
 use crate::llm::types::gemini::{
     Content, FinishReason, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
-    GenerateContentRequest, GenerationConfig, GoogleSearch, Part, Role, SystemInstruction, Tool,
-    ToolConfig,
+    GenerateContentRequest, GenerationConfig, Part, Role, SystemInstruction, Tool, ToolConfig,
 };
 
 use super::common::{
@@ -24,10 +23,15 @@ use super::common::{
 use super::history::ConversationTracker;
 
 fn make_function_declaration(name: ToolName) -> FunctionDeclaration {
+    // Gemini API doesn't support additionalProperties in function parameters
+    let mut params = name.parameters();
+    if let Some(obj) = params.as_object_mut() {
+        obj.remove("additionalProperties");
+    }
     FunctionDeclaration {
         name: name.to_string(),
         description: name.description().to_string(),
-        parameters: name.parameters(),
+        parameters: params,
     }
 }
 
@@ -73,21 +77,18 @@ pub fn run_gemini_agent(
     // Track if we've processed the initial prompt (for non-TTY mode)
     let mut processed_initial = false;
 
-    // Build the tools list - function declarations and Google Search
-    let tools = vec![
-        Tool {
-            function_declarations: Some(vec![
-                make_function_declaration(ToolName::Bash),
-                make_function_declaration(ToolName::Edit),
-                make_function_declaration(ToolName::Write),
-            ]),
-            google_search: None,
-        },
-        Tool {
-            function_declarations: None,
-            google_search: Some(GoogleSearch::default()),
-        },
-    ];
+    // Build the tools list - function declarations only.
+    // Multi-tool use (combining google_search with function_declarations) is only
+    // supported by the Live API, not the generateContent API we use here.
+    // See: https://ai.google.dev/gemini-api/docs/function-calling#multi-tool_use
+    let tools = vec![Tool {
+        function_declarations: Some(vec![
+            make_function_declaration(ToolName::Bash),
+            make_function_declaration(ToolName::Edit),
+            make_function_declaration(ToolName::Write),
+        ]),
+        google_search: None,
+    }];
 
     loop {
         let user_input = if let Some(ref prompt) = initial_prompt {
