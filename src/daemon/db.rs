@@ -144,6 +144,24 @@ pub fn list_conversations(
     Ok(result)
 }
 
+/// Delete all conversations for a given repo and sandbox.
+///
+/// Returns the number of conversations deleted.
+pub fn delete_conversations(
+    conn: &Connection,
+    repo_path: &Path,
+    sandbox_name: &str,
+) -> Result<usize> {
+    let repo_path_str = repo_path.to_string_lossy();
+    let count = conn
+        .execute(
+            "DELETE FROM conversations WHERE repo_path = ? AND sandbox_name = ?",
+            rusqlite::params![repo_path_str, sandbox_name],
+        )
+        .context("Failed to delete conversations")?;
+    Ok(count)
+}
+
 /// Get a conversation by ID.
 pub fn get_conversation(conn: &Connection, id: i64) -> Result<Option<Conversation>> {
     let mut stmt = conn
@@ -298,5 +316,41 @@ mod tests {
 
         let conv = get_conversation(&conn, 999).unwrap();
         assert!(conv.is_none());
+    }
+
+    #[test]
+    fn test_delete_conversations() {
+        let (_temp_dir, conn) = test_db();
+
+        let repo_path = PathBuf::from("/home/user/project");
+        let history = serde_json::json!([]);
+
+        // Save conversations in different sandboxes
+        save_conversation(&conn, None, &repo_path, "dev", "sonnet", &history).unwrap();
+        save_conversation(&conn, None, &repo_path, "dev", "opus", &history).unwrap();
+        save_conversation(&conn, None, &repo_path, "test", "haiku", &history).unwrap();
+
+        // Delete conversations for "dev" sandbox
+        let deleted = delete_conversations(&conn, &repo_path, "dev").unwrap();
+        assert_eq!(deleted, 2);
+
+        // "dev" should have no conversations
+        let dev_list = list_conversations(&conn, &repo_path, "dev").unwrap();
+        assert!(dev_list.is_empty());
+
+        // "test" should still have its conversation
+        let test_list = list_conversations(&conn, &repo_path, "test").unwrap();
+        assert_eq!(test_list.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_conversations_nonexistent_sandbox() {
+        let (_temp_dir, conn) = test_db();
+
+        let repo_path = PathBuf::from("/home/user/project");
+
+        // Deleting from a sandbox that doesn't exist should succeed with 0 deleted
+        let deleted = delete_conversations(&conn, &repo_path, "nonexistent").unwrap();
+        assert_eq!(deleted, 0);
     }
 }

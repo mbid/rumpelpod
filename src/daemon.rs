@@ -750,6 +750,10 @@ impl Daemon for DaemonServer {
         // Remove the network (must be done after removing the container)
         delete_network(&name)?;
 
+        // Delete conversation history for this sandbox
+        let conn = self.db.lock().unwrap();
+        db::delete_conversations(&conn, &repo_path, &sandbox_name.0)?;
+
         Ok(())
     }
 
