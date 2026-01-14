@@ -120,11 +120,7 @@ impl TestRepo {
             .success()
             .expect("git config user.name failed");
 
-        Command::new("git")
-            .args(["commit", "--allow-empty", "-m", "Initial commit"])
-            .current_dir(dir.path())
-            .success()
-            .expect("git commit failed");
+        create_commit(dir.path(), "Initial commit");
 
         TestRepo { dir }
     }
@@ -140,6 +136,17 @@ impl TestRepo {
     pub fn path(&self) -> &Path {
         self.dir.path()
     }
+}
+
+/// Create a commit with a fixed timestamp to ensure deterministic directory hashes.
+pub fn create_commit(repo_path: &Path, message: &str) {
+    Command::new("git")
+        .args(["commit", "--allow-empty", "-m", message])
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00+00:00")
+        .current_dir(repo_path)
+        .success()
+        .expect("git commit failed");
 }
 
 /// Create a Command for the sandbox binary, pre-configured for testing.

@@ -10,7 +10,8 @@ use std::process::Command;
 use sandbox::CommandExt;
 
 use crate::common::{
-    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
+    build_test_image, create_commit, sandbox_command, write_test_sandbox_config, TestDaemon,
+    TestRepo,
 };
 
 /// Get the list of branches in a repository.
@@ -71,15 +72,6 @@ fn get_branch_commit(repo_path: &Path, branch: &str) -> Option<String> {
         .success()
         .ok()
         .map(|b| String::try_from(b).unwrap().trim().to_string())
-}
-
-/// Create a commit with a given message in the repo.
-fn create_commit(repo_path: &Path, message: &str) {
-    Command::new("git")
-        .args(["commit", "--allow-empty", "-m", message])
-        .current_dir(repo_path)
-        .success()
-        .expect("git commit failed");
 }
 
 /// Create a new branch in the repo.

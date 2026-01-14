@@ -9,7 +9,9 @@ use indoc::formatdoc;
 use sandbox::CommandExt;
 
 use super::{llm_cache_dir, run_agent_with_prompt_and_model, run_agent_with_prompt_model_and_args};
-use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
+use crate::common::{
+    build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
+};
 
 const MODEL: &str = "claude-haiku-4-5";
 
@@ -54,11 +56,7 @@ fn agent_reads_file() {
         .current_dir(repo.path())
         .success()
         .expect("git add failed");
-    Command::new("git")
-        .args(["commit", "-m", "Add secret"])
-        .current_dir(repo.path())
-        .success()
-        .expect("git commit failed");
+    create_commit(repo.path(), "Add secret");
 
     // Build image after file is committed
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -96,11 +94,7 @@ fn agent_edits_file() {
         .current_dir(repo.path())
         .success()
         .expect("git add failed");
-    Command::new("git")
-        .args(["commit", "-m", "Add greeting"])
-        .current_dir(repo.path())
-        .success()
-        .expect("git commit failed");
+    create_commit(repo.path(), "Add greeting");
 
     // Build image after file is committed
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -219,11 +213,7 @@ fn agent_large_file_output() {
         .current_dir(repo.path())
         .success()
         .expect("git add failed");
-    Command::new("git")
-        .args(["commit", "-m", "Add large file"])
-        .current_dir(repo.path())
-        .success()
-        .expect("git commit failed");
+    create_commit(repo.path(), "Add large file");
 
     // Build image after file is committed
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");

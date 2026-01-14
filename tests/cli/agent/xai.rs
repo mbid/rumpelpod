@@ -6,7 +6,9 @@ use std::process::Command;
 use sandbox::CommandExt;
 
 use super::run_agent_with_prompt_and_model;
-use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
+use crate::common::{
+    build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
+};
 
 const MODEL: &str = "grok-3-mini";
 
@@ -33,11 +35,7 @@ fn xai_agent_reads_file() {
         .current_dir(repo.path())
         .success()
         .expect("git add failed");
-    Command::new("git")
-        .args(["commit", "-m", "Add secret"])
-        .current_dir(repo.path())
-        .success()
-        .expect("git commit failed");
+    create_commit(repo.path(), "Add secret");
 
     // Build image after file is committed
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
