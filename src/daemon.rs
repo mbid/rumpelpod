@@ -573,8 +573,6 @@ fn create_container(
             &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
             "--label",
             &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
-            "--mount",
-            &format!("type=bind,src={},dst=/repo", repo_path.display()),
             &image.0,
             "sleep",
             "infinity", // Keep container running
