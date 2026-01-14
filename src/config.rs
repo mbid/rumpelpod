@@ -26,7 +26,7 @@ pub enum Runtime {
 }
 
 /// Model to use for the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum Model {
     Anthropic(anthropic::Model),
@@ -73,6 +73,47 @@ impl ValueEnum for Model {
             Model::Anthropic(m) => m.to_possible_value(),
             Model::Gemini(m) => m.to_possible_value(),
             Model::Xai(m) => m.to_possible_value(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::ValueEnum;
+
+    #[test]
+    fn test_model_string_consistency() {
+        // This test ensures that for every model variant:
+        // 1. The string representation (Display) matches the Clap value name.
+        // 2. The string representation matches the Serde serialization (JSON/TOML).
+        // 3. The string is used exactly as is for the API (implied by usage of to_string() in agent code).
+
+        for model in Model::value_variants() {
+            let s = model.to_string();
+
+            // Check Clap name
+            let clap_val = model
+                .to_possible_value()
+                .expect("Model should have a clap value");
+            assert_eq!(s, clap_val.get_name(), "Clap name mismatch for {:?}", model);
+
+            // Check Serde serialization
+            let json = serde_json::to_string(&model).expect("Failed to serialize");
+            let expected_json = format!("\"{}\"", s);
+            assert_eq!(
+                json, expected_json,
+                "Serde serialization mismatch for {:?}",
+                model
+            );
+
+            // Check Serde deserialization
+            let deserialized: Model = serde_json::from_str(&json).expect("Failed to deserialize");
+            assert_eq!(
+                *model, deserialized,
+                "Deserialization mismatch for {:?}",
+                model
+            );
         }
     }
 }
