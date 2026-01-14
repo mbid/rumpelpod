@@ -10,7 +10,7 @@ use log::error;
 use tokio::net::UnixListener;
 
 use crate::command_ext::CommandExt;
-use crate::config::Runtime;
+use crate::config::{Network, Runtime};
 use crate::gateway;
 use crate::git_http_server;
 use protocol::{
@@ -37,9 +37,13 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(PathBuf::from(runtime_dir).join("sandbox.sock"))
 }
 
+use std::collections::HashMap;
+
 struct DaemonServer {
     /// SQLite connection for conversation history.
     db: Mutex<Connection>,
+    /// Active git HTTP servers: network_name -> port
+    active_git_servers: Mutex<HashMap<String, u16>>,
 }
 
 /// Label key used to store the repository path on containers and networks.
@@ -336,21 +340,62 @@ fn cleanup_sandbox_refs(gateway_path: &Path, repo_path: &Path, sandbox_name: &Sa
         .output();
 }
 
-/// Spawn a git HTTP server for the container.
-/// This is required for the container to fetch from the gateway repository.
+/// Spawn a git HTTP server for the container and return the access URL.
 fn spawn_git_http_server(
+    active_git_servers: &Mutex<HashMap<String, u16>>,
     gateway_path: &Path,
     network_name: &str,
     sandbox_name: &SandboxName,
     container_id: &str,
-) -> Result<()> {
-    git_http_server::spawn_git_http_server(
+    network_config: Network,
+) -> Result<String> {
+    // Check if we already have a server for this network
+    {
+        let servers = active_git_servers.lock().unwrap();
+        if let Some(&port) = servers.get(network_name) {
+            let ip = match network_config {
+                Network::UnsafeHost => "127.0.0.1".to_string(),
+                Network::Default => git_http_server::get_network_gateway_ip(network_name)?,
+            };
+            return Ok(git_http_server::git_http_url(&ip, port));
+        }
+    }
+
+    let (bind_ip, bind_port) = match network_config {
+        Network::UnsafeHost => ("127.0.0.1".to_string(), 0),
+        Network::Default => {
+            let gateway_ip = git_http_server::get_network_gateway_ip(network_name)?;
+            (gateway_ip, git_http_server::GIT_HTTP_PORT)
+        }
+    };
+
+    let result = git_http_server::spawn_git_http_server(
         gateway_path,
-        network_name,
+        &bind_ip,
+        bind_port,
         &sandbox_name.0,
         container_id,
-    )
-    .with_context(|| format!("starting git HTTP server for container {}", container_id))
+    );
+
+    let port = match result {
+        Ok(port) => port,
+        Err(e) => {
+            if network_config == Network::UnsafeHost {
+                error!("Failed to spawn git HTTP server for unsafe-host: {}. Continuing without git sync.", e);
+                return Err(e);
+            } else {
+                return Err(e).context("starting git HTTP server");
+            }
+        }
+    };
+
+    // Store the port so we don't try to bind again for this network
+    active_git_servers
+        .lock()
+        .unwrap()
+        .insert(network_name.to_string(), port);
+
+    Ok(git_http_server::git_http_url(&bind_ip, port))
 }
 
 /// Check that the .git directory inside the container is owned by the expected user.
@@ -410,7 +455,7 @@ fn check_git_directory_ownership(
 /// show meaningful tracking information relative to the host branch.
 fn setup_git_remotes(
     container_id: &str,
-    network_name: &str,
+    git_http_url: &str,
     container_repo_path: &Path,
     sandbox_name: &SandboxName,
     user: &str,
@@ -418,7 +463,6 @@ fn setup_git_remotes(
 ) -> Result<()> {
     check_git_directory_ownership(container_id, container_repo_path, user)?;
 
-    let git_http_url = git_http_server::git_http_url(network_name)?;
     let repo_path_str = container_repo_path.to_string_lossy();
 
     // Helper to run a git command inside the container
@@ -654,7 +698,13 @@ fn create_container(
     image: &Image,
     repo_path: &Path,
     runtime: Runtime,
+    network_config: Network,
 ) -> Result<ContainerId> {
+    let network_arg = match network_config {
+        Network::UnsafeHost => "host",
+        Network::Default => name,
+    };
+
     let output = Command::new("docker")
         .args([
             "run",
@@ -666,7 +716,7 @@ fn create_container(
             "--hostname",
             &sandbox_name.0,
             "--network",
-            name, // Container and network share the same name
+            network_arg,
             "--label",
             &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
             "--label",
@@ -756,8 +806,14 @@ impl Daemon for DaemonServer {
         container_repo_path: PathBuf,
         user: Option<String>,
         runtime: Runtime,
+        network: Network,
         host_branch: Option<String>,
     ) -> Result<LaunchResult> {
+        // Validate network configuration
+        if network == Network::UnsafeHost && runtime != Runtime::Runc {
+            anyhow::bail!("network='unsafe-host' is only supported with runtime='runc'");
+        }
+
         // Resolve the user first, before any container operations
         let user = resolve_user(user, &image.0)?;
 
@@ -783,58 +839,86 @@ impl Daemon for DaemonServer {
                 );
             }
 
-            if state.status == "running" {
-                // Already running with correct image.
-                // Spawn git HTTP server in case daemon was restarted while container was running.
-                spawn_git_http_server(&gateway_path, &name, &sandbox_name, &state.id)?;
-                // On re-entry, don't pass host_branch - we don't want to change
-                // the upstream of an existing branch.
-                setup_git_remotes(
-                    &state.id,
-                    &name,
-                    &container_repo_path,
-                    &sandbox_name,
-                    &user,
-                    None,
-                )?;
-                return Ok(LaunchResult {
-                    container_id: ContainerId(state.id),
-                    user,
-                });
+            if state.status != "running" {
+                // Container exists but is stopped - restart it
+                start_container(&name)?;
             }
 
-            // Container exists but is stopped - restart it
-            start_container(&name)?;
-            spawn_git_http_server(&gateway_path, &name, &sandbox_name, &state.id)?;
-            // On re-entry, don't pass host_branch - we don't want to change
-            // the upstream of an existing branch.
-            setup_git_remotes(
-                &state.id,
+            // Already running (or just restarted).
+            // Spawn git HTTP server in case daemon was restarted while container was running.
+            let git_url_result = spawn_git_http_server(
+                &self.active_git_servers,
+                &gateway_path,
                 &name,
-                &container_repo_path,
                 &sandbox_name,
-                &user,
-                None,
-            )?;
+                &state.id,
+                network,
+            );
+
+            match git_url_result {
+                Ok(url) => {
+                    // On re-entry, don't pass host_branch - we don't want to change
+                    // the upstream of an existing branch.
+                    setup_git_remotes(
+                        &state.id,
+                        &url,
+                        &container_repo_path,
+                        &sandbox_name,
+                        &user,
+                        None,
+                    )?;
+                }
+                Err(e) => {
+                    if network == Network::UnsafeHost {
+                        error!("Failed to spawn git HTTP server: {}. Continuing...", e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
             });
         }
 
-        // Create network and container (both use the same name)
-        create_network(&name, &sandbox_name, &repo_path)?;
+        // Create network (only for isolated network)
+        if network == Network::Default {
+            create_network(&name, &sandbox_name, &repo_path)?;
+        }
 
-        let container_id = create_container(&name, &sandbox_name, &image, &repo_path, runtime)?;
-        spawn_git_http_server(&gateway_path, &name, &sandbox_name, &container_id.0)?;
-        setup_git_remotes(
-            &container_id.0,
+        let container_id =
+            create_container(&name, &sandbox_name, &image, &repo_path, runtime, network)?;
+        let git_url_result = spawn_git_http_server(
+            &self.active_git_servers,
+            &gateway_path,
             &name,
-            &container_repo_path,
             &sandbox_name,
-            &user,
-            host_branch.as_deref(),
-        )?;
+            &container_id.0,
+            network,
+        );
+
+        match git_url_result {
+            Ok(url) => {
+                setup_git_remotes(
+                    &container_id.0,
+                    &url,
+                    &container_repo_path,
+                    &sandbox_name,
+                    &user,
+                    host_branch.as_deref(),
+                )?;
+            }
+            Err(e) => {
+                if network == Network::UnsafeHost {
+                    error!("Failed to spawn git HTTP server: {}. Continuing...", e);
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+
         Ok(LaunchResult { container_id, user })
     }
 
@@ -865,6 +949,9 @@ impl Daemon for DaemonServer {
 
         // Remove the network (must be done after removing the container)
         delete_network(&name)?;
+
+        // Remove from active git servers
+        self.active_git_servers.lock().unwrap().remove(&name);
 
         // Clean up gateway refs for this sandbox
         if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
@@ -941,6 +1028,7 @@ pub fn run_daemon() -> Result<()> {
 
     let daemon = DaemonServer {
         db: Mutex::new(db_conn),
+        active_git_servers: Mutex::new(HashMap::new()),
     };
     protocol::serve_daemon(daemon, listener);
 }

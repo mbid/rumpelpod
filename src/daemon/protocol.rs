@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
 use url::Url;
 
-use crate::config::Runtime;
+use crate::config::{Network, Runtime};
 use crate::r#async::block_on;
 
 /// Opaque wrapper for docker image names.
@@ -66,6 +66,8 @@ struct LaunchSandboxRequest {
     user: Option<String>,
     /// Container runtime to use (runsc, runc, sysbox-runc).
     runtime: Runtime,
+    /// Network configuration.
+    network: Network,
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the sandbox.
     host_branch: Option<String>,
@@ -166,6 +168,7 @@ pub trait Daemon: Send + Sync + 'static {
         container_repo_path: PathBuf,
         user: Option<String>,
         runtime: Runtime,
+        network: Network,
         host_branch: Option<String>,
     ) -> Result<LaunchResult>;
 
@@ -240,6 +243,7 @@ impl Daemon for DaemonClient {
         container_repo_path: PathBuf,
         user: Option<String>,
         runtime: Runtime,
+        network: Network,
         host_branch: Option<String>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
@@ -250,6 +254,7 @@ impl Daemon for DaemonClient {
             container_repo_path,
             user,
             runtime,
+            network,
             host_branch,
         };
 
@@ -432,6 +437,7 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.container_repo_path,
             request.user,
             request.runtime,
+            request.network,
             request.host_branch,
         )
     });
@@ -444,7 +450,7 @@ async fn launch_sandbox_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: format!("{:#}", e),
             }),
         )),
     }
@@ -462,7 +468,7 @@ async fn delete_sandbox_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: format!("{:#}", e),
             }),
         )),
     }
@@ -480,7 +486,7 @@ async fn list_sandboxes_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: format!("{:#}", e),
             }),
         )),
     }
@@ -506,7 +512,7 @@ async fn save_conversation_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: format!("{:#}", e),
             }),
         )),
     }
@@ -525,7 +531,7 @@ async fn list_conversations_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: format!("{:#}", e),
             }),
         )),
     }
@@ -549,7 +555,7 @@ async fn get_conversation_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: e.to_string(),
+                error: format!("{:#}", e),
             }),
         )),
     }
@@ -615,6 +621,7 @@ mod tests {
             _container_repo_path: PathBuf,
             user: Option<String>,
             _runtime: Runtime,
+            _network: Network,
             _host_branch: Option<String>,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
@@ -719,6 +726,7 @@ mod tests {
             PathBuf::from("/workspace"),
             Some("testuser".to_string()),
             Runtime::Runc,
+            Network::Default,
             Some("main".to_string()),
         );
 
@@ -749,6 +757,7 @@ mod tests {
             _container_repo_path: PathBuf,
             _user: Option<String>,
             _runtime: Runtime,
+            _network: Network,
             _host_branch: Option<String>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")

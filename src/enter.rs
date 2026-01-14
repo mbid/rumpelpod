@@ -39,6 +39,7 @@ pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
         config.repo_path,
         config.user,
         runtime,
+        config.network,
         host_branch,
     )
 }

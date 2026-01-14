@@ -40,6 +40,7 @@ url = "*"
 axum = "*"
 cgi-service = "*"
 rusqlite = { version = "*", features = ["bundled"] }
+socket2 = "*"
 
 [dev-dependencies]
 assert_cmd = "*"

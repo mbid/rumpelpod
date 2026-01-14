@@ -7,11 +7,12 @@
 use std::path::Path;
 use std::process::Command;
 
+use indoc::formatdoc;
 use sandbox::CommandExt;
 
 use crate::common::{
-    build_test_image, create_commit, sandbox_command, write_test_sandbox_config, TestDaemon,
-    TestRepo,
+    build_test_image, create_commit, sandbox_command, write_test_sandbox_config,
+    write_test_sandbox_config_with_network, TestDaemon, TestRepo, TEST_REPO_PATH,
 };
 
 /// Get the list of branches in a repository.
@@ -2523,4 +2524,95 @@ fn sandbox_re_entry_does_not_change_upstream() {
         Some("host/master".to_string()),
         "Primary branch upstream should not change on re-entry"
     );
+}
+
+#[test]
+fn sandbox_unsafe_host_network_mode() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    // Configure unsafe-host network
+    write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "unsafe-host-test";
+
+    // Enter sandbox and verify it works
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "hello"])
+        .success()
+        .expect("sandbox enter failed");
+
+    // Verify git sync works by pushing a branch from sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            "feature",
+        ])
+        .success()
+        .expect("git checkout failed");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "feature commit",
+        ])
+        .success()
+        .expect("git commit failed");
+
+    // The branch should appear in host as refs/remotes/sandbox/feature@unsafe-host-test
+    // Note: get_sandbox_remote_refs returns short names like "sandbox/feature@unsafe-host-test"
+    // Wait, get_sandbox_remote_refs returns refname:short, so it is "origin/..."?
+    // No, the function queries "refs/remotes/sandbox/", so it returns "sandbox/feature@..."
+
+    // Let's verify get_sandbox_remote_refs implementation
+    // "refs/remotes/sandbox/*" -> refname:short -> "sandbox/..."
+
+    let remote_refs = get_sandbox_remote_refs(repo.path());
+    let expected_ref = format!("sandbox/feature@{}", sandbox_name);
+    assert!(
+        remote_refs.contains(&expected_ref),
+        "Sandbox branch not synced to host. Found: {:?}",
+        remote_refs
+    );
+}
+
+#[test]
+fn sandbox_unsafe_host_network_mode_requires_runc() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    // Configure unsafe-host network with runsc (should fail)
+    let config = formatdoc! {r#"
+        runtime = "runsc"
+        image = "{}"
+        repo-path = "{}"
+        network = "unsafe-host"
+    "#, image_id, TEST_REPO_PATH};
+    std::fs::write(repo.path().join(".sandbox.toml"), config)
+        .expect("Failed to write .sandbox.toml");
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "unsafe-host-fail-test";
+
+    // Enter sandbox and verify it fails with helpful message
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "hello"])
+        .output()
+        .expect("Failed to execute sandbox command");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("network='unsafe-host' is only supported with runtime='runc'"));
 }

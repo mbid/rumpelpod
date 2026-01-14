@@ -9,7 +9,7 @@
 //! - The sandbox cannot modify this variable (it's set by the server, not the client)
 //! - The sandbox can only reach its own network's HTTP server (network isolation)
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use cgi_service::{CgiConfig, CgiService};
 use log::{debug, error};
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::task::JoinHandle;
 
 use crate::command_ext::CommandExt;
@@ -42,28 +43,64 @@ pub struct GitHttpServer {
 impl GitHttpServer {
     /// Start a new git HTTP server for the given gateway repository.
     ///
-    /// The server binds to the specified address (typically the docker network
-    /// gateway IP) and serves the gateway repo via git-http-backend.
+    /// The server binds to the specified address. If port is 0, a random port is assigned.
+    /// Returns the server instance and the actual port bound.
     ///
     /// The `sandbox_name` is passed to git-http-backend as an environment variable,
-    /// which hooks can use for access control. This is secure because the sandbox
-    /// cannot modify this variable - it's set server-side based on network identity.
-    pub fn start(gateway_path: &Path, bind_address: &str, sandbox_name: &str) -> Result<Self> {
+    /// which hooks can use for access control.
+    pub fn start(
+        gateway_path: &Path,
+        bind_address: &str,
+        port: u16,
+        sandbox_name: &str,
+    ) -> Result<(Self, u16)> {
         let gateway_parent = gateway_path
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("/"));
 
-        let addr: SocketAddr = format!("{}:{}", bind_address, GIT_HTTP_PORT)
+        let addr: SocketAddr = format!("{}:{}", bind_address, port)
             .parse()
             .context("parsing bind address")?;
 
         debug!(
-            "Starting git HTTP server on {} for {} (sandbox: {})",
+            "Starting git HTTP server on {} (requested port: {}) for {} (sandbox: {})",
             addr,
+            port,
             gateway_path.display(),
             sandbox_name
         );
+
+        // Bind manually using socket2 to ensure SO_REUSEADDR is set.
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+
+        let socket =
+            Socket::new(domain, Type::STREAM, Some(Protocol::TCP)).context("creating socket")?;
+
+        socket
+            .set_reuse_address(true)
+            .context("setting SO_REUSEADDR")?;
+
+        socket
+            .bind(&addr.into())
+            .context("binding git HTTP server")?;
+        socket.listen(128).context("listening on socket")?;
+
+        let std_listener: TcpListener = socket.into();
+        std_listener
+            .set_nonblocking(true)
+            .context("setting nonblocking mode")?;
+
+        let bound_addr = std_listener.local_addr().context("getting local address")?;
+        let actual_port = bound_addr.port();
+
+        // Convert to tokio listener
+        let listener = tokio::net::TcpListener::from_std(std_listener)
+            .context("converting to tokio listener")?;
 
         // Configure the CGI service for git-http-backend.
         // git-http-backend expects:
@@ -86,20 +123,12 @@ impl GitHttpServer {
 
         // Spawn the server in the background
         let task_handle = RUNTIME.spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    error!("Failed to bind git HTTP server to {}: {}", addr, e);
-                    return;
-                }
-            };
-
             if let Err(e) = axum::serve(listener, app).await {
                 error!("Git HTTP server error: {}", e);
             }
         });
 
-        Ok(GitHttpServer { task_handle })
+        Ok((GitHttpServer { task_handle }, actual_port))
     }
 
     /// Stop the server.
@@ -139,27 +168,25 @@ pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
 /// Spawn a git HTTP server for a container and manage its lifecycle.
 ///
 /// This function:
-/// 1. Gets the gateway IP for the container's network
-/// 2. Starts an axum server bound to that IP serving git-http-backend via CGI
-/// 3. Spawns a background task that waits for the container to stop and then
+/// 1. Starts an axum server bound to the provided address and port
+/// 2. Spawns a background task that waits for the container to stop and then
 ///    shuts down the server
 ///
-/// The `sandbox_name` is passed to the server so it can set the SANDBOX_NAME
-/// environment variable for access control in git hooks.
+/// Returns the actual port bound.
 pub fn spawn_git_http_server(
     gateway_path: &Path,
-    network_name: &str,
+    bind_address: &str,
+    port: u16,
     sandbox_name: &str,
     container_id: &str,
-) -> Result<()> {
-    let gateway_ip = get_network_gateway_ip(network_name)?;
-
+) -> Result<u16> {
     debug!(
         "Starting git HTTP server on {}:{} for container {} (sandbox: {})",
-        gateway_ip, GIT_HTTP_PORT, container_id, sandbox_name
+        bind_address, port, container_id, sandbox_name
     );
 
-    let server = GitHttpServer::start(gateway_path, &gateway_ip, sandbox_name)?;
+    let (server, actual_port) =
+        GitHttpServer::start(gateway_path, bind_address, port, sandbox_name)?;
 
     // Spawn a task to wait for the container to stop and then shut down the server
     let container_id = container_id.to_string();
@@ -199,14 +226,10 @@ pub fn spawn_git_http_server(
         server.stop();
     });
 
-    Ok(())
+    Ok(actual_port)
 }
 
 /// Get the URL for the git HTTP server accessible from within a container.
-pub fn git_http_url(network_name: &str) -> Result<String> {
-    let gateway_ip = get_network_gateway_ip(network_name)?;
-    Ok(format!(
-        "http://{}:{}/gateway.git",
-        gateway_ip, GIT_HTTP_PORT
-    ))
+pub fn git_http_url(ip: &str, port: u16) -> String {
+    format!("http://{}:{}/gateway.git", ip, port)
 }

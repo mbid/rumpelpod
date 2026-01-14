@@ -63,6 +63,17 @@ pub enum Model {
     Gemini3Pro,
 }
 
+/// Network configuration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Network {
+    /// Isolated network (default)
+    #[default]
+    Default,
+    /// Host network - shares network namespace with host (unsafe)
+    UnsafeHost,
+}
+
 /// Top-level configuration structure parsed from `.sandbox.toml`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -70,6 +81,10 @@ pub struct SandboxConfig {
     /// Container runtime (runsc, runc, sysbox-runc).
     #[serde(default)]
     pub runtime: Option<Runtime>,
+
+    /// Network configuration.
+    #[serde(default)]
+    pub network: Network,
 
     pub image: String,
 
