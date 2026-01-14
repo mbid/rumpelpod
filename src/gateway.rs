@@ -121,9 +121,11 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
                 # HEAD changed - sync current commit to host/HEAD in gateway.
                 # The newvalue may be a symbolic ref (e.g., "ref:refs/heads/main")
                 # or a commit hash (detached HEAD). We always resolve to the commit.
+                # We use the fully qualified ref because when HEAD is a commit hash,
+                # git requires the full ref path for the destination.
                 head_commit=$(git rev-parse HEAD 2>/dev/null)
                 if [ -n "$head_commit" ]; then
-                    git push sandbox "$head_commit:host/HEAD" --force --quiet 2>/dev/null || true
+                    git push sandbox "$head_commit:refs/heads/host/HEAD" --force --quiet 2>/dev/null || true
                 fi
                 ;;
             refs/heads/*)
@@ -475,8 +477,10 @@ fn push_all_branches(repo_path: &Path) -> Result<()> {
         .map(|b| format!("{}:host/{}", b, b))
         .collect();
 
-    // Also push HEAD to host/HEAD so sandboxes can find the current commit
-    refspecs.push("HEAD:host/HEAD".to_string());
+    // Also push HEAD to host/HEAD so sandboxes can find the current commit.
+    // We use the fully qualified ref path because when HEAD is detached (pointing
+    // to a commit rather than a branch), git requires the full ref name.
+    refspecs.push("HEAD:refs/heads/host/HEAD".to_string());
 
     let mut args: Vec<&str> = vec!["push", SANDBOX_REMOTE, "--force"];
     args.extend(refspecs.iter().map(|s| s.as_str()));

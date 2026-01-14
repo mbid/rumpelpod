@@ -404,12 +404,17 @@ fn check_git_directory_ownership(
 /// to push branches without conflicts.
 ///
 /// A post-commit hook is installed to automatically push commits to the gateway.
+///
+/// If `host_branch` is provided (only on first entry), the primary branch's upstream
+/// will be set to `host/<host_branch>`. This allows `git pull` and `git status` to
+/// show meaningful tracking information relative to the host branch.
 fn setup_git_remotes(
     container_id: &str,
     network_name: &str,
     container_repo_path: &Path,
     sandbox_name: &SandboxName,
     user: &str,
+    host_branch: Option<&str>,
 ) -> Result<()> {
     check_git_directory_ownership(container_id, container_repo_path, user)?;
 
@@ -501,18 +506,31 @@ fn setup_git_remotes(
         .is_ok();
 
         if branch_exists {
-            // Branch exists (e.g., from the image) - reset it to host/HEAD
-            run_git(&["branch", "-f", branch_name, "host/HEAD"])
+            // Branch exists (e.g., from the image) - reset it to host/HEAD.
+            // Use --no-track to prevent git from auto-setting upstream.
+            run_git(&["branch", "-f", "--no-track", branch_name, "host/HEAD"])
                 .with_context(|| format!("resetting branch '{}' to host/HEAD", branch_name))?;
         } else {
-            // Create the branch pointing to host/HEAD
-            run_git(&["branch", branch_name, "host/HEAD"])
+            // Create the branch pointing to host/HEAD.
+            // Use --no-track to prevent git from auto-setting upstream based on
+            // the remote-tracking ref. We'll set the proper upstream explicitly
+            // below if host_branch is provided.
+            run_git(&["branch", "--no-track", branch_name, "host/HEAD"])
                 .with_context(|| format!("creating branch '{}'", branch_name))?;
         }
 
         // Checkout the branch
         run_git(&["checkout", branch_name])
             .with_context(|| format!("checking out branch '{}'", branch_name))?;
+
+        // Set upstream to host/<host_branch> if a branch was checked out on the host.
+        // This enables `git status` to show tracking info and `git pull` to work.
+        if let Some(host_branch) = host_branch {
+            let upstream = format!("host/{}", host_branch);
+            run_git(&["branch", "--set-upstream-to", &upstream, branch_name]).with_context(
+                || format!("setting upstream of '{}' to '{}'", branch_name, upstream),
+            )?;
+        }
     }
 
     Ok(())
@@ -738,6 +756,7 @@ impl Daemon for DaemonServer {
         container_repo_path: PathBuf,
         user: Option<String>,
         runtime: Runtime,
+        host_branch: Option<String>,
     ) -> Result<LaunchResult> {
         // Resolve the user first, before any container operations
         let user = resolve_user(user, &image.0)?;
@@ -768,7 +787,16 @@ impl Daemon for DaemonServer {
                 // Already running with correct image.
                 // Spawn git HTTP server in case daemon was restarted while container was running.
                 spawn_git_http_server(&gateway_path, &name, &sandbox_name, &state.id)?;
-                setup_git_remotes(&state.id, &name, &container_repo_path, &sandbox_name, &user)?;
+                // On re-entry, don't pass host_branch - we don't want to change
+                // the upstream of an existing branch.
+                setup_git_remotes(
+                    &state.id,
+                    &name,
+                    &container_repo_path,
+                    &sandbox_name,
+                    &user,
+                    None,
+                )?;
                 return Ok(LaunchResult {
                     container_id: ContainerId(state.id),
                     user,
@@ -778,7 +806,16 @@ impl Daemon for DaemonServer {
             // Container exists but is stopped - restart it
             start_container(&name)?;
             spawn_git_http_server(&gateway_path, &name, &sandbox_name, &state.id)?;
-            setup_git_remotes(&state.id, &name, &container_repo_path, &sandbox_name, &user)?;
+            // On re-entry, don't pass host_branch - we don't want to change
+            // the upstream of an existing branch.
+            setup_git_remotes(
+                &state.id,
+                &name,
+                &container_repo_path,
+                &sandbox_name,
+                &user,
+                None,
+            )?;
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
@@ -796,6 +833,7 @@ impl Daemon for DaemonServer {
             &container_repo_path,
             &sandbox_name,
             &user,
+            host_branch.as_deref(),
         )?;
         Ok(LaunchResult { container_id, user })
     }

@@ -2372,3 +2372,163 @@ fn re_entering_sandbox_preserves_branch() {
         "Re-entering sandbox should preserve branch name"
     );
 }
+
+/// Get the upstream tracking branch for a local branch in the sandbox.
+fn get_sandbox_upstream(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    sandbox_name: &str,
+    branch: &str,
+) -> Option<String> {
+    sandbox_command(repo, daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{}@{{upstream}}", branch),
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+#[test]
+fn sandbox_primary_branch_has_upstream_when_host_on_branch() {
+    // When the host is on a branch, the sandbox's primary branch should track it
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Host is on "master" branch by default (from TestRepo::new)
+    let sandbox_name = "upstream-test";
+
+    // Enter sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("sandbox enter failed");
+
+    // Check that the primary branch tracks host/master
+    let upstream = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    assert_eq!(
+        upstream,
+        Some("host/master".to_string()),
+        "Primary branch should track host/master"
+    );
+}
+
+#[test]
+fn sandbox_primary_branch_tracks_host_feature_branch() {
+    // When the host is on a feature branch, the sandbox should track that branch
+    let repo = TestRepo::new();
+
+    // Create and switch to a feature branch
+    create_branch(repo.path(), "feature-xyz");
+    create_commit(repo.path(), "Feature commit");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "feature-upstream-test";
+
+    // Enter sandbox while host is on feature-xyz
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("sandbox enter failed");
+
+    // Check that the primary branch tracks host/feature-xyz
+    let upstream = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    assert_eq!(
+        upstream,
+        Some("host/feature-xyz".to_string()),
+        "Primary branch should track host/feature-xyz"
+    );
+}
+
+#[test]
+fn sandbox_primary_branch_has_no_upstream_when_host_detached() {
+    // When the host is in detached HEAD state, the sandbox should have no upstream
+    let repo = TestRepo::new();
+
+    // Create a commit and get its hash
+    create_commit(repo.path(), "Test commit");
+    let commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Build image while still on master branch
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    // Now detach HEAD by checking out the commit directly
+    Command::new("git")
+        .args(["checkout", &commit])
+        .current_dir(repo.path())
+        .success()
+        .expect("git checkout (detached) failed");
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "detached-upstream-test";
+
+    // Enter sandbox while host is detached
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
+        .success()
+        .expect("sandbox enter failed");
+
+    // Check that the primary branch has no upstream
+    let upstream = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    assert!(
+        upstream.is_none(),
+        "Primary branch should have no upstream when host is detached, got: {:?}",
+        upstream
+    );
+}
+
+#[test]
+fn sandbox_re_entry_does_not_change_upstream() {
+    // Re-entering a sandbox should not change the upstream, even if host branch changed
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "upstream-preserve-test";
+
+    // First entry while on master
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "first entry"])
+        .success()
+        .expect("first sandbox enter failed");
+
+    // Verify upstream is host/master
+    let upstream_before = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    assert_eq!(
+        upstream_before,
+        Some("host/master".to_string()),
+        "Primary branch should track host/master initially"
+    );
+
+    // Switch host to a different branch
+    create_branch(repo.path(), "other-branch");
+
+    // Re-enter sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "second entry"])
+        .success()
+        .expect("second sandbox enter failed");
+
+    // Verify upstream is still host/master (not changed to host/other-branch)
+    let upstream_after = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    assert_eq!(
+        upstream_after,
+        Some("host/master".to_string()),
+        "Primary branch upstream should not change on re-entry"
+    );
+}

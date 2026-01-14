@@ -34,3 +34,17 @@ pub fn get_repo_root() -> Result<PathBuf> {
         }
     }
 }
+
+/// Get the current branch name from a repository path.
+///
+/// Returns None if HEAD is detached (not pointing to a branch).
+pub fn get_current_branch(repo_path: &std::path::Path) -> Option<String> {
+    let repo = Repository::open(repo_path).ok()?;
+    let head = repo.head().ok()?;
+
+    if head.is_branch() {
+        head.shorthand().map(|s| s.to_string())
+    } else {
+        None
+    }
+}

@@ -8,7 +8,7 @@ use crate::cli::EnterCommand;
 use crate::config::SandboxConfig;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, Image, LaunchResult, SandboxName};
-use crate::git::get_repo_root;
+use crate::git::{get_current_branch, get_repo_root};
 
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
@@ -28,6 +28,10 @@ pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
 
     let runtime = config.runtime.unwrap_or_default();
 
+    // Get the current branch on the host (if any) to set as upstream for the
+    // sandbox's primary branch.
+    let host_branch = get_current_branch(&repo_root);
+
     client.launch_sandbox(
         SandboxName(sandbox_name.to_string()),
         Image(config.image.clone()),
@@ -35,6 +39,7 @@ pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
         config.repo_path,
         config.user,
         runtime,
+        host_branch,
     )
 }
 

@@ -66,6 +66,9 @@ struct LaunchSandboxRequest {
     user: Option<String>,
     /// Container runtime to use (runsc, runc, sysbox-runc).
     runtime: Runtime,
+    /// The branch currently checked out on the host, if any.
+    /// Used to set the upstream of the primary branch in the sandbox.
+    host_branch: Option<String>,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -163,6 +166,7 @@ pub trait Daemon: Send + Sync + 'static {
         container_repo_path: PathBuf,
         user: Option<String>,
         runtime: Runtime,
+        host_branch: Option<String>,
     ) -> Result<LaunchResult>;
 
     // DELETE /sandbox
@@ -236,6 +240,7 @@ impl Daemon for DaemonClient {
         container_repo_path: PathBuf,
         user: Option<String>,
         runtime: Runtime,
+        host_branch: Option<String>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -245,6 +250,7 @@ impl Daemon for DaemonClient {
             container_repo_path,
             user,
             runtime,
+            host_branch,
         };
 
         let response = self
@@ -426,6 +432,7 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.container_repo_path,
             request.user,
             request.runtime,
+            request.host_branch,
         )
     });
 
@@ -608,6 +615,7 @@ mod tests {
             _container_repo_path: PathBuf,
             user: Option<String>,
             _runtime: Runtime,
+            _host_branch: Option<String>,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -711,6 +719,7 @@ mod tests {
             PathBuf::from("/workspace"),
             Some("testuser".to_string()),
             Runtime::Runc,
+            Some("main".to_string()),
         );
 
         let launch_result = result.unwrap();
@@ -740,6 +749,7 @@ mod tests {
             _container_repo_path: PathBuf,
             _user: Option<String>,
             _runtime: Runtime,
+            _host_branch: Option<String>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
