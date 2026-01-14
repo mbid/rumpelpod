@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The file `secret.txt` contains `GEMINI_SECRET_99`."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 384,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 401,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 384
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "7WtnafDBNfyCvdIP5smpyAw"
+}

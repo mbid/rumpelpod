@@ -62,7 +62,6 @@ fn execute_web_search(client: &Client, model: &str, query: &str) -> Result<Strin
             )],
         }),
         generation_config: Some(GenerationConfig {
-            temperature: Some(0.0),
             max_output_tokens: Some(MAX_TOKENS),
             ..Default::default()
         }),
@@ -175,7 +174,6 @@ pub fn run_gemini_agent(
                     parts: vec![Part::text(system_prompt.clone())],
                 }),
                 generation_config: Some(GenerationConfig {
-                    temperature: Some(0.0),
                     max_output_tokens: Some(MAX_TOKENS),
                     ..Default::default()
                 }),
