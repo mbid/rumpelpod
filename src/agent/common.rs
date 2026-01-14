@@ -67,6 +67,9 @@ pub enum ToolName {
     Bash,
     Edit,
     Write,
+    /// Web search tool for Gemini (workaround for API limitation that prevents
+    /// combining google_search with function_declarations in generateContent API)
+    WebSearch,
 }
 
 impl ToolName {
@@ -79,6 +82,11 @@ impl ToolName {
             ToolName::Edit => "Perform a search-and-replace edit on a file.",
             ToolName::Write => {
                 "Write content to a new file. Returns an error if the file already exists."
+            }
+            ToolName::WebSearch => {
+                "Search the web for information. Use this tool when you need to find \
+                 current information or facts that may be beyond your knowledge cutoff. \
+                 Provide a detailed query describing what information you need."
             }
         }
     }
@@ -128,6 +136,16 @@ impl ToolName {
                 },
                 "required": ["file_path", "content"],
                 "additionalProperties": false
+            }),
+            ToolName::WebSearch => serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query to find information on the web"
+                    }
+                },
+                "required": ["query"]
             }),
         }
     }

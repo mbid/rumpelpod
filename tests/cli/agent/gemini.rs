@@ -61,11 +61,10 @@ fn gemini_agent_reads_file() {
 }
 
 #[test]
-#[should_panic(expected = "2025-11-12")]
-fn gemini_agent_web_search_not_supported() {
-    // Gemini agent doesn't have web search enabled - combining google_search with
-    // function_declarations is only supported by the Live API.
-    // This test verifies that the agent cannot answer questions requiring web search.
+fn gemini_agent_web_search() {
+    // Test that the Gemini agent can use web search to find information past its knowledge cutoff.
+    // The US penny production ended in November 2025, after the model's training data.
+    // Uses a custom websearch tool that makes a separate API call with google_search enabled.
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
     write_test_sandbox_config(&repo, &image_id);
@@ -79,8 +78,7 @@ fn gemini_agent_web_search_not_supported() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // This will panic because the output won't contain the correct date (2025-11-12)
-    // since Gemini can't search the web for this information.
+    // The last US penny was minted on November 12, 2025
     assert!(
         stdout.contains("2025-11-12"),
         "Agent should find that the last US penny was minted on 2025-11-12.\nstdout: {}\nstderr: {}",

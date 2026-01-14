@@ -280,6 +280,10 @@ pub fn run_claude_agent(
                                 }
                                 (output, success)
                             }
+                            // WebSearch is Gemini-specific; Anthropic uses server-side web_search
+                            ToolName::WebSearch => {
+                                unreachable!("WebSearch tool is only used by Gemini agent")
+                            }
                         };
 
                         // Anthropic API requires non-empty content when is_error is true.

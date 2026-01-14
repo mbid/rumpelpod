@@ -11,7 +11,8 @@ use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
 use crate::llm::types::gemini::{
     Content, FinishReason, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
-    GenerateContentRequest, GenerationConfig, Part, Role, SystemInstruction, Tool, ToolConfig,
+    GenerateContentRequest, GenerationConfig, GoogleSearch, Part, Role, SystemInstruction, Tool,
+    ToolConfig,
 };
 
 use super::common::{
@@ -32,6 +33,50 @@ fn make_function_declaration(name: ToolName) -> FunctionDeclaration {
         description: name.description().to_string(),
         parameters: params,
     }
+}
+
+/// Execute a web search using Gemini's google_search grounding.
+///
+/// The Gemini generateContent API doesn't support combining google_search with
+/// function_declarations (multi-tool use is only in Live API). As a workaround,
+/// we make a separate request with only google_search enabled to perform the search.
+fn execute_web_search(client: &Client, model: &str, query: &str) -> Result<String> {
+    // Create a search-focused request without function declarations
+    let search_tool = Tool {
+        function_declarations: None,
+        google_search: Some(GoogleSearch::default()),
+    };
+
+    let request = GenerateContentRequest {
+        contents: vec![Content {
+            role: Role::User,
+            parts: vec![Part::text(query)],
+        }],
+        tools: Some(vec![search_tool]),
+        tool_config: None,
+        system_instruction: Some(SystemInstruction {
+            parts: vec![Part::text(
+                "You are a web search assistant. Search for the requested information and \
+                 provide a comprehensive answer based on the search results. Include relevant \
+                 facts, dates, and details. Cite your sources when possible.",
+            )],
+        }),
+        generation_config: Some(GenerationConfig {
+            temperature: Some(0.0),
+            max_output_tokens: Some(MAX_TOKENS),
+            ..Default::default()
+        }),
+    };
+
+    let response = client.generate_content(model, request)?;
+
+    if response.candidates.is_empty() {
+        return Ok("No search results found.".to_string());
+    }
+
+    // Extract text from the response
+    let text = response.text().unwrap_or_else(|| "No results.".to_string());
+    Ok(text)
 }
 
 pub fn run_gemini_agent(
@@ -77,12 +122,14 @@ pub fn run_gemini_agent(
     // Build the tools list - function declarations only.
     // Multi-tool use (combining google_search with function_declarations) is only
     // supported by the Live API, not the generateContent API we use here.
-    // See: https://ai.google.dev/gemini-api/docs/function-calling#multi-tool_use
+    // We add a custom websearch function that internally makes a separate API call
+    // with google_search enabled (see execute_web_search).
     let tools = vec![Tool {
         function_declarations: Some(vec![
             make_function_declaration(ToolName::Bash),
             make_function_declaration(ToolName::Edit),
             make_function_declaration(ToolName::Write),
+            make_function_declaration(ToolName::WebSearch),
         ]),
         google_search: None,
     }];
@@ -250,6 +297,24 @@ pub fn run_gemini_agent(
                                 }
                                 (output, success)
                             }
+                            Ok(ToolName::WebSearch) => {
+                                let query =
+                                    fc.args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+
+                                println!("[search] {query}");
+
+                                match execute_web_search(&client, model_api_id(model), query) {
+                                    Ok(result) => {
+                                        // Don't print full search results to avoid noise
+                                        (result, true)
+                                    }
+                                    Err(e) => {
+                                        let error_msg = format!("Search failed: {e}");
+                                        println!("{error_msg}");
+                                        (error_msg, false)
+                                    }
+                                }
+                            }
                             Err(_) => {
                                 let error_msg = format!("Unknown tool: {}", fc.name);
                                 println!("[error] {error_msg}");
@@ -290,13 +355,10 @@ pub fn run_gemini_agent(
                 &serde_json::to_value(&contents).context("Failed to serialize contents to JSON")?,
             )?;
 
-            // Check if we should continue (function calls mean we need another round)
-            // Check finish reason - if it indicates function call, continue
-            let should_continue = has_function_call
-                && candidate.finish_reason != Some(FinishReason::Stop)
-                && candidate.finish_reason != Some(FinishReason::MaxTokens);
-
-            if !should_continue {
+            // Continue if there were function calls (need to process the results).
+            // Gemini sets finish_reason to STOP even for function calls, so we
+            // rely on has_function_call rather than finish_reason.
+            if !has_function_call || candidate.finish_reason == Some(FinishReason::MaxTokens) {
                 break;
             }
         }
@@ -366,6 +428,11 @@ fn format_gemini_history(contents: &[Content]) -> String {
                                     fc.args.get("file_path").and_then(|v| v.as_str())
                                 {
                                     output.push_str(&format!("[write] {path}\n"));
+                                }
+                            }
+                            "websearch" => {
+                                if let Some(query) = fc.args.get("query").and_then(|v| v.as_str()) {
+                                    output.push_str(&format!("[search] {query}\n"));
                                 }
                             }
                             // Unknown tools are ignored in history display

@@ -240,6 +240,10 @@ pub fn run_grok_agent(
                             }
                             (output, success)
                         }
+                        // WebSearch is Gemini-specific; xAI uses search_parameters
+                        Ok(ToolName::WebSearch) => {
+                            unreachable!("WebSearch tool is only used by Gemini agent")
+                        }
                         Err(_) => {
                             let tool_name = &tool_call.function.name;
                             let error_msg = format!("Unknown tool: {tool_name}");

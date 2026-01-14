@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "2025-11-12"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 669,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 679,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 669
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "bN9mabqMEbPUvdIP8rPaQQ"
+}
