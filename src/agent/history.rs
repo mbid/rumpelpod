@@ -88,20 +88,28 @@ fn format_timestamp(iso: &str) -> Result<String> {
 
 /// Display a picker for selecting a conversation in TTY mode.
 ///
-/// Returns the selected conversation ID, or None for a new conversation.
-fn show_picker(conversations: &[ConversationSummary]) -> Result<Option<i64>> {
+/// Returns the selected conversation ID.
+fn show_picker(conversations: &[ConversationSummary]) -> Result<i64> {
     let mut stdout = std::io::stdout();
 
-    println!("Found {} existing conversations:", conversations.len());
-    println!("  0) (new conversation)");
+    println!(
+        "Found {} existing conversations (use --new to start fresh):",
+        conversations.len()
+    );
 
     for (i, conv) in conversations.iter().enumerate() {
         let timestamp = format_timestamp(&conv.updated_at)?;
-        println!("  {}) {} [{}]", i + 1, timestamp, conv.model);
+        println!("  {}) {} [{}]", i, timestamp, conv.model);
     }
 
+    // Picker is only shown when there are 2+ conversations
+    assert!(
+        conversations.len() >= 2,
+        "picker requires multiple conversations"
+    );
+    let max_index = conversations.len() - 1;
     loop {
-        print!("Select [0-{}]: ", conversations.len());
+        print!("Select [0-{}]: ", max_index);
         stdout.flush()?;
 
         let mut input = String::new();
@@ -109,10 +117,8 @@ fn show_picker(conversations: &[ConversationSummary]) -> Result<Option<i64>> {
 
         let input = input.trim();
         if let Ok(n) = input.parse::<usize>() {
-            if n == 0 {
-                return Ok(None);
-            } else if n <= conversations.len() {
-                return Ok(Some(conversations[n - 1].id));
+            if n < conversations.len() {
+                return Ok(conversations[n].id);
             }
         }
 
@@ -171,10 +177,8 @@ pub fn resolve_conversation(
             // Multiple conversations exist
             if std::io::stdin().is_terminal() {
                 // TTY: show picker
-                match show_picker(&conversations)? {
-                    Some(id) => Ok(ConversationChoice::Resume(id)),
-                    None => Ok(ConversationChoice::New),
-                }
+                let id = show_picker(&conversations)?;
+                Ok(ConversationChoice::Resume(id))
             } else {
                 // Non-TTY: error with helpful message
                 bail!(
