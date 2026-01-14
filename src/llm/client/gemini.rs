@@ -99,7 +99,9 @@ impl Client {
             let cache_key = cache.compute_key(&cache_header_refs, &cache_input);
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response = GenerateContentResponse::from_response_json(&cached_response)
-                    .context("Failed to parse cached response")?;
+                    .with_context(|| {
+                        format!("Failed to parse cached response: {cached_response}")
+                    })?;
                 return Ok(response);
             }
         }
@@ -167,7 +169,9 @@ impl Client {
                 }
 
                 let response = GenerateContentResponse::from_response_json(&response_text)
-                    .context("Failed to parse Gemini API response")?;
+                    .with_context(|| {
+                        format!("Failed to parse Gemini API response: {response_text}")
+                    })?;
 
                 if let Some(ref usage) = response.usage_metadata {
                     debug!(

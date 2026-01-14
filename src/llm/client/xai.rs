@@ -82,7 +82,9 @@ impl Client {
             let cache_key = cache.compute_key(&cache_header_refs, &body);
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response: ChatCompletionResponse = serde_json::from_str(&cached_response)
-                    .context("Failed to parse cached response")?;
+                    .with_context(|| {
+                        format!("Failed to parse cached response: {cached_response}")
+                    })?;
                 return Ok(response);
             }
         }
@@ -145,7 +147,9 @@ impl Client {
                 }
 
                 let response: ChatCompletionResponse = serde_json::from_str(&response_text)
-                    .context("Failed to parse xAI API response")?;
+                    .with_context(|| {
+                        format!("Failed to parse xAI API response: {response_text}")
+                    })?;
                 debug!(
                     "xAI API request successful: {} prompt tokens, {} completion tokens",
                     response.usage.prompt_tokens, response.usage.completion_tokens

@@ -82,7 +82,9 @@ impl Client {
             let cache_key = cache.compute_key(&cache_header_refs, &body);
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response: MessagesResponse = serde_json::from_str(&cached_response)
-                    .context("Failed to parse cached response")?;
+                    .with_context(|| {
+                        format!("Failed to parse cached response: {cached_response}")
+                    })?;
                 return Ok(response);
             }
         }
@@ -145,7 +147,9 @@ impl Client {
                 }
 
                 let response: MessagesResponse = serde_json::from_str(&response_text)
-                    .context("Failed to parse Anthropic API response")?;
+                    .with_context(|| {
+                        format!("Failed to parse Anthropic API response: {response_text}")
+                    })?;
                 debug!(
                     "API request successful: {} input tokens, {} output tokens",
                     response.usage.input_tokens, response.usage.output_tokens
