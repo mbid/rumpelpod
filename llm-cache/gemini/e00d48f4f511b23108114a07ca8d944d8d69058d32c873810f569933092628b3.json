@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "cat newfile.txt"
+              }
+            },
+            "thoughtSignature": "CrABAXLI2nzYBxvse2Q+aBCJjgjlrJZXtM6LdadQ+o6vKNuN6n6ZtTijjXJEdrVIZy/pb6Ww8hO6RyD3wdilg5vwOtdZunPrDcF5QWvFop2GgGXPzL6oC4nhpZs3qKM3/naoZ1ZXQTHsL5MDAy6vdcuRTfoRD4+8yYSBXYRg8yn1ahvkwSnFsE3HFwzVCKNT7JG3zH/POqfVIl2f1yNSechBM9zre+XkrRF5ZTSbxdMSHAk="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 419,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 468,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 419
+      }
+    ],
+    "thoughtsTokenCount": 32
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "9SdoaYSfFpfwnsEPkdazmQo"
+}

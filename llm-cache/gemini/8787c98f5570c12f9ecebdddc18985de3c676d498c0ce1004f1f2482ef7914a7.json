@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "cat Dockerfile"
+              }
+            },
+            "thoughtSignature": "CnwBcsjafJoQzF2LDGZxI8LJb2sEBGrp2BObuN2Lt7WHol9Znjhbt+645i1DcggkuLm68kHUjnafcJw5LXj3LGWbpfv4Pf+bBW0bVX2ODAA0Khc+byMt+lSE2YLMuZBYOFPglva/DN3p1DdjpmgRtUwIVApyO1gRHYREMRdR"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 367,
+    "candidatesTokenCount": 15,
+    "totalTokenCount": 402,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 367
+      }
+    ],
+    "thoughtsTokenCount": 20
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "8SdoaeuxEKrY7M8P38a18Qg"
+}

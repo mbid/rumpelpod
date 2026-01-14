@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "ls -F"
+              }
+            },
+            "thoughtSignature": "CooEAXLI2nyLBwks3mxC0uPa0zSGLQ/Wn0jGFmnR8kJu+I6dPQM2kwge3rBK8iIahvuqzZTiyBOjSsVev2728tJQw33E7jrssqOZXe7PcwdKKfzikZySbf3ybbEfKPzGOLrtHwDXsZy9aaEu//1aCSGJutDNx8oGTYfsVTy13Wt2FMM1nGS3HPE2lxvLoZDnDt4k3pjbP2OlDH/QX9kJaxH89t7r/0qOLKkaJjLXMYgPa1wPZX3BkyTYeRULJIXbQTpnJggwABsSJIvu5HQgkUJjuiDXR7SsY8D3b5UQSjEIS43As7xZYjpjUlSPUKL/VhwfybVTqVd0oPwK45VJhUdvmjMGJcot3BTNSW7An2kBD4FzFbcejhg3LLBnLcq6U3vdoC34hXyt/kLmtgAiOIMHvGRd7qvR99lRn/pPigtCv1nLmwEg2WkuPYdiJZCfmUa46dg5WzflkPM4JT37M3HVb4gHD1s4s4uflBqqQhdzy9WahT6OZ/vW7ZjauW11pdB94wTrqEpI8+eWG7sLr6GHrjcsjSpuj7zyGyCrawMeTsMwNOXSkYsVtDvHReEY//2XBsnJuoE+eenUn0ygjDU/U7CMYC6LQkirMy2uI6Qmr08rqVXoeWaswzeSe8yFryhLmLnC+J71IobRY2W0SaCTwKW8ovpGT10voMG8cXWgHmBuHZPTgIgaaH9R"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 466,
+    "candidatesTokenCount": 15,
+    "totalTokenCount": 595,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 466
+      }
+    ],
+    "thoughtsTokenCount": 114
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "7SdoaauKErLxnsEPyqOS2AU"
+}

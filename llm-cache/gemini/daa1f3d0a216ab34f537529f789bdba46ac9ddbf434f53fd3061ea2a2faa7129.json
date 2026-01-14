@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The file now contains \"Hello Universe\".",
+            "thoughtSignature": "CqsBAXLI2nyTvBF3HC9GkU52SMtexmFTMhljAUkK+sgQ44HZQ3pStqZvaH+tE31djKL2qlMkNuJ148gKj587OJ08jZmz6kTPnlwHlM/BKUb9YozoUzO9CR0GS/e/AwYXmSMMf9kZiBpmFN7ekOTNERpaw3JxINyNlFs8ZRVwuTnb/gLYMjNo0xTCXoMPIYrLQ1M/AgvGiUAqUrtcT8NIc5O3xvHPsT1IUhtrdUBq"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 445,
+    "candidatesTokenCount": 8,
+    "totalTokenCount": 486,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 445
+      }
+    ],
+    "thoughtsTokenCount": 33
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "6ydoadmTMsHknsEP0ameuAk"
+}

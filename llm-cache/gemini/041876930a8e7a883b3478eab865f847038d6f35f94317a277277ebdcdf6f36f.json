@@ -1,0 +1,39 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "edit",
+              "args": {
+                "file_path": "greeting.txt",
+                "new_string": "Universe",
+                "old_string": "World"
+              }
+            },
+            "thoughtSignature": "CvMBAXLI2nwyLGafzJXJxNUocIptOvrOecXbcqomdmXG3Se7h6ALpnbKCIDJdCnToxivs8rVT0Javx3636qRIZHolrBJWyaanY0vXA6U691oLyTr3PR5K082gPNs7lAiDI3n003VgfYLILT4K4ykokLuI7pGEANFtp9RkP9PbVZmFMapuGRJRPWZ8e0GpUalqxgLyhLed4Dh3ZwKOOC1IPdoqnU0DWcirhPmrBBd61c6vv675uU/i8UsWujYXDdglrs5ymzwvwe9YdhSsP3Z1i+WedCXq9RP13F/TCUrqIXQLvrGQvljmD1SA288cJGqZm6PKWso"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 367,
+    "candidatesTokenCount": 31,
+    "totalTokenCount": 453,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 367
+      }
+    ],
+    "thoughtsTokenCount": 55
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "6idoaZCNE7Li7M8P8tjG0Ac"
+}

@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "ZEBRA_DELTA_9876."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 392,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 402,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 392
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "6idoae--FruKkdUP2fDYuQw"
+}

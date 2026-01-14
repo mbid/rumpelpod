@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Acknowledged."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 354,
+    "candidatesTokenCount": 3,
+    "totalTokenCount": 357,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 354
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "7CdoaaOqHZ_gnsEPs9eVqAk"
+}

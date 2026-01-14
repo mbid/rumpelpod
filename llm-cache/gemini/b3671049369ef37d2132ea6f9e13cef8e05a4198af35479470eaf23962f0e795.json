@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The secret code you mentioned is FOXTROT_HOTEL_2468."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 389,
+    "candidatesTokenCount": 18,
+    "totalTokenCount": 407,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 389
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "6SdoacPZNo7d7M8Pisrp4Ac"
+}

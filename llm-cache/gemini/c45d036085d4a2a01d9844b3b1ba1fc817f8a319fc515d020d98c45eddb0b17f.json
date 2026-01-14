@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I'm sorry, I'm not sure what you mean by \"Single conversation\". Could you please provide more details or context?",
+            "thoughtSignature": "CswBAXLI2nxE9I5Rij5gx87nVshoy3COPsdVkorAqen7L1ZQFISCiRMgI41Mx1BFHZ+6ggvo8+veEYta4GeC8Njtre2thqpJqE5q7edMbBrd3A5wh1BVADKQ8TAFHscIIY2Mr8mfN1f/EShMgtPViIR098VzTjst4SSHuyAIEylDC92GwIEDIlAzSIPehWZPb2Jm7rK3sTS3qNVsUGRuSK9e/tObGQbc3m/ErvhWVV76zDASoIBDCoCagjKGH0fXJ7fgjb/jcFyJEyOy1Yq7"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 337,
+    "candidatesTokenCount": 27,
+    "totalTokenCount": 401,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 337
+      }
+    ],
+    "thoughtsTokenCount": 37
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "6CdoadPsFbavnsEP74bD8Qc"
+}

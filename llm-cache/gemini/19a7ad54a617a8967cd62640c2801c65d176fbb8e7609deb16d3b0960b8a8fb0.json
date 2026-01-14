@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "Hello! I see you have a `Dockerfile` in your project. How can I help you today? What would you like to do with this project or what task would you have for me?",
+            "thoughtSignature": "CvcEAXLI2nxjWEoSFhi8R3LE0wWKCP8X4bkGhNczUAuSUZh7eCOdkJt5nyi3i/Z91J89JqgIUMEtkBi7aM2p4fvEpkUyr5gwf96vkzdpht8w60+DagL5yq2TbQ/4TPIaiQiyZS0QuwKw+VYEHEXi5KqwOAVcmRPCx7UgCI6OCQwEcxVXuii4woRu/vy1/5ksn2JUpEAalNWbDm0WAJ9kmGF5L3hmmFi2GwcczLWZsYlCrvCC2L1CQmdTE/QDE5/0rBAeQNcusOMJM1OwR0NHyNa44THslAWHwY9e5piukKsFNYo8CvO2oWggeppBbwm4p1hz0Trme51U/8vOR4zbw2mhsHe+hgINBFPxAIMV6VNgnQXOZbZ6HMg7jUuHaQRXppVv9fRi+iBHL4/9Zt5mhLLE2eSPVRen/0PTXAvJ1ShxpwWNc/VkSI5wZ+gSDwTbqP2nYMwWp6y98OhmEhDw9zbvokIjcoqNDnHmQpSqBloPQXSZquvEIyQMZbOLRfmimkfDGkIhRQSVAXhJPyyAkda9p/PwUhUrWmgvAnsNjn6k42Tod67V2d1ZSqB5KPhDuBCdZELgkt+PAf1m/lGWFDgHhWWPhKMmcVUh/hX2moLiIvkEg80HvlGpZajOSoMu/K12PJXF8YIgN1bG8R74F3G+iQVQBDeGaTFwFfTbaI3kSm8jewv6aMP9XHVdUVCJFHY68xrllt5K4nnwQ5EoA5QJb32hKVexQhJ4Moc0LPu5WcF8ThtcBYuUwVSmrWNQIK5cAu2cFtdRBeOW0f0SgmiTWP3ghN4q/SoVFMtGc8Nw/+jokxilvmOSCK3EFX+ReJDfZzFBa89qhQ=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 466,
+    "candidatesTokenCount": 39,
+    "totalTokenCount": 637,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 466
+      }
+    ],
+    "thoughtsTokenCount": 132
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "8idoacidIcHknsEP0ameuAk"
+}

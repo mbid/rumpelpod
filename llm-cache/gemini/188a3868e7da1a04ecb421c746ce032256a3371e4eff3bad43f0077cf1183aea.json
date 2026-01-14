@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The command `false` was executed and it exited with status 1, which indicates an error or failure. In bash, a command exiting with a non-zero status typically signifies an unsuccessful execution."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 378,
+    "candidatesTokenCount": 40,
+    "totalTokenCount": 418,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 378
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "7CdoaYGKG6rNnsEPu4yl8Qg"
+}
