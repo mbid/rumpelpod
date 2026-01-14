@@ -467,9 +467,16 @@ impl From<CandidateResponse> for Candidate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageMetadata {
-    pub prompt_token_count: u32,
-    pub candidates_token_count: u32,
-    pub total_token_count: u32,
+    #[serde(default)]
+    pub prompt_token_count: Option<u32>,
+    #[serde(default)]
+    pub candidates_token_count: Option<u32>,
+    #[serde(default)]
+    pub total_token_count: Option<u32>,
+    #[serde(default)]
+    pub cached_content_token_count: Option<u32>,
+    #[serde(default)]
+    pub thoughts_token_count: Option<u32>,
 }
 
 /// Web source information in grounding chunks.

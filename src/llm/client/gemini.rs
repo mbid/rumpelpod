@@ -171,7 +171,7 @@ impl Client {
 
                 if let Some(ref usage) = response.usage_metadata {
                     debug!(
-                        "Gemini API request successful: {} prompt tokens, {} completion tokens",
+                        "Gemini API request successful: {:?} prompt tokens, {:?} completion tokens",
                         usage.prompt_token_count, usage.candidates_token_count
                     );
                 }
