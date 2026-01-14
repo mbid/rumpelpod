@@ -203,6 +203,11 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
 /// When a sandbox pushes `refs/heads/sandbox/*@<name>`, this hook mirrors it to
 /// the host repo as `refs/remotes/sandbox/*@<name>`.
 ///
+/// For primary branches (where branch name equals sandbox name, e.g., `foo@foo`),
+/// this hook also creates a symbolic ref alias `sandbox/<name>` -> `sandbox/<name>@<name>`.
+/// This allows users to refer to a sandbox's primary branch simply as `sandbox/alice`
+/// instead of the full `sandbox/alice@alice`.
+///
 /// The post-receive hook runs after refs are updated but before git-receive-pack
 /// sends the response to the client. This means the pushing sandbox's `git push`
 /// blocks until this hook completes, ensuring refs are visible in the host repo
@@ -212,18 +217,34 @@ const GATEWAY_POST_RECEIVE_HOOK: &str = indoc! {r#"
     # Sync sandbox refs from gateway to host repo's remote-tracking refs.
     # When sandbox pushes refs/heads/sandbox/*@<name>, mirror to host as
     # refs/remotes/sandbox/*@<name>.
+    #
+    # For primary branches (foo@foo), also create an alias symref sandbox/foo.
 
     while read oldvalue newvalue refname; do
         case "$refname" in
             refs/heads/sandbox/*)
                 # Extract branch name (sandbox/foo@bar)
                 branch="${refname#refs/heads/}"
+                ref_suffix="${branch#sandbox/}"  # foo@bar
+                branch_part="${ref_suffix%@*}"   # foo
+                sandbox_part="${ref_suffix##*@}" # bar
+
                 if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
                     # Deletion - remove from host
                     git push host --delete "refs/remotes/$branch" --quiet 2>/dev/null || true
+                    # Remove alias if this was a primary branch (foo@foo)
+                    if [ "$branch_part" = "$sandbox_part" ]; then
+                        git symbolic-ref --delete "refs/heads/sandbox/$sandbox_part" 2>/dev/null || true
+                        git push host --delete "refs/remotes/sandbox/$sandbox_part" --quiet 2>/dev/null || true
+                    fi
                 else
                     # Update - push to host as remote-tracking ref
                     git push host "$refname:refs/remotes/$branch" --force --quiet 2>/dev/null || true
+                    # Create alias if this is a primary branch (foo@foo)
+                    if [ "$branch_part" = "$sandbox_part" ]; then
+                        git symbolic-ref "refs/heads/sandbox/$sandbox_part" "$refname"
+                        git push host "$refname:refs/remotes/sandbox/$sandbox_part" --force --quiet 2>/dev/null || true
+                    fi
                 fi
                 ;;
         esac

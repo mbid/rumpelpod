@@ -1810,3 +1810,343 @@ fn gateway_host_head_works_in_detached_state() {
         "Sandbox host/HEAD should resolve to the detached HEAD commit"
     );
 }
+
+#[test]
+fn gateway_primary_branch_alias_works_on_host() {
+    // Test that sandbox/<name> resolves to the same commit as sandbox/<name>@<name>
+    // For the alias to be created, the sandbox must be on a branch with the same name
+    // as the sandbox (the "primary branch").
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "alias-test";
+
+    // Create and checkout a branch named after the sandbox (the primary branch)
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            sandbox_name,
+        ])
+        .success()
+        .expect("Failed to create primary branch in sandbox");
+
+    // Create a commit on the primary branch
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "test commit for alias",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    // Get commit from sandbox
+    let commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get sandbox HEAD");
+    let sandbox_commit = String::from_utf8_lossy(&commit_output).trim().to_string();
+
+    // Verify host has both refs pointing to the same commit
+    let full_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
+    let alias_ref = format!("sandbox/{}", sandbox_name);
+
+    let full_ref_commit = get_remote_ref_commit(repo.path(), &full_ref);
+    let alias_ref_commit = get_remote_ref_commit(repo.path(), &alias_ref);
+
+    assert_eq!(
+        full_ref_commit,
+        Some(sandbox_commit.clone()),
+        "Full ref sandbox/{}@{} should point to sandbox commit",
+        sandbox_name,
+        sandbox_name
+    );
+    assert_eq!(
+        alias_ref_commit,
+        Some(sandbox_commit),
+        "Alias ref sandbox/{} should point to same commit as full ref",
+        sandbox_name
+    );
+}
+
+#[test]
+fn gateway_alias_deleted_with_sandbox() {
+    // Test that alias ref is removed when sandbox is deleted
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "delete-alias-test";
+
+    // Create and checkout the primary branch (named after sandbox)
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            sandbox_name,
+        ])
+        .success()
+        .expect("Failed to create primary branch in sandbox");
+
+    // Create a commit on the primary branch
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "test commit",
+        ])
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    // Verify refs exist
+    let full_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
+    let alias_ref = format!("sandbox/{}", sandbox_name);
+
+    assert!(
+        get_remote_ref_commit(repo.path(), &full_ref).is_some(),
+        "Full ref should exist before deletion"
+    );
+    assert!(
+        get_remote_ref_commit(repo.path(), &alias_ref).is_some(),
+        "Alias ref should exist before deletion"
+    );
+
+    // Delete the sandbox
+    sandbox_command(&repo, &daemon)
+        .args(["delete", sandbox_name])
+        .success()
+        .expect("Failed to delete sandbox");
+
+    // Verify refs are removed
+    assert!(
+        get_remote_ref_commit(repo.path(), &full_ref).is_none(),
+        "Full ref should be removed after deletion"
+    );
+    assert!(
+        get_remote_ref_commit(repo.path(), &alias_ref).is_none(),
+        "Alias ref should be removed after deletion"
+    );
+}
+
+#[test]
+fn gateway_alias_does_not_conflict_with_branches() {
+    // Test that sandbox `alice` creating branch `bob` doesn't affect sandbox `bob`'s alias
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Create sandbox `bob` on its primary branch (named `bob`)
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "bob", "--", "git", "checkout", "-b", "bob"])
+        .success()
+        .expect("Failed to create bob's primary branch");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "bob",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "bob commit",
+        ])
+        .success()
+        .expect("Failed to create commit in bob sandbox");
+
+    let bob_commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", "bob", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get bob HEAD");
+    let bob_commit = String::from_utf8_lossy(&bob_commit_output)
+        .trim()
+        .to_string();
+
+    // Create sandbox `alice` and create a branch named `bob` with different commit
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "alice",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "alice commit",
+        ])
+        .success()
+        .expect("Failed to create commit in alice sandbox");
+
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "alice", "--", "git", "checkout", "-b", "bob"])
+        .success()
+        .expect("Failed to create bob branch in alice sandbox");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "alice",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "alice bob-branch commit",
+        ])
+        .success()
+        .expect("Failed to create commit on bob branch in alice sandbox");
+
+    let alice_bob_commit_output = sandbox_command(&repo, &daemon)
+        .args(["enter", "alice", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("Failed to get alice bob-branch HEAD");
+    let alice_bob_commit = String::from_utf8_lossy(&alice_bob_commit_output)
+        .trim()
+        .to_string();
+
+    // Verify sandbox/bob alias still points to bob's primary branch, not alice's bob branch
+    let bob_alias_commit = get_remote_ref_commit(repo.path(), "sandbox/bob");
+    let bob_full_commit = get_remote_ref_commit(repo.path(), "sandbox/bob@bob");
+    let alice_bob_branch_commit = get_remote_ref_commit(repo.path(), "sandbox/bob@alice");
+
+    assert_ne!(
+        bob_commit, alice_bob_commit,
+        "Bob and alice's bob-branch should have different commits"
+    );
+    assert_eq!(
+        bob_alias_commit,
+        Some(bob_commit.clone()),
+        "sandbox/bob alias should point to bob's primary branch"
+    );
+    assert_eq!(
+        bob_full_commit,
+        Some(bob_commit),
+        "sandbox/bob@bob should point to bob's commit"
+    );
+    assert_eq!(
+        alice_bob_branch_commit,
+        Some(alice_bob_commit),
+        "sandbox/bob@alice should point to alice's bob-branch commit"
+    );
+}
+
+#[test]
+fn gateway_non_primary_branches_have_no_alias() {
+    // Test that non-primary branches (feature@sandbox) don't get an alias
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "no-alias-test";
+
+    // Create the primary branch (named after the sandbox)
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            sandbox_name,
+        ])
+        .success()
+        .expect("Failed to create primary branch");
+
+    // Create initial commit on primary branch
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "primary commit",
+        ])
+        .success()
+        .expect("Failed to create commit on primary branch");
+
+    // Create a feature branch
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "checkout",
+            "-b",
+            "feature",
+        ])
+        .success()
+        .expect("Failed to create feature branch");
+
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "feature commit",
+        ])
+        .success()
+        .expect("Failed to create commit on feature branch");
+
+    // Verify feature@sandbox_name exists but sandbox/feature alias does not
+    let feature_ref = format!("sandbox/feature@{}", sandbox_name);
+    assert!(
+        get_remote_ref_commit(repo.path(), &feature_ref).is_some(),
+        "sandbox/feature@{} should exist",
+        sandbox_name
+    );
+    assert!(
+        get_remote_ref_commit(repo.path(), "sandbox/feature").is_none(),
+        "sandbox/feature alias should not exist (only primary branches get aliases)"
+    );
+
+    // Verify primary branch alias still works
+    let primary_alias_commit =
+        get_remote_ref_commit(repo.path(), &format!("sandbox/{}", sandbox_name));
+    let primary_full_commit = get_remote_ref_commit(
+        repo.path(),
+        &format!("sandbox/{}@{}", sandbox_name, sandbox_name),
+    );
+    assert!(
+        primary_alias_commit.is_some(),
+        "Primary branch alias should exist"
+    );
+    assert_eq!(
+        primary_alias_commit, primary_full_commit,
+        "Primary branch alias should point to same commit as full ref"
+    );
+}

@@ -290,6 +290,52 @@ fn delete_network(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clean up gateway refs for a deleted sandbox.
+///
+/// Removes all refs matching `sandbox/*@<sandbox_name>` from both the gateway
+/// and host repos, including the alias symref `sandbox/<sandbox_name>`.
+fn cleanup_sandbox_refs(gateway_path: &Path, repo_path: &Path, sandbox_name: &SandboxName) {
+    // Find all refs matching sandbox/*@<sandbox_name> in gateway
+    let pattern = format!("refs/heads/sandbox/*@{}", sandbox_name.0);
+    if let Ok(output) = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", &pattern])
+        .current_dir(gateway_path)
+        .output()
+    {
+        if output.status.success() {
+            let refs = String::from_utf8_lossy(&output.stdout);
+            for ref_name in refs.lines().filter(|s| !s.is_empty()) {
+                // Delete from gateway
+                let _ = Command::new("git")
+                    .args(["update-ref", "-d", ref_name])
+                    .current_dir(gateway_path)
+                    .output();
+
+                // Delete corresponding remote-tracking ref from host
+                let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
+                let _ = Command::new("git")
+                    .args(["update-ref", "-d", &format!("refs/remotes/{}", branch)])
+                    .current_dir(repo_path)
+                    .output();
+            }
+        }
+    }
+
+    // Delete the alias symref (sandbox/<name> -> sandbox/<name>@<name>)
+    let alias_ref = format!("refs/heads/sandbox/{}", sandbox_name.0);
+    let _ = Command::new("git")
+        .args(["symbolic-ref", "--delete", &alias_ref])
+        .current_dir(gateway_path)
+        .output();
+
+    // Delete the alias remote-tracking ref from host
+    let alias_remote_ref = format!("refs/remotes/sandbox/{}", sandbox_name.0);
+    let _ = Command::new("git")
+        .args(["update-ref", "-d", &alias_remote_ref])
+        .current_dir(repo_path)
+        .output();
+}
+
 /// Spawn a git HTTP server for the container.
 /// This is required for the container to fetch from the gateway repository.
 fn spawn_git_http_server(
@@ -747,6 +793,11 @@ impl Daemon for DaemonServer {
 
         // Remove the network (must be done after removing the container)
         delete_network(&name)?;
+
+        // Clean up gateway refs for this sandbox
+        if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
+            cleanup_sandbox_refs(&gateway_path, &repo_path, &sandbox_name);
+        }
 
         // Delete conversation history for this sandbox
         let conn = self.db.lock().unwrap();
