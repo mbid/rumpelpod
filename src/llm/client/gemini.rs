@@ -98,7 +98,7 @@ impl Client {
             let cache_input = format!("{}\n{}", cache_url, body);
             let cache_key = cache.compute_key(&cache_header_refs, &cache_input);
             if let Some(cached_response) = cache.get(&cache_key) {
-                let response: GenerateContentResponse = serde_json::from_str(&cached_response)
+                let response = GenerateContentResponse::from_response_json(&cached_response)
                     .context("Failed to parse cached response")?;
                 return Ok(response);
             }
@@ -166,7 +166,7 @@ impl Client {
                     cache.put(&cache_key, &response_text)?;
                 }
 
-                let response: GenerateContentResponse = serde_json::from_str(&response_text)
+                let response = GenerateContentResponse::from_response_json(&response_text)
                     .context("Failed to parse Gemini API response")?;
 
                 if let Some(ref usage) = response.usage_metadata {

@@ -260,10 +260,31 @@ impl<'de> serde::Deserialize<'de> for Part {
 }
 
 /// Content in a conversation (a turn from either user or model).
+/// Used for requests - role is required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Content {
     pub role: Role,
     pub parts: Vec<Part>,
+}
+
+/// Content as returned in API responses.
+/// The role field is optional in responses (official SDKs treat it as optional),
+/// so we deserialize to this type and then convert to Content.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContentResponse {
+    pub role: Option<Role>,
+    pub parts: Vec<Part>,
+}
+
+impl ContentResponse {
+    /// Convert to Content, defaulting missing role to Model.
+    /// API responses are always from the model, so this is the correct default.
+    pub fn into_content(self) -> Content {
+        Content {
+            role: self.role.unwrap_or(Role::Model),
+            parts: self.parts,
+        }
+    }
 }
 
 /// Function declaration for tool calling.
@@ -392,11 +413,11 @@ pub struct CitationMetadata {
     pub citation_sources: Vec<CitationSource>,
 }
 
-/// A single candidate response from the model.
+/// A single candidate response from the model (raw API response).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Candidate {
-    pub content: Content,
+struct CandidateResponse {
+    pub content: ContentResponse,
     #[serde(default)]
     pub finish_reason: Option<FinishReason>,
     #[serde(default)]
@@ -407,6 +428,39 @@ pub struct Candidate {
     pub grounding_metadata: Option<GroundingMetadata>,
     #[serde(default)]
     pub index: Option<u32>,
+}
+
+/// A single candidate response from the model.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub content: Content,
+    pub finish_reason: Option<FinishReason>,
+    pub safety_ratings: Option<Vec<SafetyRating>>,
+    pub citation_metadata: Option<CitationMetadata>,
+    pub grounding_metadata: Option<GroundingMetadata>,
+    pub index: Option<u32>,
+}
+
+impl From<CandidateResponse> for Candidate {
+    fn from(
+        CandidateResponse {
+            content,
+            finish_reason,
+            safety_ratings,
+            citation_metadata,
+            grounding_metadata,
+            index,
+        }: CandidateResponse,
+    ) -> Self {
+        Candidate {
+            content: content.into_content(),
+            finish_reason,
+            safety_ratings,
+            citation_metadata,
+            grounding_metadata,
+            index,
+        }
+    }
 }
 
 /// Token usage information.
@@ -473,18 +527,43 @@ pub struct GroundingMetadata {
     pub grounding_supports: Vec<GroundingSupport>,
 }
 
-/// Response from the generateContent endpoint.
+/// Raw response from the generateContent endpoint (for deserialization).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GenerateContentResponse {
-    pub candidates: Vec<Candidate>,
+struct GenerateContentResponseRaw {
+    pub candidates: Vec<CandidateResponse>,
     #[serde(default)]
     pub usage_metadata: Option<UsageMetadata>,
     #[serde(default)]
     pub model_version: Option<String>,
 }
 
+/// Response from the generateContent endpoint.
+#[derive(Debug)]
+pub struct GenerateContentResponse {
+    pub candidates: Vec<Candidate>,
+    pub usage_metadata: Option<UsageMetadata>,
+    pub model_version: Option<String>,
+}
+
+impl From<GenerateContentResponseRaw> for GenerateContentResponse {
+    fn from(raw: GenerateContentResponseRaw) -> Self {
+        GenerateContentResponse {
+            candidates: raw.candidates.into_iter().map(Candidate::from).collect(),
+            usage_metadata: raw.usage_metadata,
+            model_version: raw.model_version,
+        }
+    }
+}
+
 impl GenerateContentResponse {
+    /// Parse from JSON string, converting the raw response to the public type.
+    /// This handles the optional `role` field in responses by defaulting to Model.
+    pub fn from_response_json(json: &str) -> Result<Self, serde_json::Error> {
+        let raw: GenerateContentResponseRaw = serde_json::from_str(json)?;
+        Ok(raw.into())
+    }
+
     /// Extract text from the first candidate's response.
     pub fn text(&self) -> Option<String> {
         self.candidates.first().and_then(|c| {
