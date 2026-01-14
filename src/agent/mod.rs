@@ -63,7 +63,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     let repo_path = &sandbox_config.repo_path;
 
     match model {
-        Model::Opus | Model::Sonnet | Model::Haiku => run_claude_agent(
+        Model::Anthropic(_) => run_claude_agent(
             container_name,
             user,
             repo_path,
@@ -72,7 +72,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             initial_history,
             tracker,
         ),
-        Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => run_grok_agent(
+        Model::Xai(_) => run_grok_agent(
             container_name,
             user,
             repo_path,
@@ -81,7 +81,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             initial_history,
             tracker,
         ),
-        Model::Gemini25Flash | Model::Gemini3Flash | Model::Gemini3Pro => run_gemini_agent(
+        Model::Gemini(_) => run_gemini_agent(
             container_name,
             user,
             repo_path,

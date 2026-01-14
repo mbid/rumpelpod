@@ -15,26 +15,16 @@ pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
 
 /// Get the model identifier as used by the provider's API.
-pub fn model_api_id(model: Model) -> &'static str {
-    match model {
-        Model::Opus => "claude-opus-4-5-20251101",
-        Model::Sonnet => "claude-sonnet-4-5-20250929",
-        Model::Haiku => "claude-haiku-4-5-20251001",
-        Model::Grok3Mini => "grok-3-mini",
-        Model::Grok4 => "grok-4",
-        Model::Grok41Fast => "grok-4-1-fast",
-        Model::Gemini25Flash => "gemini-2.5-flash",
-        Model::Gemini3Flash => "gemini-3-flash-preview",
-        Model::Gemini3Pro => "gemini-3-pro-preview",
-    }
+pub fn model_api_id(model: Model) -> String {
+    model.to_string()
 }
 
 /// Get the provider name for this model (used for cache directories).
 pub fn model_provider(model: Model) -> &'static str {
     match model {
-        Model::Opus | Model::Sonnet | Model::Haiku => "anthropic",
-        Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => "xai",
-        Model::Gemini25Flash | Model::Gemini3Flash | Model::Gemini3Pro => "gemini",
+        Model::Anthropic(_) => "anthropic",
+        Model::Xai(_) => "xai",
+        Model::Gemini(_) => "gemini",
     }
 }
 

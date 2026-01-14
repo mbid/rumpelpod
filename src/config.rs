@@ -5,6 +5,7 @@
 //! - SandboxConfig for parsing `.sandbox.toml` at the repository root
 //! - Utility functions for state directory paths
 
+use crate::llm::types::{anthropic, gemini, xai};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
@@ -25,42 +26,55 @@ pub enum Runtime {
 }
 
 /// Model to use for the agent.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
 pub enum Model {
-    // Claude models (Anthropic)
-    /// Claude Opus 4.5 - most capable model
-    #[default]
-    #[value(name = "claude-opus-4-5")]
-    Opus,
-    /// Claude Sonnet 4.5 - balanced performance and cost
-    #[value(name = "claude-sonnet-4-5")]
-    Sonnet,
-    /// Claude Haiku 4.5 - fast and cost-effective
-    #[value(name = "claude-haiku-4-5")]
-    Haiku,
+    Anthropic(anthropic::Model),
+    Gemini(gemini::Model),
+    Xai(xai::Model),
+}
 
-    // Grok models (xAI)
-    /// Grok 3 Mini - lightweight reasoning model, cost-effective
-    #[value(name = "grok-3-mini")]
-    Grok3Mini,
-    /// Grok 4 - most capable reasoning model from xAI
-    #[value(name = "grok-4")]
-    Grok4,
-    /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
-    #[value(name = "grok-4-1-fast")]
-    Grok41Fast,
+impl Default for Model {
+    fn default() -> Self {
+        Model::Anthropic(anthropic::Model::Opus)
+    }
+}
 
-    // Gemini models (Google)
-    /// Gemini 2.5 Flash - fast, stable, best price-performance
-    #[value(name = "gemini-2.5-flash")]
-    Gemini25Flash,
-    /// Gemini 3 Flash - frontier model built for speed and scale
-    #[value(name = "gemini-3-flash")]
-    Gemini3Flash,
-    /// Gemini 3 Pro - most intelligent frontier model
-    #[value(name = "gemini-3-pro")]
-    Gemini3Pro,
+impl std::fmt::Display for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Model::Anthropic(m) => std::fmt::Display::fmt(m, f),
+            Model::Gemini(m) => std::fmt::Display::fmt(m, f),
+            Model::Xai(m) => std::fmt::Display::fmt(m, f),
+        }
+    }
+}
+
+impl ValueEnum for Model {
+    fn value_variants<'a>() -> &'a [Self] {
+        static VARIANTS: std::sync::OnceLock<Vec<Model>> = std::sync::OnceLock::new();
+        VARIANTS.get_or_init(|| {
+            let mut v = Vec::new();
+            for m in anthropic::Model::value_variants() {
+                v.push(Model::Anthropic(*m));
+            }
+            for m in gemini::Model::value_variants() {
+                v.push(Model::Gemini(*m));
+            }
+            for m in xai::Model::value_variants() {
+                v.push(Model::Xai(*m));
+            }
+            v
+        })
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        match self {
+            Model::Anthropic(m) => m.to_possible_value(),
+            Model::Gemini(m) => m.to_possible_value(),
+            Model::Xai(m) => m.to_possible_value(),
+        }
+    }
 }
 
 /// Network configuration.

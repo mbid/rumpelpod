@@ -5,6 +5,35 @@
 
 use serde::{Deserialize, Serialize};
 
+/// xAI models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+pub enum Model {
+    /// Grok 3 Mini - lightweight reasoning model, cost-effective
+    #[serde(rename = "grok-3-mini")]
+    #[value(name = "grok-3-mini")]
+    Grok3Mini,
+    /// Grok 4 - most capable reasoning model from xAI
+    #[serde(rename = "grok-4")]
+    #[value(name = "grok-4")]
+    Grok4,
+    /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
+    #[serde(rename = "grok-4-1-fast-reasoning")]
+    #[value(name = "grok-4-1-fast-reasoning")]
+    Grok41Fast,
+}
+
+impl std::fmt::Display for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use the serde rename as the string representation
+        let s = match self {
+            Model::Grok3Mini => "grok-3-mini",
+            Model::Grok4 => "grok-4",
+            Model::Grok41Fast => "grok-4-1-fast-reasoning",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 /// Role of a message in the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

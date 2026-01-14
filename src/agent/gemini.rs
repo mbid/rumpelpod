@@ -179,7 +179,7 @@ pub fn run_gemini_agent(
                 }),
             };
 
-            let response = client.generate_content(model_api_id(model), request)?;
+            let response = client.generate_content(&model_api_id(model), request)?;
 
             if response.candidates.is_empty() {
                 anyhow::bail!("No candidates in response");
@@ -301,7 +301,7 @@ pub fn run_gemini_agent(
 
                                 println!("[search] {query}");
 
-                                match execute_web_search(&client, model_api_id(model), query) {
+                                match execute_web_search(&client, &model_api_id(model), query) {
                                     Ok(result) => {
                                         // Don't print full search results to avoid noise
                                         (result, true)

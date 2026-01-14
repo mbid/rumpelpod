@@ -8,6 +8,35 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Gemini models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+pub enum Model {
+    /// Gemini 2.5 Flash - fast, stable, best price-performance
+    #[serde(rename = "gemini-2.5-flash")]
+    #[value(name = "gemini-2.5-flash")]
+    Gemini25Flash,
+    /// Gemini 3 Flash - frontier model built for speed and scale
+    #[serde(rename = "gemini-3-flash-preview")]
+    #[value(name = "gemini-3-flash-preview")]
+    Gemini3Flash,
+    /// Gemini 3 Pro - most intelligent frontier model
+    #[serde(rename = "gemini-3-pro-preview")]
+    #[value(name = "gemini-3-pro-preview")]
+    Gemini3Pro,
+}
+
+impl std::fmt::Display for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Use the serde rename as the string representation
+        let s = match self {
+            Model::Gemini25Flash => "gemini-2.5-flash",
+            Model::Gemini3Flash => "gemini-3-flash-preview",
+            Model::Gemini3Pro => "gemini-3-pro-preview",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 /// Role of a message in the conversation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
