@@ -71,32 +71,75 @@ pub struct FunctionResponse {
     pub response: serde_json::Value,
 }
 
-/// A part of content - can be text, inline data, function call, or function response.
+/// The content type within a Part.
 #[derive(Debug, Clone)]
-pub enum Part {
+pub enum PartContent {
     Text(String),
     InlineData(InlineDataPart),
     FunctionCall(FunctionCall),
     FunctionResponse(FunctionResponse),
 }
 
+/// A part of content - can be text, inline data, function call, or function response.
+/// Gemini 3 models include thought signatures for maintaining reasoning context.
+#[derive(Debug, Clone)]
+pub struct Part {
+    pub content: PartContent,
+    /// Thought signature for Gemini 3 models. Must be preserved and returned
+    /// to maintain reasoning context across API calls.
+    pub thought_signature: Option<String>,
+}
+
 impl Part {
     pub fn text(text: impl Into<String>) -> Self {
-        Part::Text(text.into())
+        Part {
+            content: PartContent::Text(text.into()),
+            thought_signature: None,
+        }
     }
 
     pub fn function_call(name: impl Into<String>, args: serde_json::Value) -> Self {
-        Part::FunctionCall(FunctionCall {
-            name: name.into(),
-            args,
-        })
+        Part {
+            content: PartContent::FunctionCall(FunctionCall {
+                name: name.into(),
+                args,
+            }),
+            thought_signature: None,
+        }
     }
 
     pub fn function_response(name: impl Into<String>, response: serde_json::Value) -> Self {
-        Part::FunctionResponse(FunctionResponse {
-            name: name.into(),
-            response,
-        })
+        Part {
+            content: PartContent::FunctionResponse(FunctionResponse {
+                name: name.into(),
+                response,
+            }),
+            thought_signature: None,
+        }
+    }
+
+    /// Check if this part is a Text variant.
+    pub fn as_text(&self) -> Option<&str> {
+        match &self.content {
+            PartContent::Text(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Check if this part is a FunctionCall variant.
+    pub fn as_function_call(&self) -> Option<&FunctionCall> {
+        match &self.content {
+            PartContent::FunctionCall(fc) => Some(fc),
+            _ => None,
+        }
+    }
+
+    /// Check if this part is a FunctionResponse variant.
+    pub fn as_function_response(&self) -> Option<&FunctionResponse> {
+        match &self.content {
+            PartContent::FunctionResponse(fr) => Some(fr),
+            _ => None,
+        }
     }
 }
 
@@ -107,25 +150,40 @@ impl serde::Serialize for Part {
         S: serde::Serializer,
     {
         use serde::ser::SerializeMap;
-        match self {
-            Part::Text(text) => {
-                let mut map = serializer.serialize_map(Some(1))?;
+        let has_signature = self.thought_signature.is_some();
+        let map_size = if has_signature { 2 } else { 1 };
+
+        match &self.content {
+            PartContent::Text(text) => {
+                let mut map = serializer.serialize_map(Some(map_size))?;
                 map.serialize_entry("text", text)?;
+                if let Some(ref sig) = self.thought_signature {
+                    map.serialize_entry("thoughtSignature", sig)?;
+                }
                 map.end()
             }
-            Part::InlineData(data) => {
-                let mut map = serializer.serialize_map(Some(1))?;
+            PartContent::InlineData(data) => {
+                let mut map = serializer.serialize_map(Some(map_size))?;
                 map.serialize_entry("inlineData", data)?;
+                if let Some(ref sig) = self.thought_signature {
+                    map.serialize_entry("thoughtSignature", sig)?;
+                }
                 map.end()
             }
-            Part::FunctionCall(fc) => {
-                let mut map = serializer.serialize_map(Some(1))?;
+            PartContent::FunctionCall(fc) => {
+                let mut map = serializer.serialize_map(Some(map_size))?;
                 map.serialize_entry("functionCall", fc)?;
+                if let Some(ref sig) = self.thought_signature {
+                    map.serialize_entry("thoughtSignature", sig)?;
+                }
                 map.end()
             }
-            Part::FunctionResponse(fr) => {
-                let mut map = serializer.serialize_map(Some(1))?;
+            PartContent::FunctionResponse(fr) => {
+                let mut map = serializer.serialize_map(Some(map_size))?;
                 map.serialize_entry("functionResponse", fr)?;
+                if let Some(ref sig) = self.thought_signature {
+                    map.serialize_entry("thoughtSignature", sig)?;
+                }
                 map.end()
             }
         }
@@ -160,6 +218,7 @@ impl<'de> serde::Deserialize<'de> for Part {
                 let mut inline_data: Option<InlineDataPart> = None;
                 let mut function_call: Option<FunctionCall> = None;
                 let mut function_response: Option<FunctionResponse> = None;
+                let mut thought_signature: Option<String> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -167,6 +226,7 @@ impl<'de> serde::Deserialize<'de> for Part {
                         "inlineData" => inline_data = Some(map.next_value()?),
                         "functionCall" => function_call = Some(map.next_value()?),
                         "functionResponse" => function_response = Some(map.next_value()?),
+                        "thoughtSignature" => thought_signature = Some(map.next_value()?),
                         _ => {
                             // Skip unknown fields
                             let _ = map.next_value::<serde::de::IgnoredAny>()?;
@@ -174,19 +234,24 @@ impl<'de> serde::Deserialize<'de> for Part {
                     }
                 }
 
-                if let Some(text) = text {
-                    Ok(Part::Text(text))
+                let content = if let Some(text) = text {
+                    PartContent::Text(text)
                 } else if let Some(data) = inline_data {
-                    Ok(Part::InlineData(data))
+                    PartContent::InlineData(data)
                 } else if let Some(fc) = function_call {
-                    Ok(Part::FunctionCall(fc))
+                    PartContent::FunctionCall(fc)
                 } else if let Some(fr) = function_response {
-                    Ok(Part::FunctionResponse(fr))
+                    PartContent::FunctionResponse(fr)
                 } else {
-                    Err(serde::de::Error::custom(
+                    return Err(serde::de::Error::custom(
                         "Part must have text, inlineData, functionCall, or functionResponse",
-                    ))
-                }
+                    ));
+                };
+
+                Ok(Part {
+                    content,
+                    thought_signature,
+                })
             }
         }
 
@@ -423,10 +488,10 @@ impl GenerateContentResponse {
     /// Extract text from the first candidate's response.
     pub fn text(&self) -> Option<String> {
         self.candidates.first().and_then(|c| {
-            c.content.parts.iter().find_map(|p| match p {
-                Part::Text(text) => Some(text.clone()),
-                _ => None,
-            })
+            c.content
+                .parts
+                .iter()
+                .find_map(|p| p.as_text().map(|s| s.to_string()))
         })
     }
 
@@ -438,10 +503,7 @@ impl GenerateContentResponse {
                 c.content
                     .parts
                     .iter()
-                    .filter_map(|p| match p {
-                        Part::FunctionCall(fc) => Some(fc),
-                        _ => None,
-                    })
+                    .filter_map(|p| p.as_function_call())
                     .collect()
             })
             .unwrap_or_default()

@@ -11,8 +11,8 @@ use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
 use crate::llm::types::gemini::{
     Content, FinishReason, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
-    GenerateContentRequest, GenerationConfig, GoogleSearch, Part, Role, SystemInstruction, Tool,
-    ToolConfig,
+    GenerateContentRequest, GenerationConfig, GoogleSearch, Part, PartContent, Role,
+    SystemInstruction, Tool, ToolConfig,
 };
 
 use super::common::{
@@ -200,13 +200,13 @@ pub fn run_gemini_agent(
             let mut function_responses: Vec<Part> = Vec::new();
 
             for part in &response_content.parts {
-                match part {
-                    Part::Text(text) => {
+                match &part.content {
+                    PartContent::Text(text) => {
                         if !text.is_empty() {
                             println!("{text}");
                         }
                     }
-                    Part::FunctionCall(fc) => {
+                    PartContent::FunctionCall(fc) => {
                         has_function_call = true;
                         let tool_name = ToolName::from_str(&fc.name);
 
@@ -330,7 +330,7 @@ pub fn run_gemini_agent(
                         function_responses.push(Part::function_response(&fc.name, response_value));
                     }
                     // Model responses don't contain inline data or function responses
-                    Part::InlineData(_) | Part::FunctionResponse(_) => {}
+                    PartContent::InlineData(_) | PartContent::FunctionResponse(_) => {}
                 }
             }
 
@@ -373,14 +373,14 @@ fn format_gemini_history(contents: &[Content]) -> String {
         match content.role {
             Role::User => {
                 for part in &content.parts {
-                    match part {
-                        Part::Text(text) => {
+                    match &part.content {
+                        PartContent::Text(text) => {
                             // User text messages (but not function responses)
                             if !text.is_empty() {
                                 output.push_str(&format!("> {text}\n"));
                             }
                         }
-                        Part::FunctionResponse(fr) => {
+                        PartContent::FunctionResponse(fr) => {
                             // Function response - show result or error inline
                             if let Some(result) = fr.response.get("result").and_then(|v| v.as_str())
                             {
@@ -396,19 +396,19 @@ fn format_gemini_history(contents: &[Content]) -> String {
                             }
                         }
                         // User messages don't contain function calls or inline data
-                        Part::InlineData(_) | Part::FunctionCall(_) => {}
+                        PartContent::InlineData(_) | PartContent::FunctionCall(_) => {}
                     }
                 }
             }
             Role::Model => {
                 for part in &content.parts {
-                    match part {
-                        Part::Text(text) => {
+                    match &part.content {
+                        PartContent::Text(text) => {
                             if !text.is_empty() {
                                 output.push_str(&format!("{text}\n"));
                             }
                         }
-                        Part::FunctionCall(fc) => match fc.name.as_str() {
+                        PartContent::FunctionCall(fc) => match fc.name.as_str() {
                             "bash" => {
                                 if let Some(cmd) = fc.args.get("command").and_then(|v| v.as_str()) {
                                     output.push_str(&format!("$ {cmd}\n"));
@@ -437,7 +437,7 @@ fn format_gemini_history(contents: &[Content]) -> String {
                             _ => {}
                         },
                         // Model responses don't contain function responses or inline data
-                        Part::InlineData(_) | Part::FunctionResponse(_) => {}
+                        PartContent::InlineData(_) | PartContent::FunctionResponse(_) => {}
                     }
                 }
             }
@@ -457,13 +457,11 @@ mod tests {
         let contents = vec![
             Content {
                 role: Role::User,
-                parts: vec![Part::Text("What time is it?".to_string())],
+                parts: vec![Part::text("What time is it?")],
             },
             Content {
                 role: Role::Model,
-                parts: vec![Part::Text(
-                    "I don't have access to the current time.".to_string(),
-                )],
+                parts: vec![Part::text("I don't have access to the current time.")],
             },
         ];
 
@@ -478,10 +476,13 @@ mod tests {
     fn test_format_gemini_history_function_call() {
         let contents = vec![Content {
             role: Role::Model,
-            parts: vec![Part::FunctionCall(FunctionCall {
-                name: "edit".to_string(),
-                args: serde_json::json!({"file_path": "src/main.rs"}),
-            })],
+            parts: vec![Part {
+                content: PartContent::FunctionCall(FunctionCall {
+                    name: "edit".to_string(),
+                    args: serde_json::json!({"file_path": "src/main.rs"}),
+                }),
+                thought_signature: None,
+            }],
         }];
 
         let result = format_gemini_history(&contents);
@@ -492,10 +493,13 @@ mod tests {
     fn test_format_gemini_history_function_response() {
         let contents = vec![Content {
             role: Role::User,
-            parts: vec![Part::FunctionResponse(FunctionResponse {
-                name: "bash".to_string(),
-                response: serde_json::json!({"result": "file1.txt\nfile2.txt"}),
-            })],
+            parts: vec![Part {
+                content: PartContent::FunctionResponse(FunctionResponse {
+                    name: "bash".to_string(),
+                    response: serde_json::json!({"result": "file1.txt\nfile2.txt"}),
+                }),
+                thought_signature: None,
+            }],
         }];
 
         let result = format_gemini_history(&contents);
