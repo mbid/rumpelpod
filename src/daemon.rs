@@ -475,13 +475,45 @@ fn setup_git_remotes(
     run_git(&["config", "remote.sandbox.push", &push_refspec])
         .context("configuring sandbox remote push refspec")?;
 
-    // Install reference-transaction hook to auto-push to gateway on any ref update
-    install_sandbox_reference_transaction_hook(
+    // Fetch all refs from the host remote so sandboxes have access to host branches.
+    run_git(&["fetch", "host"]).context("fetching from host remote")?;
+
+    // Install reference-transaction hook to auto-push to gateway on any ref update.
+    // We install the hook first because we use its presence to detect whether this
+    // is the first entry (hook not installed) or a re-entry (hook already installed).
+    let is_first_entry = install_sandbox_reference_transaction_hook(
         container_id,
         container_repo_path,
         sandbox_name,
         user,
     )?;
+
+    // Create and checkout a branch named after the sandbox, pointing to host/HEAD.
+    // Only do this on initial setup to avoid disrupting work in progress.
+    if is_first_entry {
+        let branch_name = &sandbox_name.0;
+        let branch_exists = run_git(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{}", branch_name),
+        ])
+        .is_ok();
+
+        if branch_exists {
+            // Branch exists (e.g., from the image) - reset it to host/HEAD
+            run_git(&["branch", "-f", branch_name, "host/HEAD"])
+                .with_context(|| format!("resetting branch '{}' to host/HEAD", branch_name))?;
+        } else {
+            // Create the branch pointing to host/HEAD
+            run_git(&["branch", branch_name, "host/HEAD"])
+                .with_context(|| format!("creating branch '{}'", branch_name))?;
+        }
+
+        // Checkout the branch
+        run_git(&["checkout", branch_name])
+            .with_context(|| format!("checking out branch '{}'", branch_name))?;
+    }
 
     Ok(())
 }
@@ -519,12 +551,13 @@ const SANDBOX_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
 "#};
 
 /// Install the reference-transaction hook in the sandbox repository.
+/// Returns true if this is the first installation (first entry), false if already installed.
 fn install_sandbox_reference_transaction_hook(
     container_id: &str,
     container_repo_path: &Path,
     _sandbox_name: &SandboxName,
     user: &str,
-) -> Result<()> {
+) -> Result<bool> {
     let hooks_dir = container_repo_path.join(".git").join("hooks");
     let hook_path = hooks_dir.join("reference-transaction");
     let hooks_dir_str = hooks_dir.to_string_lossy();
@@ -549,8 +582,8 @@ fn install_sandbox_reference_transaction_hook(
 
     let final_hook = match existing_hook {
         Some(existing) if existing.contains(hook_signature) => {
-            // Already installed
-            return Ok(());
+            // Already installed - this is a re-entry
+            return Ok(false);
         }
         Some(existing) => {
             // Append to existing hook
@@ -583,7 +616,8 @@ fn install_sandbox_reference_transaction_hook(
         .success()
         .context("making reference-transaction hook executable")?;
 
-    Ok(())
+    // First installation - this is the first entry
+    Ok(true)
 }
 
 /// Returns the docker runtime name to pass to `docker run --runtime`.

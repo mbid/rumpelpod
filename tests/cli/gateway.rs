@@ -603,9 +603,10 @@ fn gateway_sandbox_commit_triggers_push() {
         .trim()
         .to_string();
 
-    // Check that the gateway has the branch sandbox/master@<sandbox_name>
+    // Check that the gateway has the branch sandbox/<sandbox_name>@<sandbox_name>
+    // (sandbox is on a branch named after itself, not "master")
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/master@{}", sandbox_name);
+    let expected_branch = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -748,8 +749,8 @@ fn gateway_multiple_sandboxes_push_independently() {
     // Check that the gateway has both branches with different commits
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
-    let gateway_commit_a = get_branch_commit(&gateway, "sandbox/master@sandbox-a");
-    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/master@sandbox-b");
+    let gateway_commit_a = get_branch_commit(&gateway, "sandbox/sandbox-a@sandbox-a");
+    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/sandbox-b@sandbox-b");
 
     assert_eq!(
         gateway_commit_a,
@@ -840,7 +841,7 @@ fn gateway_sandbox_amend_triggers_push() {
 
     // Check that the gateway has the amended commit
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/master@{}", sandbox_name);
+    let expected_branch = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -933,7 +934,7 @@ fn gateway_sandbox_cannot_push_to_other_sandbox_namespace() {
 
     // Verify sandbox-b's branch exists in gateway
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/master@sandbox-b");
+    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/sandbox-b@sandbox-b");
     assert_eq!(
         gateway_commit_b,
         Some(commit_b.clone()),
@@ -950,7 +951,7 @@ fn gateway_sandbox_cannot_push_to_other_sandbox_namespace() {
             "git",
             "push",
             "sandbox",
-            "HEAD:refs/heads/sandbox/master@sandbox-b",
+            "HEAD:refs/heads/sandbox/sandbox-b@sandbox-b",
             "--force",
         ])
         .output()
@@ -970,7 +971,7 @@ fn gateway_sandbox_cannot_push_to_other_sandbox_namespace() {
     );
 
     // Verify sandbox-b's branch still has its original commit (not overwritten)
-    let gateway_commit_b_after = get_branch_commit(&gateway, "sandbox/master@sandbox-b");
+    let gateway_commit_b_after = get_branch_commit(&gateway, "sandbox/sandbox-b@sandbox-b");
     assert_eq!(
         gateway_commit_b_after,
         Some(commit_b),
@@ -1186,7 +1187,7 @@ fn gateway_sandbox_reset_triggers_push() {
 
     // Verify gateway has commit2
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/master@{}", sandbox_name);
+    let expected_branch = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
 
     // Reset back to commit1 (no new commit created)
     sandbox_command(&repo, &daemon)
@@ -1294,13 +1295,10 @@ fn gateway_sandbox_push_syncs_to_host_remote_ref() {
         .success()
         .expect("Failed to run sandbox enter");
 
-    // Verify no sandbox remote refs exist yet in host
-    let refs_before = get_sandbox_remote_refs(repo.path());
-    assert!(
-        refs_before.is_empty(),
-        "No sandbox remote refs should exist initially, got: {:?}",
-        refs_before
-    );
+    // Note: The sandbox branch is created and checked out on first entry, which
+    // triggers a push to the gateway. This is expected behavior - sandboxes now
+    // automatically sync their initial branch.
+    let expected_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
 
     // Create a commit in the sandbox
     sandbox_command(&repo, &daemon)
@@ -1324,8 +1322,7 @@ fn gateway_sandbox_push_syncs_to_host_remote_ref() {
         .expect("Failed to get commit");
     let commit = String::from_utf8_lossy(&commit_output).trim().to_string();
 
-    // Host should now have the sandbox commit as a remote-tracking ref
-    let expected_ref = format!("sandbox/master@{}", sandbox_name);
+    // Host should have the sandbox commit as a remote-tracking ref
     let refs_after = get_sandbox_remote_refs(repo.path());
     assert!(
         refs_after.contains(&expected_ref),
@@ -1439,8 +1436,8 @@ fn gateway_multiple_sandboxes_sync_to_host() {
 
     // Host should have both remote refs
     let refs = get_sandbox_remote_refs(repo.path());
-    let expected_ref1 = format!("sandbox/master@{}", sandbox1);
-    let expected_ref2 = format!("sandbox/master@{}", sandbox2);
+    let expected_ref1 = format!("sandbox/{}@{}", sandbox1, sandbox1);
+    let expected_ref2 = format!("sandbox/{}@{}", sandbox2, sandbox2);
 
     assert!(
         refs.contains(&expected_ref1),
@@ -1520,7 +1517,7 @@ fn gateway_sandbox_reset_syncs_to_host_via_force_push() {
     let commit2 = String::from_utf8_lossy(&commit2_output).trim().to_string();
 
     // Verify host has commit2
-    let expected_ref = format!("sandbox/master@{}", sandbox_name);
+    let expected_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
     assert_eq!(
         get_remote_ref_commit(repo.path(), &expected_ref),
         Some(commit2.clone()),
@@ -1823,19 +1820,12 @@ fn gateway_primary_branch_alias_works_on_host() {
     let daemon = TestDaemon::start();
     let sandbox_name = "alias-test";
 
-    // Create and checkout a branch named after the sandbox (the primary branch)
+    // Launch sandbox - it automatically creates and checks out a branch named after
+    // the sandbox (the "primary branch")
     sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "checkout",
-            "-b",
-            sandbox_name,
-        ])
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to create primary branch in sandbox");
+        .expect("Failed to launch sandbox");
 
     // Create a commit on the primary branch
     sandbox_command(&repo, &daemon)
@@ -1891,19 +1881,11 @@ fn gateway_alias_deleted_with_sandbox() {
     let daemon = TestDaemon::start();
     let sandbox_name = "delete-alias-test";
 
-    // Create and checkout the primary branch (named after sandbox)
+    // Launch sandbox - it automatically creates and checks out the primary branch
     sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "checkout",
-            "-b",
-            sandbox_name,
-        ])
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to create primary branch in sandbox");
+        .expect("Failed to launch sandbox");
 
     // Create a commit on the primary branch
     sandbox_command(&repo, &daemon)
@@ -1959,11 +1941,11 @@ fn gateway_alias_does_not_conflict_with_branches() {
 
     let daemon = TestDaemon::start();
 
-    // Create sandbox `bob` on its primary branch (named `bob`)
+    // Launch sandbox `bob` - it automatically creates and checks out its primary branch
     sandbox_command(&repo, &daemon)
-        .args(["enter", "bob", "--", "git", "checkout", "-b", "bob"])
+        .args(["enter", "bob", "--", "echo", "setup"])
         .success()
-        .expect("Failed to create bob's primary branch");
+        .expect("Failed to launch bob sandbox");
 
     sandbox_command(&repo, &daemon)
         .args([
@@ -2065,19 +2047,11 @@ fn gateway_non_primary_branches_have_no_alias() {
     let daemon = TestDaemon::start();
     let sandbox_name = "no-alias-test";
 
-    // Create the primary branch (named after the sandbox)
+    // Launch sandbox - it automatically creates and checks out its primary branch
     sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "checkout",
-            "-b",
-            sandbox_name,
-        ])
+        .args(["enter", sandbox_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to create primary branch");
+        .expect("Failed to launch sandbox");
 
     // Create initial commit on primary branch
     sandbox_command(&repo, &daemon)
@@ -2148,5 +2122,253 @@ fn gateway_non_primary_branches_have_no_alias() {
     assert_eq!(
         primary_alias_commit, primary_full_commit,
         "Primary branch alias should point to same commit as full ref"
+    );
+}
+
+#[test]
+fn sandbox_has_branch_named_after_sandbox() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Enter sandbox and check the current branch name
+    let stdout = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "my-sandbox",
+            "--",
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .success()
+        .expect("sandbox enter failed");
+
+    let branch = String::from_utf8_lossy(&stdout).trim().to_string();
+    assert_eq!(
+        branch, "my-sandbox",
+        "Expected branch 'my-sandbox' to be checked out, got '{}'",
+        branch
+    );
+}
+
+#[test]
+fn sandbox_branch_points_to_host_head() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Get the host's HEAD commit
+    let host_head = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .success()
+        .expect("Failed to get host HEAD");
+    let host_head = String::from_utf8_lossy(&host_head).trim().to_string();
+
+    // Enter sandbox and get its HEAD commit
+    let sandbox_head = sandbox_command(&repo, &daemon)
+        .args(["enter", "test-branch", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("sandbox enter failed");
+    let sandbox_head = String::from_utf8_lossy(&sandbox_head).trim().to_string();
+
+    assert_eq!(
+        sandbox_head, host_head,
+        "Sandbox HEAD ({}) should match host HEAD ({})",
+        sandbox_head, host_head
+    );
+}
+
+#[test]
+fn sandbox_has_host_remote_refs() {
+    let repo = TestRepo::new();
+
+    // Create a branch on the host before building the image
+    Command::new("git")
+        .args(["checkout", "-b", "feature-branch"])
+        .current_dir(repo.path())
+        .success()
+        .expect("Failed to create feature branch");
+
+    Command::new("git")
+        .args(["commit", "--allow-empty", "-m", "Feature commit"])
+        .current_dir(repo.path())
+        .success()
+        .expect("Failed to commit on feature branch");
+
+    // Switch back to the default branch
+    Command::new("git")
+        .args(["checkout", "-"])
+        .current_dir(repo.path())
+        .success()
+        .expect("Failed to switch back");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Enter sandbox and list remote refs
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "test-refs", "--", "git", "branch", "-r"])
+        .success()
+        .expect("sandbox enter failed");
+
+    let refs = String::from_utf8_lossy(&stdout);
+
+    // Should have host/HEAD and host/master (or main) and host/feature-branch
+    assert!(
+        refs.contains("host/HEAD"),
+        "Expected host/HEAD in remote refs: {}",
+        refs
+    );
+    assert!(
+        refs.contains("host/feature-branch"),
+        "Expected host/feature-branch in remote refs: {}",
+        refs
+    );
+}
+
+#[test]
+fn sandbox_branch_is_different_from_host_branches() {
+    // The sandbox branch should be a new branch, not one that already exists on host
+    let repo = TestRepo::new();
+
+    // Create a branch named "existing" on host
+    Command::new("git")
+        .args(["checkout", "-b", "existing"])
+        .current_dir(repo.path())
+        .success()
+        .expect("Failed to create existing branch");
+
+    Command::new("git")
+        .args(["checkout", "-"])
+        .current_dir(repo.path())
+        .success()
+        .expect("Failed to switch back");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // The sandbox named "existing" should still have its own branch, separate
+    // from the host's "existing" branch (which becomes host/existing)
+    let stdout = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "existing",
+            "--",
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .success()
+        .expect("sandbox enter failed");
+
+    let branch = String::from_utf8_lossy(&stdout).trim().to_string();
+    assert_eq!(
+        branch, "existing",
+        "Expected branch 'existing' to be checked out, got '{}'",
+        branch
+    );
+
+    // Check that both the local branch and remote ref exist
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "existing", "--", "git", "branch", "-a"])
+        .success()
+        .expect("sandbox enter failed");
+
+    let branches = String::from_utf8_lossy(&stdout);
+    assert!(
+        branches.contains("* existing"),
+        "Expected '* existing' (checked out local branch) in: {}",
+        branches
+    );
+    assert!(
+        branches.contains("remotes/host/existing"),
+        "Expected 'remotes/host/existing' in: {}",
+        branches
+    );
+}
+
+#[test]
+fn re_entering_sandbox_preserves_branch() {
+    // Re-entering a sandbox should not reset the branch or checkout
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // First enter - creates the sandbox and branch
+    sandbox_command(&repo, &daemon)
+        .args(["enter", "persist-test", "--", "echo", "first"])
+        .success()
+        .expect("first sandbox enter failed");
+
+    // Make a commit in the sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "persist-test",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Sandbox commit",
+        ])
+        .success()
+        .expect("sandbox commit failed");
+
+    // Get the sandbox HEAD after the commit
+    let head_after_commit = sandbox_command(&repo, &daemon)
+        .args(["enter", "persist-test", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("git rev-parse failed");
+    let head_after_commit = String::from_utf8_lossy(&head_after_commit)
+        .trim()
+        .to_string();
+
+    // Re-enter the sandbox and check HEAD is still at the same commit
+    let head_after_reenter = sandbox_command(&repo, &daemon)
+        .args(["enter", "persist-test", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("git rev-parse failed after re-enter");
+    let head_after_reenter = String::from_utf8_lossy(&head_after_reenter)
+        .trim()
+        .to_string();
+
+    assert_eq!(
+        head_after_commit, head_after_reenter,
+        "Re-entering sandbox should preserve HEAD commit"
+    );
+
+    // Check we're still on the same branch
+    let branch = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "persist-test",
+            "--",
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .success()
+        .expect("git rev-parse --abbrev-ref failed");
+    let branch = String::from_utf8_lossy(&branch).trim().to_string();
+
+    assert_eq!(
+        branch, "persist-test",
+        "Re-entering sandbox should preserve branch name"
     );
 }
