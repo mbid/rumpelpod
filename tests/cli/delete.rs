@@ -117,7 +117,13 @@ fn run_agent_with_prompt(
 ) -> std::process::Output {
     let cache_dir = llm_cache_dir();
     let mut cmd = sandbox_command(repo, daemon);
-    cmd.args(["agent", sandbox_name, "--model", "haiku", "--cache"]);
+    cmd.args([
+        "agent",
+        sandbox_name,
+        "--model",
+        "claude-haiku-4-5",
+        "--cache",
+    ]);
     cmd.arg(cache_dir);
     cmd.args(extra_args);
     cmd.stdin(Stdio::piped());

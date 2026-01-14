@@ -212,13 +212,21 @@ mod tests {
         let history = serde_json::json!([{"role": "user", "content": "hello"}]);
 
         // Save new conversation
-        let id = save_conversation(&conn, None, &repo_path, "dev", "sonnet", &history).unwrap();
+        let id = save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "dev",
+            "claude-sonnet-4-5",
+            &history,
+        )
+        .unwrap();
         assert!(id > 0);
 
         // Get it back
         let conv = get_conversation(&conn, id).unwrap().unwrap();
         assert_eq!(conv.id, id);
-        assert_eq!(conv.model, "sonnet");
+        assert_eq!(conv.model, "claude-sonnet-4-5");
         assert_eq!(conv.history, history);
     }
 
@@ -234,15 +242,31 @@ mod tests {
         ]);
 
         // Save initial
-        let id = save_conversation(&conn, None, &repo_path, "dev", "sonnet", &history1).unwrap();
+        let id = save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "dev",
+            "claude-sonnet-4-5",
+            &history1,
+        )
+        .unwrap();
 
         // Update it
-        let id2 = save_conversation(&conn, Some(id), &repo_path, "dev", "opus", &history2).unwrap();
+        let id2 = save_conversation(
+            &conn,
+            Some(id),
+            &repo_path,
+            "dev",
+            "claude-opus-4-5",
+            &history2,
+        )
+        .unwrap();
         assert_eq!(id, id2);
 
         // Get updated version
         let conv = get_conversation(&conn, id).unwrap().unwrap();
-        assert_eq!(conv.model, "opus");
+        assert_eq!(conv.model, "claude-opus-4-5");
         assert_eq!(conv.history, history2);
     }
 
@@ -254,11 +278,20 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Save multiple conversations
-        let id1 = save_conversation(&conn, None, &repo_path, "dev", "sonnet", &history).unwrap();
+        let id1 = save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "dev",
+            "claude-sonnet-4-5",
+            &history,
+        )
+        .unwrap();
 
         // Small delay to ensure different timestamps
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let id2 = save_conversation(&conn, None, &repo_path, "dev", "opus", &history).unwrap();
+        let id2 =
+            save_conversation(&conn, None, &repo_path, "dev", "claude-opus-4-5", &history).unwrap();
 
         // List should be ordered by updated_at DESC (most recent first)
         let list = list_conversations(&conn, &repo_path, "dev").unwrap();
@@ -275,17 +308,25 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Save to different sandboxes
-        save_conversation(&conn, None, &repo_path, "dev", "sonnet", &history).unwrap();
-        save_conversation(&conn, None, &repo_path, "test", "opus", &history).unwrap();
+        save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "dev",
+            "claude-sonnet-4-5",
+            &history,
+        )
+        .unwrap();
+        save_conversation(&conn, None, &repo_path, "test", "claude-opus-4-5", &history).unwrap();
 
         // List should only return matching sandbox
         let dev_list = list_conversations(&conn, &repo_path, "dev").unwrap();
         assert_eq!(dev_list.len(), 1);
-        assert_eq!(dev_list[0].model, "sonnet");
+        assert_eq!(dev_list[0].model, "claude-sonnet-4-5");
 
         let test_list = list_conversations(&conn, &repo_path, "test").unwrap();
         assert_eq!(test_list.len(), 1);
-        assert_eq!(test_list[0].model, "opus");
+        assert_eq!(test_list[0].model, "claude-opus-4-5");
     }
 
     #[test]
@@ -297,17 +338,17 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Save to different repos with same sandbox name
-        save_conversation(&conn, None, &repo1, "dev", "sonnet", &history).unwrap();
-        save_conversation(&conn, None, &repo2, "dev", "opus", &history).unwrap();
+        save_conversation(&conn, None, &repo1, "dev", "claude-sonnet-4-5", &history).unwrap();
+        save_conversation(&conn, None, &repo2, "dev", "claude-opus-4-5", &history).unwrap();
 
         // List should only return matching repo
         let repo1_list = list_conversations(&conn, &repo1, "dev").unwrap();
         assert_eq!(repo1_list.len(), 1);
-        assert_eq!(repo1_list[0].model, "sonnet");
+        assert_eq!(repo1_list[0].model, "claude-sonnet-4-5");
 
         let repo2_list = list_conversations(&conn, &repo2, "dev").unwrap();
         assert_eq!(repo2_list.len(), 1);
-        assert_eq!(repo2_list[0].model, "opus");
+        assert_eq!(repo2_list[0].model, "claude-opus-4-5");
     }
 
     #[test]
@@ -326,9 +367,25 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Save conversations in different sandboxes
-        save_conversation(&conn, None, &repo_path, "dev", "sonnet", &history).unwrap();
-        save_conversation(&conn, None, &repo_path, "dev", "opus", &history).unwrap();
-        save_conversation(&conn, None, &repo_path, "test", "haiku", &history).unwrap();
+        save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "dev",
+            "claude-sonnet-4-5",
+            &history,
+        )
+        .unwrap();
+        save_conversation(&conn, None, &repo_path, "dev", "claude-opus-4-5", &history).unwrap();
+        save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "test",
+            "claude-haiku-4-5",
+            &history,
+        )
+        .unwrap();
 
         // Delete conversations for "dev" sandbox
         let deleted = delete_conversations(&conn, &repo_path, "dev").unwrap();

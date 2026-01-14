@@ -11,7 +11,7 @@ use sandbox::CommandExt;
 use super::{llm_cache_dir, run_agent_with_prompt_and_model, run_agent_with_prompt_model_and_args};
 use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
 
-const MODEL: &str = "haiku";
+const MODEL: &str = "claude-haiku-4-5";
 
 /// Helper to run agent with a prompt using Claude Haiku.
 fn run_agent_with_prompt(

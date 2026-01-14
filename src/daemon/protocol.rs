@@ -815,7 +815,7 @@ mod tests {
                 None,
                 repo_path.clone(),
                 "dev".to_string(),
-                "sonnet".to_string(),
+                "claude-sonnet-4-5".to_string(),
                 history.clone(),
             )
             .unwrap();
@@ -827,11 +827,11 @@ mod tests {
             .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, id);
-        assert_eq!(list[0].model, "sonnet");
+        assert_eq!(list[0].model, "claude-sonnet-4-5");
 
         // Get the conversation back
         let conv = client.get_conversation(id).unwrap().unwrap();
-        assert_eq!(conv.model, "sonnet");
+        assert_eq!(conv.model, "claude-sonnet-4-5");
         assert_eq!(conv.history, history);
     }
 
@@ -855,7 +855,7 @@ mod tests {
                 None,
                 repo_path.clone(),
                 "dev".to_string(),
-                "sonnet".to_string(),
+                "claude-sonnet-4-5".to_string(),
                 history1,
             )
             .unwrap();
@@ -866,7 +866,7 @@ mod tests {
                 Some(id),
                 repo_path.clone(),
                 "dev".to_string(),
-                "opus".to_string(),
+                "claude-opus-4-5".to_string(),
                 history2.clone(),
             )
             .unwrap();
@@ -874,7 +874,7 @@ mod tests {
 
         // Verify update
         let conv = client.get_conversation(id).unwrap().unwrap();
-        assert_eq!(conv.model, "opus");
+        assert_eq!(conv.model, "claude-opus-4-5");
         assert_eq!(conv.history, history2);
     }
 

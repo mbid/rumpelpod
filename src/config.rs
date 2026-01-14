@@ -31,13 +31,13 @@ pub enum Model {
     // Claude models (Anthropic)
     /// Claude Opus 4.5 - most capable model
     #[default]
-    #[value(name = "opus")]
+    #[value(name = "claude-opus-4-5")]
     Opus,
     /// Claude Sonnet 4.5 - balanced performance and cost
-    #[value(name = "sonnet")]
+    #[value(name = "claude-sonnet-4-5")]
     Sonnet,
     /// Claude Haiku 4.5 - fast and cost-effective
-    #[value(name = "haiku")]
+    #[value(name = "claude-haiku-4-5")]
     Haiku,
 
     // Grok models (xAI)
@@ -48,7 +48,7 @@ pub enum Model {
     #[value(name = "grok-4")]
     Grok4,
     /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
-    #[value(name = "grok-4.1-fast")]
+    #[value(name = "grok-4-1-fast")]
     Grok41Fast,
 
     // Gemini models (Google)
