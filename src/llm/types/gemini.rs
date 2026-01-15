@@ -302,7 +302,7 @@ pub struct Content {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContentResponse {
     pub role: Option<Role>,
-    pub parts: Vec<Part>,
+    pub parts: Option<Vec<Part>>,
 }
 
 impl ContentResponse {
@@ -311,7 +311,7 @@ impl ContentResponse {
     pub fn into_content(self) -> Content {
         Content {
             role: self.role.unwrap_or(Role::Model),
-            parts: self.parts,
+            parts: self.parts.unwrap_or_default(),
         }
     }
 }
@@ -450,6 +450,8 @@ struct CandidateResponse {
     #[serde(default)]
     pub finish_reason: Option<FinishReason>,
     #[serde(default)]
+    pub finish_message: Option<String>,
+    #[serde(default)]
     pub safety_ratings: Option<Vec<SafetyRating>>,
     #[serde(default)]
     pub citation_metadata: Option<CitationMetadata>,
@@ -464,6 +466,7 @@ struct CandidateResponse {
 pub struct Candidate {
     pub content: Content,
     pub finish_reason: Option<FinishReason>,
+    pub finish_message: Option<String>,
     pub safety_ratings: Option<Vec<SafetyRating>>,
     pub citation_metadata: Option<CitationMetadata>,
     pub grounding_metadata: Option<GroundingMetadata>,
@@ -475,6 +478,7 @@ impl From<CandidateResponse> for Candidate {
         CandidateResponse {
             content,
             finish_reason,
+            finish_message,
             safety_ratings,
             citation_metadata,
             grounding_metadata,
@@ -484,6 +488,7 @@ impl From<CandidateResponse> for Candidate {
         Candidate {
             content: content.into_content(),
             finish_reason,
+            finish_message,
             safety_ratings,
             citation_metadata,
             grounding_metadata,
@@ -622,5 +627,42 @@ impl GenerateContentResponse {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_malformed_function_call_response() {
+        let json = r#"{
+  "candidates": [
+    {
+      "content": {},
+      "finishReason": "MALFORMED_FUNCTION_CALL",
+      "index": 0,
+      "finishMessage": "Malformed function call: call:default_api:edit{file_path: src/agent/anthropic.rs}"
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 14265,
+    "totalTokenCount": 14265
+  },
+  "modelVersion": "gemini-3-flash-preview"
+}"#;
+
+        let response = GenerateContentResponse::from_response_json(json).unwrap();
+        assert_eq!(response.candidates.len(), 1);
+        assert_eq!(
+            response.candidates[0].finish_reason,
+            Some(FinishReason::MalformedFunctionCall)
+        );
+        assert!(response.candidates[0]
+            .finish_message
+            .as_ref()
+            .unwrap()
+            .contains("Malformed function call"));
+        assert!(response.candidates[0].content.parts.is_empty());
     }
 }

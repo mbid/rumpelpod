@@ -188,6 +188,19 @@ pub fn run_gemini_agent(
             let candidate = &response.candidates[0];
             let response_content = &candidate.content;
 
+            // Report non-stop finish reasons
+            if let Some(reason) = &candidate.finish_reason {
+                match reason {
+                    FinishReason::Stop | FinishReason::MaxTokens => {}
+                    _ => {
+                        println!("[finish_reason] {:?}", reason);
+                        if let Some(msg) = &candidate.finish_message {
+                            println!("[finish_message] {}", msg);
+                        }
+                    }
+                }
+            }
+
             // Log Google Search queries if grounding was used
             if let Some(ref grounding) = candidate.grounding_metadata {
                 for query in &grounding.web_search_queries {
@@ -334,11 +347,13 @@ pub fn run_gemini_agent(
                 }
             }
 
-            // Add the model's response to contents
-            contents.push(Content {
-                role: Role::Model,
-                parts: response_content.parts.clone(),
-            });
+            // Add the model's response to contents if it has any parts
+            if !response_content.parts.is_empty() {
+                contents.push(Content {
+                    role: Role::Model,
+                    parts: response_content.parts.clone(),
+                });
+            }
 
             // If there were function calls, add the function responses
             if has_function_call && !function_responses.is_empty() {
