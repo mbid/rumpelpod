@@ -192,6 +192,9 @@ pub fn run_claude_agent(
             // Enable thinking for Opus (Claude 4.5)
             if let Model::Anthropic(crate::llm::types::anthropic::Model::Opus) = model {
                 max_tokens = 20000; // Large output budget for thinking + response
+                // Minimum budget of 1024 tokens is recommended by Anthropic to enable the mode.
+                // For a high-tier reasoning model like Opus 4.5, 4000 tokens provides a good
+                // balance for tool-use tasks without excessive latency.
                 thinking = Some(ThinkingConfig {
                     r#type: "enabled".to_string(),
                     budget_tokens: 4000,
