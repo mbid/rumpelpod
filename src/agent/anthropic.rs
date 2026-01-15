@@ -9,8 +9,8 @@ use anyhow::{Context, Result};
 use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
 use crate::llm::types::anthropic::{
-    CacheControl, ContentBlock, CustomTool, FetchToolType, Message, MessagesRequest, Model, Role,
-    ServerTool, StopReason, SystemBlock, SystemPrompt, Tool, WebSearchToolType,
+    CacheControl, ContentBlock, CustomTool, Effort, FetchToolType, Message, MessagesRequest, Role,
+    ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool, WebSearchToolType,
 };
 
 use super::common::{
@@ -63,7 +63,9 @@ fn filter_invalid_content(Message { role, content }: Message) -> Option<Message>
             | ContentBlock::ServerToolUse { .. }
             | ContentBlock::WebSearchToolResult { .. }
             | ContentBlock::WebFetchToolResult { .. }
-            | ContentBlock::WebFetchToolResultError { .. } => true,
+            | ContentBlock::WebFetchToolResultError { .. }
+            | ContentBlock::Thinking { .. }
+            | ContentBlock::RedactedThinking { .. } => true,
         })
         .collect();
 
@@ -164,7 +166,9 @@ pub fn run_claude_agent(
                             | ContentBlock::ServerToolUse { .. }
                             | ContentBlock::WebSearchToolResult { .. }
                             | ContentBlock::WebFetchToolResult { .. }
-                            | ContentBlock::WebFetchToolResultError { .. } => {}
+                            | ContentBlock::WebFetchToolResultError { .. }
+                            | ContentBlock::Thinking { .. }
+                            | ContentBlock::RedactedThinking { .. } => {}
                         }
                     }
                 }
@@ -181,15 +185,31 @@ pub fn run_claude_agent(
                 tools.push(fetch_tool());
             }
 
+            let mut max_tokens = MAX_TOKENS;
+            let mut thinking = None;
+            let mut effort = None;
+
+            // Enable thinking for Opus (Claude 4.5)
+            if let Model::Anthropic(crate::llm::types::anthropic::Model::Opus) = model {
+                max_tokens = 20000; // Large output budget for thinking + response
+                thinking = Some(ThinkingConfig {
+                    r#type: "enabled".to_string(),
+                    budget_tokens: 4000,
+                });
+                effort = Some(Effort::High);
+            }
+
             let request = MessagesRequest {
-                model: model.to_string(),
-                max_tokens: MAX_TOKENS,
+                model: model_api_id(model).to_string(),
+                max_tokens,
                 system: Some(SystemPrompt::Blocks(vec![SystemBlock::Text {
                     text: system_prompt.clone(),
                     cache_control: Some(CacheControl::default()),
                 }])),
                 messages: request_messages,
                 tools: Some(tools),
+                thinking,
+                effort,
                 temperature: None,
                 top_p: None,
                 top_k: None,
@@ -204,6 +224,12 @@ pub fn run_claude_agent(
                 match block {
                     ContentBlock::Text { text, .. } => {
                         println!("{text}");
+                    }
+                    ContentBlock::Thinking { thinking, .. } => {
+                        println!("<thinking>\n{}\n</thinking>", thinking);
+                    }
+                    ContentBlock::RedactedThinking { .. } => {
+                        println!("<thinking>\n[redacted]\n</thinking>");
                     }
                     ContentBlock::ToolUse { id, name, input } => {
                         has_tool_use = true;
@@ -390,7 +416,9 @@ fn format_anthropic_history(messages: &[Message]) -> String {
                         | ContentBlock::ServerToolUse { .. }
                         | ContentBlock::WebSearchToolResult { .. }
                         | ContentBlock::WebFetchToolResult { .. }
-                        | ContentBlock::WebFetchToolResultError { .. } => {}
+                        | ContentBlock::WebFetchToolResultError { .. }
+                        | ContentBlock::Thinking { .. }
+                        | ContentBlock::RedactedThinking { .. } => {}
                     }
                 }
             }
@@ -401,6 +429,12 @@ fn format_anthropic_history(messages: &[Message]) -> String {
                             if !text.trim().is_empty() {
                                 output.push_str(&format!("{text}\n"));
                             }
+                        }
+                        ContentBlock::Thinking { thinking, .. } => {
+                            output.push_str(&format!("<thinking>\n{}\n</thinking>\n", thinking));
+                        }
+                        ContentBlock::RedactedThinking { .. } => {
+                            output.push_str("<thinking>\n[redacted]\n</thinking>\n");
                         }
                         ContentBlock::ToolUse { name, input, .. } => {
                             if name == "bash" {
@@ -495,6 +529,29 @@ mod tests {
     #[test]
     fn test_format_anthropic_history_empty() {
         assert_eq!(format_anthropic_history(&[]), "");
+    }
+
+    #[test]
+    fn test_format_anthropic_history_thinking() {
+        let messages = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    thinking: "I should use the ls command.".to_string(),
+                    signature: "sig".to_string(),
+                },
+                ContentBlock::Text {
+                    text: "Here are the files:".to_string(),
+                    cache_control: None,
+                },
+            ],
+        }];
+
+        let result = format_anthropic_history(&messages);
+        assert_eq!(
+            result,
+            "<thinking>\nI should use the ls command.\n</thinking>\nHere are the files:\n"
+        );
     }
 
     #[test]

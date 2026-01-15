@@ -53,7 +53,11 @@ impl Client {
     fn build_headers(&self, for_cache_key: bool) -> Vec<(&'static str, String)> {
         let mut headers = vec![
             ("anthropic-version", ANTHROPIC_VERSION.to_string()),
-            ("anthropic-beta", "web-fetch-2025-09-10".to_string()),
+            (
+                "anthropic-beta",
+                "web-fetch-2025-09-10,interleaved-thinking-2025-05-14,effort-2025-11-24"
+                    .to_string(),
+            ),
             ("content-type", "application/json".to_string()),
         ];
         if !for_cache_key {

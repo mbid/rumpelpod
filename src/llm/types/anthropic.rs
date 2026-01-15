@@ -134,6 +134,13 @@ pub enum ContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
     WebSearchToolResult {
         tool_use_id: String,
         content: Vec<WebSearchResult>,
@@ -288,6 +295,20 @@ pub struct UserLocation {
     pub timezone: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingConfig {
+    pub r#type: String,
+    pub budget_tokens: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MessagesRequest {
     pub model: String,
@@ -297,6 +318,10 @@ pub struct MessagesRequest {
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
