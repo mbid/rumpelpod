@@ -184,10 +184,12 @@ impl SandboxConfig {
 
 /// Agent configuration.
 #[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct AgentConfig {
     /// Default model.
     pub model: Option<Model>,
+    /// Anthropic base URL.
+    pub anthropic_base_url: Option<String>,
 }
 
 /// Get the state directory for sandbox data.

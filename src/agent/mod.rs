@@ -92,6 +92,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             repo_path,
             model,
             cache,
+            sandbox_config.agent.anthropic_base_url,
             initial_history,
             tracker,
         ),

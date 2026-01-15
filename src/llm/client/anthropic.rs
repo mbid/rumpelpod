@@ -11,6 +11,7 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub struct Client {
     api_key: Option<String>,
+    base_url: String,
     client: reqwest::blocking::Client,
     cache: Option<LlmCache>,
 }
@@ -20,7 +21,7 @@ impl Client {
     /// If cache is provided and no API key is set, only cached responses will work.
     ///
     /// See [`llm-cache/README.md`](../../../llm-cache/README.md) for cache documentation.
-    pub fn new_with_cache(cache: Option<LlmCache>) -> Result<Self> {
+    pub fn new_with_cache(cache: Option<LlmCache>, base_url: Option<String>) -> Result<Self> {
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()
             .filter(|s| !s.is_empty());
@@ -28,6 +29,8 @@ impl Client {
         if api_key.is_none() && cache.is_none() {
             anyhow::bail!("ANTHROPIC_API_KEY not set and no cache provided");
         }
+
+        let base_url = base_url.unwrap_or_else(|| ANTHROPIC_API_URL.to_string());
 
         // Use 180s timeout as API requests with large context can take >30s to complete.
         // This includes connection, sending request body, and receiving response.
@@ -38,6 +41,7 @@ impl Client {
 
         Ok(Self {
             api_key,
+            base_url,
             client,
             cache,
         })
@@ -101,7 +105,7 @@ impl Client {
 
         loop {
             debug!("Sending API request (attempt {})", attempt + 1);
-            let mut req = self.client.post(ANTHROPIC_API_URL).body(body.clone());
+            let mut req = self.client.post(&self.base_url).body(body.clone());
 
             for (name, value) in &request_headers {
                 req = req.header(*name, value);

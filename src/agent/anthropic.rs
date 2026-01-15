@@ -82,10 +82,11 @@ pub fn run_claude_agent(
     repo_path: &Path,
     model: Model,
     cache: Option<LlmCache>,
+    anthropic_base_url: Option<String>,
     initial_history: Option<serde_json::Value>,
     mut tracker: ConversationTracker,
 ) -> Result<()> {
-    let client = Client::new_with_cache(cache)?;
+    let client = Client::new_with_cache(cache, anthropic_base_url)?;
 
     let mut stdout = std::io::stdout();
 
