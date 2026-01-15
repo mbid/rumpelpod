@@ -7,7 +7,6 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
 
 #[test]
 fn network_host_connectivity() {
@@ -58,8 +57,9 @@ fn network_host_connectivity() {
     server_handle.join().expect("Server thread panicked");
 }
 
+/// With --network=host, both 'host' and 'sandbox' remotes inside the sandbox
+/// should use localhost since the sandbox shares the host's network namespace.
 #[test]
-#[should_panic(expected = "Sandbox remote on host should be localhost")]
 fn network_host_remotes_use_localhost() {
     let daemon = TestDaemon::start();
     let repo = TestRepo::new();
@@ -67,7 +67,7 @@ fn network_host_remotes_use_localhost() {
 
     write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
 
-    // Check host remote inside sandbox
+    // Check 'host' remote inside sandbox
     let output = sandbox_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
@@ -77,53 +77,70 @@ fn network_host_remotes_use_localhost() {
         .arg("get-url")
         .arg("host")
         .success()
-        .expect("Failed to check remote inside sandbox");
+        .expect("Failed to get 'host' remote URL inside sandbox");
 
-    let remote_url = String::from_utf8_lossy(&output).trim().to_string();
-    println!("Remote 'host' URL inside sandbox: {}", remote_url);
+    let host_remote_url = String::from_utf8_lossy(&output).trim().to_string();
+    println!("Remote 'host' URL inside sandbox: {}", host_remote_url);
     assert!(
-        remote_url.contains("127.0.0.1") || remote_url.contains("localhost"),
-        "Remote 'host' inside sandbox should use localhost"
+        host_remote_url.contains("127.0.0.1") || host_remote_url.contains("localhost"),
+        "Remote 'host' inside sandbox should use localhost, got: {}",
+        host_remote_url
     );
 
-    // Keep sandbox running to check the remote on the host
-    let mut cmd = sandbox_command(&repo, &daemon);
-    cmd.arg("enter").arg("test").arg("--").arg("sleep").arg("3");
-
-    let sandbox_handle = thread::spawn(move || {
-        cmd.success().expect("Failed to run sandbox sleep");
-    });
-
-    thread::sleep(Duration::from_secs(1));
-
-    let output = Command::new("git")
-        .args(["remote", "get-url", "sandbox"])
-        .current_dir(repo.path())
+    // Check 'sandbox' remote inside sandbox
+    let output = sandbox_command(&repo, &daemon)
+        .arg("enter")
+        .arg("test")
+        .arg("--")
+        .arg("git")
+        .arg("remote")
+        .arg("get-url")
+        .arg("sandbox")
         .success()
-        .expect("Failed to get sandbox remote");
+        .expect("Failed to get 'sandbox' remote URL inside sandbox");
 
-    // Cleanup
-    sandbox_handle.join().unwrap();
-
-    let url = String::from_utf8_lossy(&output);
-    println!("Remote 'sandbox' URL on host: {}", url);
+    let sandbox_remote_url = String::from_utf8_lossy(&output).trim().to_string();
+    println!(
+        "Remote 'sandbox' URL inside sandbox: {}",
+        sandbox_remote_url
+    );
     assert!(
-        url.contains("127.0.0.1") || url.contains("localhost"),
-        "Sandbox remote on host should be localhost"
+        sandbox_remote_url.contains("127.0.0.1") || sandbox_remote_url.contains("localhost"),
+        "Remote 'sandbox' inside sandbox should use localhost, got: {}",
+        sandbox_remote_url
     );
 }
 
+/// Test that commits made on the host are available via the 'host' remote inside
+/// the sandbox when using --network=host.
 #[test]
-fn network_host_git_operations() {
+fn network_host_fetch_from_sandbox() {
     let daemon = TestDaemon::start();
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
     write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
 
-    // 1. git fetch host (from inside sandbox)
-    create_commit(repo.path(), "Host commit");
+    // Launch sandbox first
+    sandbox_command(&repo, &daemon)
+        .arg("enter")
+        .arg("test")
+        .arg("--")
+        .arg("echo")
+        .arg("setup")
+        .success()
+        .expect("Failed to setup sandbox");
 
+    // Create a commit on the host (reference-transaction hook pushes to gateway)
+    create_commit(repo.path(), "Host commit for fetch test");
+    let host_commit = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .success()
+        .expect("Failed to get host commit");
+    let host_commit = String::from_utf8_lossy(&host_commit).trim().to_string();
+
+    // Fetch from host remote inside the sandbox
     sandbox_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
@@ -132,24 +149,87 @@ fn network_host_git_operations() {
         .arg("fetch")
         .arg("host")
         .success()
-        .expect("Failed to fetch host");
+        .expect("Failed to fetch from host remote");
 
-    // 2. git push sandbox (from host)
-    // Keep sandbox running
-    let mut cmd = sandbox_command(&repo, &daemon);
-    cmd.arg("enter").arg("test").arg("--").arg("sleep").arg("5");
+    // Verify the fetched commit matches
+    let fetched_commit = sandbox_command(&repo, &daemon)
+        .arg("enter")
+        .arg("test")
+        .arg("--")
+        .arg("git")
+        .arg("rev-parse")
+        .arg("host/master")
+        .success()
+        .expect("Failed to get fetched commit");
+    let fetched_commit = String::from_utf8_lossy(&fetched_commit).trim().to_string();
 
-    let sandbox_handle = thread::spawn(move || {
-        cmd.success().expect("Failed to run sandbox sleep");
-    });
+    assert_eq!(
+        fetched_commit, host_commit,
+        "Fetched commit should match host commit"
+    );
+}
 
-    thread::sleep(Duration::from_secs(2));
+/// Test that commits pushed from inside the sandbox propagate to the host repo
+/// as remote-tracking refs when using --network=host.
+#[test]
+fn network_host_push_from_sandbox() {
+    let daemon = TestDaemon::start();
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
-    Command::new("git")
-        .args(["push", "sandbox", "HEAD:host/sandbox-branch"])
+    write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
+
+    let sandbox_name = "push-test";
+
+    // Launch sandbox
+    sandbox_command(&repo, &daemon)
+        .arg("enter")
+        .arg(sandbox_name)
+        .arg("--")
+        .arg("echo")
+        .arg("setup")
+        .success()
+        .expect("Failed to setup sandbox");
+
+    // Create a commit inside the sandbox (reference-transaction hook pushes to gateway)
+    sandbox_command(&repo, &daemon)
+        .arg("enter")
+        .arg(sandbox_name)
+        .arg("--")
+        .arg("git")
+        .arg("commit")
+        .arg("--allow-empty")
+        .arg("-m")
+        .arg("Sandbox commit")
+        .success()
+        .expect("Failed to create commit in sandbox");
+
+    // Get the commit hash from the sandbox
+    let sandbox_commit = sandbox_command(&repo, &daemon)
+        .arg("enter")
+        .arg(sandbox_name)
+        .arg("--")
+        .arg("git")
+        .arg("rev-parse")
+        .arg("HEAD")
+        .success()
+        .expect("Failed to get sandbox commit");
+    let sandbox_commit = String::from_utf8_lossy(&sandbox_commit).trim().to_string();
+
+    // The sandbox's commit should be visible in the host repo as a remote-tracking ref.
+    // The gateway post-receive hook syncs sandbox/<branch>@<name> to the host repo
+    // as refs/remotes/sandbox/<branch>@<name>.
+    // For the primary branch (where branch == sandbox name), there's also an alias.
+    let host_ref_commit = Command::new("git")
+        .args(["rev-parse", &format!("sandbox/{}", sandbox_name)])
         .current_dir(repo.path())
         .success()
-        .expect("Failed to push to sandbox");
+        .expect("Failed to get sandbox ref from host repo");
+    let host_ref_commit = String::from_utf8_lossy(&host_ref_commit).trim().to_string();
 
-    sandbox_handle.join().unwrap();
+    assert_eq!(
+        host_ref_commit, sandbox_commit,
+        "Host repo should have sandbox's commit at sandbox/{} ref",
+        sandbox_name
+    );
 }
