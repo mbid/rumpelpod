@@ -6,7 +6,7 @@ mod gemini;
 pub mod history;
 mod xai;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::cli::AgentCommand;
 use crate::config::{Model, SandboxConfig};
@@ -34,7 +34,30 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     let (initial_history, conversation_id) = match choice {
         ConversationChoice::New => (None, None),
         ConversationChoice::Resume(id) => {
-            let history = history::load_conversation(id)?;
+            let (history, saved_model_name) = history::load_conversation(id)?;
+
+            let current_provider = model_provider(model);
+            // Parse the saved model name into a Model value to determine its provider
+            let saved_model = serde_json::from_str::<Model>(&format!("\"{}\"", saved_model_name))
+                .with_context(|| {
+                    format!(
+                        "Failed to parse model '{}' from conversation history. The database may be corrupt.\n\
+                         Try deleting the sandbox with 'sandbox delete {}' to start fresh.",
+                        saved_model_name, cmd.name
+                    )
+                })?;
+
+            let saved_provider = model_provider(saved_model);
+            if current_provider != saved_provider {
+                anyhow::bail!(
+                    "Cannot resume conversation started with {} ({}) using {} ({})",
+                    saved_model_name,
+                    saved_provider,
+                    model,
+                    current_provider
+                );
+            }
+
             (Some(history), Some(id))
         }
     };
@@ -54,7 +77,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     let cache = cmd
         .cache
         .as_ref()
-        .map(|path| LlmCache::new(path, model_provider(model)))
+        .map(|path| LlmCache::new(path, &model_provider(model).to_string()))
         .transpose()?;
 
     // Run the agent loop

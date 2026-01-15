@@ -192,13 +192,13 @@ pub fn resolve_conversation(
 }
 
 /// Load conversation history by ID.
-pub fn load_conversation(id: i64) -> Result<serde_json::Value> {
+pub fn load_conversation(id: i64) -> Result<(serde_json::Value, String)> {
     let socket = socket_path()?;
     let client = DaemonClient::new_unix(&socket);
     let response = client
         .get_conversation(id)?
         .with_context(|| format!("Conversation {} not found", id))?;
-    Ok(response.history)
+    Ok((response.history, response.model))
 }
 
 #[cfg(test)]

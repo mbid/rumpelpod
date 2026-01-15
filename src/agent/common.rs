@@ -19,12 +19,45 @@ pub fn model_api_id(model: Model) -> String {
     model.to_string()
 }
 
-/// Get the provider name for this model (used for cache directories).
-pub fn model_provider(model: Model) -> &'static str {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+#[strum(serialize_all = "lowercase")]
+pub enum Provider {
+    Anthropic,
+    Gemini,
+    Xai,
+}
+
+/// Get the provider for this model.
+pub fn model_provider(model: Model) -> Provider {
     match model {
-        Model::Anthropic(_) => "anthropic",
-        Model::Xai(_) => "xai",
-        Model::Gemini(_) => "gemini",
+        Model::Anthropic(_) => Provider::Anthropic,
+        Model::Gemini(_) => Provider::Gemini,
+        Model::Xai(_) => Provider::Xai,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_model_provider() {
+        use crate::llm::types::anthropic;
+        use crate::llm::types::gemini;
+        use crate::llm::types::xai;
+
+        assert_eq!(
+            model_provider(Model::Anthropic(anthropic::Model::Opus)),
+            Provider::Anthropic
+        );
+        assert_eq!(
+            model_provider(Model::Gemini(gemini::Model::Gemini25Flash)),
+            Provider::Gemini
+        );
+        assert_eq!(
+            model_provider(Model::Xai(xai::Model::Grok4)),
+            Provider::Xai
+        );
     }
 }
 
