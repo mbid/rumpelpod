@@ -54,10 +54,7 @@ mod tests {
             model_provider(Model::Gemini(gemini::Model::Gemini25Flash)),
             Provider::Gemini
         );
-        assert_eq!(
-            model_provider(Model::Xai(xai::Model::Grok4)),
-            Provider::Xai
-        );
+        assert_eq!(model_provider(Model::Xai(xai::Model::Grok4)), Provider::Xai);
     }
 }
 
