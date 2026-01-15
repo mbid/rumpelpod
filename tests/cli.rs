@@ -10,3 +10,5 @@ mod enter;
 mod gateway;
 #[path = "cli/list.rs"]
 mod list;
+#[path = "cli/network.rs"]
+mod network;
