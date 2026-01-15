@@ -14,6 +14,10 @@ pub enum Model {
     Haiku,
     /// Custom model string
     Custom(String),
+    /// Claude 3.7 Sonnet - the current latest hybrid reasoning model
+    #[serde(rename = "claude-3-7-sonnet-20250219")]
+    #[value(name = "claude-3-7-sonnet-20250219")]
+    Sonnet37,
 }
 
 impl std::fmt::Display for Model {
@@ -24,6 +28,7 @@ impl std::fmt::Display for Model {
             Model::Sonnet => "claude-sonnet-4-5",
             Model::Haiku => "claude-haiku-4-5",
             Model::Custom(s) => s,
+            Model::Sonnet37 => "claude-3-7-sonnet-20250219",
         };
         write!(f, "{}", s)
     }

@@ -25,7 +25,10 @@ pub enum Provider {
 /// Get the provider for this model.
 pub fn model_provider(model: Model) -> Provider {
     match model {
-        Model::ClaudeOpus | Model::ClaudeSonnet | Model::ClaudeHaiku => Provider::Anthropic,
+        Model::ClaudeOpus
+        | Model::ClaudeSonnet
+        | Model::ClaudeSonnet37
+        | Model::ClaudeHaiku => Provider::Anthropic,
         Model::Gemini25Flash | Model::Gemini3Flash | Model::Gemini3Pro => Provider::Gemini,
         Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => Provider::Xai,
     }

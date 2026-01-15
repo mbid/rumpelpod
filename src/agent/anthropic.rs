@@ -9,8 +9,9 @@ use anyhow::{Context, Result};
 use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
 use crate::llm::types::anthropic::{
-    CacheControl, ContentBlock, CustomTool, Effort, FetchToolType, Message, MessagesRequest, Role,
-    ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool, WebSearchToolType,
+    CacheControl, ContentBlock, CustomTool, Effort, FetchToolType, Message, MessagesRequest, Model,
+    Role, ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool,
+    WebSearchToolType,
 };
 
 use super::common::{
@@ -81,6 +82,7 @@ pub fn run_claude_agent(
     user: &str,
     repo_path: &Path,
     model: Model,
+    thinking_budget: Option<u32>,
     cache: Option<LlmCache>,
     anthropic_base_url: Option<String>,
     enable_websearch: bool,
@@ -189,17 +191,24 @@ pub fn run_claude_agent(
             let mut thinking = None;
             let mut effort = None;
 
-            // Enable thinking for Opus (Claude 4.5)
-            if let Model::Anthropic(crate::llm::types::anthropic::Model::Opus) = model {
+            // Enable thinking for Opus (Claude 4.5) by default
+            if let Model::Opus = model {
                 max_tokens = 20000; // Large output budget for thinking + response
-                // Minimum budget of 1024 tokens is recommended by Anthropic to enable the mode.
-                // For a high-tier reasoning model like Opus 4.5, 4000 tokens provides a good
-                // balance for tool-use tasks without excessive latency.
+                                    // Minimum budget of 1024 tokens is recommended by Anthropic to enable the mode.
+                                    // For a high-tier reasoning model like Opus 4.5, 4000 tokens provides a good
+                                    // balance for tool-use tasks without excessive latency.
                 thinking = Some(ThinkingConfig {
                     r#type: "enabled".to_string(),
-                    budget_tokens: 4000,
+                    budget_tokens: thinking_budget.unwrap_or(4000),
                 });
                 effort = Some(Effort::High);
+            } else if let Some(budget) = thinking_budget {
+                // If budget is explicitly provided for other models (e.g. Sonnet 3.7)
+                max_tokens = budget + MAX_TOKENS;
+                thinking = Some(ThinkingConfig {
+                    r#type: "enabled".to_string(),
+                    budget_tokens: budget,
+                });
             }
 
             let request = MessagesRequest {

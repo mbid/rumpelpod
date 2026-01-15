@@ -74,6 +74,7 @@ fn convert_config_model(m: ConfigModel) -> EffectiveModel {
     match m {
         ConfigModel::ClaudeOpus => EffectiveModel::Anthropic(anthropic_types::Model::Opus),
         ConfigModel::ClaudeSonnet => EffectiveModel::Anthropic(anthropic_types::Model::Sonnet),
+        ConfigModel::ClaudeSonnet37 => EffectiveModel::Anthropic(anthropic_types::Model::Sonnet37),
         ConfigModel::ClaudeHaiku => EffectiveModel::Anthropic(anthropic_types::Model::Haiku),
         ConfigModel::Gemini25Flash => EffectiveModel::Gemini(gemini_types::Model::Gemini25Flash),
         ConfigModel::Gemini3Flash => EffectiveModel::Gemini(gemini_types::Model::Gemini3Flash),
@@ -181,6 +182,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
     let repo_path = &sandbox_config.repo_path;
+    let thinking_budget = cmd.thinking_budget.or(sandbox_config.agent.thinking_budget);
 
     match model {
         EffectiveModel::Anthropic(m) => {
@@ -197,6 +199,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
                 user,
                 repo_path,
                 m,
+                thinking_budget,
                 cache,
                 sandbox_config.agent.anthropic_base_url,
                 enable_websearch,

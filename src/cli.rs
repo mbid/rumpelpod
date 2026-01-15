@@ -8,12 +8,9 @@ use crate::config::Model;
 #[command(name = "sandbox")]
 #[command(version)]
 #[command(about = "Sandbox management tool for LLM agents")]
-#[command(long_about = "\
-Sandbox management tool for LLM agents.
+#[command(long_about = "Sandbox management tool for LLM agents.
 
-Spawns isolated Docker containers with automatic git synchronization for \
-running untrusted code safely. Each sandbox gets its own working copy of \
-your repository where changes are isolated from the host filesystem.
+Spawns isolated Docker containers with automatic git synchronization for running untrusted code safely. Each sandbox gets its own working copy of your repository where changes are isolated from the host filesystem.
 
 SETUP:
   1. Create a .sandbox.toml config file in your repository root
@@ -43,17 +40,13 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     /// Enter a sandbox (create if needed)
-    #[command(long_about = "\
-Enter a sandbox, creating it if it doesn't exist.
+    #[command(long_about = "Enter a sandbox, creating it if it doesn't exist.
 
-Sandboxes are identified by name and are specific to the current repository. \
-The same name in different repositories refers to different sandboxes.
+Sandboxes are identified by name and are specific to the current repository. The same name in different repositories refers to different sandboxes.
 
-By default, opens an interactive shell. You can also run a specific command \
-by passing it after '--'.
+By default, opens an interactive shell. You can also run a specific command by passing it after '--'.
 
-The working directory inside the sandbox corresponds to your current directory \
-relative to the repository root.
+The working directory inside the sandbox corresponds to your current directory relative to the repository root.
 
 Examples:
   sandbox enter dev              # Interactive shell in 'dev' sandbox
@@ -63,31 +56,25 @@ Examples:
     Enter(EnterCommand),
 
     /// List all sandboxes for the current repository
-    #[command(long_about = "\
-List all sandboxes for the current repository.
+    #[command(long_about = "List all sandboxes for the current repository.
 
 Shows sandbox name, status (running/stopped), and creation time.
 ")]
     List,
 
     /// Delete a sandbox
-    #[command(long_about = "\
-Delete a sandbox and its associated container.
+    #[command(long_about = "Delete a sandbox and its associated container.
 
-This stops the container if running and removes all sandbox state. \
-Any uncommitted changes in the sandbox will be lost.
+This stops the container if running and removes all sandbox state. Any uncommitted changes in the sandbox will be lost.
 ")]
     Delete(DeleteCommand),
 
     /// Run an LLM agent inside a sandbox
-    #[command(long_about = "\
-Run an LLM agent inside a sandbox.
+    #[command(long_about = "Run an LLM agent inside a sandbox.
 
-The agent runs autonomously, executing commands in the sandbox. All changes \
-are isolated - safety comes from the sandbox, not from asking for permission.
+The agent runs autonomously, executing commands in the sandbox. All changes are isolated - safety comes from the sandbox, not from asking for permission.
 
-Requires ANTHROPIC_API_KEY, XAI_API_KEY, or GEMINI_API_KEY environment variable \
-depending on the model. Project-specific instructions can be provided in an AGENTS.md file.
+Requires ANTHROPIC_API_KEY, XAI_API_KEY, or GEMINI_API_KEY environment variable depending on the model. Project-specific instructions can be provided in an AGENTS.md file.
 ")]
     Agent(AgentCommand),
 
@@ -96,22 +83,18 @@ depending on the model. Project-specific instructions can be provided in an AGEN
     Daemon,
 
     /// Install the sandbox daemon as a systemd user service
-    #[command(long_about = "\
-Install the sandbox daemon as a systemd user service.
+    #[command(long_about = "Install the sandbox daemon as a systemd user service.
 
-The daemon runs in the background and manages sandbox containers, handling \
-git synchronization and container lifecycle. It starts automatically on login.
+The daemon runs in the background and manages sandbox containers, handling git synchronization and container lifecycle. It starts automatically on login.
 
 This is required before using other sandbox commands.
 ")]
     SystemInstall,
 
     /// Uninstall the sandbox daemon from systemd
-    #[command(long_about = "\
-Uninstall the sandbox daemon from systemd.
+    #[command(long_about = "Uninstall the sandbox daemon from systemd.
 
-Stops the daemon and removes it from systemd. Existing sandbox containers \
-are not automatically removed.
+Stops the daemon and removes it from systemd. Existing sandbox containers are not automatically removed.
 ")]
     SystemUninstall,
 }
@@ -170,4 +153,8 @@ pub struct AgentCommand {
     /// Disable web search for Anthropic models
     #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "enable_anthropic_websearch")]
     pub disable_anthropic_websearch: bool,
+
+    /// Thinking budget in tokens (enables thinking mode)
+    #[arg(long, value_name = "TOKENS")]
+    pub thinking_budget: Option<u32>,
 }
