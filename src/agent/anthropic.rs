@@ -6,18 +6,16 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::config::Model;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
 use crate::llm::types::anthropic::{
-    CacheControl, ContentBlock, CustomTool, FetchToolType, Message, MessagesRequest, Role,
+    CacheControl, ContentBlock, CustomTool, FetchToolType, Message, MessagesRequest, Model, Role,
     ServerTool, StopReason, SystemBlock, SystemPrompt, Tool, WebSearchToolType,
 };
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_editor, model_api_id, read_agents_md, ToolName,
-    MAX_TOKENS,
+    execute_write_in_sandbox, get_input_via_editor, read_agents_md, ToolName, MAX_TOKENS,
 };
 use super::history::ConversationTracker;
 
@@ -184,7 +182,7 @@ pub fn run_claude_agent(
             }
 
             let request = MessagesRequest {
-                model: model_api_id(model).to_string(),
+                model: model.to_string(),
                 max_tokens: MAX_TOKENS,
                 system: Some(SystemPrompt::Blocks(vec![SystemBlock::Text {
                     text: system_prompt.clone(),

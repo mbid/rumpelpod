@@ -6,19 +6,16 @@
 use serde::{Deserialize, Serialize};
 
 /// xAI models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
     /// Grok 3 Mini - lightweight reasoning model, cost-effective
     #[serde(rename = "grok-3-mini")]
-    #[value(name = "grok-3-mini")]
     Grok3Mini,
     /// Grok 4 - most capable reasoning model from xAI
     #[serde(rename = "grok-4")]
-    #[value(name = "grok-4")]
     Grok4,
     /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
     #[serde(rename = "grok-4-1-fast-reasoning")]
-    #[value(name = "grok-4-1-fast-reasoning")]
     Grok41Fast,
 }
 

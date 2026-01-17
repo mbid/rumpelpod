@@ -6,18 +6,16 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::config::Model;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::xai::Client;
 use crate::llm::types::xai::{
-    ChatCompletionRequest, FinishReason, FunctionDefinition, Message, MessageContent, Role,
+    ChatCompletionRequest, FinishReason, FunctionDefinition, Message, MessageContent, Model, Role,
     SearchMode, SearchParameters, Tool, ToolChoice, ToolChoiceMode, ToolType,
 };
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_editor, model_api_id, read_agents_md, ToolName,
-    MAX_TOKENS,
+    execute_write_in_sandbox, get_input_via_editor, read_agents_md, ToolName, MAX_TOKENS,
 };
 use super::history::ConversationTracker;
 
@@ -114,7 +112,7 @@ pub fn run_grok_agent(
 
         loop {
             let request = ChatCompletionRequest {
-                model: model_api_id(model).to_string(),
+                model: model.to_string(),
                 messages: messages.clone(),
                 max_tokens: Some(MAX_TOKENS),
                 temperature: Some(0.0),

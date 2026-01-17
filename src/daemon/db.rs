@@ -11,6 +11,7 @@ use rusqlite::Connection;
 pub struct ConversationSummary {
     pub id: i64,
     pub model: String,
+    pub provider: String,
     pub updated_at: String,
 }
 
@@ -20,6 +21,7 @@ pub struct Conversation {
     #[allow(dead_code)] // Used for potential future features
     pub id: i64,
     pub model: String,
+    pub provider: String,
     pub history: serde_json::Value,
 }
 
@@ -61,6 +63,7 @@ fn init_db(conn: &Connection) -> Result<()> {
             repo_path TEXT NOT NULL,
             sandbox_name TEXT NOT NULL,
             model TEXT NOT NULL,
+            provider TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             history JSON NOT NULL
@@ -84,6 +87,7 @@ pub fn save_conversation(
     repo_path: &Path,
     sandbox_name: &str,
     model: &str,
+    provider: &str,
     history: &serde_json::Value,
 ) -> Result<i64> {
     let now = chrono::Utc::now().to_rfc3339();
@@ -93,17 +97,17 @@ pub fn save_conversation(
     if let Some(id) = id {
         // Update existing conversation
         conn.execute(
-            "UPDATE conversations SET model = ?, updated_at = ?, history = ? WHERE id = ?",
-            rusqlite::params![model, now, history_str, id],
+            "UPDATE conversations SET model = ?, provider = ?, updated_at = ?, history = ? WHERE id = ?",
+            rusqlite::params![model, provider, now, history_str, id],
         )
         .context("Failed to update conversation")?;
         Ok(id)
     } else {
         // Insert new conversation
         conn.execute(
-            "INSERT INTO conversations (repo_path, sandbox_name, model, created_at, updated_at, history)
-             VALUES (?, ?, ?, ?, ?, ?)",
-            rusqlite::params![repo_path_str, sandbox_name, model, now, now, history_str],
+            "INSERT INTO conversations (repo_path, sandbox_name, model, provider, created_at, updated_at, history)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![repo_path_str, sandbox_name, model, provider, now, now, history_str],
         )
         .context("Failed to insert conversation")?;
         Ok(conn.last_insert_rowid())
@@ -120,7 +124,7 @@ pub fn list_conversations(
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, model, updated_at FROM conversations
+            "SELECT id, model, provider, updated_at FROM conversations
              WHERE repo_path = ? AND sandbox_name = ?
              ORDER BY updated_at DESC",
         )
@@ -131,7 +135,8 @@ pub fn list_conversations(
             Ok(ConversationSummary {
                 id: row.get(0)?,
                 model: row.get(1)?,
-                updated_at: row.get(2)?,
+                provider: row.get(2)?,
+                updated_at: row.get(3)?,
             })
         })
         .context("Failed to query conversations")?;
@@ -165,15 +170,15 @@ pub fn delete_conversations(
 /// Get a conversation by ID.
 pub fn get_conversation(conn: &Connection, id: i64) -> Result<Option<Conversation>> {
     let mut stmt = conn
-        .prepare("SELECT id, model, history FROM conversations WHERE id = ?")
+        .prepare("SELECT id, model, provider, history FROM conversations WHERE id = ?")
         .context("Failed to prepare query")?;
 
     let mut rows = stmt
         .query_map(rusqlite::params![id], |row| {
-            let history_str: String = row.get(2)?;
+            let history_str: String = row.get(3)?;
             let history: serde_json::Value = serde_json::from_str(&history_str).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    2,
+                    3,
                     rusqlite::types::Type::Text,
                     Box::new(e),
                 )
@@ -181,6 +186,7 @@ pub fn get_conversation(conn: &Connection, id: i64) -> Result<Option<Conversatio
             Ok(Conversation {
                 id: row.get(0)?,
                 model: row.get(1)?,
+                provider: row.get(2)?,
                 history,
             })
         })
@@ -218,6 +224,7 @@ mod tests {
             &repo_path,
             "dev",
             "claude-sonnet-4-5",
+            "anthropic",
             &history,
         )
         .unwrap();
@@ -227,6 +234,7 @@ mod tests {
         let conv = get_conversation(&conn, id).unwrap().unwrap();
         assert_eq!(conv.id, id);
         assert_eq!(conv.model, "claude-sonnet-4-5");
+        assert_eq!(conv.provider, "anthropic");
         assert_eq!(conv.history, history);
     }
 
@@ -248,6 +256,7 @@ mod tests {
             &repo_path,
             "dev",
             "claude-sonnet-4-5",
+            "anthropic",
             &history1,
         )
         .unwrap();
@@ -259,6 +268,7 @@ mod tests {
             &repo_path,
             "dev",
             "claude-opus-4-5",
+            "anthropic",
             &history2,
         )
         .unwrap();
@@ -267,6 +277,7 @@ mod tests {
         // Get updated version
         let conv = get_conversation(&conn, id).unwrap().unwrap();
         assert_eq!(conv.model, "claude-opus-4-5");
+        assert_eq!(conv.provider, "anthropic");
         assert_eq!(conv.history, history2);
     }
 
@@ -284,14 +295,23 @@ mod tests {
             &repo_path,
             "dev",
             "claude-sonnet-4-5",
+            "anthropic",
             &history,
         )
         .unwrap();
 
         // Small delay to ensure different timestamps
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let id2 =
-            save_conversation(&conn, None, &repo_path, "dev", "claude-opus-4-5", &history).unwrap();
+        let id2 = save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "dev",
+            "claude-opus-4-5",
+            "anthropic",
+            &history,
+        )
+        .unwrap();
 
         // List should be ordered by updated_at DESC (most recent first)
         let list = list_conversations(&conn, &repo_path, "dev").unwrap();
@@ -314,10 +334,20 @@ mod tests {
             &repo_path,
             "dev",
             "claude-sonnet-4-5",
+            "anthropic",
             &history,
         )
         .unwrap();
-        save_conversation(&conn, None, &repo_path, "test", "claude-opus-4-5", &history).unwrap();
+        save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "test",
+            "claude-opus-4-5",
+            "anthropic",
+            &history,
+        )
+        .unwrap();
 
         // List should only return matching sandbox
         let dev_list = list_conversations(&conn, &repo_path, "dev").unwrap();
@@ -338,8 +368,26 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Save to different repos with same sandbox name
-        save_conversation(&conn, None, &repo1, "dev", "claude-sonnet-4-5", &history).unwrap();
-        save_conversation(&conn, None, &repo2, "dev", "claude-opus-4-5", &history).unwrap();
+        save_conversation(
+            &conn,
+            None,
+            &repo1,
+            "dev",
+            "claude-sonnet-4-5",
+            "anthropic",
+            &history,
+        )
+        .unwrap();
+        save_conversation(
+            &conn,
+            None,
+            &repo2,
+            "dev",
+            "claude-opus-4-5",
+            "anthropic",
+            &history,
+        )
+        .unwrap();
 
         // List should only return matching repo
         let repo1_list = list_conversations(&conn, &repo1, "dev").unwrap();
@@ -373,16 +421,27 @@ mod tests {
             &repo_path,
             "dev",
             "claude-sonnet-4-5",
+            "anthropic",
             &history,
         )
         .unwrap();
-        save_conversation(&conn, None, &repo_path, "dev", "claude-opus-4-5", &history).unwrap();
+        save_conversation(
+            &conn,
+            None,
+            &repo_path,
+            "dev",
+            "claude-opus-4-5",
+            "anthropic",
+            &history,
+        )
+        .unwrap();
         save_conversation(
             &conn,
             None,
             &repo_path,
             "test",
             "claude-haiku-4-5",
+            "anthropic",
             &history,
         )
         .unwrap();

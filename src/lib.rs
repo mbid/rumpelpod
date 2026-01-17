@@ -3,7 +3,7 @@ mod agent;
 mod r#async;
 mod cli;
 mod command_ext;
-mod config;
+pub mod config;
 
 pub use command_ext::CommandExt;
 mod daemon;

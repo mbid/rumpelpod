@@ -114,6 +114,7 @@ pub struct SaveConversationRequest {
     pub repo_path: PathBuf,
     pub sandbox_name: String,
     pub model: String,
+    pub provider: String,
     pub history: serde_json::Value,
 }
 
@@ -135,6 +136,7 @@ pub struct ListConversationsRequest {
 pub struct ConversationSummary {
     pub id: i64,
     pub model: String,
+    pub provider: String,
     pub updated_at: String,
 }
 
@@ -148,6 +150,7 @@ pub struct ListConversationsResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GetConversationResponse {
     pub model: String,
+    pub provider: String,
     pub history: serde_json::Value,
 }
 
@@ -188,6 +191,7 @@ pub trait Daemon: Send + Sync + 'static {
         repo_path: PathBuf,
         sandbox_name: String,
         model: String,
+        provider: String,
         history: serde_json::Value,
     ) -> Result<i64>;
 
@@ -335,6 +339,7 @@ impl Daemon for DaemonClient {
         repo_path: PathBuf,
         sandbox_name: String,
         model: String,
+        provider: String,
         history: serde_json::Value,
     ) -> Result<i64> {
         let url = self.url.join("/conversation")?;
@@ -343,6 +348,7 @@ impl Daemon for DaemonClient {
             repo_path,
             sandbox_name,
             model,
+            provider,
             history,
         };
 
@@ -503,6 +509,7 @@ async fn save_conversation_handler<D: Daemon>(
             request.repo_path,
             request.sandbox_name,
             request.model,
+            request.provider,
             request.history,
         )
     });
@@ -645,6 +652,7 @@ mod tests {
             _repo_path: PathBuf,
             _sandbox_name: String,
             _model: String,
+            _provider: String,
             _history: serde_json::Value,
         ) -> Result<i64> {
             Ok(id.unwrap_or(1))
@@ -777,6 +785,7 @@ mod tests {
             repo_path: PathBuf,
             sandbox_name: String,
             model: String,
+            provider: String,
             history: serde_json::Value,
         ) -> Result<i64> {
             let conn = self.db.lock().unwrap();
@@ -786,6 +795,7 @@ mod tests {
                 &repo_path,
                 &sandbox_name,
                 &model,
+                &provider,
                 &history,
             )
         }
@@ -803,6 +813,7 @@ mod tests {
                 .map(|s| ConversationSummary {
                     id: s.id,
                     model: s.model,
+                    provider: s.provider,
                     updated_at: s.updated_at,
                 })
                 .collect())
@@ -813,6 +824,7 @@ mod tests {
             let conv = crate::daemon::db::get_conversation(&conn, id)?;
             Ok(conv.map(|c| GetConversationResponse {
                 model: c.model,
+                provider: c.provider,
                 history: c.history,
             }))
         }
@@ -835,6 +847,7 @@ mod tests {
                 repo_path.clone(),
                 "dev".to_string(),
                 "claude-sonnet-4-5".to_string(),
+                "anthropic".to_string(),
                 history.clone(),
             )
             .unwrap();
@@ -847,10 +860,12 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, id);
         assert_eq!(list[0].model, "claude-sonnet-4-5");
+        assert_eq!(list[0].provider, "anthropic");
 
         // Get the conversation back
         let conv = client.get_conversation(id).unwrap().unwrap();
         assert_eq!(conv.model, "claude-sonnet-4-5");
+        assert_eq!(conv.provider, "anthropic");
         assert_eq!(conv.history, history);
     }
 
@@ -875,6 +890,7 @@ mod tests {
                 repo_path.clone(),
                 "dev".to_string(),
                 "claude-sonnet-4-5".to_string(),
+                "anthropic".to_string(),
                 history1,
             )
             .unwrap();
@@ -886,6 +902,7 @@ mod tests {
                 repo_path.clone(),
                 "dev".to_string(),
                 "claude-opus-4-5".to_string(),
+                "anthropic".to_string(),
                 history2.clone(),
             )
             .unwrap();
@@ -894,6 +911,7 @@ mod tests {
         // Verify update
         let conv = client.get_conversation(id).unwrap().unwrap();
         assert_eq!(conv.model, "claude-opus-4-5");
+        assert_eq!(conv.provider, "anthropic");
         assert_eq!(conv.history, history2);
     }
 

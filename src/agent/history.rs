@@ -17,6 +17,7 @@ pub struct ConversationTracker {
     repo_path: std::path::PathBuf,
     sandbox_name: String,
     model: String,
+    provider: String,
 }
 
 impl ConversationTracker {
@@ -28,6 +29,7 @@ impl ConversationTracker {
         repo_path: std::path::PathBuf,
         sandbox_name: String,
         model: String,
+        provider: String,
         id: Option<i64>,
     ) -> Result<Self> {
         let socket = socket_path()?;
@@ -38,6 +40,7 @@ impl ConversationTracker {
             repo_path,
             sandbox_name,
             model,
+            provider,
         })
     }
 
@@ -50,6 +53,7 @@ impl ConversationTracker {
             self.repo_path.clone(),
             self.sandbox_name.clone(),
             self.model.clone(),
+            self.provider.clone(),
             history.clone(),
         )?;
 
@@ -192,13 +196,13 @@ pub fn resolve_conversation(
 }
 
 /// Load conversation history by ID.
-pub fn load_conversation(id: i64) -> Result<(serde_json::Value, String)> {
+pub fn load_conversation(id: i64) -> Result<(serde_json::Value, String, String)> {
     let socket = socket_path()?;
     let client = DaemonClient::new_unix(&socket);
     let response = client
         .get_conversation(id)?
         .with_context(|| format!("Conversation {} not found", id))?;
-    Ok((response.history, response.model))
+    Ok((response.history, response.model, response.provider))
 }
 
 #[cfg(test)]

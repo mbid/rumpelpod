@@ -9,19 +9,16 @@
 use serde::{Deserialize, Serialize};
 
 /// Gemini models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
     /// Gemini 2.5 Flash - fast, stable, best price-performance
     #[serde(rename = "gemini-2.5-flash")]
-    #[value(name = "gemini-2.5-flash")]
     Gemini25Flash,
     /// Gemini 3 Flash - frontier model built for speed and scale
     #[serde(rename = "gemini-3-flash-preview")]
-    #[value(name = "gemini-3-flash-preview")]
     Gemini3Flash,
     /// Gemini 3 Pro - most intelligent frontier model
     #[serde(rename = "gemini-3-pro-preview")]
-    #[value(name = "gemini-3-pro-preview")]
     Gemini3Pro,
 }
 

@@ -975,10 +975,19 @@ impl Daemon for DaemonServer {
         repo_path: PathBuf,
         sandbox_name: String,
         model: String,
+        provider: String,
         history: serde_json::Value,
     ) -> Result<i64> {
         let conn = self.db.lock().unwrap();
-        db::save_conversation(&conn, id, &repo_path, &sandbox_name, &model, &history)
+        db::save_conversation(
+            &conn,
+            id,
+            &repo_path,
+            &sandbox_name,
+            &model,
+            &provider,
+            &history,
+        )
     }
 
     fn list_conversations(
@@ -993,6 +1002,7 @@ impl Daemon for DaemonServer {
             .map(|s| ConversationSummary {
                 id: s.id,
                 model: s.model,
+                provider: s.provider,
                 updated_at: s.updated_at,
             })
             .collect())
@@ -1003,6 +1013,7 @@ impl Daemon for DaemonServer {
         let conv = db::get_conversation(&conn, id)?;
         Ok(conv.map(|c| GetConversationResponse {
             model: c.model,
+            provider: c.provider,
             history: c.history,
         }))
     }

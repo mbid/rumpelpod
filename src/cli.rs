@@ -141,8 +141,14 @@ pub struct AgentCommand {
     pub name: String,
 
     /// Model to use (overrides config file)
-    #[arg(short, long, value_enum)]
+    #[arg(short, long, value_enum, conflicts_with = "custom_anthropic_model")]
     pub model: Option<Model>,
+
+    /// Custom Anthropic model string (e.g. "claude-3-opus-20240229")
+    /// Taken verbatim as the model string on the Anthropic API.
+    /// Overrides --model and config file settings.
+    #[arg(long, conflicts_with = "model")]
+    pub custom_anthropic_model: Option<String>,
 
     /// Start a new conversation instead of resuming
     #[arg(long, conflicts_with = "continue")]

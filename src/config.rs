@@ -5,7 +5,6 @@
 //! - SandboxConfig for parsing `.sandbox.toml` at the repository root
 //! - Utility functions for state directory paths
 
-use crate::llm::types::{anthropic, gemini, xai};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
@@ -26,54 +25,71 @@ pub enum Runtime {
 }
 
 /// Model to use for the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 pub enum Model {
-    Anthropic(anthropic::Model),
-    Gemini(gemini::Model),
-    Xai(xai::Model),
+    // Anthropic
+    /// Claude Opus 4.5 - most capable model
+    #[serde(rename = "claude-opus-4-5")]
+    #[value(name = "claude-opus-4-5")]
+    ClaudeOpus,
+    /// Claude Sonnet 4.5 - balanced performance and cost
+    #[serde(rename = "claude-sonnet-4-5")]
+    #[value(name = "claude-sonnet-4-5")]
+    ClaudeSonnet,
+    /// Claude Haiku 4.5 - fast and cost-effective
+    #[serde(rename = "claude-haiku-4-5")]
+    #[value(name = "claude-haiku-4-5")]
+    ClaudeHaiku,
+
+    // Gemini
+    /// Gemini 2.5 Flash - fast, stable, best price-performance
+    #[serde(rename = "gemini-2.5-flash")]
+    #[value(name = "gemini-2.5-flash")]
+    Gemini25Flash,
+    /// Gemini 3 Flash - frontier model built for speed and scale
+    #[serde(rename = "gemini-3-flash-preview")]
+    #[value(name = "gemini-3-flash-preview")]
+    Gemini3Flash,
+    /// Gemini 3 Pro - most intelligent frontier model
+    #[serde(rename = "gemini-3-pro-preview")]
+    #[value(name = "gemini-3-pro-preview")]
+    Gemini3Pro,
+
+    // xAI
+    /// Grok 3 Mini - lightweight reasoning model, cost-effective
+    #[serde(rename = "grok-3-mini")]
+    #[value(name = "grok-3-mini")]
+    Grok3Mini,
+    /// Grok 4 - most capable reasoning model from xAI
+    #[serde(rename = "grok-4")]
+    #[value(name = "grok-4")]
+    Grok4,
+    /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
+    #[serde(rename = "grok-4-1-fast-reasoning")]
+    #[value(name = "grok-4-1-fast-reasoning")]
+    Grok41Fast,
 }
 
 impl Default for Model {
     fn default() -> Self {
-        Model::Anthropic(anthropic::Model::Opus)
+        Model::ClaudeOpus
     }
 }
 
 impl std::fmt::Display for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Model::Anthropic(m) => std::fmt::Display::fmt(m, f),
-            Model::Gemini(m) => std::fmt::Display::fmt(m, f),
-            Model::Xai(m) => std::fmt::Display::fmt(m, f),
-        }
-    }
-}
-
-impl ValueEnum for Model {
-    fn value_variants<'a>() -> &'a [Self] {
-        static VARIANTS: std::sync::OnceLock<Vec<Model>> = std::sync::OnceLock::new();
-        VARIANTS.get_or_init(|| {
-            let mut v = Vec::new();
-            for m in anthropic::Model::value_variants() {
-                v.push(Model::Anthropic(*m));
-            }
-            for m in gemini::Model::value_variants() {
-                v.push(Model::Gemini(*m));
-            }
-            for m in xai::Model::value_variants() {
-                v.push(Model::Xai(*m));
-            }
-            v
-        })
-    }
-
-    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        match self {
-            Model::Anthropic(m) => m.to_possible_value(),
-            Model::Gemini(m) => m.to_possible_value(),
-            Model::Xai(m) => m.to_possible_value(),
-        }
+        let s = match self {
+            Model::ClaudeOpus => "claude-opus-4-5",
+            Model::ClaudeSonnet => "claude-sonnet-4-5",
+            Model::ClaudeHaiku => "claude-haiku-4-5",
+            Model::Gemini25Flash => "gemini-2.5-flash",
+            Model::Gemini3Flash => "gemini-3-flash-preview",
+            Model::Gemini3Pro => "gemini-3-pro-preview",
+            Model::Grok3Mini => "grok-3-mini",
+            Model::Grok4 => "grok-4",
+            Model::Grok41Fast => "grok-4-1-fast-reasoning",
+        };
+        write!(f, "{}", s)
     }
 }
 
@@ -87,7 +103,6 @@ mod tests {
         // This test ensures that for every model variant:
         // 1. The string representation (Display) matches the Clap value name.
         // 2. The string representation matches the Serde serialization (JSON/TOML).
-        // 3. The string is used exactly as is for the API (implied by usage of to_string() in agent code).
 
         for model in Model::value_variants() {
             let s = model.to_string();
@@ -178,6 +193,11 @@ impl SandboxConfig {
         let config: SandboxConfig =
             toml::from_str(&contents).with_context(|| format!("Failed to parse {path}"))?;
 
+        // Validate that model and custom-anthropic-model are not both set
+        if config.agent.model.is_some() && config.agent.custom_anthropic_model.is_some() {
+            bail!("Configuration error: 'model' and 'custom-anthropic-model' cannot both be specified in [agent] section.");
+        }
+
         Ok(config)
     }
 }
@@ -188,6 +208,8 @@ impl SandboxConfig {
 pub struct AgentConfig {
     /// Default model.
     pub model: Option<Model>,
+    /// Custom Anthropic model string.
+    pub custom_anthropic_model: Option<String>,
     /// Anthropic base URL.
     pub anthropic_base_url: Option<String>,
     /// Enable Anthropic web search.

@@ -14,11 +14,6 @@ use crate::config::Model;
 pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
 
-/// Get the model identifier as used by the provider's API.
-pub fn model_api_id(model: Model) -> String {
-    model.to_string()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "lowercase")]
 pub enum Provider {
@@ -30,9 +25,9 @@ pub enum Provider {
 /// Get the provider for this model.
 pub fn model_provider(model: Model) -> Provider {
     match model {
-        Model::Anthropic(_) => Provider::Anthropic,
-        Model::Gemini(_) => Provider::Gemini,
-        Model::Xai(_) => Provider::Xai,
+        Model::ClaudeOpus | Model::ClaudeSonnet | Model::ClaudeHaiku => Provider::Anthropic,
+        Model::Gemini25Flash | Model::Gemini3Flash | Model::Gemini3Pro => Provider::Gemini,
+        Model::Grok3Mini | Model::Grok4 | Model::Grok41Fast => Provider::Xai,
     }
 }
 
@@ -42,19 +37,9 @@ mod tests {
 
     #[test]
     fn test_model_provider() {
-        use crate::llm::types::anthropic;
-        use crate::llm::types::gemini;
-        use crate::llm::types::xai;
-
-        assert_eq!(
-            model_provider(Model::Anthropic(anthropic::Model::Opus)),
-            Provider::Anthropic
-        );
-        assert_eq!(
-            model_provider(Model::Gemini(gemini::Model::Gemini25Flash)),
-            Provider::Gemini
-        );
-        assert_eq!(model_provider(Model::Xai(xai::Model::Grok4)), Provider::Xai);
+        assert_eq!(model_provider(Model::ClaudeOpus), Provider::Anthropic);
+        assert_eq!(model_provider(Model::Gemini25Flash), Provider::Gemini);
+        assert_eq!(model_provider(Model::Grok4), Provider::Xai);
     }
 }
 

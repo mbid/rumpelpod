@@ -6,19 +6,17 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result};
 
-use crate::config::Model;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
 use crate::llm::types::gemini::{
     Content, FinishReason, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
-    GenerateContentRequest, GenerationConfig, GoogleSearch, Part, PartContent, Role,
+    GenerateContentRequest, GenerationConfig, GoogleSearch, Model, Part, PartContent, Role,
     SystemInstruction, Tool, ToolConfig,
 };
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_editor, model_api_id, read_agents_md, ToolName,
-    MAX_TOKENS,
+    execute_write_in_sandbox, get_input_via_editor, read_agents_md, ToolName, MAX_TOKENS,
 };
 use super::history::ConversationTracker;
 
@@ -179,7 +177,7 @@ pub fn run_gemini_agent(
                 }),
             };
 
-            let response = client.generate_content(&model_api_id(model), request)?;
+            let response = client.generate_content(&model.to_string(), request)?;
 
             if response.candidates.is_empty() {
                 anyhow::bail!("No candidates in response");
@@ -314,7 +312,7 @@ pub fn run_gemini_agent(
 
                                 println!("[search] {query}");
 
-                                match execute_web_search(&client, &model_api_id(model), query) {
+                                match execute_web_search(&client, &model.to_string(), query) {
                                     Ok(result) => {
                                         // Don't print full search results to avoid noise
                                         (result, true)

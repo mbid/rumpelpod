@@ -1,20 +1,19 @@
 use serde::{Deserialize, Serialize};
 
 /// Anthropic models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
     /// Claude Opus 4.5 - most capable model
     #[serde(rename = "claude-opus-4-5")]
-    #[value(name = "claude-opus-4-5")]
     Opus,
     /// Claude Sonnet 4.5 - balanced performance and cost
     #[serde(rename = "claude-sonnet-4-5")]
-    #[value(name = "claude-sonnet-4-5")]
     Sonnet,
     /// Claude Haiku 4.5 - fast and cost-effective
     #[serde(rename = "claude-haiku-4-5")]
-    #[value(name = "claude-haiku-4-5")]
     Haiku,
+    /// Custom model string
+    Custom(String),
 }
 
 impl std::fmt::Display for Model {
@@ -24,6 +23,7 @@ impl std::fmt::Display for Model {
             Model::Opus => "claude-opus-4-5",
             Model::Sonnet => "claude-sonnet-4-5",
             Model::Haiku => "claude-haiku-4-5",
+            Model::Custom(s) => s,
         };
         write!(f, "{}", s)
     }
