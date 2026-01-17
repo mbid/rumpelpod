@@ -83,6 +83,7 @@ pub fn run_claude_agent(
     model: Model,
     cache: Option<LlmCache>,
     anthropic_base_url: Option<String>,
+    enable_websearch: bool,
     initial_history: Option<serde_json::Value>,
     mut tracker: ConversationTracker,
 ) -> Result<()> {
@@ -171,6 +172,17 @@ pub fn run_claude_agent(
                 }
             }
 
+            let mut tools = vec![
+                make_tool(ToolName::Bash),
+                make_tool(ToolName::Edit),
+                make_tool(ToolName::Write),
+            ];
+
+            if enable_websearch {
+                tools.push(websearch_tool());
+                tools.push(fetch_tool());
+            }
+
             let request = MessagesRequest {
                 model: model_api_id(model).to_string(),
                 max_tokens: MAX_TOKENS,
@@ -179,13 +191,7 @@ pub fn run_claude_agent(
                     cache_control: Some(CacheControl::default()),
                 }])),
                 messages: request_messages,
-                tools: Some(vec![
-                    make_tool(ToolName::Bash),
-                    make_tool(ToolName::Edit),
-                    make_tool(ToolName::Write),
-                    websearch_tool(),
-                    fetch_tool(),
-                ]),
+                tools: Some(tools),
                 temperature: None,
                 top_p: None,
                 top_k: None,

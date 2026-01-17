@@ -190,6 +190,9 @@ pub struct AgentConfig {
     pub model: Option<Model>,
     /// Anthropic base URL.
     pub anthropic_base_url: Option<String>,
+    /// Enable Anthropic web search.
+    #[serde(default)]
+    pub anthropic_websearch: Option<bool>,
 }
 
 /// Get the state directory for sandbox data.

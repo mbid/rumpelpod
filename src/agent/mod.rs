@@ -86,16 +86,27 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     let repo_path = &sandbox_config.repo_path;
 
     match model {
-        Model::Anthropic(_) => run_claude_agent(
-            container_name,
-            user,
-            repo_path,
-            model,
-            cache,
-            sandbox_config.agent.anthropic_base_url,
-            initial_history,
-            tracker,
-        ),
+        Model::Anthropic(_) => {
+            let enable_websearch = if cmd.disable_anthropic_websearch {
+                false
+            } else if cmd.enable_anthropic_websearch {
+                true
+            } else {
+                sandbox_config.agent.anthropic_websearch.unwrap_or(true)
+            };
+
+            run_claude_agent(
+                container_name,
+                user,
+                repo_path,
+                model,
+                cache,
+                sandbox_config.agent.anthropic_base_url,
+                enable_websearch,
+                initial_history,
+                tracker,
+            )
+        }
         Model::Xai(_) => run_grok_agent(
             container_name,
             user,

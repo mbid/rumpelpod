@@ -156,4 +156,12 @@ pub struct AgentCommand {
     /// See llm-cache/README.md for documentation.
     #[arg(long, hide = true)]
     pub cache: Option<PathBuf>,
+
+    /// Enable web search for Anthropic models
+    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "disable_anthropic_websearch")]
+    pub enable_anthropic_websearch: bool,
+
+    /// Disable web search for Anthropic models
+    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "enable_anthropic_websearch")]
+    pub disable_anthropic_websearch: bool,
 }
