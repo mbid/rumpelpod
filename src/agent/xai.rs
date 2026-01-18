@@ -110,6 +110,10 @@ pub fn run_grok_agent(
             tool_call_id: None,
         });
 
+        tracker.save(
+            &serde_json::to_value(&messages).context("Failed to serialize messages to JSON")?,
+        )?;
+
         loop {
             let request = ChatCompletionRequest {
                 model: model.to_string(),

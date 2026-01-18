@@ -158,6 +158,10 @@ pub fn run_gemini_agent(
             parts: vec![Part::text(user_input)],
         });
 
+        tracker.save(
+            &serde_json::to_value(&contents).context("Failed to serialize contents to JSON")?,
+        )?;
+
         loop {
             let request = GenerateContentRequest {
                 contents: contents.clone(),

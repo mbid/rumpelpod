@@ -115,8 +115,8 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             //
             // Ideally we check compatibility based on provider.
             let saved_provider = if saved_provider_str.is_empty() {
-                 // Try to guess from model name for backward compatibility/incomplete data
-                 if let Ok(saved_model) =
+                // Try to guess from model name for backward compatibility/incomplete data
+                if let Ok(saved_model) =
                     serde_json::from_str::<ConfigModel>(&format!("\"{}\"", saved_model_name))
                 {
                     model_provider(saved_model)
@@ -130,9 +130,12 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
                     "gemini" => Provider::Gemini,
                     "xai" => Provider::Xai,
                     _ => {
-                         // Unknown provider string? fallback or error.
-                         // Let's error safe.
-                         anyhow::bail!("Unknown provider in conversation history: {}", saved_provider_str);
+                        // Unknown provider string? fallback or error.
+                        // Let's error safe.
+                        anyhow::bail!(
+                            "Unknown provider in conversation history: {}",
+                            saved_provider_str
+                        );
                     }
                 }
             };

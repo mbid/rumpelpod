@@ -338,9 +338,9 @@ fn agent_web_search_anthropic_config_disable_works() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("don't have the ability to search the web") || 
-        stdout.contains("cannot search the web") ||
-        !stdout.contains("2025-11-12"),
+        stdout.contains("don't have the ability to search the web")
+            || stdout.contains("cannot search the web")
+            || !stdout.contains("2025-11-12"),
         "Agent should NOT find the date when web search is disabled via config.\nstdout: {}",
         stdout
     );
@@ -392,7 +392,10 @@ fn agent_web_search_anthropic_flags_conflict() {
         &daemon,
         "Test",
         ANTHROPIC_MODEL,
-        &["--enable-anthropic-websearch", "--disable-anthropic-websearch"],
+        &[
+            "--enable-anthropic-websearch",
+            "--disable-anthropic-websearch",
+        ],
     );
 
     assert!(

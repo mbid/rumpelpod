@@ -150,6 +150,10 @@ pub fn run_claude_agent(
             }],
         });
 
+        tracker.save(
+            &serde_json::to_value(&messages).context("Failed to serialize messages to JSON")?,
+        )?;
+
         loop {
             // Cache conversation history by marking the last content block.
             // Single breakpoint at the end is optimal for non-rewinding multi-turn agents.
