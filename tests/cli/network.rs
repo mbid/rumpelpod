@@ -36,6 +36,8 @@ fn network_host_connectivity() {
         stream.read_exact(&mut buf).expect("Failed to read");
         assert_eq!(&buf, b"HELLO");
         stream.write_all(b"WORLD").expect("Failed to write");
+        // Give the client a moment to receive the data before closing the connection
+        thread::sleep(std::time::Duration::from_millis(100));
     });
 
     // Run nc inside sandbox to connect to host's localhost
