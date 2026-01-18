@@ -36,10 +36,6 @@ pub enum Model {
     #[serde(rename = "claude-sonnet-4-5")]
     #[value(name = "claude-sonnet-4-5")]
     ClaudeSonnet,
-    /// Claude 3.7 Sonnet - the current latest hybrid reasoning model
-    #[serde(rename = "claude-3-7-sonnet-20250219")]
-    #[value(name = "claude-3-7-sonnet-20250219")]
-    ClaudeSonnet37,
     /// Claude Haiku 4.5 - fast and cost-effective
     #[serde(rename = "claude-haiku-4-5")]
     #[value(name = "claude-haiku-4-5")]
@@ -85,7 +81,6 @@ impl std::fmt::Display for Model {
         let s = match self {
             Model::ClaudeOpus => "claude-opus-4-5",
             Model::ClaudeSonnet => "claude-sonnet-4-5",
-            Model::ClaudeSonnet37 => "claude-3-7-sonnet-20250219",
             Model::ClaudeHaiku => "claude-haiku-4-5",
             Model::Gemini25Flash => "gemini-2.5-flash",
             Model::Gemini3Flash => "gemini-3-flash-preview",
@@ -221,7 +216,7 @@ pub struct AgentConfig {
     #[serde(default)]
     pub anthropic_websearch: Option<bool>,
     /// Thinking budget in tokens.
-    /// If set, enables thinking mode for supported models (e.g., Claude 3.7 Sonnet).
+    /// If set, enables thinking mode for supported models (e.g., Claude Opus 4.5).
     pub thinking_budget: Option<u32>,
 }
 

@@ -74,7 +74,6 @@ fn convert_config_model(m: ConfigModel) -> EffectiveModel {
     match m {
         ConfigModel::ClaudeOpus => EffectiveModel::Anthropic(anthropic_types::Model::Opus),
         ConfigModel::ClaudeSonnet => EffectiveModel::Anthropic(anthropic_types::Model::Sonnet),
-        ConfigModel::ClaudeSonnet37 => EffectiveModel::Anthropic(anthropic_types::Model::Sonnet37),
         ConfigModel::ClaudeHaiku => EffectiveModel::Anthropic(anthropic_types::Model::Haiku),
         ConfigModel::Gemini25Flash => EffectiveModel::Gemini(gemini_types::Model::Gemini25Flash),
         ConfigModel::Gemini3Flash => EffectiveModel::Gemini(gemini_types::Model::Gemini3Flash),

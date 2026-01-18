@@ -50,14 +50,20 @@ impl Client {
     /// Build request headers for the messages endpoint.
     /// Build headers for the API request. If `for_cache_key` is true, excludes the API key
     /// so cache lookups work regardless of whether an API key is set.
-    fn build_headers(&self, for_cache_key: bool) -> Vec<(&'static str, String)> {
+    fn build_headers(
+        &self,
+        for_cache_key: bool,
+        enable_thinking: bool,
+    ) -> Vec<(&'static str, String)> {
+        let mut beta_flags = vec!["web-fetch-2025-09-10"];
+        if enable_thinking {
+            beta_flags.push("interleaved-thinking-2025-05-14");
+            beta_flags.push("effort-2025-11-24");
+        }
+
         let mut headers = vec![
             ("anthropic-version", ANTHROPIC_VERSION.to_string()),
-            (
-                "anthropic-beta",
-                "web-fetch-2025-09-10,interleaved-thinking-2025-05-14,effort-2025-11-24"
-                    .to_string(),
-            ),
+            ("anthropic-beta", beta_flags.join(",")),
             ("content-type", "application/json".to_string()),
         ];
         if !for_cache_key {
@@ -75,11 +81,13 @@ impl Client {
         const BASE_RETRY_DELAY: Duration = Duration::from_secs(120);
         const MAX_JITTER: Duration = Duration::from_secs(30);
 
+        let enable_thinking = request.thinking.is_some();
+
         // Serialize request body to a string once
         let body = serde_json::to_string(&request).context("Failed to serialize request")?;
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
-        let cache_headers = self.build_headers(true);
+        let cache_headers = self.build_headers(true, enable_thinking);
         let cache_header_refs: Vec<(&str, &str)> = cache_headers
             .iter()
             .map(|(k, v)| (*k, v.as_str()))
@@ -103,7 +111,7 @@ impl Client {
         }
 
         // Build headers including API key for actual requests
-        let request_headers = self.build_headers(false);
+        let request_headers = self.build_headers(false, enable_thinking);
 
         let mut attempt = 0;
 

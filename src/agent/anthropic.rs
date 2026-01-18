@@ -191,28 +191,41 @@ pub fn run_claude_agent(
             let mut thinking = None;
             let mut effort = None;
 
-            // Enable thinking for Opus (Claude 4.5) by default
-            if let Model::Opus = model {
-                max_tokens = 20000; // Large output budget for thinking + response
-                                    // Minimum budget of 1024 tokens is recommended by Anthropic to enable the mode.
-                                    // For a high-tier reasoning model like Opus 4.5, 4000 tokens provides a good
-                                    // balance for tool-use tasks without excessive latency.
-                thinking = Some(ThinkingConfig {
-                    r#type: "enabled".to_string(),
-                    budget_tokens: thinking_budget.unwrap_or(4000),
-                });
-                effort = Some(Effort::High);
-            } else if let Some(budget) = thinking_budget {
-                // If budget is explicitly provided for other models (e.g. Sonnet 3.7)
-                max_tokens = budget + MAX_TOKENS;
+            // Determine effective thinking budget
+            // If explicit CLI flag/TOML option is set to 0, thinking is disabled.
+            // Otherwise, use the provided value, or default to 32000 for Opus.
+            let effective_budget = match thinking_budget {
+                Some(0) => None,
+                Some(b) => Some(b),
+                None => {
+                    if let Model::Opus = model {
+                        // Claude Code uses ~32k tokens for reasoning.
+                        // We adopt this default for Opus to match its capability profile.
+                        Some(32_000)
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(budget) = effective_budget {
                 thinking = Some(ThinkingConfig {
                     r#type: "enabled".to_string(),
                     budget_tokens: budget,
                 });
+
+                // Increase max_tokens to accommodate the large thinking budget + response
+                // Opus 4.5 supports up to 64k output tokens.
+                max_tokens = 64_000;
+
+                // For Opus, we also set high effort when thinking is enabled
+                if let Model::Opus = model {
+                    effort = Some(Effort::High);
+                }
             }
 
             let request = MessagesRequest {
-                model: model_api_id(model).to_string(),
+                model: model.to_string(),
                 max_tokens,
                 system: Some(SystemPrompt::Blocks(vec![SystemBlock::Text {
                     text: system_prompt.clone(),
