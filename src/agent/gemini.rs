@@ -463,4 +463,3 @@ fn format_gemini_history(contents: &[Content]) -> String {
 
     output
 }
-

@@ -31,7 +31,6 @@ pub fn model_provider(model: Model) -> Provider {
     }
 }
 
-
 /// Build a docker exec command that runs as the specified user in the given repo_path.
 /// This ensures secondary group membership is applied correctly.
 ///

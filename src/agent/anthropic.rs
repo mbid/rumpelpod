@@ -507,4 +507,3 @@ fn format_anthropic_history(messages: &[Message]) -> String {
 
     output
 }
-

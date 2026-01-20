@@ -393,4 +393,3 @@ fn format_xai_history(messages: &[Message]) -> String {
 
     output
 }
-

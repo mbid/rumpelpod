@@ -204,4 +204,3 @@ pub fn load_conversation(id: i64) -> Result<(serde_json::Value, String, String)>
         .with_context(|| format!("Conversation {} not found", id))?;
     Ok((response.history, response.model, response.provider))
 }
-

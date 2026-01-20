@@ -896,3 +896,73 @@ fn agent_interactive_resume_shows_history_xai() {
 fn agent_interactive_resume_shows_history_gemini() {
     agent_interactive_resume_shows_history(GEMINI_MODEL);
 }
+
+fn agent_can_read_large_output_from_one_time_command(model: &str) {
+    let repo = TestRepo::new();
+    let script_name = "once.sh";
+    let secret = "SECRET_CODE_XYZ_98765";
+
+    // Generate content larger than 30KB (limit in src/agent/common.rs)
+    // 4000 lines of "0123456789" is 40KB+
+    let mut script_content = String::from("#!/bin/bash\n");
+    for i in 0..4000 {
+        script_content.push_str(&format!("echo 'Line {i} 0123456789'\n"));
+    }
+    script_content.push_str(&format!("echo '{secret}'\n"));
+    script_content.push_str(&format!("rm {script_name}\n"));
+
+    fs::write(repo.path().join(script_name), script_content).expect("Failed to write script");
+
+    // Make executable
+    let mut perms = fs::metadata(repo.path().join(script_name))
+        .unwrap()
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(repo.path().join(script_name), perms).unwrap();
+
+    Command::new("git")
+        .args(["add", script_name])
+        .current_dir(repo.path())
+        .success()
+        .expect("git add failed");
+    create_commit(repo.path(), "Add one-time script");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    let output = run_agent_with_prompt_and_model(
+        &repo,
+        &daemon,
+        &format!("Run `./{script_name}`. It will print a lot of output and then delete itself. Tell me the secret code at the very end of the output."),
+        model,
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // This is expected to fail currently
+    assert!(
+        stdout.contains(secret),
+        "Agent should have found the secret in the large output.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "Agent should have found the secret in the large output")]
+fn agent_can_read_large_output_from_one_time_command_anthropic() {
+    agent_can_read_large_output_from_one_time_command(ANTHROPIC_MODEL);
+}
+
+#[test]
+#[should_panic(expected = "Agent should have found the secret in the large output")]
+fn agent_can_read_large_output_from_one_time_command_xai() {
+    agent_can_read_large_output_from_one_time_command(XAI_MODEL);
+}
+
+#[test]
+#[should_panic(expected = "Agent should have found the secret in the large output")]
+fn agent_can_read_large_output_from_one_time_command_gemini() {
+    agent_can_read_large_output_from_one_time_command(GEMINI_MODEL);
+}

@@ -629,4 +629,3 @@ impl GenerateContentResponse {
             .unwrap_or_default()
     }
 }
-
