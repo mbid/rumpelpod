@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// xAI models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
     /// Grok 3 Mini - lightweight reasoning model, cost-effective
     #[serde(rename = "grok-3-mini")]
@@ -17,6 +17,8 @@ pub enum Model {
     /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
     #[serde(rename = "grok-4-1-fast-reasoning")]
     Grok41Fast,
+    /// Custom model string
+    Custom(String),
 }
 
 impl std::fmt::Display for Model {
@@ -26,6 +28,7 @@ impl std::fmt::Display for Model {
             Model::Grok3Mini => "grok-3-mini",
             Model::Grok4 => "grok-4",
             Model::Grok41Fast => "grok-4-1-fast-reasoning",
+            Model::Custom(s) => s,
         };
         write!(f, "{}", s)
     }

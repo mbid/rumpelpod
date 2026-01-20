@@ -46,9 +46,15 @@ impl EffectiveModel {
 }
 
 fn resolve_model(cmd: &AgentCommand, config: &SandboxConfig) -> EffectiveModel {
-    // 1. CLI custom anthropic model
+    // 1. CLI custom models
     if let Some(s) = &cmd.custom_anthropic_model {
         return EffectiveModel::Anthropic(anthropic_types::Model::Custom(s.clone()));
+    }
+    if let Some(s) = &cmd.custom_gemini_model {
+        return EffectiveModel::Gemini(gemini_types::Model::Custom(s.clone()));
+    }
+    if let Some(s) = &cmd.custom_xai_model {
+        return EffectiveModel::Xai(xai_types::Model::Custom(s.clone()));
     }
 
     // 2. CLI model (overrides config)
@@ -56,9 +62,15 @@ fn resolve_model(cmd: &AgentCommand, config: &SandboxConfig) -> EffectiveModel {
         return convert_config_model(m);
     }
 
-    // 3. Config custom anthropic model
+    // 3. Config custom models
     if let Some(s) = &config.agent.custom_anthropic_model {
         return EffectiveModel::Anthropic(anthropic_types::Model::Custom(s.clone()));
+    }
+    if let Some(s) = &config.agent.custom_gemini_model {
+        return EffectiveModel::Gemini(gemini_types::Model::Custom(s.clone()));
+    }
+    if let Some(s) = &config.agent.custom_xai_model {
+        return EffectiveModel::Xai(xai_types::Model::Custom(s.clone()));
     }
 
     // 4. Config model

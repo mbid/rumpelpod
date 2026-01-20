@@ -193,9 +193,14 @@ impl SandboxConfig {
         let config: SandboxConfig =
             toml::from_str(&contents).with_context(|| format!("Failed to parse {path}"))?;
 
-        // Validate that model and custom-anthropic-model are not both set
-        if config.agent.model.is_some() && config.agent.custom_anthropic_model.is_some() {
-            bail!("Configuration error: 'model' and 'custom-anthropic-model' cannot both be specified in [agent] section.");
+        // Validate that only one model option is set
+        let model_options_count = config.agent.model.is_some() as usize
+            + config.agent.custom_anthropic_model.is_some() as usize
+            + config.agent.custom_gemini_model.is_some() as usize
+            + config.agent.custom_xai_model.is_some() as usize;
+
+        if model_options_count > 1 {
+            bail!("Configuration error: Only one of 'model', 'custom-anthropic-model', 'custom-gemini-model', or 'custom-xai-model' can be specified in [agent] section.");
         }
 
         Ok(config)
@@ -210,6 +215,10 @@ pub struct AgentConfig {
     pub model: Option<Model>,
     /// Custom Anthropic model string.
     pub custom_anthropic_model: Option<String>,
+    /// Custom Gemini model string.
+    pub custom_gemini_model: Option<String>,
+    /// Custom xAI model string.
+    pub custom_xai_model: Option<String>,
     /// Anthropic base URL.
     pub anthropic_base_url: Option<String>,
     /// Enable Anthropic web search.

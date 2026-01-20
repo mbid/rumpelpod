@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Gemini models.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Model {
     /// Gemini 2.5 Flash - fast, stable, best price-performance
     #[serde(rename = "gemini-2.5-flash")]
@@ -20,6 +20,8 @@ pub enum Model {
     /// Gemini 3 Pro - most intelligent frontier model
     #[serde(rename = "gemini-3-pro-preview")]
     Gemini3Pro,
+    /// Custom model string
+    Custom(String),
 }
 
 impl std::fmt::Display for Model {
@@ -29,6 +31,7 @@ impl std::fmt::Display for Model {
             Model::Gemini25Flash => "gemini-2.5-flash",
             Model::Gemini3Flash => "gemini-3-flash-preview",
             Model::Gemini3Pro => "gemini-3-pro-preview",
+            Model::Custom(s) => s,
         };
         write!(f, "{}", s)
     }

@@ -124,14 +124,26 @@ pub struct AgentCommand {
     pub name: String,
 
     /// Model to use (overrides config file)
-    #[arg(short, long, value_enum, conflicts_with = "custom_anthropic_model")]
+    #[arg(short, long, value_enum, conflicts_with_all = ["custom_anthropic_model", "custom_gemini_model", "custom_xai_model"])]
     pub model: Option<Model>,
 
     /// Custom Anthropic model string (e.g. "claude-3-opus-20240229")
     /// Taken verbatim as the model string on the Anthropic API.
     /// Overrides --model and config file settings.
-    #[arg(long, conflicts_with = "model")]
+    #[arg(long, conflicts_with_all = ["model", "custom_gemini_model", "custom_xai_model"])]
     pub custom_anthropic_model: Option<String>,
+
+    /// Custom Gemini model string (e.g. "gemini-1.5-pro")
+    /// Taken verbatim as the model string on the Google AI Studio API.
+    /// Overrides --model and config file settings.
+    #[arg(long, conflicts_with_all = ["model", "custom_anthropic_model", "custom_xai_model"])]
+    pub custom_gemini_model: Option<String>,
+
+    /// Custom xAI model string (e.g. "grok-beta")
+    /// Taken verbatim as the model string on the xAI API.
+    /// Overrides --model and config file settings.
+    #[arg(long, conflicts_with_all = ["model", "custom_anthropic_model", "custom_gemini_model"])]
+    pub custom_xai_model: Option<String>,
 
     /// Start a new conversation instead of resuming
     #[arg(long, conflicts_with = "continue")]
