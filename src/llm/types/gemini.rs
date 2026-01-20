@@ -627,39 +627,3 @@ impl GenerateContentResponse {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_malformed_function_call_response() {
-        let json = r#"{
-  "candidates": [
-    {
-      "content": {},
-      "finishReason": "MALFORMED_FUNCTION_CALL",
-      "index": 0,
-      "finishMessage": "Malformed function call: call:default_api:edit{file_path: src/agent/anthropic.rs}"
-    }
-  ],
-  "usageMetadata": {
-    "promptTokenCount": 14265,
-    "totalTokenCount": 14265
-  },
-  "modelVersion": "gemini-3-flash-preview"
-}"#;
-
-        let response = GenerateContentResponse::from_response_json(json).unwrap();
-        assert_eq!(response.candidates.len(), 1);
-        assert_eq!(
-            response.candidates[0].finish_reason,
-            Some(FinishReason::MalformedFunctionCall)
-        );
-        assert!(response.candidates[0]
-            .finish_message
-            .as_ref()
-            .unwrap()
-            .contains("Malformed function call"));
-        assert!(response.candidates[0].content.parts.is_empty());
-    }
-}

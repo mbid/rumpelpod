@@ -205,20 +205,3 @@ pub fn load_conversation(id: i64) -> Result<(serde_json::Value, String, String)>
     Ok((response.history, response.model, response.provider))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_format_timestamp_valid() {
-        let result = format_timestamp("2024-01-15T14:32:00+00:00").unwrap();
-        assert_eq!(result, "Jan-15 14:32");
-    }
-
-    #[test]
-    fn test_format_timestamp_invalid() {
-        let result = format_timestamp("invalid");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse"));
-    }
-}

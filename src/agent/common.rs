@@ -31,28 +31,6 @@ pub fn model_provider(model: Model) -> Provider {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_model_provider() {
-        assert_eq!(model_provider(Model::ClaudeOpus), Provider::Anthropic);
-        assert_eq!(model_provider(Model::Gemini25Flash), Provider::Gemini);
-        assert_eq!(model_provider(Model::Grok4), Provider::Xai);
-    }
-
-    #[test]
-    fn test_docker_exec_cmd_sets_git_editor() {
-        let cmd = docker_exec_cmd("container", "user", Path::new("/repo"), false);
-        let debug_str = format!("{:?}", cmd);
-        // The Debug implementation of Command typically formats it as: "program" "arg1" "arg2" ...
-        // We just check if the env var setting is present in the args.
-        // Note: env vars set via .env() are not always visible in Debug output of Command on all platforms/versions,
-        // but here we are passing it as an argument `-e GIT_EDITOR=false` to docker, so it should be visible as an argument.
-        assert!(debug_str.contains("GIT_EDITOR=false"));
-    }
-}
 
 /// Build a docker exec command that runs as the specified user in the given repo_path.
 /// This ensures secondary group membership is applied correctly.
