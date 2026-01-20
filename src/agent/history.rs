@@ -113,13 +113,17 @@ fn show_picker(conversations: &[ConversationSummary]) -> Result<i64> {
     );
     let max_index = conversations.len() - 1;
     loop {
-        print!("Select [0-{}]: ", max_index);
+        print!("Select [0-{}] (default 0): ", max_index);
         stdout.flush()?;
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
 
         let input = input.trim();
+        if input.is_empty() {
+            return Ok(conversations[0].id);
+        }
+
         if let Ok(n) = input.parse::<usize>() {
             if n < conversations.len() {
                 return Ok(conversations[n].id);

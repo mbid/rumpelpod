@@ -968,3 +968,129 @@ fn agent_can_read_large_output_from_one_time_command_xai() {
 fn agent_can_read_large_output_from_one_time_command_gemini() {
     agent_can_read_large_output_from_one_time_command(GEMINI_MODEL);
 }
+
+#[test]
+fn agent_picker_default_selection_on_enter() {
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+    let model = ANTHROPIC_MODEL;
+
+    // 1. Create first conversation
+    run_agent_with_prompt_model_and_args(
+        &repo,
+        &daemon,
+        "Remember this color: BLUE_99. Just acknowledge.",
+        model,
+        &["--new"],
+    );
+
+    // 2. Create second conversation (will be most recent)
+    run_agent_with_prompt_model_and_args(
+        &repo,
+        &daemon,
+        "Remember this color: RED_11. Just acknowledge.",
+        model,
+        &["--new"],
+    );
+
+    // 3. Run interactively, press Enter at picker
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("Failed to create PTY");
+
+    let sandbox_bin = cargo::cargo_bin!("sandbox");
+    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    cmd.cwd(repo.path());
+    cmd.env(
+        "SANDBOX_DAEMON_SOCKET",
+        daemon.socket_path.to_str().unwrap(),
+    );
+    cmd.args(["agent", "test", "--model", model]);
+
+    let _child = pair
+        .slave
+        .spawn_command(cmd)
+        .expect("Failed to spawn interactive agent");
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("Failed to clone reader");
+    let mut writer = pair.master.take_writer().expect("Failed to get writer");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 1024];
+        while let Ok(n) = reader.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            if tx
+                .send(String::from_utf8_lossy(&buffer[..n]).to_string())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    // Read until we see the picker prompt
+    let mut output_acc = String::new();
+    let start = Instant::now();
+    let timeout = Duration::from_secs(30);
+    let mut prompted = false;
+
+    while start.elapsed() < timeout {
+        while let Ok(s) = rx.try_recv() {
+            output_acc.push_str(&s);
+        }
+        if output_acc.contains("Select [0-") && output_acc.contains("default 0") {
+            prompted = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        prompted,
+        "Did not see selection prompt in time. Output:\n{}",
+        output_acc
+    );
+
+    // Press Enter
+    writeln!(writer).expect("Failed to send newline");
+
+    // Now the agent should be running in the selected conversation (RED_11).
+    // We send a question and check the response.
+    // Wait for the next prompt "You: " or similar if it exists, or just wait a bit.
+    thread::sleep(Duration::from_secs(2));
+    writeln!(writer, "What color did I tell you?").expect("Failed to send question");
+
+    // Check for RED_11 in output
+    let mut saw_red = false;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(30) {
+        while let Ok(s) = rx.try_recv() {
+            output_acc.push_str(&s);
+        }
+        if output_acc.contains("RED_11") {
+            saw_red = true;
+            break;
+        }
+        if output_acc.contains("BLUE_99") {
+            panic!("Picked wrong conversation (BLUE_99 instead of RED_11)");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    assert!(
+        saw_red,
+        "Agent did not remember the correct color (RED_11). Output:\n{}",
+        output_acc
+    );
+}
