@@ -8,3 +8,4 @@ This is a rust project implementing a sandboxed LLM agent.
 - Always run tests with a timeout, e.g. 60 seconds, to prevent getting stuck.
 - Don't run commands in interactive mode (e.g. git rebase, git rebase --continue):
   You can't operate the UI, only run commands.
+- Don't use --test-threads unless you are debugging a concurrency issue.
