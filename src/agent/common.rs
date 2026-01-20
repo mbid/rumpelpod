@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use indoc::formatdoc;
 use log::debug;
 use sha2::{Digest, Sha256};
 use strum::{Display, EnumString};
@@ -324,18 +325,19 @@ fn save_output_to_file(
     let hash = hasher.finalize();
     let id = hex::encode(&hash[..6]);
 
-    let output_file = format!("/agent/bash-output-{id}");
-    debug!("Saving large output to file: {}", output_file);
+    let output_file = format!("/tmp/agent/bash-output-{id}");
+    debug!("Saving large output to file: {output_file}");
 
-    // Create /agent directory if it doesn't exist
-    debug!("Creating /agent directory");
+    // Create /tmp/agent directory if it doesn't exist
+    debug!("Creating /tmp/agent directory");
     docker_exec_cmd(container_name, user, repo_path, false)
-        .args(["bash", "-c", "mkdir -p /agent"])
+        .args(["bash", "-c", "mkdir -p /tmp/agent"])
         .output()
-        .context("Failed to create /agent directory")?;
+        .context("Failed to create /tmp/agent directory")?;
 
     // Write the output to file
-    debug!("Writing output data ({} bytes)", data.len());
+    let len = data.len();
+    debug!("Writing output data ({len} bytes)");
     let write_cmd = format!("cat > {output_file}");
     let mut write_process = docker_exec_cmd(container_name, user, repo_path, true)
         .args(["bash", "-c", &write_cmd])
@@ -391,7 +393,14 @@ pub fn execute_bash_in_sandbox(
     // Check if output exceeds limit - save to file if so
     if combined_bytes.len() > MAX_OUTPUT_SIZE {
         let output_file = save_output_to_file(container_name, user, repo_path, &combined_bytes)?;
-        return Ok((format!("Full output available at {output_file}"), false));
+        let len = combined_bytes.len();
+        return Ok((
+            formatdoc! {r#"
+                Output is too large ({len} bytes). Full output available at {output_file}.
+                Use `tail -n 100 {output_file}` to see the end of the output, or `grep` to search.
+            "#},
+            false,
+        ));
     }
 
     // Validate UTF-8 - save to file if invalid

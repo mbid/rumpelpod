@@ -1,0 +1,38 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The secret code is `SECRET_CODE_XYZ_98765`.",
+            "thoughtSignature": "CqIBAXLI2nyzAXP1DWmvDQMNbno5O+U8zjSgKGV49AFuakfgbLkWFIp+0XGeZHj8myF/g7v8qLkdvP4Utm10iACUlCq6PJzHIUPUx9XgIPqKN0U35yDR1mlz1MCy7ezvCwdb+acsuarQezdnXSaay2R+ozaFw83xlPHc1NONfH8p+y76dGTANnH1F+9aIcATZWR2NOcFPuPkCVfJvXBJyt2tMVzX"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 2436,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 2488,
+    "cachedContentTokenCount": 808,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 2436
+      }
+    ],
+    "cacheTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 808
+      }
+    ],
+    "thoughtsTokenCount": 35
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "xKFvaYnGLsyskdUP5u2m-Qo"
+}

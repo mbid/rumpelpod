@@ -509,7 +509,7 @@ fn agent_large_file_output(model: &str) {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("/agent/bash-output-"),
+        stdout.contains("/tmp/agent/bash-output-"),
         "Agent should report that output was saved to a file.\nstdout: {}\nstderr: {}",
         stdout,
         String::from_utf8_lossy(&output.stderr)
@@ -935,7 +935,12 @@ fn agent_can_read_large_output_from_one_time_command(model: &str) {
     let output = run_agent_with_prompt_and_model(
         &repo,
         &daemon,
-        &format!("Run `./{script_name}`. It will print a lot of output and then delete itself. Tell me the secret code at the very end of the output."),
+        &formatdoc! {r#"
+            Run `./{script_name}`.
+            It will print a lot of output and then delete itself.
+            The output will be saved to a file because it is too large.
+            Use `tail` to read the end of that file to find the secret code.
+        "#},
         model,
     );
 
@@ -950,19 +955,16 @@ fn agent_can_read_large_output_from_one_time_command(model: &str) {
 }
 
 #[test]
-#[should_panic(expected = "Agent should have found the secret in the large output")]
 fn agent_can_read_large_output_from_one_time_command_anthropic() {
     agent_can_read_large_output_from_one_time_command(ANTHROPIC_MODEL);
 }
 
 #[test]
-#[should_panic(expected = "Agent should have found the secret in the large output")]
 fn agent_can_read_large_output_from_one_time_command_xai() {
     agent_can_read_large_output_from_one_time_command(XAI_MODEL);
 }
 
 #[test]
-#[should_panic(expected = "Agent should have found the secret in the large output")]
 fn agent_can_read_large_output_from_one_time_command_gemini() {
     agent_can_read_large_output_from_one_time_command(GEMINI_MODEL);
 }

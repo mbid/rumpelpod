@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I observed that the output of `cat large.txt` was too large to be displayed directly. The full output is available at `/tmp/agent/bash-output-09daa28f6373`.",
+            "thoughtSignature": "CusCAXLI2nylFAd4bsIaoLVO3Cd7rRDWXDVdCo0oNay9u8sfgl7HMrke6endE5Srfs5r8xlic6W6sAjTk7MlC5BaS36XGVIExISg6YbDCMm0HVgp8eUKvzzbVtF6tGjeRQT2GKe1akMi3H3GfiqhdtY5a0YSEqu1wBAuMJBIU/dSxzGRyOdCWoMCCJC/NtBgQWvX3NJIAqLT0ICQdXpIELrmhaC9F3wT80Z3tSB5ngvLgjb1UElKRBxQ9KqWUYY6jfwgrbkCoB0GEiOF0Hak+GWlBDUrqR8pbxn1ZU0jhtwZhaDXx/2oqVLLDtSgl4zktVDU8Af4PMGk3ZXe2GDwRTxA3SOKVcZKnlkGSP5OCY7HuWj4b1OZysQ3WQDNXNqoSeQmZaM9bmB2QLzJnQ4d7YcXMlvonka0o9pxWAPmUnUShFnA80srqxMXUTCAKpoAIAu9rCiQP2ocjATGtFOWXmey4VTnAM+68JMF1RRQ"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 478,
+    "candidatesTokenCount": 46,
+    "totalTokenCount": 612,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 478
+      }
+    ],
+    "thoughtsTokenCount": 88
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "v6RvaeTyGrGCvdIPmPnu-Ao"
+}

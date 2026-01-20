@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "tail -n 100 /tmp/agent/bash-output-d1edf5ee7b28"
+              }
+            },
+            "thoughtSignature": "CvYCAXLI2nzwQ1FvbQK3IOplNg3V/5jBlSb4GhmX87AezA4tCmK41/IZ6b0bO9cxg3/WMiHW2I3u4X6R0EQKRubXuM5eVos/GdLXApoSzKxVmXGzUqwMvN+kQb9EtZG3SxuGbQlSH6YLOyTIOeLKaOijDJgC9AeJH4ylC53RjHX6UAOgKeNAC1UdDkuu8BCDNOjq/0psMKnXPjgwu4c5AxJtyeZPIBT9+erjyTifipH4ah3O1UztQ3aPX3HwjUg+HJfhMSXfmFAL39Xr0ncY8IIBOSDKOIl9fyEdIpkquorUz4WOve7j96bqb/uW0oa01RzFO0pJTXEwJImCS1kf+kTGC5HRDHoaNMuBB1kcIXBhFYNNU15MlMRhgFeeilyCbgPtH7bB59mxPYldItDhQx5vjJJeRheFh+0uULhwVr/K+Ji+0fFwgUc2GaXCHz9xevTfdnYFhSpJoQvUtfVjOLMno1cWYuaFP5lfZg4KmhPKyWIx1RiPHBw="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 494,
+    "candidatesTokenCount": 37,
+    "totalTokenCount": 629,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 494
+      }
+    ],
+    "thoughtsTokenCount": 98
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "8KJvaeD3D_bYvdIP0LnumQ4"
+}
