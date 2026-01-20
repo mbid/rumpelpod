@@ -6,4 +6,5 @@ This is a rust project implementing a sandboxed LLM agent.
   Don't paraphrase code next to the comment.
 - Format, run tests before committing.
 - Always run tests with a timeout, e.g. 60 seconds, to prevent getting stuck.
-- Don't run commands in interactive mode (e.g. git rebase): You can't operate the UI, only run commands.
+- Don't run commands in interactive mode (e.g. git rebase, git rebase --continue):
+  You can't operate the UI, only run commands.
