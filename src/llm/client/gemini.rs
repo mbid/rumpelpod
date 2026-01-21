@@ -1,77 +1,172 @@
-//! Google Gemini API client (AI Studio).
+//! Google Gemini API client supporting both AI Studio and Vertex AI.
 //!
-//! Uses the REST API at `https://generativelanguage.googleapis.com/v1beta/`.
-//! See https://ai.google.dev/api/generate-content for the full API reference.
+//! AI Studio uses the REST API at `https://generativelanguage.googleapis.com/v1beta/`.
+//! Vertex AI uses the REST API at `https://aiplatform.googleapis.com/v1/`.
+//!
+//! See https://ai.google.dev/api/generate-content for the AI Studio API reference.
+//! See https://cloud.google.com/vertex-ai/docs/reference/rest for the Vertex AI API reference.
+//!
+//! ## Backend Selection
+//!
+//! The client automatically selects the backend based on available credentials:
+//! 1. **Vertex AI** (preferred): Used when `GOOGLE_APPLICATION_CREDENTIALS` is set to a
+//!    service account JSON key file path. Also requires `GOOGLE_CLOUD_PROJECT` (or extracted
+//!    from key file) and optionally `GOOGLE_CLOUD_LOCATION` (defaults to "global").
+//! 2. **AI Studio**: Used when `GEMINI_API_KEY` is set.
+//!
+//! Vertex AI takes precedence over AI Studio when both are configured.
 
 use anyhow::{Context, Result};
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rand::Rng;
 use std::time::Duration;
 
+use super::vertex_auth::{VertexAuthenticator, VertexConfig};
 use crate::llm::cache::LlmCache;
 use crate::llm::types::gemini::{GenerateContentRequest, GenerateContentResponse};
 
-const GEMINI_API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// AI Studio API base URL.
+const AISTUDIO_API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+
+/// Vertex AI API base URL template.
+/// Format: https://aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent
+const VERTEX_API_BASE_URL: &str = "https://aiplatform.googleapis.com/v1";
+
+/// Backend type for the Gemini API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backend {
+    /// Google AI Studio (uses API key)
+    AiStudio,
+    /// Google Cloud Vertex AI (uses OAuth2 service account)
+    VertexAi,
+}
 
 pub struct Client {
+    /// API key for AI Studio backend
     api_key: Option<String>,
+    /// Authenticator for Vertex AI backend
+    vertex_auth: Option<VertexAuthenticator>,
+    /// Which backend to use
+    backend: Backend,
     client: reqwest::blocking::Client,
     cache: Option<LlmCache>,
 }
 
 impl Client {
     /// Create a new client with optional caching for deterministic testing.
-    /// If cache is provided and no API key is set, only cached responses will work.
+    ///
+    /// Backend selection:
+    /// 1. **Vertex AI** (preferred): Used when `GOOGLE_APPLICATION_CREDENTIALS` is set.
+    /// 2. **AI Studio**: Used when `GEMINI_API_KEY` is set.
+    ///
+    /// If cache is provided and no credentials are set, only cached responses will work.
     ///
     /// See [`llm-cache/README.md`](../../../llm-cache/README.md) for cache documentation.
     pub fn new_with_cache(cache: Option<LlmCache>) -> Result<Self> {
+        // Use 180s timeout as API requests with large context can take >30s to complete.
+        // This includes connection, sending request body, and receiving response.
+        let http_client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(180))
+            .build()
+            .context("Failed to build HTTP client")?;
+
+        // Try Vertex AI first (preferred backend)
+        let vertex_config = VertexConfig::from_env()?;
+
+        if let Some(config) = vertex_config {
+            info!(
+                "Using Vertex AI backend (project: {}, location: {})",
+                config.project_id, config.location
+            );
+            let vertex_auth = VertexAuthenticator::new(config, http_client.clone());
+            return Ok(Self {
+                api_key: None,
+                vertex_auth: Some(vertex_auth),
+                backend: Backend::VertexAi,
+                client: http_client,
+                cache,
+            });
+        }
+
+        // Fall back to AI Studio
         let api_key = std::env::var("GEMINI_API_KEY")
             .ok()
             .filter(|s| !s.is_empty());
 
         if api_key.is_none() && cache.is_none() {
-            anyhow::bail!("GEMINI_API_KEY not set and no cache provided");
+            anyhow::bail!(
+                "No Gemini credentials found. Set either:\n\
+                 - GOOGLE_APPLICATION_CREDENTIALS (for Vertex AI)\n\
+                 - GEMINI_API_KEY (for AI Studio)"
+            );
         }
 
-        // Use 180s timeout as API requests with large context can take >30s to complete.
-        // This includes connection, sending request body, and receiving response.
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(180))
-            .build()
-            .context("Failed to build HTTP client")?;
+        if api_key.is_some() {
+            info!("Using AI Studio backend");
+        }
 
         Ok(Self {
             api_key,
-            client,
+            vertex_auth: None,
+            backend: Backend::AiStudio,
+            client: http_client,
             cache,
         })
     }
 
     /// Build the API URL for a specific model.
     fn build_url(&self, model: &str) -> String {
-        // API key is passed as query parameter for Gemini
-        if let Some(ref api_key) = self.api_key {
-            format!(
-                "{}/{}:generateContent?key={}",
-                GEMINI_API_BASE_URL, model, api_key
-            )
-        } else {
-            format!("{}/{}:generateContent", GEMINI_API_BASE_URL, model)
+        match self.backend {
+            Backend::AiStudio => {
+                // API key is passed as query parameter for AI Studio
+                if let Some(ref api_key) = self.api_key {
+                    format!(
+                        "{}/{}:generateContent?key={}",
+                        AISTUDIO_API_BASE_URL, model, api_key
+                    )
+                } else {
+                    format!("{}/{}:generateContent", AISTUDIO_API_BASE_URL, model)
+                }
+            }
+            Backend::VertexAi => {
+                // Vertex AI uses a different URL format with project/location
+                let auth = self.vertex_auth.as_ref().unwrap();
+                format!(
+                    "{}/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
+                    VERTEX_API_BASE_URL,
+                    auth.project_id(),
+                    auth.location(),
+                    model
+                )
+            }
         }
     }
 
-    /// Build the cache URL (without API key for consistent lookups).
+    /// Build the cache URL (without credentials for consistent lookups).
     fn build_cache_url(&self, model: &str) -> String {
-        format!("{}/{}:generateContent", GEMINI_API_BASE_URL, model)
+        // Use a consistent URL format for caching regardless of backend
+        // This allows cache hits when switching between backends
+        format!("{}/{}:generateContent", AISTUDIO_API_BASE_URL, model)
     }
 
     /// Build headers for the API request.
-    fn build_headers(&self) -> Vec<(&'static str, String)> {
-        vec![("content-type", "application/json".to_string())]
+    fn build_headers(&self) -> Result<Vec<(&'static str, String)>> {
+        let mut headers = vec![("content-type", "application/json".to_string())];
+
+        // Add Authorization header for Vertex AI
+        if self.backend == Backend::VertexAi {
+            let auth = self.vertex_auth.as_ref().unwrap();
+            let token = auth.get_access_token()?;
+            headers.push(("authorization", format!("Bearer {}", token)));
+        }
+
+        Ok(headers)
     }
 
     /// Retry logic follows claude code's behavior: up to 10 retries, first retry instant
     /// (unless rate-limited), then 2 minute delays with jitter.
+    ///
+    /// For Vertex AI, 401 errors trigger a token refresh (once) before retrying.
     pub fn generate_content(
         &self,
         model: &str,
@@ -84,19 +179,16 @@ impl Client {
         // Serialize request body to a string once
         let body = serde_json::to_string(&request).context("Failed to serialize request")?;
 
-        // Build cache key using URL without API key + headers + body
+        // Build cache key using URL without credentials + body
+        // Use only content-type header for cache key (not auth headers)
         let cache_url = self.build_cache_url(model);
-        let cache_headers = self.build_headers();
-        let cache_header_refs: Vec<(&str, &str)> = cache_headers
-            .iter()
-            .map(|(k, v)| (*k, v.as_str()))
-            .collect();
+        let cache_headers: Vec<(&str, &str)> = vec![("content-type", "application/json")];
 
         // Check cache first
         if let Some(ref cache) = self.cache {
             // Include URL in cache key computation
             let cache_input = format!("{}\n{}", cache_url, body);
-            let cache_key = cache.compute_key(&cache_header_refs, &cache_input);
+            let cache_key = cache.compute_key(&cache_headers, &cache_input);
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response = GenerateContentResponse::from_response_json(&cached_response)
                     .with_context(|| {
@@ -106,17 +198,29 @@ impl Client {
             }
         }
 
-        // No cache hit - need API key to make the request
-        if self.api_key.is_none() {
-            anyhow::bail!("Cache miss and no GEMINI_API_KEY set - cannot make API request");
+        // No cache hit - need credentials to make the request
+        let has_credentials = match self.backend {
+            Backend::AiStudio => self.api_key.is_some(),
+            Backend::VertexAi => self.vertex_auth.is_some(),
+        };
+        if !has_credentials {
+            anyhow::bail!("Cache miss and no credentials set - cannot make API request");
         }
 
         let url = self.build_url(model);
-        let request_headers = self.build_headers();
 
         let mut attempt = 0;
+        let mut did_refresh_token = false;
 
         loop {
+            // Build headers (may fetch/refresh OAuth token for Vertex AI)
+            let request_headers = if did_refresh_token {
+                // After a 401, we already refreshed, so use normal headers
+                self.build_headers()?
+            } else {
+                self.build_headers()?
+            };
+
             debug!("Sending Gemini API request (attempt {})", attempt + 1);
             let mut req = self.client.post(&url).body(body.clone());
 
@@ -164,7 +268,7 @@ impl Client {
 
                 if let Some(ref cache) = self.cache {
                     let cache_input = format!("{}\n{}", cache_url, body);
-                    let cache_key = cache.compute_key(&cache_header_refs, &cache_input);
+                    let cache_key = cache.compute_key(&cache_headers, &cache_input);
                     cache.put(&cache_key, &response_text)?;
                 }
 
@@ -180,6 +284,26 @@ impl Client {
                     );
                 }
                 return Ok(response);
+            }
+
+            // Handle 401 Unauthorized - refresh token once for Vertex AI
+            if status.as_u16() == 401 && self.backend == Backend::VertexAi && !did_refresh_token {
+                warn!("Received 401 Unauthorized, refreshing OAuth token and retrying");
+                // Force token refresh
+                if let Some(ref auth) = self.vertex_auth {
+                    auth.clear_cached_token();
+                    match auth.refresh_token() {
+                        Ok(_) => {
+                            did_refresh_token = true;
+                            // Don't increment attempt counter for token refresh
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!("Failed to refresh OAuth token: {}", e);
+                            // Fall through to return the 401 error
+                        }
+                    }
+                }
             }
 
             let is_rate_limited = status.as_u16() == 429;

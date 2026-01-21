@@ -30,6 +30,8 @@ libc = "*"
 reflink-copy = "*"
 git2 = { version = "*", default-features = false }
 reqwest = { version = "*", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+jsonwebtoken = { version = "*", features = ["rust_crypto"] }
+base64 = "*"
 indoc = "*"
 strum = { version = "*", features = ["derive"] }
 backoff = "*"
