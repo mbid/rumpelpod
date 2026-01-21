@@ -80,7 +80,8 @@ ENV XAI_API_KEY=${XAI_API_KEY}
 ENV GEMINI_API_KEY=${GEMINI_API_KEY}
 
 # Initialize cargo crate registry, populate target/ so that incremental builds will be fast.
-RUN cargo build || cargo test --no-run || true
+WORKDIR /home/dev/sandbox
+RUN cargo build; cargo test --no-run; true
 
 USER root
 
