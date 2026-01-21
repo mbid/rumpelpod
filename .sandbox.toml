@@ -4,4 +4,4 @@ user = "dev"
 repo-path = "/home/dev/sandbox"
 
 [agent]
-model = "gemini-3-flash-preview"
+model = "gemini-3-pro-preview"
