@@ -98,6 +98,7 @@ fn create_mock_editor_exit(script_dir: &Path, verify_file: &Path) -> PathBuf {
 // Basic agent functionality tests
 // ============================================================================
 
+// This is used as smoke test and executed with every explicitly supported model.
 fn agent_reads_file(model: &str) {
     let repo = TestRepo::new();
 
@@ -133,18 +134,44 @@ fn agent_reads_file(model: &str) {
 }
 
 #[test]
-fn agent_reads_file_anthropic() {
-    agent_reads_file(ANTHROPIC_MODEL);
+fn agent_reads_file_claude_haiku_4_5() {
+    agent_reads_file("claude-haiku-4-5");
 }
 
 #[test]
-fn agent_reads_file_xai() {
-    agent_reads_file(XAI_MODEL);
+fn agent_reads_file_claude_sonnet_4_5() {
+    agent_reads_file("claude-sonnet-4-5");
 }
 
 #[test]
-fn agent_reads_file_gemini() {
-    agent_reads_file(GEMINI_MODEL);
+#[should_panic = "effort: Extra inputs are not permitted"]
+fn agent_reads_file_claude_opus_4_5() {
+    agent_reads_file("claude-opus-4-5");
+}
+
+#[test]
+fn agent_reads_file_grok_4() {
+    agent_reads_file("grok-4");
+}
+
+#[test]
+fn agent_reads_file_grok_4_1() {
+    agent_reads_file("grok-4-1-fast-reasoning");
+}
+
+#[test]
+fn agent_reads_file_gemini_2_5_flash() {
+    agent_reads_file("gemini-2.5-flash");
+}
+
+#[test]
+fn agent_reads_file_gemini_3_flash_preview() {
+    agent_reads_file("gemini-3-flash-preview");
+}
+
+#[test]
+fn agent_reads_file_gemini_3_pro_preview() {
+    agent_reads_file("gemini-3-pro-preview");
 }
 
 fn agent_edits_file(model: &str) {

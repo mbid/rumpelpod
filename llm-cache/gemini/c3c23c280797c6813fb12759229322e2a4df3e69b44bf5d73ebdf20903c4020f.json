@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The file `secret.txt` contains: `AGENT_SECRET_12345`."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 450,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 470,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 450
+      }
+    ]
+  },
+  "modelVersion": "gemini-3-pro-preview",
+  "responseId": "vEFxaY3EHY61xN8Pm5-wsQ0"
+}
