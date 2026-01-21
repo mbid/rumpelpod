@@ -111,8 +111,7 @@ impl Client {
         // Check cache first
         if let Some(ref cache) = self.cache {
             // Include base URL in cache key to ensure different URLs don't share cache entries
-            let cache_input = format!("{}\n{}", self.base_url, body);
-            let cache_key = cache.compute_key(&cache_header_refs, &cache_input);
+            let cache_key = cache.compute_key(&self.base_url, &cache_header_refs, &body);
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response: MessagesResponse = serde_json::from_str(&cached_response)
                     .with_context(|| {
@@ -183,8 +182,7 @@ impl Client {
 
                 if let Some(ref cache) = self.cache {
                     // Include base URL in cache key (same as cache lookup)
-                    let cache_input = format!("{}\n{}", self.base_url, body);
-                    let cache_key = cache.compute_key(&cache_header_refs, &cache_input);
+                    let cache_key = cache.compute_key(&self.base_url, &cache_header_refs, &body);
                     cache.put(&cache_key, &response_text)?;
                 }
 

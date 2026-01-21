@@ -1,0 +1,34 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The result of `cat newfile.txt` is:\n",
+            "thoughtSignature": "Cv0BAXLI2nxdcVe2qnMAeZ/WlMjhojoH6XlfGHWNJYVSxGpOjQFcOdU2e3PGgYKtakioIQnmOJ3hUqCkK94xqdlo3l6dHdsWi3xhZZrQwNmX29FXDIvqQzf9b/wOWZLjzRolnolaid3A5xkvtKQ/8lWBhrjNzznDlbfVqGmWM8qJRqtR6ZcHwY3pAl4aovXHklBNp5XygKXPvlmgW86RHdPgMqbxat93YXjxMng4zadHGqQXdjqEwCGmzL3AW8TOSCkgVzOFRfEbvGeIkI++6lDvmL1WQIoet+EIPeT1z6L+H26EudJYnUOh9NwJl13nu3GGeveqeBo8A/MZQ6NCFg=="
+          },
+          {
+            "text": "```\nWRITTEN_BY_AGENT_12345\n```"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 463,
+    "candidatesTokenCount": 30,
+    "totalTokenCount": 539,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 463
+      }
+    ],
+    "thoughtsTokenCount": 46
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "fVlxafGaNv34nsEPp_6okAk"
+}

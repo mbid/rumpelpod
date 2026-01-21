@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The file `secret.txt` contains: `AGENT_SECRET_12345`",
+            "thoughtSignature": "EpoBCpcBAXLI2nw4q7UpvMWH5aroyyF14s7ndzAcxQhfSDdeGnYDTqoqJ7feoQugGXwGP9T4cSVJ+v/86HjG1IONzY1Ihq/BiDXWAWa8xnHrhSVMP/rj+PbVx9VscN896I8wW5BLABnnMsl+svrbpCL63RoSckMlx8Na8g4b9vu6IUKNUhwLsMgfW7TwlUD/9J4ziPVjEVZ/MLd0Ug=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 540,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 590,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 540
+      }
+    ],
+    "thoughtsTokenCount": 30
+  },
+  "modelVersion": "gemini-3-flash-preview",
+  "responseId": "cllxacbjLeaekdUPooft-AU"
+}

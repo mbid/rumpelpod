@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "I observed that the output of `cat large.txt` was too large to be displayed directly. The output was truncated and a message indicated that the full output is available at `/tmp/agent/bash-output-09daa28f6373`. It also suggested using `tail -n 100 /tmp/agent/bash-output-09daa28f6373` or `grep` to view or search the output."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 478,
+    "candidatesTokenCount": 98,
+    "totalTokenCount": 576,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 478
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "Z1lxaZaJEeiWkdUP0eixwAU"
+}

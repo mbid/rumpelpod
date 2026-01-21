@@ -34,13 +34,17 @@ impl LlmCache {
         })
     }
 
-    /// Compute the cache key from sorted headers and body.
+    /// Compute the cache key from URL, sorted headers, and body.
     /// Headers should be passed as (name, value) pairs.
-    pub fn compute_key(&self, headers: &[(&str, &str)], body: &str) -> String {
+    pub fn compute_key(&self, url: &str, headers: &[(&str, &str)], body: &str) -> String {
         let mut sorted_headers: Vec<_> = headers.to_vec();
         sorted_headers.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(b.1)));
 
         let mut hasher = Sha256::new();
+        // Include URL in the hash
+        hasher.update(url.as_bytes());
+        hasher.update(b"\n");
+        // Include headers
         for (name, value) in sorted_headers {
             hasher.update(name.as_bytes());
             hasher.update(b": ");
@@ -48,6 +52,7 @@ impl LlmCache {
             hasher.update(b"\n");
         }
         hasher.update(b"\n");
+        // Include body
         hasher.update(body.as_bytes());
 
         hex::encode(hasher.finalize())

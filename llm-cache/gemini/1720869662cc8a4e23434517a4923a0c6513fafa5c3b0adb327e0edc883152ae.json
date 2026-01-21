@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The content of `greeting.txt` is now \"Hello Universe\"."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 445,
+    "candidatesTokenCount": 14,
+    "totalTokenCount": 459,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 445
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "XllxaZbtAduc28oP7Kv0kQ8"
+}

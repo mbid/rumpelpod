@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "second conversation"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 340,
+    "candidatesTokenCount": 2,
+    "totalTokenCount": 342,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 340
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "aVlxaZGtPI6e28oPo8Lk8Q4"
+}

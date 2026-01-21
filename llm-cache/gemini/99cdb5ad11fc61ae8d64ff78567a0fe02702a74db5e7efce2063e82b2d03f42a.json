@@ -1,0 +1,44 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "ls -F"
+              }
+            },
+            "thoughtSignature": "CpUCAXLI2nzuW3TiBASxiReS8EMySMc7Ipa1Mo/SrXRXqoMqk2vbAJddS9Wfo+7PDeJbUQLl6daP89RrYskNsge4/oY2vDP6LIwTddH9dBxHDbyX0pP4u1C0OPc48gt5JN1gQXWy7WruFIHArNfUS/trDhTvDJCb6PGUSSeUiQKKCwesl8BH9WjnvTHHZh1KjJkBcC3xDN3o4qp1kJRv5ulYtfbzZrXZyFboC+tRY84YuirHp+jUCtXDEiqLnHr/pfAkBFOcL1EzehLOEjJbsfiFtNhEKNUdC7i8vNVjhZ5ueY3VB5P6AeBYHCwxtDL18QLD1ideprqKCjc2O688RVCybzp3Rr9FmfKHEuNYZmoLcBgmJJZxRw=="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 1368,
+    "candidatesTokenCount": 15,
+    "totalTokenCount": 1438,
+    "cachedContentTokenCount": 1053,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 1368
+      }
+    ],
+    "cacheTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 1053
+      }
+    ],
+    "thoughtsTokenCount": 55
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "a1lxaYCtNLbgxN8P89aUuQ8"
+}

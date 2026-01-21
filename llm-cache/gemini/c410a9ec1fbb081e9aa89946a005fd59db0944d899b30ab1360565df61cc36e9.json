@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "ls -aF /"
+              }
+            },
+            "thoughtSignature": "Cq8DAXLI2nx20nNBsqfDZpfQKp7ZTIYsQ5bMVpizMhjAdRXs3RFVOUm6UDnexwhdNmsgG2mb2WbRROK7Omg3QcngrDCE9JKbJgMfoC2SSON1QU6HfgrQ2dXhn+GvvUIXG0XhYMIRWgWjxz//iVjJraMhVYrFIDmLvt4HBEHe0gpUbChcyD7ZMQ3aXb8cZytBq+3Q8uaQ5VvthgEPTKHjWlFhydLPoGfH7UjaLMZ1ydUaGkpLfQSzjho+W4PLPU24Mren3O3w3vVuh/hK5RRsKJLJhpvlkkmsKn6+WfkT+SSyHiewJLjxKBANZ0LJnp6KWX1kkEs36B3x9vg/MyMiHw1FiErSm2/p6iGayXrHWlGdzRgpvgJ/OjzzpFk6nI1RrgiJFJACeKcluKFyEtU1a9YF4RgPGJUqocgng+tNGD11ERWl2AzNM4gpPOkR2NZRgi/e2kx0pTs1C0ctdm9aUajyH4bsEu2Q/Fq08bErr3qM5S7bP4HQI42XKpcxIQQYibPsdQFW1YXlwWGnhGPJQ1UbStCtI8o1kaeY3yrOuja9a8AzZ2g6pXJrGu80SnSsc3M="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 551,
+    "candidatesTokenCount": 17,
+    "totalTokenCount": 663,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 551
+      }
+    ],
+    "thoughtsTokenCount": 95
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "Yllxaa7hGIK128oP1_-U6Q4"
+}

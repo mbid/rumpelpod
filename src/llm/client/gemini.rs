@@ -203,8 +203,7 @@ impl Client {
         // Check cache first
         if let Some(ref cache) = self.cache {
             // Include URL in cache key computation
-            let cache_input = format!("{}\n{}", cache_url, body);
-            let cache_key = cache.compute_key(&cache_headers, &cache_input);
+            let cache_key = cache.compute_key(&cache_url, &cache_headers, &body);
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response = GenerateContentResponse::from_response_json(&cached_response)
                     .with_context(|| {
@@ -290,8 +289,7 @@ impl Client {
                 let response_text = response.text().context("Failed to read response body")?;
 
                 if let Some(ref cache) = self.cache {
-                    let cache_input = format!("{}\n{}", cache_url, body);
-                    let cache_key = cache.compute_key(&cache_headers, &cache_input);
+                    let cache_key = cache.compute_key(&cache_url, &cache_headers, &body);
                     cache.put(&cache_key, &response_text)?;
                 }
 
