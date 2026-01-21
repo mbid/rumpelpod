@@ -50,6 +50,7 @@ pub struct Client {
     backend: Backend,
     client: reqwest::blocking::Client,
     cache: Option<LlmCache>,
+    offline_test_mode: bool,
 }
 
 impl Client {
@@ -63,6 +64,11 @@ impl Client {
     ///
     /// See [`llm-cache/README.md`](../../../llm-cache/README.md) for cache documentation.
     pub fn new_with_cache(cache: Option<LlmCache>) -> Result<Self> {
+        // If SANDBOX_TEST_LLM_OFFLINE is set, ignore API key/credentials to ensure strict caching in tests
+        let offline_test_mode = std::env::var("SANDBOX_TEST_LLM_OFFLINE")
+            .map(|s| s == "1" || s.to_lowercase() == "true")
+            .unwrap_or(false);
+
         // Use 180s timeout as API requests with large context can take >30s to complete.
         // This includes connection, sending request body, and receiving response.
         let http_client = reqwest::blocking::Client::builder()
@@ -71,7 +77,11 @@ impl Client {
             .context("Failed to build HTTP client")?;
 
         // Try Vertex AI first (preferred backend)
-        let vertex_config = VertexConfig::from_env()?;
+        let vertex_config = if offline_test_mode {
+            None
+        } else {
+            VertexConfig::from_env()?
+        };
 
         if let Some(config) = vertex_config {
             info!(
@@ -85,15 +95,20 @@ impl Client {
                 backend: Backend::VertexAi,
                 client: http_client,
                 cache,
+                offline_test_mode,
             });
         }
 
         // Fall back to AI Studio
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
+        let api_key = if offline_test_mode {
+            None
+        } else {
+            std::env::var("GEMINI_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+        };
 
-        if api_key.is_none() && cache.is_none() {
+        if api_key.is_none() && cache.is_none() && !offline_test_mode {
             anyhow::bail!(
                 "No Gemini credentials found. Set either:\n\
                  - GOOGLE_APPLICATION_CREDENTIALS (for Vertex AI)\n\
@@ -111,6 +126,7 @@ impl Client {
             backend: Backend::AiStudio,
             client: http_client,
             cache,
+            offline_test_mode,
         })
     }
 
@@ -204,6 +220,13 @@ impl Client {
             Backend::VertexAi => self.vertex_auth.is_some(),
         };
         if !has_credentials {
+            if self.offline_test_mode {
+                anyhow::bail!(
+                    "LLM Cache miss in test offline mode.\n\
+                     See llm-cache/README.md for details.\n\
+                     To populate the cache, rerun the test with SANDBOX_TEST_LLM_OFFLINE=0 set in the environment."
+                );
+            }
             anyhow::bail!("Cache miss and no credentials set - cannot make API request");
         }
 

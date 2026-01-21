@@ -27,6 +27,8 @@ fn test_anthropic_base_url_garbage_errors() {
     let mut cmd = sandbox_command(&repo, &daemon);
     cmd.args(["agent", "test"]);
     cmd.env("ANTHROPIC_API_KEY", "dummy-key");
+    // Ensure we attempt network request (disable offline mode)
+    cmd.env("SANDBOX_TEST_LLM_OFFLINE", "0");
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

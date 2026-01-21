@@ -14,6 +14,7 @@ pub struct Client {
     base_url: String,
     client: reqwest::blocking::Client,
     cache: Option<LlmCache>,
+    offline_test_mode: bool,
 }
 
 impl Client {
@@ -22,11 +23,20 @@ impl Client {
     ///
     /// See [`llm-cache/README.md`](../../../llm-cache/README.md) for cache documentation.
     pub fn new_with_cache(cache: Option<LlmCache>, base_url: Option<String>) -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .filter(|s| !s.is_empty());
+        // If SANDBOX_TEST_LLM_OFFLINE is set, ignore API key to ensure strict caching in tests
+        let offline_test_mode = std::env::var("SANDBOX_TEST_LLM_OFFLINE")
+            .map(|s| s == "1" || s.to_lowercase() == "true")
+            .unwrap_or(false);
 
-        if api_key.is_none() && cache.is_none() {
+        let api_key = if offline_test_mode {
+            None
+        } else {
+            std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+        };
+
+        if api_key.is_none() && cache.is_none() && !offline_test_mode {
             anyhow::bail!("ANTHROPIC_API_KEY not set and no cache provided");
         }
 
@@ -44,6 +54,7 @@ impl Client {
             base_url,
             client,
             cache,
+            offline_test_mode,
         })
     }
 
@@ -107,6 +118,13 @@ impl Client {
 
         // No cache hit - need API key to make the request
         if self.api_key.is_none() {
+            if self.offline_test_mode {
+                anyhow::bail!(
+                    "LLM Cache miss in test offline mode.\n\
+                     See llm-cache/README.md for details.\n\
+                     To populate the cache, rerun the test with SANDBOX_TEST_LLM_OFFLINE=0 set in the environment."
+                );
+            }
             anyhow::bail!("Cache miss and no ANTHROPIC_API_KEY set - cannot make API request");
         }
 

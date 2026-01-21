@@ -154,6 +154,13 @@ pub fn sandbox_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
     cmd.current_dir(repo.path())
         .env(SOCKET_PATH_ENV, &daemon.socket_path);
+
+    // Default to offline mode for tests unless explicitly configured.
+    // This ensures tests don't accidentally depend on ambient API keys.
+    if std::env::var("SANDBOX_TEST_LLM_OFFLINE").is_err() {
+        cmd.env("SANDBOX_TEST_LLM_OFFLINE", "1");
+    }
+
     cmd
 }
 
