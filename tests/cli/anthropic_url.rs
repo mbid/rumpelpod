@@ -87,9 +87,8 @@ fn test_anthropic_base_url_default_works() {
 
     let mut child = cmd.spawn().expect("Failed to spawn agent");
     let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-    // This prompt is in the cache for claude-sonnet-4-5
-    writeln!(stdin, "Run `cat secret.txt` and tell me what it contains.")
-        .expect("Failed to write to stdin");
+    // Use a simple prompt that should be cached
+    writeln!(stdin, "Say hello").expect("Failed to write to stdin");
     drop(child.stdin.take());
 
     let output = child.wait_with_output().expect("Failed to wait for agent");
