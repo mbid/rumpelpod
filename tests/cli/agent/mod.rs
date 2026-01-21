@@ -144,7 +144,6 @@ fn agent_reads_file_claude_sonnet_4_5() {
 }
 
 #[test]
-#[should_panic = "effort: Extra inputs are not permitted"]
 fn agent_reads_file_claude_opus_4_5() {
     agent_reads_file("claude-opus-4-5");
 }

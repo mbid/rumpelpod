@@ -65,10 +65,13 @@ impl Client {
         &self,
         for_cache_key: bool,
         enable_thinking: bool,
+        enable_effort: bool,
     ) -> Vec<(&'static str, String)> {
         let mut beta_flags = vec!["web-fetch-2025-09-10"];
         if enable_thinking {
             beta_flags.push("interleaved-thinking-2025-05-14");
+        }
+        if enable_effort {
             beta_flags.push("effort-2025-11-24");
         }
 
@@ -93,12 +96,13 @@ impl Client {
         const MAX_JITTER: Duration = Duration::from_secs(30);
 
         let enable_thinking = request.thinking.is_some();
+        let enable_effort = request.output_config.is_some();
 
         // Serialize request body to a string once
         let body = serde_json::to_string(&request).context("Failed to serialize request")?;
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
-        let cache_headers = self.build_headers(true, enable_thinking);
+        let cache_headers = self.build_headers(true, enable_thinking, enable_effort);
         let cache_header_refs: Vec<(&str, &str)> = cache_headers
             .iter()
             .map(|(k, v)| (*k, v.as_str()))
@@ -129,7 +133,7 @@ impl Client {
         }
 
         // Build headers including API key for actual requests
-        let request_headers = self.build_headers(false, enable_thinking);
+        let request_headers = self.build_headers(false, enable_thinking, enable_effort);
 
         let mut attempt = 0;
 

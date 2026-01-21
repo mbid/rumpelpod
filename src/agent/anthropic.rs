@@ -10,7 +10,7 @@ use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
 use crate::llm::types::anthropic::{
     CacheControl, ContentBlock, CustomTool, Effort, FetchToolType, Message, MessagesRequest, Model,
-    Role, ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool,
+    OutputConfig, Role, ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool,
     WebSearchToolType,
 };
 
@@ -193,7 +193,7 @@ pub fn run_claude_agent(
 
             let mut max_tokens = MAX_TOKENS;
             let mut thinking = None;
-            let mut effort = None;
+            let mut output_config = None;
 
             // Determine effective thinking budget
             // If explicit CLI flag/TOML option is set to 0, thinking is disabled.
@@ -224,7 +224,9 @@ pub fn run_claude_agent(
 
                 // For Opus, we also set high effort when thinking is enabled
                 if let Model::Opus = model {
-                    effort = Some(Effort::High);
+                    output_config = Some(OutputConfig {
+                        effort: Effort::High,
+                    });
                 }
             }
 
@@ -238,7 +240,7 @@ pub fn run_claude_agent(
                 messages: request_messages,
                 tools: Some(tools),
                 thinking,
-                effort,
+                output_config,
                 temperature: None,
                 top_p: None,
                 top_k: None,

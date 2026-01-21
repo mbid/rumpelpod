@@ -309,6 +309,11 @@ pub enum Effort {
     High,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputConfig {
+    pub effort: Effort,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MessagesRequest {
     pub model: String,
@@ -321,7 +326,7 @@ pub struct MessagesRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<Effort>,
+    pub output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
