@@ -14,9 +14,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use axum::Router;
+use axum::{
+    extract::Request,
+    http::{header, StatusCode},
+    middleware::{self, Next},
+    response::Response,
+    Router,
+};
 use cgi_service::{CgiConfig, CgiService};
 use log::{debug, error};
+use rand::{distr::Alphanumeric, Rng};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::task::JoinHandle;
 
@@ -53,6 +60,7 @@ impl GitHttpServer {
         bind_address: &str,
         port: u16,
         sandbox_name: &str,
+        token: &str,
     ) -> Result<(Self, u16)> {
         let gateway_parent = gateway_path
             .parent()
@@ -117,9 +125,14 @@ impl GitHttpServer {
             .script_name("");
 
         let cgi_service = CgiService::with_config(cgi_config);
+        let token = token.to_string();
 
         // Build router that handles all requests via CGI
-        let app = Router::new().fallback_service(cgi_service);
+        let app = Router::new()
+            .fallback_service(cgi_service)
+            .layer(middleware::from_fn(move |req, next| {
+                auth(req, next, token.clone())
+            }));
 
         // Spawn the server in the background
         let task_handle = RUNTIME.spawn(async move {
@@ -172,21 +185,27 @@ pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
 /// 2. Spawns a background task that waits for the container to stop and then
 ///    shuts down the server
 ///
-/// Returns the actual port bound.
+/// Returns the actual port bound and the authentication token.
 pub fn spawn_git_http_server(
     gateway_path: &Path,
     bind_address: &str,
     port: u16,
     sandbox_name: &str,
     container_id: &str,
-) -> Result<u16> {
+) -> Result<(u16, String)> {
     debug!(
         "Starting git HTTP server on {}:{} for container {} (sandbox: {})",
         bind_address, port, container_id, sandbox_name
     );
 
+    let token: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+
     let (server, actual_port) =
-        GitHttpServer::start(gateway_path, bind_address, port, sandbox_name)?;
+        GitHttpServer::start(gateway_path, bind_address, port, sandbox_name, &token)?;
 
     // Spawn a task to wait for the container to stop and then shut down the server
     let container_id = container_id.to_string();
@@ -226,10 +245,22 @@ pub fn spawn_git_http_server(
         server.stop();
     });
 
-    Ok(actual_port)
+    Ok((actual_port, token))
 }
 
 /// Get the URL for the git HTTP server accessible from within a container.
 pub fn git_http_url(ip: &str, port: u16) -> String {
     format!("http://{}:{}/gateway.git", ip, port)
+}
+
+async fn auth(req: Request, next: Next, token: String) -> Result<Response, StatusCode> {
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    match auth_header {
+        Some(h) if h == format!("Bearer {}", token) => Ok(next.run(req).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
 }

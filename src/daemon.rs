@@ -42,8 +42,8 @@ use std::collections::HashMap;
 struct DaemonServer {
     /// SQLite connection for conversation history.
     db: Mutex<Connection>,
-    /// Active git HTTP servers: network_name -> port
-    active_git_servers: Mutex<HashMap<String, u16>>,
+    /// Active git HTTP servers: network_name -> (port, token)
+    active_git_servers: Mutex<HashMap<String, (u16, String)>>,
 }
 
 /// Label key used to store the repository path on containers and networks.
@@ -342,22 +342,22 @@ fn cleanup_sandbox_refs(gateway_path: &Path, repo_path: &Path, sandbox_name: &Sa
 
 /// Spawn a git HTTP server for the container and return the access URL.
 fn spawn_git_http_server(
-    active_git_servers: &Mutex<HashMap<String, u16>>,
+    active_git_servers: &Mutex<HashMap<String, (u16, String)>>,
     gateway_path: &Path,
     network_name: &str,
     sandbox_name: &SandboxName,
     container_id: &str,
     network_config: Network,
-) -> Result<String> {
+) -> Result<(String, String)> {
     // Check if we already have a server for this network
     {
         let servers = active_git_servers.lock().unwrap();
-        if let Some(&port) = servers.get(network_name) {
+        if let Some((port, token)) = servers.get(network_name) {
             let ip = match network_config {
                 Network::UnsafeHost => "127.0.0.1".to_string(),
                 Network::Default => git_http_server::get_network_gateway_ip(network_name)?,
             };
-            return Ok(git_http_server::git_http_url(&ip, port));
+            return Ok((git_http_server::git_http_url(&ip, *port), token.clone()));
         }
     }
 
@@ -377,8 +377,8 @@ fn spawn_git_http_server(
         container_id,
     );
 
-    let port = match result {
-        Ok(port) => port,
+    let (port, token) = match result {
+        Ok((port, token)) => (port, token),
         Err(e) => {
             if network_config == Network::UnsafeHost {
                 error!("Failed to spawn git HTTP server for unsafe-host: {}. Continuing without git sync.", e);
@@ -393,9 +393,9 @@ fn spawn_git_http_server(
     active_git_servers
         .lock()
         .unwrap()
-        .insert(network_name.to_string(), port);
+        .insert(network_name.to_string(), (port, token.clone()));
 
-    Ok(git_http_server::git_http_url(&bind_ip, port))
+    Ok((git_http_server::git_http_url(&bind_ip, port), token))
 }
 
 /// Check that the .git directory inside the container is owned by the expected user.
@@ -456,6 +456,7 @@ fn check_git_directory_ownership(
 fn setup_git_remotes(
     container_id: &str,
     git_http_url: &str,
+    token: &str,
     container_repo_path: &Path,
     sandbox_name: &SandboxName,
     user: &str,
@@ -475,6 +476,14 @@ fn setup_git_remotes(
             .args(args)
             .success()
     };
+
+    // Configure Bearer authentication
+    run_git(&[
+        "config",
+        "http.extraHeader",
+        &format!("Authorization: Bearer {}", token),
+    ])
+    .context("configuring git http.extraHeader")?;
 
     // Add "host" remote (or update if exists)
     match run_git(&["remote", "add", "host", &git_http_url]) {
@@ -856,12 +865,13 @@ impl Daemon for DaemonServer {
             );
 
             match git_url_result {
-                Ok(url) => {
+                Ok((url, token)) => {
                     // On re-entry, don't pass host_branch - we don't want to change
                     // the upstream of an existing branch.
                     setup_git_remotes(
                         &state.id,
                         &url,
+                        &token,
                         &container_repo_path,
                         &sandbox_name,
                         &user,
@@ -900,10 +910,11 @@ impl Daemon for DaemonServer {
         );
 
         match git_url_result {
-            Ok(url) => {
+            Ok((url, token)) => {
                 setup_git_remotes(
                     &container_id.0,
                     &url,
+                    &token,
                     &container_repo_path,
                     &sandbox_name,
                     &user,
