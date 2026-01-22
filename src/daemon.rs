@@ -139,33 +139,28 @@ fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<St
 }
 
 /// Inspect an existing container by name. Returns None if container doesn't exist.
-fn inspect_container(container_name: &str) -> Result<Option<ContainerState>> {
-    let output = Command::new("docker")
-        .args([
-            "inspect",
-            "--format",
-            "{{.State.Status}} {{.Config.Image}} {{.Id}}",
-            container_name,
-        ])
-        .output()
-        .context("Failed to execute docker inspect")?;
+fn inspect_container(docker: &Docker, container_name: &str) -> Result<Option<ContainerState>> {
+    use bollard::errors::Error as BollardError;
 
-    if !output.status.success() {
-        // Container doesn't exist
-        return Ok(None);
+    match block_on(docker.inspect_container(container_name, None)) {
+        Ok(response) => {
+            let state = response.state.context("missing container state")?;
+            let status = state
+                .status
+                .map(|s| format!("{:?}", s).to_lowercase())
+                .unwrap_or_default();
+
+            Ok(Some(ContainerState {
+                status,
+                image: response.config.and_then(|c| c.image).unwrap_or_default(),
+                id: response.id.unwrap_or_default(),
+            }))
+        }
+        Err(BollardError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Ok(None),
+        Err(e) => Err(e).context("inspecting container"),
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.trim().splitn(3, ' ').collect();
-    if parts.len() != 3 {
-        anyhow::bail!("Unexpected docker inspect output: {}", stdout);
-    }
-
-    Ok(Some(ContainerState {
-        status: parts[0].to_string(),
-        image: parts[1].to_string(),
-        id: parts[2].to_string(),
-    }))
 }
 
 /// Start a stopped container.
@@ -681,7 +676,7 @@ impl Daemon for DaemonServer {
         // inspect it. For robustness, we'd need to retry on specific failures,
         // but that adds complexity. For now, we accept this limitation.
 
-        if let Some(state) = inspect_container(&name)? {
+        if let Some(state) = inspect_container(&docker, &name)? {
             // Container exists - check if it has the expected image
             if state.image != image.0 {
                 anyhow::bail!(
