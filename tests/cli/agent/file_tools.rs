@@ -1,4 +1,8 @@
 //! Tests for basic file operations (edit, write).
+//!
+//! These tests verify the shared file operation code in `common.rs`, so we only
+//! need to test with one model (Haiku) since the implementation is identical
+//! across all providers.
 
 use std::fs;
 use std::process::Command;
@@ -9,9 +13,10 @@ use crate::common::{
     build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
 };
 
-use super::common::{run_agent_with_prompt_and_model, ANTHROPIC_MODEL, GEMINI_MODEL, XAI_MODEL};
+use super::common::{run_agent_with_prompt_and_model, ANTHROPIC_MODEL};
 
-fn agent_edits_file(model: &str) {
+#[test]
+fn agent_edits_file() {
     let repo = TestRepo::new();
 
     let original_content = "Hello World";
@@ -34,7 +39,7 @@ fn agent_edits_file(model: &str) {
         &repo,
         &daemon,
         "Use the edit tool to replace 'World' with 'Universe' in greeting.txt, then run `cat greeting.txt` and tell me the result.",
-        model,
+        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -47,21 +52,7 @@ fn agent_edits_file(model: &str) {
 }
 
 #[test]
-fn agent_edits_file_anthropic() {
-    agent_edits_file(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_edits_file_xai() {
-    agent_edits_file(XAI_MODEL);
-}
-
-#[test]
-fn agent_edits_file_gemini() {
-    agent_edits_file(GEMINI_MODEL);
-}
-
-fn agent_writes_file(model: &str) {
+fn agent_writes_file() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
     write_test_sandbox_config(&repo, &image_id);
@@ -77,7 +68,7 @@ fn agent_writes_file(model: &str) {
             "Run `echo '{expected_content}' > newfile.txt` \
              then run `cat newfile.txt` and tell me the result."
         ),
-        model,
+        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -87,19 +78,4 @@ fn agent_writes_file(model: &str) {
         stdout,
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-#[test]
-fn agent_writes_file_anthropic() {
-    agent_writes_file(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_writes_file_xai() {
-    agent_writes_file(XAI_MODEL);
-}
-
-#[test]
-fn agent_writes_file_gemini() {
-    agent_writes_file(GEMINI_MODEL);
 }

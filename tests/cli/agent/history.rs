@@ -1,4 +1,8 @@
 //! Tests for conversation history management.
+//!
+//! These tests verify the shared history management code in `history.rs`, so we
+//! only need to test with one model (Haiku) since the implementation is identical
+//! across all providers.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -13,23 +17,27 @@ use crate::common::TestDaemon;
 
 use super::common::{
     create_mock_editor_exit, llm_cache_dir, run_agent_with_prompt_and_model,
-    run_agent_with_prompt_model_and_args, setup_test_repo, ANTHROPIC_MODEL, GEMINI_MODEL,
-    XAI_MODEL,
+    run_agent_with_prompt_model_and_args, setup_test_repo, ANTHROPIC_MODEL,
 };
 
-fn agent_new_flag_starts_fresh_conversation(model: &str) {
+#[test]
+fn agent_new_flag_starts_fresh_conversation() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 =
-        run_agent_with_prompt_and_model(&repo, &daemon, "Say 'first conversation'", model);
+    let output1 = run_agent_with_prompt_and_model(
+        &repo,
+        &daemon,
+        "Say 'first conversation'",
+        ANTHROPIC_MODEL,
+    );
     assert!(output1.status.success(), "First agent run should succeed");
 
     let output2 = run_agent_with_prompt_model_and_args(
         &repo,
         &daemon,
         "Say 'second conversation'",
-        model,
+        ANTHROPIC_MODEL,
         &["--new"],
     );
     assert!(
@@ -45,21 +53,7 @@ fn agent_new_flag_starts_fresh_conversation(model: &str) {
 }
 
 #[test]
-fn agent_new_flag_starts_fresh_conversation_anthropic() {
-    agent_new_flag_starts_fresh_conversation(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_new_flag_starts_fresh_conversation_xai() {
-    agent_new_flag_starts_fresh_conversation(XAI_MODEL);
-}
-
-#[test]
-fn agent_new_flag_starts_fresh_conversation_gemini() {
-    agent_new_flag_starts_fresh_conversation(GEMINI_MODEL);
-}
-
-fn agent_continue_flag_resumes_conversation(model: &str) {
+fn agent_continue_flag_resumes_conversation() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
@@ -67,7 +61,7 @@ fn agent_continue_flag_resumes_conversation(model: &str) {
         &repo,
         &daemon,
         "Remember this secret code: ZEBRA_DELTA_9876. Just acknowledge you've memorized it.",
-        model,
+        ANTHROPIC_MODEL,
     );
     assert!(output1.status.success(), "First agent run should succeed");
 
@@ -75,7 +69,7 @@ fn agent_continue_flag_resumes_conversation(model: &str) {
         &repo,
         &daemon,
         "What was the secret code I asked you to remember?",
-        model,
+        ANTHROPIC_MODEL,
         &["--continue=0"],
     );
     let stdout2 = String::from_utf8_lossy(&output2.stdout);
@@ -91,21 +85,7 @@ fn agent_continue_flag_resumes_conversation(model: &str) {
 }
 
 #[test]
-fn agent_continue_flag_resumes_conversation_anthropic() {
-    agent_continue_flag_resumes_conversation(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_continue_flag_resumes_conversation_xai() {
-    agent_continue_flag_resumes_conversation(XAI_MODEL);
-}
-
-#[test]
-fn agent_continue_flag_resumes_conversation_gemini() {
-    agent_continue_flag_resumes_conversation(GEMINI_MODEL);
-}
-
-fn agent_auto_resumes_single_conversation(model: &str) {
+fn agent_auto_resumes_single_conversation() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
@@ -113,7 +93,7 @@ fn agent_auto_resumes_single_conversation(model: &str) {
         &repo,
         &daemon,
         "Remember: the secret code is FOXTROT_HOTEL_2468. Acknowledge.",
-        model,
+        ANTHROPIC_MODEL,
     );
     assert!(output1.status.success(), "First agent run should succeed");
 
@@ -121,7 +101,7 @@ fn agent_auto_resumes_single_conversation(model: &str) {
         &repo,
         &daemon,
         "What was the secret code I mentioned?",
-        model,
+        ANTHROPIC_MODEL,
     );
     assert!(output2.status.success(), "Second agent run should succeed");
 
@@ -134,38 +114,29 @@ fn agent_auto_resumes_single_conversation(model: &str) {
 }
 
 #[test]
-fn agent_auto_resumes_single_conversation_anthropic() {
-    agent_auto_resumes_single_conversation(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_auto_resumes_single_conversation_xai() {
-    agent_auto_resumes_single_conversation(XAI_MODEL);
-}
-
-#[test]
-fn agent_auto_resumes_single_conversation_gemini() {
-    agent_auto_resumes_single_conversation(GEMINI_MODEL);
-}
-
-fn agent_errors_with_multiple_conversations_no_flag(model: &str) {
+fn agent_errors_with_multiple_conversations_no_flag() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 = run_agent_with_prompt_and_model(&repo, &daemon, "First conversation", model);
+    let output1 =
+        run_agent_with_prompt_and_model(&repo, &daemon, "First conversation", ANTHROPIC_MODEL);
     assert!(output1.status.success(), "First agent run should succeed");
 
     let output2 = run_agent_with_prompt_model_and_args(
         &repo,
         &daemon,
         "Second conversation",
-        model,
+        ANTHROPIC_MODEL,
         &["--new"],
     );
     assert!(output2.status.success(), "Second agent run should succeed");
 
-    let output3 =
-        run_agent_with_prompt_and_model(&repo, &daemon, "Which conversation am I in?", model);
+    let output3 = run_agent_with_prompt_and_model(
+        &repo,
+        &daemon,
+        "Which conversation am I in?",
+        ANTHROPIC_MODEL,
+    );
     assert!(
         !output3.status.success(),
         "Agent should fail when multiple conversations exist without flags"
@@ -180,32 +151,19 @@ fn agent_errors_with_multiple_conversations_no_flag(model: &str) {
 }
 
 #[test]
-fn agent_errors_with_multiple_conversations_no_flag_anthropic() {
-    agent_errors_with_multiple_conversations_no_flag(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_errors_with_multiple_conversations_no_flag_xai() {
-    agent_errors_with_multiple_conversations_no_flag(XAI_MODEL);
-}
-
-#[test]
-fn agent_errors_with_multiple_conversations_no_flag_gemini() {
-    agent_errors_with_multiple_conversations_no_flag(GEMINI_MODEL);
-}
-
-fn agent_continue_out_of_range_errors(model: &str) {
+fn agent_continue_out_of_range_errors() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 = run_agent_with_prompt_and_model(&repo, &daemon, "Single conversation", model);
+    let output1 =
+        run_agent_with_prompt_and_model(&repo, &daemon, "Single conversation", ANTHROPIC_MODEL);
     assert!(output1.status.success(), "First agent run should succeed");
 
     let output2 = run_agent_with_prompt_model_and_args(
         &repo,
         &daemon,
         "This should fail",
-        model,
+        ANTHROPIC_MODEL,
         &["--continue=5"],
     );
     assert!(
@@ -222,21 +180,7 @@ fn agent_continue_out_of_range_errors(model: &str) {
 }
 
 #[test]
-fn agent_continue_out_of_range_errors_anthropic() {
-    agent_continue_out_of_range_errors(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_continue_out_of_range_errors_xai() {
-    agent_continue_out_of_range_errors(XAI_MODEL);
-}
-
-#[test]
-fn agent_continue_out_of_range_errors_gemini() {
-    agent_continue_out_of_range_errors(GEMINI_MODEL);
-}
-
-fn agent_continue_no_conversations_errors(model: &str) {
+fn agent_continue_no_conversations_errors() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
@@ -244,7 +188,7 @@ fn agent_continue_no_conversations_errors(model: &str) {
         &repo,
         &daemon,
         "This should fail",
-        model,
+        ANTHROPIC_MODEL,
         &["--continue=0"],
     );
     assert!(
@@ -261,21 +205,7 @@ fn agent_continue_no_conversations_errors(model: &str) {
 }
 
 #[test]
-fn agent_continue_no_conversations_errors_anthropic() {
-    agent_continue_no_conversations_errors(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_continue_no_conversations_errors_xai() {
-    agent_continue_no_conversations_errors(XAI_MODEL);
-}
-
-#[test]
-fn agent_continue_no_conversations_errors_gemini() {
-    agent_continue_no_conversations_errors(GEMINI_MODEL);
-}
-
-fn agent_interactive_resume_shows_history(model: &str) {
+fn agent_interactive_resume_shows_history() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
@@ -284,7 +214,7 @@ fn agent_interactive_resume_shows_history(model: &str) {
         &repo,
         &daemon,
         &format!("Remember this marker: {unique_marker}. Just acknowledge."),
-        model,
+        ANTHROPIC_MODEL,
     );
     assert!(output1.status.success(), "First agent run should succeed");
 
@@ -318,7 +248,7 @@ fn agent_interactive_resume_shows_history(model: &str) {
         "agent",
         "test",
         "--model",
-        model,
+        ANTHROPIC_MODEL,
         "--cache",
         cache_dir.to_str().unwrap(),
         "--continue=0",
@@ -367,32 +297,16 @@ fn agent_interactive_resume_shows_history(model: &str) {
 }
 
 #[test]
-fn agent_interactive_resume_shows_history_anthropic() {
-    agent_interactive_resume_shows_history(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_interactive_resume_shows_history_xai() {
-    agent_interactive_resume_shows_history(XAI_MODEL);
-}
-
-#[test]
-fn agent_interactive_resume_shows_history_gemini() {
-    agent_interactive_resume_shows_history(GEMINI_MODEL);
-}
-
-#[test]
 fn agent_picker_default_selection_on_enter() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
-    let model = ANTHROPIC_MODEL;
 
     // 1. Create first conversation
     run_agent_with_prompt_model_and_args(
         &repo,
         &daemon,
         "Remember this color: BLUE_99. Just acknowledge.",
-        model,
+        ANTHROPIC_MODEL,
         &["--new"],
     );
 
@@ -401,7 +315,7 @@ fn agent_picker_default_selection_on_enter() {
         &repo,
         &daemon,
         "Remember this color: RED_11. Just acknowledge.",
-        model,
+        ANTHROPIC_MODEL,
         &["--new"],
     );
 
@@ -423,7 +337,7 @@ fn agent_picker_default_selection_on_enter() {
         "SANDBOX_DAEMON_SOCKET",
         daemon.socket_path.to_str().unwrap(),
     );
-    cmd.args(["agent", "test", "--model", model]);
+    cmd.args(["agent", "test", "--model", ANTHROPIC_MODEL]);
 
     let _child = pair
         .slave

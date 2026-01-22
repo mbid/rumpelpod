@@ -1,4 +1,8 @@
 //! Tests for advanced bash tool functionality (output limits, error handling).
+//!
+//! These tests verify the shared bash execution code in `common.rs`, so we only
+//! need to test with one model (Haiku) since the implementation is identical
+//! across all providers.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -11,9 +15,10 @@ use crate::common::{
     build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
 };
 
-use super::common::{run_agent_with_prompt_and_model, ANTHROPIC_MODEL, GEMINI_MODEL, XAI_MODEL};
+use super::common::{run_agent_with_prompt_and_model, ANTHROPIC_MODEL};
 
-fn agent_handles_command_with_empty_output_and_nonzero_exit(model: &str) {
+#[test]
+fn agent_handles_command_with_empty_output_and_nonzero_exit() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
     write_test_sandbox_config(&repo, &image_id);
@@ -24,7 +29,7 @@ fn agent_handles_command_with_empty_output_and_nonzero_exit(model: &str) {
         &repo,
         &daemon,
         "Run the command `false` and tell me what happened.",
-        model,
+        ANTHROPIC_MODEL,
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -36,21 +41,7 @@ fn agent_handles_command_with_empty_output_and_nonzero_exit(model: &str) {
 }
 
 #[test]
-fn agent_handles_command_with_empty_output_and_nonzero_exit_anthropic() {
-    agent_handles_command_with_empty_output_and_nonzero_exit(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_handles_command_with_empty_output_and_nonzero_exit_xai() {
-    agent_handles_command_with_empty_output_and_nonzero_exit(XAI_MODEL);
-}
-
-#[test]
-fn agent_handles_command_with_empty_output_and_nonzero_exit_gemini() {
-    agent_handles_command_with_empty_output_and_nonzero_exit(GEMINI_MODEL);
-}
-
-fn agent_large_file_output(model: &str) {
+fn agent_large_file_output() {
     let repo = TestRepo::new();
 
     let large_content = "x".repeat(35000);
@@ -72,7 +63,7 @@ fn agent_large_file_output(model: &str) {
         &repo,
         &daemon,
         "Run exactly one tool: `cat large.txt`. After that single tool call, stop immediately and tell me what you observed. Do not run any other tools.",
-        model,
+        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -85,21 +76,7 @@ fn agent_large_file_output(model: &str) {
 }
 
 #[test]
-fn agent_large_file_output_anthropic() {
-    agent_large_file_output(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_large_file_output_xai() {
-    agent_large_file_output(XAI_MODEL);
-}
-
-#[test]
-fn agent_large_file_output_gemini() {
-    agent_large_file_output(GEMINI_MODEL);
-}
-
-fn agent_can_read_large_output_from_one_time_command(model: &str) {
+fn agent_can_read_large_output_from_one_time_command() {
     let repo = TestRepo::new();
     let script_name = "once.sh";
     let secret = "SECRET_CODE_XYZ_98765";
@@ -143,30 +120,14 @@ fn agent_can_read_large_output_from_one_time_command(model: &str) {
             The output will be saved to a file because it is too large.
             Use `tail` to read the end of that file to find the secret code.
         "#},
-        model,
+        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // This is expected to fail currently
     assert!(
         stdout.contains(secret),
         "Agent should have found the secret in the large output.\nstdout: {stdout}\nstderr: {stderr}"
     );
-}
-
-#[test]
-fn agent_can_read_large_output_from_one_time_command_anthropic() {
-    agent_can_read_large_output_from_one_time_command(ANTHROPIC_MODEL);
-}
-
-#[test]
-fn agent_can_read_large_output_from_one_time_command_xai() {
-    agent_can_read_large_output_from_one_time_command(XAI_MODEL);
-}
-
-#[test]
-fn agent_can_read_large_output_from_one_time_command_gemini() {
-    agent_can_read_large_output_from_one_time_command(GEMINI_MODEL);
 }
