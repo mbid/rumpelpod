@@ -863,7 +863,7 @@ pub fn run_daemon() -> Result<()> {
     let db_conn = db::open_db(&db_path)?;
 
     // Enter the runtime context so UnixListener::bind can register with the reactor
-    let _guard = crate::r#async::RUNTIME.enter();
+    let _guard = crate::async_runtime::RUNTIME.enter();
 
     // Create shared state for the git HTTP server
     let git_server_state = SharedGitServerState::new();

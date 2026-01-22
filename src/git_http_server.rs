@@ -30,8 +30,8 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::task::JoinHandle;
 use tower_service::Service;
 
+use crate::async_runtime::RUNTIME;
 use crate::command_ext::CommandExt;
-use crate::r#async::RUNTIME;
 
 /// Path to git-http-backend CGI script.
 const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";

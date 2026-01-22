@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
 use url::Url;
 
+use crate::async_runtime::block_on;
 use crate::config::{Network, Runtime};
-use crate::r#async::block_on;
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
