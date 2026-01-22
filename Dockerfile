@@ -65,11 +65,8 @@ USER ${USER}
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
 
-RUN --mount=type=bind,target=/meta.git \
-    export GIT_CONFIG_GLOBAL=/tmp/gitconfig && \
-    printf '[safe]\n\tdirectory = *\n' > "$GIT_CONFIG_GLOBAL" && \
-    git clone /meta.git /home/$USER/sandbox && \
-    rm /tmp/gitconfig
+RUN git clone https://github.com/mbid/sandbox /home/$USER/sandbox
+WORKDIR /home/$USER/sandbox
 
 ARG ANTHROPIC_API_KEY
 ARG XAI_API_KEY
@@ -80,7 +77,6 @@ ENV XAI_API_KEY=${XAI_API_KEY}
 ENV GEMINI_API_KEY=${GEMINI_API_KEY}
 
 # Initialize cargo crate registry, populate target/ so that incremental builds will be fast.
-WORKDIR /home/dev/sandbox
 RUN cargo build; cargo test --no-run; true
 
 USER root
