@@ -91,18 +91,12 @@ struct ContainerState {
 
 /// Get the USER directive from a Docker image.
 /// Returns None if the image has no USER set (defaults to root).
-fn get_image_user(image: &str) -> Result<Option<String>> {
-    let output = Command::new("docker")
-        .args(["inspect", "--format", "{{.Config.User}}", image])
-        .output()
-        .context("Failed to execute docker inspect on image")?;
+fn get_image_user(docker: &Docker, image: &str) -> Result<Option<String>> {
+    let inspect = block_on(docker.inspect_image(image))
+        .with_context(|| format!("Failed to inspect image '{}'", image))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Failed to inspect image '{}': {}", image, stderr.trim());
-    }
+    let user = inspect.config.and_then(|c| c.user).unwrap_or_default();
 
-    let user = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if user.is_empty() {
         Ok(None)
     } else {
@@ -115,12 +109,12 @@ fn get_image_user(image: &str) -> Result<Option<String>> {
 /// If `user` is provided, it is used directly.
 /// Otherwise, the image's USER directive is used.
 /// Returns an error if no user is specified and the image has no USER or uses root.
-fn resolve_user(user: Option<String>, image: &str) -> Result<String> {
+fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<String> {
     if let Some(user) = user {
         return Ok(user);
     }
 
-    let image_user = get_image_user(image)?;
+    let image_user = get_image_user(docker, image)?;
 
     match image_user {
         Some(user) if user != "root" && !user.starts_with("0:") && user != "0" => Ok(user),
@@ -661,8 +655,11 @@ impl Daemon for DaemonServer {
             anyhow::bail!("network='unsafe-host' is only supported with runtime='runc'");
         }
 
+        let docker =
+            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+
         // Resolve the user first, before any container operations
-        let user = resolve_user(user, &image.0)?;
+        let user = resolve_user(&docker, user, &image.0)?;
 
         // Set up gateway for git synchronization (idempotent)
         gateway::setup_gateway(&repo_path)?;
