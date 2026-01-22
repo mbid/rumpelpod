@@ -1,8 +1,8 @@
 //! Tests for conversation history management.
 //!
 //! These tests verify the shared history management code in `history.rs`, so we
-//! only need to test with one model (Haiku) since the implementation is identical
-//! across all providers.
+//! only need to test with one model since the implementation is identical across
+//! all providers.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -16,8 +16,8 @@ use tempfile::TempDir;
 use crate::common::TestDaemon;
 
 use super::common::{
-    create_mock_editor_exit, llm_cache_dir, run_agent_with_prompt_and_model,
-    run_agent_with_prompt_model_and_args, setup_test_repo, ANTHROPIC_MODEL,
+    create_mock_editor_exit, llm_cache_dir, run_agent_with_prompt, run_agent_with_prompt_and_args,
+    setup_test_repo, DEFAULT_MODEL,
 };
 
 #[test]
@@ -25,21 +25,11 @@ fn agent_new_flag_starts_fresh_conversation() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 = run_agent_with_prompt_and_model(
-        &repo,
-        &daemon,
-        "Say 'first conversation'",
-        ANTHROPIC_MODEL,
-    );
+    let output1 = run_agent_with_prompt(&repo, &daemon, "Say 'first conversation'");
     assert!(output1.status.success(), "First agent run should succeed");
 
-    let output2 = run_agent_with_prompt_model_and_args(
-        &repo,
-        &daemon,
-        "Say 'second conversation'",
-        ANTHROPIC_MODEL,
-        &["--new"],
-    );
+    let output2 =
+        run_agent_with_prompt_and_args(&repo, &daemon, "Say 'second conversation'", &["--new"]);
     assert!(
         output2.status.success(),
         "Second agent run with --new should succeed"
@@ -57,19 +47,17 @@ fn agent_continue_flag_resumes_conversation() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 = run_agent_with_prompt_and_model(
+    let output1 = run_agent_with_prompt(
         &repo,
         &daemon,
         "Remember this secret code: ZEBRA_DELTA_9876. Just acknowledge you've memorized it.",
-        ANTHROPIC_MODEL,
     );
     assert!(output1.status.success(), "First agent run should succeed");
 
-    let output2 = run_agent_with_prompt_model_and_args(
+    let output2 = run_agent_with_prompt_and_args(
         &repo,
         &daemon,
         "What was the secret code I asked you to remember?",
-        ANTHROPIC_MODEL,
         &["--continue=0"],
     );
     let stdout2 = String::from_utf8_lossy(&output2.stdout);
@@ -89,20 +77,14 @@ fn agent_auto_resumes_single_conversation() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 = run_agent_with_prompt_and_model(
+    let output1 = run_agent_with_prompt(
         &repo,
         &daemon,
         "Remember: the secret code is FOXTROT_HOTEL_2468. Acknowledge.",
-        ANTHROPIC_MODEL,
     );
     assert!(output1.status.success(), "First agent run should succeed");
 
-    let output2 = run_agent_with_prompt_and_model(
-        &repo,
-        &daemon,
-        "What was the secret code I mentioned?",
-        ANTHROPIC_MODEL,
-    );
+    let output2 = run_agent_with_prompt(&repo, &daemon, "What was the secret code I mentioned?");
     assert!(output2.status.success(), "Second agent run should succeed");
 
     let stdout2 = String::from_utf8_lossy(&output2.stdout);
@@ -118,25 +100,13 @@ fn agent_errors_with_multiple_conversations_no_flag() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 =
-        run_agent_with_prompt_and_model(&repo, &daemon, "First conversation", ANTHROPIC_MODEL);
+    let output1 = run_agent_with_prompt(&repo, &daemon, "First conversation");
     assert!(output1.status.success(), "First agent run should succeed");
 
-    let output2 = run_agent_with_prompt_model_and_args(
-        &repo,
-        &daemon,
-        "Second conversation",
-        ANTHROPIC_MODEL,
-        &["--new"],
-    );
+    let output2 = run_agent_with_prompt_and_args(&repo, &daemon, "Second conversation", &["--new"]);
     assert!(output2.status.success(), "Second agent run should succeed");
 
-    let output3 = run_agent_with_prompt_and_model(
-        &repo,
-        &daemon,
-        "Which conversation am I in?",
-        ANTHROPIC_MODEL,
-    );
+    let output3 = run_agent_with_prompt(&repo, &daemon, "Which conversation am I in?");
     assert!(
         !output3.status.success(),
         "Agent should fail when multiple conversations exist without flags"
@@ -155,17 +125,11 @@ fn agent_continue_out_of_range_errors() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output1 =
-        run_agent_with_prompt_and_model(&repo, &daemon, "Single conversation", ANTHROPIC_MODEL);
+    let output1 = run_agent_with_prompt(&repo, &daemon, "Single conversation");
     assert!(output1.status.success(), "First agent run should succeed");
 
-    let output2 = run_agent_with_prompt_model_and_args(
-        &repo,
-        &daemon,
-        "This should fail",
-        ANTHROPIC_MODEL,
-        &["--continue=5"],
-    );
+    let output2 =
+        run_agent_with_prompt_and_args(&repo, &daemon, "This should fail", &["--continue=5"]);
     assert!(
         !output2.status.success(),
         "Agent should fail with out-of-range conversation index"
@@ -184,13 +148,8 @@ fn agent_continue_no_conversations_errors() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    let output = run_agent_with_prompt_model_and_args(
-        &repo,
-        &daemon,
-        "This should fail",
-        ANTHROPIC_MODEL,
-        &["--continue=0"],
-    );
+    let output =
+        run_agent_with_prompt_and_args(&repo, &daemon, "This should fail", &["--continue=0"]);
     assert!(
         !output.status.success(),
         "Agent should fail with --continue when no conversations exist"
@@ -210,11 +169,10 @@ fn agent_interactive_resume_shows_history() {
     let daemon = TestDaemon::start();
 
     let unique_marker = "UNIQUE_HISTORY_MARKER_XYZ123";
-    let output1 = run_agent_with_prompt_and_model(
+    let output1 = run_agent_with_prompt(
         &repo,
         &daemon,
         &format!("Remember this marker: {unique_marker}. Just acknowledge."),
-        ANTHROPIC_MODEL,
     );
     assert!(output1.status.success(), "First agent run should succeed");
 
@@ -248,7 +206,7 @@ fn agent_interactive_resume_shows_history() {
         "agent",
         "test",
         "--model",
-        ANTHROPIC_MODEL,
+        DEFAULT_MODEL,
         "--cache",
         cache_dir.to_str().unwrap(),
         "--continue=0",
@@ -302,20 +260,18 @@ fn agent_picker_default_selection_on_enter() {
     let daemon = TestDaemon::start();
 
     // 1. Create first conversation
-    run_agent_with_prompt_model_and_args(
+    run_agent_with_prompt_and_args(
         &repo,
         &daemon,
         "Remember this color: BLUE_99. Just acknowledge.",
-        ANTHROPIC_MODEL,
         &["--new"],
     );
 
     // 2. Create second conversation (will be most recent)
-    run_agent_with_prompt_model_and_args(
+    run_agent_with_prompt_and_args(
         &repo,
         &daemon,
         "Remember this color: RED_11. Just acknowledge.",
-        ANTHROPIC_MODEL,
         &["--new"],
     );
 
@@ -337,7 +293,7 @@ fn agent_picker_default_selection_on_enter() {
         "SANDBOX_DAEMON_SOCKET",
         daemon.socket_path.to_str().unwrap(),
     );
-    cmd.args(["agent", "test", "--model", ANTHROPIC_MODEL]);
+    cmd.args(["agent", "test", "--model", DEFAULT_MODEL]);
 
     let _child = pair
         .slave

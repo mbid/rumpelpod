@@ -1,8 +1,8 @@
 //! Tests for advanced bash tool functionality (output limits, error handling).
 //!
 //! These tests verify the shared bash execution code in `common.rs`, so we only
-//! need to test with one model (Haiku) since the implementation is identical
-//! across all providers.
+//! need to test with one model since the implementation is identical across all
+//! providers.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -15,7 +15,7 @@ use crate::common::{
     build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
 };
 
-use super::common::{run_agent_with_prompt_and_model, ANTHROPIC_MODEL};
+use super::common::run_agent_with_prompt;
 
 #[test]
 fn agent_handles_command_with_empty_output_and_nonzero_exit() {
@@ -25,11 +25,10 @@ fn agent_handles_command_with_empty_output_and_nonzero_exit() {
 
     let daemon = TestDaemon::start();
 
-    let output = run_agent_with_prompt_and_model(
+    let output = run_agent_with_prompt(
         &repo,
         &daemon,
         "Run the command `false` and tell me what happened.",
-        ANTHROPIC_MODEL,
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -59,11 +58,10 @@ fn agent_large_file_output() {
 
     let daemon = TestDaemon::start();
 
-    let output = run_agent_with_prompt_and_model(
+    let output = run_agent_with_prompt(
         &repo,
         &daemon,
         "Run exactly one tool: `cat large.txt`. After that single tool call, stop immediately and tell me what you observed. Do not run any other tools.",
-        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -111,7 +109,7 @@ fn agent_can_read_large_output_from_one_time_command() {
 
     let daemon = TestDaemon::start();
 
-    let output = run_agent_with_prompt_and_model(
+    let output = run_agent_with_prompt(
         &repo,
         &daemon,
         &formatdoc! {r#"
@@ -120,7 +118,6 @@ fn agent_can_read_large_output_from_one_time_command() {
             The output will be saved to a file because it is too large.
             Use `tail` to read the end of that file to find the secret code.
         "#},
-        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);

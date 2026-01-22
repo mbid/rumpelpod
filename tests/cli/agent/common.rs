@@ -10,6 +10,11 @@ use crate::common::{
     build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
 };
 
+/// Default model for tests that don't depend on provider-specific behavior.
+/// Using Haiku as it's the fastest and cheapest option.
+pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
+
+/// Provider-specific models for tests that need to verify provider-specific behavior.
 pub const ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
 pub const XAI_MODEL: &str = "grok-3-mini";
 pub const GEMINI_MODEL: &str = "gemini-2.5-flash";
@@ -19,7 +24,29 @@ pub fn llm_cache_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache")
 }
 
-/// Helper to run agent with a prompt via stdin using a specific model.
+/// Run agent with a prompt using the default model.
+/// Use this for tests that verify shared implementation code.
+pub fn run_agent_with_prompt(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    prompt: &str,
+) -> std::process::Output {
+    run_agent_with_prompt_model_and_args(repo, daemon, prompt, DEFAULT_MODEL, &[])
+}
+
+/// Run agent with a prompt and extra CLI arguments using the default model.
+/// Use this for tests that verify shared implementation code.
+pub fn run_agent_with_prompt_and_args(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    prompt: &str,
+    extra_args: &[&str],
+) -> std::process::Output {
+    run_agent_with_prompt_model_and_args(repo, daemon, prompt, DEFAULT_MODEL, extra_args)
+}
+
+/// Run agent with a prompt using a specific model.
+/// Use this for tests that need to verify provider-specific behavior.
 pub fn run_agent_with_prompt_and_model(
     repo: &TestRepo,
     daemon: &TestDaemon,
@@ -29,7 +56,8 @@ pub fn run_agent_with_prompt_and_model(
     run_agent_with_prompt_model_and_args(repo, daemon, prompt, model, &[])
 }
 
-/// Helper to run agent with a prompt, model, and extra CLI arguments.
+/// Run agent with a prompt, model, and extra CLI arguments.
+/// Use this for tests that need to verify provider-specific behavior.
 pub fn run_agent_with_prompt_model_and_args(
     repo: &TestRepo,
     daemon: &TestDaemon,

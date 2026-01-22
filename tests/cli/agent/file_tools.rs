@@ -1,8 +1,8 @@
 //! Tests for basic file operations (edit, write).
 //!
 //! These tests verify the shared file operation code in `common.rs`, so we only
-//! need to test with one model (Haiku) since the implementation is identical
-//! across all providers.
+//! need to test with one model since the implementation is identical across all
+//! providers.
 
 use std::fs;
 use std::process::Command;
@@ -13,7 +13,7 @@ use crate::common::{
     build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
 };
 
-use super::common::{run_agent_with_prompt_and_model, ANTHROPIC_MODEL};
+use super::common::run_agent_with_prompt;
 
 #[test]
 fn agent_edits_file() {
@@ -35,11 +35,10 @@ fn agent_edits_file() {
 
     let daemon = TestDaemon::start();
 
-    let output = run_agent_with_prompt_and_model(
+    let output = run_agent_with_prompt(
         &repo,
         &daemon,
         "Use the edit tool to replace 'World' with 'Universe' in greeting.txt, then run `cat greeting.txt` and tell me the result.",
-        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -61,14 +60,13 @@ fn agent_writes_file() {
 
     let expected_content = "WRITTEN_BY_AGENT_12345";
 
-    let output = run_agent_with_prompt_and_model(
+    let output = run_agent_with_prompt(
         &repo,
         &daemon,
         &format!(
             "Run `echo '{expected_content}' > newfile.txt` \
              then run `cat newfile.txt` and tell me the result."
         ),
-        ANTHROPIC_MODEL,
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
