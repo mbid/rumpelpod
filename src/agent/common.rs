@@ -5,12 +5,14 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use bollard::Docker;
 use indoc::formatdoc;
 use log::debug;
 use sha2::{Digest, Sha256};
 use strum::{Display, EnumString};
 
 use crate::config::Model;
+use crate::docker_exec::{exec_capture, exec_check, exec_command, exec_with_stdin};
 
 pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
@@ -32,25 +34,9 @@ pub fn model_provider(model: Model) -> Provider {
     }
 }
 
-/// Build a docker exec command that runs as the specified user in the given repo_path.
-/// This ensures secondary group membership is applied correctly.
-///
-/// If `interactive` is true, adds the `-i` flag for commands that need stdin.
-fn docker_exec_cmd(
-    container_name: &str,
-    user: &str,
-    repo_path: &Path,
-    interactive: bool,
-) -> Command {
-    let mut cmd = Command::new("docker");
-    cmd.args(["exec", "--user", user, "--workdir"]);
-    cmd.arg(repo_path);
-    cmd.args(["-e", "GIT_EDITOR=false"]);
-    if interactive {
-        cmd.arg("-i");
-    }
-    cmd.arg(container_name);
-    cmd
+/// Create a Docker connection for executing commands in containers.
+fn docker_connect() -> Result<Docker> {
+    Docker::connect_with_socket_defaults().context("connecting to Docker daemon")
 }
 
 pub const BASE_SYSTEM_PROMPT: &str = "You are a helpful assistant running inside a sandboxed environment. You can execute bash commands to help the user.";
@@ -149,20 +135,21 @@ impl ToolName {
 /// Read AGENTS.md from the sandbox if it exists.
 pub fn read_agents_md(container_name: &str, user: &str, repo_path: &Path) -> Option<String> {
     debug!("Reading {} from sandbox", AGENTS_MD_PATH);
-    let output = docker_exec_cmd(container_name, user, repo_path, false)
-        .args(["cat", AGENTS_MD_PATH])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let docker = docker_connect().ok()?;
+    let workdir = repo_path.to_string_lossy().to_string();
 
-    if !output.status.success() {
-        debug!("{} not found or not readable", AGENTS_MD_PATH);
-        return None;
-    }
+    let output = exec_command(
+        &docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        Some(vec!["GIT_EDITOR=false"]),
+        vec!["cat", AGENTS_MD_PATH],
+    )
+    .ok()?;
 
     debug!("{} loaded successfully", AGENTS_MD_PATH);
-    String::from_utf8(output.stdout).ok()
+    String::from_utf8(output).ok()
 }
 
 pub fn build_system_prompt(agents_md: Option<&str>) -> String {
@@ -180,21 +167,25 @@ pub fn execute_edit_in_sandbox(
     old_string: &str,
     new_string: &str,
 ) -> Result<(String, bool)> {
+    let docker = docker_connect()?;
+    let workdir = repo_path.to_string_lossy().to_string();
+    let env = vec!["GIT_EDITOR=false"];
+
     debug!("Reading file for edit: {}", file_path);
-    let output = docker_exec_cmd(container_name, user, repo_path, false)
-        .args(["cat", file_path])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to read file in sandbox")?;
+    let output = match exec_command(
+        &docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        Some(env.clone()),
+        vec!["cat", file_path],
+    ) {
+        Ok(output) => output,
+        Err(e) => return Ok((format!("Error reading file: {e}"), false)),
+    };
     debug!("File read completed");
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok((format!("Error reading file: {stderr}"), false));
-    }
-
-    let content = match String::from_utf8(output.stdout) {
+    let content = match String::from_utf8(output) {
         Ok(s) => s,
         Err(_) => return Ok(("File contains invalid UTF-8".to_string(), false)),
     };
@@ -220,33 +211,19 @@ pub fn execute_edit_in_sandbox(
     debug!("Writing edited file: {}", file_path);
     let escaped_path = file_path.replace('\'', "'\\''");
     let write_cmd = format!("cat > '{escaped_path}'");
-    let mut write_process = docker_exec_cmd(container_name, user, repo_path, true)
-        .args(["bash", "-c", &write_cmd])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to write file in sandbox")?;
 
-    let mut stdin = write_process
-        .stdin
-        .take()
-        .expect("Process was launched with piped stdin");
-    stdin
-        .write_all(new_content.as_bytes())
-        .context("Failed to write to stdin")?;
-    drop(stdin);
-
-    debug!("Waiting for write process to complete");
-    let output = write_process
-        .wait_with_output()
-        .context("Failed to wait for write process")?;
-    debug!("Write process completed with status: {:?}", output.status);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok((format!("Error writing file: {stderr}"), false));
+    if let Err(e) = exec_with_stdin(
+        &docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        Some(env),
+        vec!["bash", "-c", &write_cmd],
+        Some(new_content.as_bytes()),
+    ) {
+        return Ok((format!("Error writing file: {e}"), false));
     }
+    debug!("Write completed");
 
     Ok((format!("Successfully edited {file_path}"), true))
 }
@@ -258,13 +235,21 @@ pub fn execute_write_in_sandbox(
     file_path: &str,
     content: &str,
 ) -> Result<(String, bool)> {
-    debug!("Checking if file exists: {}", file_path);
-    let output = docker_exec_cmd(container_name, user, repo_path, false)
-        .args(["test", "-e", file_path])
-        .output()
-        .context("Failed to check if file exists")?;
+    let docker = docker_connect()?;
+    let workdir = repo_path.to_string_lossy().to_string();
+    let env = vec!["GIT_EDITOR=false"];
 
-    if output.status.success() {
+    debug!("Checking if file exists: {}", file_path);
+    let exists = exec_check(
+        &docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        vec!["test", "-e", file_path],
+    )
+    .context("Failed to check if file exists")?;
+
+    if exists {
         return Ok((format!("File {file_path} already exists"), false));
     }
 
@@ -273,47 +258,39 @@ pub fn execute_write_in_sandbox(
             let escaped_parent = parent.display().to_string().replace('\'', "'\\''");
             let mkdir_cmd = format!("mkdir -p '{escaped_parent}'");
             debug!("Creating parent directories for: {}", file_path);
-            let _ = docker_exec_cmd(container_name, user, repo_path, false)
-                .args(["bash", "-c", &mkdir_cmd])
-                .output();
+            let _ = exec_command(
+                &docker,
+                container_name,
+                Some(user),
+                Some(&workdir),
+                Some(env.clone()),
+                vec!["bash", "-c", &mkdir_cmd],
+            );
         }
     }
 
     debug!("Writing new file: {}", file_path);
     let escaped_path = file_path.replace('\'', "'\\''");
     let write_cmd = format!("cat > '{escaped_path}'");
-    let mut write_process = docker_exec_cmd(container_name, user, repo_path, true)
-        .args(["bash", "-c", &write_cmd])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to write file in sandbox")?;
 
-    let mut stdin = write_process
-        .stdin
-        .take()
-        .expect("Process was launched with piped stdin");
-    stdin
-        .write_all(content.as_bytes())
-        .context("Failed to write to stdin")?;
-    drop(stdin);
-
-    debug!("Waiting for write process to complete");
-    let output = write_process
-        .wait_with_output()
-        .context("Failed to wait for write process")?;
-    debug!("Write process completed with status: {:?}", output.status);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Ok((format!("Error writing file: {}", stderr), false));
+    if let Err(e) = exec_with_stdin(
+        &docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        Some(env),
+        vec!["bash", "-c", &write_cmd],
+        Some(content.as_bytes()),
+    ) {
+        return Ok((format!("Error writing file: {e}"), false));
     }
+    debug!("Write completed");
 
     Ok((format!("Successfully wrote {file_path}"), true))
 }
 
 fn save_output_to_file(
+    docker: &Docker,
     container_name: &str,
     user: &str,
     repo_path: &Path,
@@ -328,34 +305,35 @@ fn save_output_to_file(
     let output_file = format!("/tmp/agent/bash-output-{id}");
     debug!("Saving large output to file: {output_file}");
 
+    let workdir = repo_path.to_string_lossy().to_string();
+    let env = vec!["GIT_EDITOR=false"];
+
     // Create /tmp/agent directory if it doesn't exist
     debug!("Creating /tmp/agent directory");
-    docker_exec_cmd(container_name, user, repo_path, false)
-        .args(["bash", "-c", "mkdir -p /tmp/agent"])
-        .output()
-        .context("Failed to create /tmp/agent directory")?;
+    exec_command(
+        docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        Some(env.clone()),
+        vec!["bash", "-c", "mkdir -p /tmp/agent"],
+    )
+    .context("Failed to create /tmp/agent directory")?;
 
     // Write the output to file
     let len = data.len();
     debug!("Writing output data ({len} bytes)");
     let write_cmd = format!("cat > {output_file}");
-    let mut write_process = docker_exec_cmd(container_name, user, repo_path, true)
-        .args(["bash", "-c", &write_cmd])
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("Failed to write output to file")?;
-
-    let mut stdin = write_process
-        .stdin
-        .take()
-        .expect("Process was launched with piped stdin");
-    stdin.write_all(data).context("Failed to write to stdin")?;
-    drop(stdin);
-
-    debug!("Waiting for output save process to complete");
-    write_process
-        .wait()
-        .context("Failed to wait for write process")?;
+    exec_with_stdin(
+        docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        Some(env),
+        vec!["bash", "-c", &write_cmd],
+        Some(data),
+    )
+    .context("Failed to write output to file")?;
     debug!("Output saved to file");
 
     Ok(output_file)
@@ -369,14 +347,24 @@ pub fn execute_bash_in_sandbox(
 ) -> Result<(String, bool)> {
     const MAX_OUTPUT_SIZE: usize = 30000;
 
+    let docker = docker_connect()?;
+    let workdir = repo_path.to_string_lossy().to_string();
+    let env = vec!["GIT_EDITOR=false"];
+
     debug!("Executing bash in sandbox: {}", command);
-    let output = docker_exec_cmd(container_name, user, repo_path, false)
-        .args(["bash", "-c", command])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to execute command in sandbox")?;
-    debug!("Bash command completed with status: {:?}", output.status);
+    let output = exec_capture(
+        &docker,
+        container_name,
+        Some(user),
+        Some(&workdir),
+        Some(env),
+        vec!["bash", "-c", command],
+    )
+    .context("Failed to execute command in sandbox")?;
+    debug!(
+        "Bash command completed with exit code: {}",
+        output.exit_code
+    );
 
     // Combine stdout and stderr as raw bytes
     let combined_bytes = if output.stderr.is_empty() {
@@ -392,7 +380,8 @@ pub fn execute_bash_in_sandbox(
 
     // Check if output exceeds limit - save to file if so
     if combined_bytes.len() > MAX_OUTPUT_SIZE {
-        let output_file = save_output_to_file(container_name, user, repo_path, &combined_bytes)?;
+        let output_file =
+            save_output_to_file(&docker, container_name, user, repo_path, &combined_bytes)?;
         let len = combined_bytes.len();
         return Ok((
             formatdoc! {r#"
@@ -408,7 +397,7 @@ pub fn execute_bash_in_sandbox(
         Ok(s) => s,
         Err(_) => {
             let output_file =
-                save_output_to_file(container_name, user, repo_path, &combined_bytes)?;
+                save_output_to_file(&docker, container_name, user, repo_path, &combined_bytes)?;
             return Ok((
                 format!("Output is not valid UTF-8. Full output available at {output_file}"),
                 false,
@@ -416,16 +405,11 @@ pub fn execute_bash_in_sandbox(
         }
     };
 
-    let success = output.status.success();
+    let success = output.success();
 
     // If command failed with no output, report the exit status
     if !success && combined.is_empty() {
-        let exit_code = output
-            .status
-            .code()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        return Ok((format!("exited with status {exit_code}"), false));
+        return Ok((format!("exited with status {}", output.exit_code), false));
     }
 
     Ok((combined, success))
