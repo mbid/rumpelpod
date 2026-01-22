@@ -1,37 +1,37 @@
-//! Git HTTP server for exposing the gateway repository to sandboxes.
+//! Git HTTP server for exposing gateway repositories to sandboxes.
 //!
-//! Runs an axum server that serves the gateway git repository via
+//! Runs a single axum server that serves multiple gateway git repositories via
 //! git-http-backend CGI, allowing containers to fetch from the host.
 //!
-//! Each sandbox gets its own HTTP server bound to its docker network's gateway IP.
+//! Authentication uses bearer tokens: each sandbox is assigned a unique token
+//! when registered. The server maintains a mapping from tokens to sandbox info
+//! (gateway path and sandbox name). When a request arrives, the server looks up
+//! the token to determine which gateway to serve and which sandbox name to set.
+//!
 //! The server sets the `SANDBOX_NAME` environment variable when invoking git-http-backend,
-//! which is then available to git hooks for access control. This is secure because:
-//! - The sandbox cannot modify this variable (it's set by the server, not the client)
-//! - The sandbox can only reach its own network's HTTP server (network isolation)
+//! which is then available to git hooks for access control.
 
+use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use axum::{
-    extract::Request,
-    http::{header, StatusCode},
-    middleware::{self, Next},
-    response::Response,
-    Router,
-};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{header, Request, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Router;
 use cgi_service::{CgiConfig, CgiService};
 use log::{debug, error};
 use rand::{distr::Alphanumeric, Rng};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::task::JoinHandle;
+use tower_service::Service;
 
 use crate::command_ext::CommandExt;
 use crate::r#async::RUNTIME;
-
-/// Port used for the git HTTP server on each container's network.
-pub const GIT_HTTP_PORT: u16 = 8417;
 
 /// Path to git-http-backend CGI script.
 const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";
@@ -40,43 +40,79 @@ const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";
 /// This is used by the pre-receive hook for access control.
 pub const SANDBOX_NAME_ENV: &str = "SANDBOX_NAME";
 
+/// Information about a registered sandbox.
+#[derive(Clone)]
+struct SandboxInfo {
+    /// Path to the gateway.git bare repository.
+    gateway_path: PathBuf,
+    /// Name of the sandbox (used for access control in hooks).
+    sandbox_name: String,
+}
+
+/// Shared state for the git HTTP server.
+/// Maps bearer tokens to sandbox information.
+#[derive(Clone, Default)]
+pub struct SharedGitServerState {
+    inner: Arc<Mutex<BTreeMap<String, SandboxInfo>>>,
+}
+
+impl SharedGitServerState {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// Register a sandbox and return its bearer token.
+    pub fn register(&self, gateway_path: PathBuf, sandbox_name: String) -> String {
+        let token: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(64)
+            .map(char::from)
+            .collect();
+
+        let info = SandboxInfo {
+            gateway_path,
+            sandbox_name,
+        };
+
+        self.inner.lock().unwrap().insert(token.clone(), info);
+        token
+    }
+
+    /// Unregister a sandbox by its token.
+    pub fn unregister(&self, token: &str) {
+        self.inner.lock().unwrap().remove(token);
+    }
+
+    /// Look up sandbox info by token.
+    fn get(&self, token: &str) -> Option<SandboxInfo> {
+        self.inner.lock().unwrap().get(token).cloned()
+    }
+}
+
 /// A running git HTTP server instance.
 /// Stops the server when dropped.
 pub struct GitHttpServer {
     /// Handle to the spawned tokio task running the server.
     task_handle: JoinHandle<()>,
+    /// The port the server is bound to.
+    pub port: u16,
 }
 
 impl GitHttpServer {
-    /// Start a new git HTTP server for the given gateway repository.
+    /// Start a new git HTTP server with shared state for handling multiple sandboxes.
     ///
     /// The server binds to the specified address. If port is 0, a random port is assigned.
-    /// Returns the server instance and the actual port bound.
-    ///
-    /// The `sandbox_name` is passed to git-http-backend as an environment variable,
-    /// which hooks can use for access control.
-    pub fn start(
-        gateway_path: &Path,
-        bind_address: &str,
-        port: u16,
-        sandbox_name: &str,
-        token: &str,
-    ) -> Result<(Self, u16)> {
-        let gateway_parent = gateway_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("/"));
-
+    /// Returns the server instance.
+    pub fn start(bind_address: &str, port: u16, state: SharedGitServerState) -> Result<Self> {
         let addr: SocketAddr = format!("{}:{}", bind_address, port)
             .parse()
             .context("parsing bind address")?;
 
         debug!(
-            "Starting git HTTP server on {} (requested port: {}) for {} (sandbox: {})",
-            addr,
-            port,
-            gateway_path.display(),
-            sandbox_name
+            "Starting git HTTP server on {} (requested port: {})",
+            addr, port
         );
 
         // Bind manually using socket2 to ensure SO_REUSEADDR is set.
@@ -110,29 +146,8 @@ impl GitHttpServer {
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .context("converting to tokio listener")?;
 
-        // Configure the CGI service for git-http-backend.
-        // git-http-backend expects:
-        //   - GIT_PROJECT_ROOT: parent directory containing the bare repo
-        //   - PATH_INFO: full request path including repo name (e.g., /gateway.git/info/refs)
-        //   - SCRIPT_NAME: empty (the script itself is at root)
-        //
-        // We also set SANDBOX_NAME so the pre-receive hook can enforce access control.
-        // This is secure because the sandbox cannot modify this - it's set by the server.
-        let cgi_config = CgiConfig::new(GIT_HTTP_BACKEND)
-            .env("GIT_PROJECT_ROOT", gateway_parent.to_string_lossy())
-            .env("GIT_HTTP_EXPORT_ALL", "")
-            .env(SANDBOX_NAME_ENV, sandbox_name)
-            .script_name("");
-
-        let cgi_service = CgiService::with_config(cgi_config);
-        let token = token.to_string();
-
-        // Build router that handles all requests via CGI
-        let app = Router::new()
-            .fallback_service(cgi_service)
-            .layer(middleware::from_fn(move |req, next| {
-                auth(req, next, token.clone())
-            }));
+        // Build router that handles all requests via our auth handler
+        let app = Router::new().fallback(handle_request).with_state(state);
 
         // Spawn the server in the background
         let task_handle = RUNTIME.spawn(async move {
@@ -141,7 +156,10 @@ impl GitHttpServer {
             }
         });
 
-        Ok((GitHttpServer { task_handle }, actual_port))
+        Ok(GitHttpServer {
+            task_handle,
+            port: actual_port,
+        })
     }
 
     /// Stop the server.
@@ -153,6 +171,48 @@ impl GitHttpServer {
 impl Drop for GitHttpServer {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Handle an incoming request by validating the bearer token and dispatching to git-http-backend.
+async fn handle_request(State(state): State<SharedGitServerState>, req: Request<Body>) -> Response {
+    // Extract bearer token from Authorization header
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let token = match auth_header {
+        Some(h) if h.starts_with("Bearer ") => &h[7..],
+        _ => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    // Look up sandbox info
+    let info = match state.get(token) {
+        Some(info) => info,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    // Get the parent directory of gateway.git for GIT_PROJECT_ROOT
+    let gateway_parent = info
+        .gateway_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("/"));
+
+    // Configure CGI service for this specific sandbox
+    let cgi_config = CgiConfig::new(GIT_HTTP_BACKEND)
+        .env("GIT_PROJECT_ROOT", gateway_parent.to_string_lossy())
+        .env("GIT_HTTP_EXPORT_ALL", "")
+        .env(SANDBOX_NAME_ENV, &info.sandbox_name)
+        .script_name("");
+
+    let mut cgi_service = CgiService::with_config(cgi_config);
+
+    // Call the CGI service
+    match cgi_service.call(req).await {
+        Ok(response) => response.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
@@ -178,89 +238,7 @@ pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
     Ok(gateway_ip)
 }
 
-/// Spawn a git HTTP server for a container and manage its lifecycle.
-///
-/// This function:
-/// 1. Starts an axum server bound to the provided address and port
-/// 2. Spawns a background task that waits for the container to stop and then
-///    shuts down the server
-///
-/// Returns the actual port bound and the authentication token.
-pub fn spawn_git_http_server(
-    gateway_path: &Path,
-    bind_address: &str,
-    port: u16,
-    sandbox_name: &str,
-    container_id: &str,
-) -> Result<(u16, String)> {
-    debug!(
-        "Starting git HTTP server on {}:{} for container {} (sandbox: {})",
-        bind_address, port, container_id, sandbox_name
-    );
-
-    let token: String = rand::rng()
-        .sample_iter(&Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
-
-    let (server, actual_port) =
-        GitHttpServer::start(gateway_path, bind_address, port, sandbox_name, &token)?;
-
-    // Spawn a task to wait for the container to stop and then shut down the server
-    let container_id = container_id.to_string();
-    RUNTIME.spawn(async move {
-        // Move server into this task so it lives until we're done
-        let mut server = server;
-
-        // docker wait blocks until the container stops
-        let result = tokio::process::Command::new("docker")
-            .args(["wait", &container_id])
-            .output()
-            .await;
-
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    debug!(
-                        "Container {} stopped, stopping git HTTP server",
-                        container_id
-                    );
-                } else {
-                    let combined = String::from_utf8_lossy(&output.stdout).to_string()
-                        + &String::from_utf8_lossy(&output.stderr);
-                    error!(
-                        "docker wait for {} exited with {}: {}",
-                        container_id,
-                        output.status,
-                        combined.trim()
-                    );
-                }
-            }
-            Err(e) => {
-                error!("docker wait failed: {}", e);
-            }
-        }
-
-        server.stop();
-    });
-
-    Ok((actual_port, token))
-}
-
 /// Get the URL for the git HTTP server accessible from within a container.
 pub fn git_http_url(ip: &str, port: u16) -> String {
     format!("http://{}:{}/gateway.git", ip, port)
-}
-
-async fn auth(req: Request, next: Next, token: String) -> Result<Response, StatusCode> {
-    let auth_header = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok());
-
-    match auth_header {
-        Some(h) if h == format!("Bearer {}", token) => Ok(next.run(req).await),
-        _ => Err(StatusCode::UNAUTHORIZED),
-    }
 }

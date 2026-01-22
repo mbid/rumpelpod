@@ -66,10 +66,10 @@
 //! - Reading (fetch) is unrestricted - all branches are visible to everyone.
 //!
 //! This is enforced by a pre-receive hook in the gateway that validates the sandbox name.
-//! The sandbox name is determined server-side by the git HTTP server based on which
-//! docker network the request came from. Each sandbox has its own isolated network and
-//! can only reach the HTTP server bound to that network's gateway IP. The server sets
-//! the SANDBOX_NAME environment variable which hooks can trust (the client cannot forge it).
+//! The sandbox name is determined server-side by the git HTTP server based on the
+//! bearer token in the request. Each sandbox is assigned a unique token when created,
+//! and the server maps tokens to sandbox info. The server sets the SANDBOX_NAME
+//! environment variable which hooks can trust (the client cannot forge it).
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -156,7 +156,7 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
     #!/bin/sh
     # Gateway access control: sandboxes can only write to their own namespace.
     #
-    # SANDBOX_NAME is set by the git HTTP server based on network identity.
+    # SANDBOX_NAME is set by the git HTTP server based on the bearer token.
     # The sandbox cannot forge this - it's set server-side.
 
     sandbox_name="$SANDBOX_NAME"

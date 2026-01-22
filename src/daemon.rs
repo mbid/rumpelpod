@@ -1,24 +1,25 @@
 pub mod db;
 pub mod protocol;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use indoc::indoc;
 use log::error;
+use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::command_ext::CommandExt;
 use crate::config::{Network, Runtime};
 use crate::gateway;
-use crate::git_http_server;
+use crate::git_http_server::{self, GitHttpServer, SharedGitServerState};
 use protocol::{
     ContainerId, ConversationSummary, Daemon, GetConversationResponse, Image, LaunchResult,
     SandboxInfo, SandboxName, SandboxStatus,
 };
-use rusqlite::Connection;
-use std::sync::Mutex;
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -37,23 +38,27 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(PathBuf::from(runtime_dir).join("sandbox.sock"))
 }
 
-use std::collections::HashMap;
-
 struct DaemonServer {
     /// SQLite connection for conversation history.
     db: Mutex<Connection>,
-    /// Active git HTTP servers: network_name -> (port, token)
-    active_git_servers: Mutex<HashMap<String, (u16, String)>>,
+    /// Shared state for the git HTTP server (maps tokens to sandbox info).
+    git_server_state: SharedGitServerState,
+    /// Port the bridge network git HTTP server is listening on.
+    bridge_server_port: u16,
+    /// Port the localhost git HTTP server is listening on.
+    localhost_server_port: u16,
+    /// Active tokens for each sandbox: (repo_path, sandbox_name) -> token
+    /// Used to clean up tokens when sandboxes are deleted.
+    active_tokens: Mutex<BTreeMap<(PathBuf, String), String>>,
 }
 
-/// Label key used to store the repository path on containers and networks.
+/// Label key used to store the repository path on containers.
 const REPO_PATH_LABEL: &str = "dev.sandbox.repo_path";
 
-/// Label key used to store the sandbox name on containers and networks.
+/// Label key used to store the sandbox name on containers.
 const SANDBOX_NAME_LABEL: &str = "dev.sandbox.name";
 
-/// Generate a unique docker resource name from repo path and sandbox name.
-/// Used for both the container and network (they can share the same name).
+/// Generate a unique docker container name from repo path and sandbox name.
 /// Format: "<repo_dir>-<sandbox_name>-<hash_prefix>"
 /// where hash is sha256(repo_path + sandbox_name) truncated to 12 hex chars.
 fn docker_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
@@ -174,126 +179,6 @@ fn start_container(container_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Compute a /29 subnet in 172.16.0.0/12 range from the network name's hash.
-///
-/// Docker by default assigns /16 or /20 subnets from the 172.17.0.0/12 range,
-/// which quickly exhausts available IP space when running many tests. By using
-/// /29 subnets (8 IPs each), we can support ~1M networks in the same IP range.
-///
-/// The subnet is derived deterministically from the network name's hash to
-/// ensure the same sandbox always gets the same subnet. The `attempt` parameter
-/// allows trying different subnets if the first one collides.
-/// Subnet and gateway configuration for a docker network.
-struct SubnetConfig {
-    subnet: String,
-    gateway: String,
-}
-
-fn compute_subnet(name: &str, attempt: u32) -> SubnetConfig {
-    use sha2::{Digest, Sha256};
-
-    let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    hasher.update(attempt.to_le_bytes());
-    let hash = hasher.finalize();
-
-    // Use first 20 bits of hash to select a /29 subnet within 172.16.0.0/12
-    // 172.16.0.0/12 spans 172.16.0.0 - 172.31.255.255 (20 bits of host space)
-    // With /29 subnets (3 bits for hosts), we have 17 bits for network selection
-    // But we'll use 20 bits and mask to /29 boundaries for simplicity
-    //
-    // Layout: 172.(16 + high_nibble).(byte2).(byte3 & 0xF8)/29
-    // where high_nibble is 0-15 (4 bits), giving us 172.16.x.x to 172.31.x.x
-    //
-    // In a /29 subnet, the first usable IP (base + 1) is the gateway.
-
-    let high_nibble = (hash[0] >> 4) & 0x0F; // 0-15, maps to 172.16-172.31
-    let byte2 = hash[1];
-    let byte3 = hash[2] & 0xF8; // Align to /29 boundary (multiples of 8)
-
-    let octet2 = 16 + high_nibble;
-    SubnetConfig {
-        subnet: format!("172.{}.{}.{}/29", octet2, byte2, byte3),
-        gateway: format!("172.{}.{}.{}", octet2, byte2, byte3 + 1),
-    }
-}
-
-/// Maximum number of subnet collision retries before giving up.
-const MAX_SUBNET_RETRIES: u32 = 10;
-
-/// Create a docker network for the sandbox.
-/// If the network already exists, returns success.
-fn create_network(name: &str, sandbox_name: &SandboxName, repo_path: &Path) -> Result<()> {
-    // Check if network already exists
-    let check = Command::new("docker")
-        .args(["network", "inspect", name])
-        .output()
-        .context("Failed to execute docker network inspect")?;
-
-    if check.status.success() {
-        return Ok(());
-    }
-
-    // Try creating the network with different subnets if we hit collisions
-    for attempt in 0..MAX_SUBNET_RETRIES {
-        let config = compute_subnet(name, attempt);
-
-        let output = Command::new("docker")
-            .args([
-                "network",
-                "create",
-                "--subnet",
-                &config.subnet,
-                "--gateway",
-                &config.gateway,
-                "--label",
-                &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
-                "--label",
-                &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
-                name,
-            ])
-            .output()
-            .context("Failed to execute docker network create")?;
-
-        if output.status.success() {
-            return Ok(());
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Retry on subnet collision, fail on other errors
-        if !stderr.contains("Pool overlaps") {
-            error!("docker network create failed: {}", stderr);
-            anyhow::bail!("docker network create failed: {}", stderr);
-        }
-    }
-
-    anyhow::bail!(
-        "docker network create failed: could not find non-overlapping subnet after {} attempts",
-        MAX_SUBNET_RETRIES
-    );
-}
-
-/// Delete a docker network.
-fn delete_network(name: &str) -> Result<()> {
-    let output = Command::new("docker")
-        .args(["network", "rm", name])
-        .combined_output()
-        .context("Failed to execute docker network rm")?;
-
-    if !output.status.success() {
-        // Ignore "not found" errors (already deleted or never existed)
-        if !output.combined_output.contains("not found") {
-            error!("docker network rm failed: {}", output.combined_output);
-            anyhow::bail!(
-                "docker network rm failed: {}",
-                output.combined_output.trim()
-            );
-        }
-    }
-
-    Ok(())
-}
-
 /// Clean up gateway refs for a deleted sandbox.
 ///
 /// Removes all refs matching `sandbox/*@<sandbox_name>` from both the gateway
@@ -338,64 +223,6 @@ fn cleanup_sandbox_refs(gateway_path: &Path, repo_path: &Path, sandbox_name: &Sa
         .args(["update-ref", "-d", &alias_remote_ref])
         .current_dir(repo_path)
         .output();
-}
-
-/// Spawn a git HTTP server for the container and return the access URL.
-fn spawn_git_http_server(
-    active_git_servers: &Mutex<HashMap<String, (u16, String)>>,
-    gateway_path: &Path,
-    network_name: &str,
-    sandbox_name: &SandboxName,
-    container_id: &str,
-    network_config: Network,
-) -> Result<(String, String)> {
-    // Check if we already have a server for this network
-    {
-        let servers = active_git_servers.lock().unwrap();
-        if let Some((port, token)) = servers.get(network_name) {
-            let ip = match network_config {
-                Network::UnsafeHost => "127.0.0.1".to_string(),
-                Network::Default => git_http_server::get_network_gateway_ip(network_name)?,
-            };
-            return Ok((git_http_server::git_http_url(&ip, *port), token.clone()));
-        }
-    }
-
-    let (bind_ip, bind_port) = match network_config {
-        Network::UnsafeHost => ("127.0.0.1".to_string(), 0),
-        Network::Default => {
-            let gateway_ip = git_http_server::get_network_gateway_ip(network_name)?;
-            (gateway_ip, git_http_server::GIT_HTTP_PORT)
-        }
-    };
-
-    let result = git_http_server::spawn_git_http_server(
-        gateway_path,
-        &bind_ip,
-        bind_port,
-        &sandbox_name.0,
-        container_id,
-    );
-
-    let (port, token) = match result {
-        Ok((port, token)) => (port, token),
-        Err(e) => {
-            if network_config == Network::UnsafeHost {
-                error!("Failed to spawn git HTTP server for unsafe-host: {}. Continuing without git sync.", e);
-                return Err(e);
-            } else {
-                return Err(e).context("starting git HTTP server");
-            }
-        }
-    };
-
-    // Store the port so we don't try to bind again for this network
-    active_git_servers
-        .lock()
-        .unwrap()
-        .insert(network_name.to_string(), (port, token.clone()));
-
-    Ok((git_http_server::git_http_url(&bind_ip, port), token))
 }
 
 /// Check that the .git directory inside the container is owned by the expected user.
@@ -711,7 +538,7 @@ fn create_container(
 ) -> Result<ContainerId> {
     let network_arg = match network_config {
         Network::UnsafeHost => "host",
-        Network::Default => name,
+        Network::Default => "bridge",
     };
 
     let output = Command::new("docker")
@@ -832,6 +659,15 @@ impl Daemon for DaemonServer {
         let name = docker_name(&repo_path, &sandbox_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
 
+        // Determine the git HTTP server URL based on network config
+        let (server_ip, server_port) = match network {
+            Network::UnsafeHost => ("127.0.0.1".to_string(), self.localhost_server_port),
+            Network::Default => {
+                let bridge_ip = git_http_server::get_network_gateway_ip("bridge")?;
+                (bridge_ip, self.bridge_server_port)
+            }
+        };
+
         // TODO: There's a potential race condition between inspect and
         // start/run. Another process could stop/remove the container after we
         // inspect it. For robustness, we'd need to retry on specific failures,
@@ -853,39 +689,30 @@ impl Daemon for DaemonServer {
                 start_container(&name)?;
             }
 
-            // Already running (or just restarted).
-            // Spawn git HTTP server in case daemon was restarted while container was running.
-            let git_url_result = spawn_git_http_server(
-                &self.active_git_servers,
-                &gateway_path,
-                &name,
-                &sandbox_name,
-                &state.id,
-                network,
-            );
+            // Register sandbox with the git HTTP server (may already be registered, that's OK)
+            let token = self
+                .git_server_state
+                .register(gateway_path.clone(), sandbox_name.0.clone());
 
-            match git_url_result {
-                Ok((url, token)) => {
-                    // On re-entry, don't pass host_branch - we don't want to change
-                    // the upstream of an existing branch.
-                    setup_git_remotes(
-                        &state.id,
-                        &url,
-                        &token,
-                        &container_repo_path,
-                        &sandbox_name,
-                        &user,
-                        None,
-                    )?;
-                }
-                Err(e) => {
-                    if network == Network::UnsafeHost {
-                        error!("Failed to spawn git HTTP server: {}. Continuing...", e);
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+            // Store the token for cleanup on delete
+            self.active_tokens
+                .lock()
+                .unwrap()
+                .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
+
+            let url = git_http_server::git_http_url(&server_ip, server_port);
+
+            // On re-entry, don't pass host_branch - we don't want to change
+            // the upstream of an existing branch.
+            setup_git_remotes(
+                &state.id,
+                &url,
+                &token,
+                &container_repo_path,
+                &sandbox_name,
+                &user,
+                None,
+            )?;
 
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
@@ -893,42 +720,31 @@ impl Daemon for DaemonServer {
             });
         }
 
-        // Create network (only for isolated network)
-        if network == Network::Default {
-            create_network(&name, &sandbox_name, &repo_path)?;
-        }
+        // Register sandbox with the git HTTP server
+        let token = self
+            .git_server_state
+            .register(gateway_path, sandbox_name.0.clone());
+
+        // Store the token for cleanup on delete
+        self.active_tokens
+            .lock()
+            .unwrap()
+            .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
 
         let container_id =
             create_container(&name, &sandbox_name, &image, &repo_path, runtime, network)?;
-        let git_url_result = spawn_git_http_server(
-            &self.active_git_servers,
-            &gateway_path,
-            &name,
-            &sandbox_name,
-            &container_id.0,
-            network,
-        );
 
-        match git_url_result {
-            Ok((url, token)) => {
-                setup_git_remotes(
-                    &container_id.0,
-                    &url,
-                    &token,
-                    &container_repo_path,
-                    &sandbox_name,
-                    &user,
-                    host_branch.as_deref(),
-                )?;
-            }
-            Err(e) => {
-                if network == Network::UnsafeHost {
-                    error!("Failed to spawn git HTTP server: {}. Continuing...", e);
-                } else {
-                    return Err(e);
-                }
-            }
-        }
+        let url = git_http_server::git_http_url(&server_ip, server_port);
+
+        setup_git_remotes(
+            &container_id.0,
+            &url,
+            &token,
+            &container_repo_path,
+            &sandbox_name,
+            &user,
+            host_branch.as_deref(),
+        )?;
 
         Ok(LaunchResult { container_id, user })
     }
@@ -958,11 +774,15 @@ impl Daemon for DaemonServer {
             }
         }
 
-        // Remove the network (must be done after removing the container)
-        delete_network(&name)?;
-
-        // Remove from active git servers
-        self.active_git_servers.lock().unwrap().remove(&name);
+        // Unregister sandbox from git HTTP server
+        if let Some(token) = self
+            .active_tokens
+            .lock()
+            .unwrap()
+            .remove(&(repo_path.clone(), sandbox_name.0.clone()))
+        {
+            self.git_server_state.unregister(&token);
+        }
 
         // Clean up gateway refs for this sandbox
         if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
@@ -1045,12 +865,37 @@ pub fn run_daemon() -> Result<()> {
     // Enter the runtime context so UnixListener::bind can register with the reactor
     let _guard = crate::r#async::RUNTIME.enter();
 
+    // Create shared state for the git HTTP server
+    let git_server_state = SharedGitServerState::new();
+
+    // Start git HTTP server on the bridge network's gateway IP.
+    // Use port 0 to let the OS auto-assign a port, allowing multiple daemons
+    // (e.g., in tests) to run simultaneously without port conflicts.
+    let bridge_ip = git_http_server::get_network_gateway_ip("bridge")
+        .context("getting bridge network gateway IP")?;
+    let bridge_server = GitHttpServer::start(&bridge_ip, 0, git_server_state.clone())
+        .context("starting git HTTP server on bridge network")?;
+
+    // TODO: Start this lazily only when a sandbox with unsafe-host network is created,
+    // instead of always starting it.
+    // Start git HTTP server on localhost for unsafe-host network mode
+    let localhost_server = GitHttpServer::start("127.0.0.1", 0, git_server_state.clone())
+        .context("starting git HTTP server on localhost")?;
+
     let listener = UnixListener::bind(&socket)
         .with_context(|| format!("Failed to bind to {}", socket.display()))?;
 
     let daemon = DaemonServer {
         db: Mutex::new(db_conn),
-        active_git_servers: Mutex::new(HashMap::new()),
+        git_server_state,
+        bridge_server_port: bridge_server.port,
+        localhost_server_port: localhost_server.port,
+        active_tokens: Mutex::new(BTreeMap::new()),
     };
+
+    // Keep servers alive for the lifetime of the daemon
+    let _bridge_server = bridge_server;
+    let _localhost_server = localhost_server;
+
     protocol::serve_daemon(daemon, listener);
 }
