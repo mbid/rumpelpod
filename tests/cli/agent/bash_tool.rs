@@ -31,11 +31,11 @@ fn agent_handles_command_with_empty_output_and_nonzero_exit() {
         "Run the command `false` and tell me what happened.",
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // In interactive mode, stdout and stderr are combined
     assert!(
-        !stderr.contains("content cannot be empty"),
-        "Agent failed with empty content error.\nstderr: {}",
-        stderr
+        !output.stdout.contains("content cannot be empty"),
+        "Agent failed with empty content error.\noutput: {}",
+        output.stdout
     );
 }
 
@@ -64,12 +64,10 @@ fn agent_large_file_output() {
         "Run exactly one tool: `cat large.txt`. After that single tool call, stop immediately and tell me what you observed. Do not run any other tools.",
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("/tmp/agent/bash-output-"),
-        "Agent should report that output was saved to a file.\nstdout: {}\nstderr: {}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout.contains("/tmp/agent/bash-output-"),
+        "Agent should report that output was saved to a file.\nstdout: {}",
+        output.stdout
     );
 }
 
@@ -120,11 +118,9 @@ fn agent_can_read_large_output_from_one_time_command() {
         "#},
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
     assert!(
-        stdout.contains(secret),
-        "Agent should have found the secret in the large output.\nstdout: {stdout}\nstderr: {stderr}"
+        output.stdout.contains(secret),
+        "Agent should have found the secret in the large output.\nstdout: {}",
+        output.stdout
     );
 }

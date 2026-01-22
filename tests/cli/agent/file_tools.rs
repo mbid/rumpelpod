@@ -41,12 +41,10 @@ fn agent_edits_file() {
         "Use the edit tool to replace 'World' with 'Universe' in greeting.txt, then run `cat greeting.txt` and tell me the result.",
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Universe"),
-        "Agent output should contain the edited content 'Universe'.\nstdout: {}\nstderr: {}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout.contains("Universe"),
+        "Agent output should contain the edited content 'Universe'.\nstdout: {}",
+        output.stdout
     );
 }
 
@@ -69,11 +67,9 @@ fn agent_writes_file() {
         ),
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(expected_content),
-        "Agent output should contain the written content.\nstdout: {}\nstderr: {}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout.contains(expected_content),
+        "Agent output should contain the written content.\nstdout: {}",
+        output.stdout
     );
 }

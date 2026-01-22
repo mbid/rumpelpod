@@ -3,7 +3,7 @@
 use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
 
 use super::common::{
-    run_agent_with_prompt_model_and_args, ANTHROPIC_MODEL, GEMINI_MODEL, XAI_MODEL,
+    run_agent_interactive_model_and_args, ANTHROPIC_MODEL, GEMINI_MODEL, XAI_MODEL,
 };
 
 fn agent_web_search(model: &str, extra_args: &[&str]) {
@@ -13,20 +13,18 @@ fn agent_web_search(model: &str, extra_args: &[&str]) {
 
     let daemon = TestDaemon::start();
 
-    let output = run_agent_with_prompt_model_and_args(
+    let output = run_agent_interactive_model_and_args(
         &repo,
         &daemon,
-        "Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
+        &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         model,
         extra_args,
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("2025-11-12"),
-        "Agent should find that the last US penny was minted on 2025-11-12.\nstdout: {}\nstderr: {}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout.contains("2025-11-12"),
+        "Agent should find that the last US penny was minted on 2025-11-12.\nstdout: {}",
+        output.stdout
     );
 }
 
@@ -59,23 +57,22 @@ fn agent_web_search_disabled_anthropic() {
 
     let daemon = TestDaemon::start();
 
-    let output = run_agent_with_prompt_model_and_args(
+    let output = run_agent_interactive_model_and_args(
         &repo,
         &daemon,
-        "Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
+        &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &["--disable-anthropic-websearch"],
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     // The agent should refuse or fail to find the info.
     // Based on previous failure, it says "I don't have the ability to search the web".
     assert!(
-        stdout.contains("don't have the ability to search the web")
-            || stdout.contains("cannot search the web")
-            || !stdout.contains("2025-11-12"),
+        output.stdout.contains("don't have the ability to search the web")
+            || output.stdout.contains("cannot search the web")
+            || !output.stdout.contains("2025-11-12"),
         "Agent should NOT find the date when web search is disabled.\nstdout: {}",
-        stdout
+        output.stdout
     );
 }
 
@@ -94,21 +91,20 @@ fn agent_web_search_anthropic_config_disable_works() {
     let daemon = TestDaemon::start();
 
     // Run without CLI flag - should be disabled by config
-    let output = run_agent_with_prompt_model_and_args(
+    let output = run_agent_interactive_model_and_args(
         &repo,
         &daemon,
-        "Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
+        &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &[],
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("don't have the ability to search the web")
-            || stdout.contains("cannot search the web")
-            || !stdout.contains("2025-11-12"),
+        output.stdout.contains("don't have the ability to search the web")
+            || output.stdout.contains("cannot search the web")
+            || !output.stdout.contains("2025-11-12"),
         "Agent should NOT find the date when web search is disabled via config.\nstdout: {}",
-        stdout
+        output.stdout
     );
 }
 
@@ -127,20 +123,18 @@ fn agent_web_search_anthropic_config_disable_cli_enable() {
     let daemon = TestDaemon::start();
 
     // Run WITH enable CLI flag - should be enabled despite config
-    let output = run_agent_with_prompt_model_and_args(
+    let output = run_agent_interactive_model_and_args(
         &repo,
         &daemon,
-        "Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
+        &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &["--enable-anthropic-websearch"],
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("2025-11-12"),
-        "Agent should find the date when web search is enabled via CLI overriding config.\nstdout: {}\nstderr: {}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout.contains("2025-11-12"),
+        "Agent should find the date when web search is enabled via CLI overriding config.\nstdout: {}",
+        output.stdout
     );
 }
 
@@ -153,10 +147,10 @@ fn agent_web_search_anthropic_flags_conflict() {
     let daemon = TestDaemon::start();
 
     // --enable AND --disable -> should fail with conflict error
-    let output = run_agent_with_prompt_model_and_args(
+    let output = run_agent_interactive_model_and_args(
         &repo,
         &daemon,
-        "Test",
+        &["Test"],
         ANTHROPIC_MODEL,
         &[
             "--enable-anthropic-websearch",
@@ -165,16 +159,16 @@ fn agent_web_search_anthropic_flags_conflict() {
     );
 
     assert!(
-        !output.status.success(),
+        !output.success,
         "Agent should fail when conflicting flags are provided"
     );
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // In PTY mode, stdout and stderr are combined
     assert!(
-        stderr.contains("argument '--enable-anthropic-websearch' cannot be used with '--disable-anthropic-websearch'") ||
-        stderr.contains("argument '--disable-anthropic-websearch' cannot be used with '--enable-anthropic-websearch'"),
-        "Error should mention conflicting arguments.\nstderr: {}",
-        stderr
+        output.stdout.contains("argument '--enable-anthropic-websearch' cannot be used with '--disable-anthropic-websearch'") ||
+        output.stdout.contains("argument '--disable-anthropic-websearch' cannot be used with '--enable-anthropic-websearch'"),
+        "Error should mention conflicting arguments.\noutput: {}",
+        output.stdout
     );
 }
 
@@ -193,20 +187,19 @@ fn agent_web_search_anthropic_config_enable_cli_disable() {
     let daemon = TestDaemon::start();
 
     // Run WITH disable CLI flag
-    let output = run_agent_with_prompt_model_and_args(
+    let output = run_agent_interactive_model_and_args(
         &repo,
         &daemon,
-        "Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format.",
+        &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &["--disable-anthropic-websearch"],
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("don't have the ability to search the web")
-            || stdout.contains("cannot search the web")
-            || !stdout.contains("2025-11-12"),
+        output.stdout.contains("don't have the ability to search the web")
+            || output.stdout.contains("cannot search the web")
+            || !output.stdout.contains("2025-11-12"),
         "Agent should NOT find the date when web search is disabled via CLI override.\nstdout: {}",
-        stdout
+        output.stdout
     );
 }

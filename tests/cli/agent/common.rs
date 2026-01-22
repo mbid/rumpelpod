@@ -1,14 +1,17 @@
 //! Common utilities for agent integration tests.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use crate::common::{
-    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
-};
+use assert_cmd::cargo;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use tempfile::TempDir;
+
+use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
 
 /// Default model for tests that don't depend on provider-specific behavior.
 /// Using Haiku as it's the fastest and cheapest option.
@@ -24,63 +27,36 @@ pub fn llm_cache_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache")
 }
 
-/// Run agent with a prompt using the default model.
+/// Run agent with a prompt using the default model (interactive mode via PTY).
 /// Use this for tests that verify shared implementation code.
 pub fn run_agent_with_prompt(
     repo: &TestRepo,
     daemon: &TestDaemon,
     prompt: &str,
-) -> std::process::Output {
-    run_agent_with_prompt_model_and_args(repo, daemon, prompt, DEFAULT_MODEL, &[])
+) -> InteractiveOutput {
+    run_agent_interactive_model_and_args(repo, daemon, &[prompt], DEFAULT_MODEL, &[])
 }
 
-/// Run agent with a prompt and extra CLI arguments using the default model.
+/// Run agent with a prompt and extra CLI arguments using the default model (interactive mode).
 /// Use this for tests that verify shared implementation code.
 pub fn run_agent_with_prompt_and_args(
     repo: &TestRepo,
     daemon: &TestDaemon,
     prompt: &str,
     extra_args: &[&str],
-) -> std::process::Output {
-    run_agent_with_prompt_model_and_args(repo, daemon, prompt, DEFAULT_MODEL, extra_args)
+) -> InteractiveOutput {
+    run_agent_interactive_model_and_args(repo, daemon, &[prompt], DEFAULT_MODEL, extra_args)
 }
 
-/// Run agent with a prompt using a specific model.
+/// Run agent with a prompt using a specific model (interactive mode via PTY).
 /// Use this for tests that need to verify provider-specific behavior.
 pub fn run_agent_with_prompt_and_model(
     repo: &TestRepo,
     daemon: &TestDaemon,
     prompt: &str,
     model: &str,
-) -> std::process::Output {
-    run_agent_with_prompt_model_and_args(repo, daemon, prompt, model, &[])
-}
-
-/// Run agent with a prompt, model, and extra CLI arguments.
-/// Use this for tests that need to verify provider-specific behavior.
-pub fn run_agent_with_prompt_model_and_args(
-    repo: &TestRepo,
-    daemon: &TestDaemon,
-    prompt: &str,
-    model: &str,
-    extra_args: &[&str],
-) -> std::process::Output {
-    let cache_dir = llm_cache_dir();
-    let mut cmd = sandbox_command(repo, daemon);
-    cmd.args(["agent", "test", "--model", model, "--cache"]);
-    cmd.arg(cache_dir);
-    cmd.args(extra_args);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().expect("Failed to spawn agent");
-
-    let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-    writeln!(stdin, "{}", prompt).expect("Failed to write to stdin");
-    drop(child.stdin.take());
-
-    child.wait_with_output().expect("Failed to wait for agent")
+) -> InteractiveOutput {
+    run_agent_interactive_model_and_args(repo, daemon, &[prompt], model, &[])
 }
 
 /// Set up a basic test repo with sandbox config.
@@ -109,4 +85,223 @@ pub fn create_mock_editor_exit(script_dir: &Path, verify_file: &Path) -> PathBuf
     fs::set_permissions(&script_path, perms).expect("Failed to set script permissions");
 
     script_path
+}
+
+/// Create a mock editor script that appends messages from a list one after the other.
+/// The first message becomes the initial prompt, subsequent messages are sent in order.
+/// When all messages are exhausted, the editor does nothing (empty input triggers exit).
+///
+/// Returns the path to the mock editor script.
+pub fn create_mock_editor_with_messages(script_dir: &Path, messages: &[&str]) -> PathBuf {
+    use indoc::formatdoc;
+
+    let script_path = script_dir.join("mock-editor.sh");
+    let state_file = script_dir.join("editor-state.txt");
+    let messages_file = script_dir.join("messages.txt");
+
+    // Write messages to a file (one per line, base64-encoded to handle multi-line messages)
+    let encoded_messages: Vec<String> = messages
+        .iter()
+        .map(|m| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(m.as_bytes())
+        })
+        .collect();
+    fs::write(&messages_file, encoded_messages.join("\n"))
+        .expect("Failed to write messages file");
+
+    // Initialize state to 0
+    fs::write(&state_file, "0").expect("Failed to write state file");
+
+    let state_file_str = state_file.to_string_lossy();
+    let messages_file_str = messages_file.to_string_lossy();
+
+    let script_content = formatdoc! {r#"
+        #!/bin/bash
+        FILE="$1"
+        STATE_FILE="{state_file_str}"
+        MESSAGES_FILE="{messages_file_str}"
+
+        # Read current index
+        INDEX=$(cat "$STATE_FILE")
+
+        # Get the message at this index (1-indexed for sed)
+        LINE=$((INDEX + 1))
+        ENCODED_MSG=$(sed -n "${{LINE}}p" "$MESSAGES_FILE")
+
+        if [ -n "$ENCODED_MSG" ]; then
+            # Decode and append message to the file
+            MSG=$(echo "$ENCODED_MSG" | base64 -d)
+            echo "$MSG" >> "$FILE"
+
+            # Increment index
+            echo $((INDEX + 1)) > "$STATE_FILE"
+        fi
+        # If no message, do nothing (empty input triggers exit)
+    "#};
+    fs::write(&script_path, &script_content).expect("Failed to write mock editor script");
+
+    let perms = std::fs::Permissions::from_mode(0o755);
+    fs::set_permissions(&script_path, perms).expect("Failed to set script permissions");
+
+    script_path
+}
+
+/// Output from an interactive agent run.
+pub struct InteractiveOutput {
+    pub stdout: String,
+    pub success: bool,
+}
+
+/// Run agent interactively with a list of messages using PTY.
+/// Messages are sent one at a time via a mock editor.
+/// The first message is the initial prompt, subsequent messages are follow-ups.
+/// After all messages are sent, the agent exits (empty editor input triggers exit).
+pub fn run_agent_interactive(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    messages: &[&str],
+) -> InteractiveOutput {
+    run_agent_interactive_model_and_args(repo, daemon, messages, DEFAULT_MODEL, &[])
+}
+
+/// Run agent interactively with a specific model.
+pub fn run_agent_interactive_and_model(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    messages: &[&str],
+    model: &str,
+) -> InteractiveOutput {
+    run_agent_interactive_model_and_args(repo, daemon, messages, model, &[])
+}
+
+/// Run agent interactively with extra CLI arguments.
+pub fn run_agent_interactive_and_args(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    messages: &[&str],
+    extra_args: &[&str],
+) -> InteractiveOutput {
+    run_agent_interactive_model_and_args(repo, daemon, messages, DEFAULT_MODEL, extra_args)
+}
+
+/// Run agent interactively with a list of messages, model, and extra CLI arguments using PTY.
+pub fn run_agent_interactive_model_and_args(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    messages: &[&str],
+    model: &str,
+    extra_args: &[&str],
+) -> InteractiveOutput {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let editor_path = create_mock_editor_with_messages(temp_dir.path(), messages);
+
+    let cache_dir = llm_cache_dir();
+    let pty_system = native_pty_system();
+
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("Failed to create PTY");
+
+    let sandbox_bin = cargo::cargo_bin!("sandbox");
+
+    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    cmd.cwd(repo.path());
+    cmd.env(
+        "SANDBOX_DAEMON_SOCKET",
+        daemon.socket_path.to_str().unwrap(),
+    );
+    cmd.env("EDITOR", editor_path.to_str().unwrap());
+    cmd.args([
+        "agent",
+        "test",
+        "--model",
+        model,
+        "--cache",
+        cache_dir.to_str().unwrap(),
+    ]);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
+
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .expect("Failed to spawn command");
+
+    // Set up reader to collect output
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("Failed to clone reader");
+    let mut writer = pair.master.take_writer().expect("Failed to get writer");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            if tx
+                .send(String::from_utf8_lossy(&buffer[..n]).to_string())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    // Collect output and handle exit confirmation
+    let mut output = String::new();
+    let start = Instant::now();
+    let timeout = Duration::from_secs(120);
+
+    loop {
+        // Check if process has exited
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Drain remaining output
+                while let Ok(s) = rx.try_recv() {
+                    output.push_str(&s);
+                }
+                return InteractiveOutput {
+                    stdout: output,
+                    success: status.exit_code() == 0,
+                };
+            }
+            Ok(None) => {
+                // Process still running
+            }
+            Err(e) => panic!("Error waiting for process: {}", e),
+        }
+
+        // Collect any available output
+        while let Ok(s) = rx.try_recv() {
+            output.push_str(&s);
+        }
+
+        // Check for exit confirmation prompt and respond with 'y'
+        if output.contains("Exit? [Y/n]") {
+            // Clear the match so we don't respond multiple times
+            output = output.replace("Exit? [Y/n]", "Exit? [Y/n] (answered)");
+            let _ = writeln!(writer, "y");
+        }
+
+        // Check timeout
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            panic!(
+                "Process did not exit within timeout.\nOutput so far:\n{}",
+                output
+            );
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
 }

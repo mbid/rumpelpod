@@ -37,12 +37,10 @@ fn agent_reads_file(model: &str) {
         model,
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(secret_content),
-        "Agent output should contain the secret content.\nstdout: {}\nstderr: {}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
+        output.stdout.contains(secret_content),
+        "Agent output should contain the secret content.\nstdout: {}",
+        output.stdout
     );
 }
 
