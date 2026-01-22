@@ -7,7 +7,9 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use bollard::query_parameters::CreateContainerOptions;
+use bollard::query_parameters::{
+    CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
+};
 use bollard::secret::{ContainerCreateBody, HostConfig};
 use bollard::Docker;
 use indoc::indoc;
@@ -750,27 +752,36 @@ impl Daemon for DaemonServer {
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
+        use bollard::errors::Error as BollardError;
+
+        let docker =
+            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
         let name = docker_name(&repo_path, &sandbox_name);
 
         // Stop the container with immediate SIGKILL (-t 0) because containers typically
         // run `sleep infinity` which won't handle SIGTERM gracefully anyway.
         // TODO: For sysbox/systemd containers that don't invoke the provided run command,
         // we should allow a graceful shutdown period.
-        let _ = Command::new("docker")
-            .args(["stop", "-t", "0", &name])
-            .combined_output();
+        let stop_options = StopContainerOptions {
+            t: Some(0),
+            ..Default::default()
+        };
+        let _ = block_on(docker.stop_container(&name, Some(stop_options)));
 
-        // Remove the container
-        let output = Command::new("docker")
-            .args(["rm", "-f", &name])
-            .combined_output()
-            .context("Failed to execute docker rm")?;
-
-        if !output.status.success() {
+        // Remove the container (force in case it's still running)
+        let remove_options = RemoveContainerOptions {
+            force: true,
+            ..Default::default()
+        };
+        match block_on(docker.remove_container(&name, Some(remove_options))) {
+            Ok(()) => {}
             // Ignore "No such container" errors (already deleted)
-            if !output.combined_output.contains("No such container") {
-                error!("docker rm failed: {}", output.combined_output);
-                anyhow::bail!("docker rm failed: {}", output.combined_output.trim());
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {}
+            Err(e) => {
+                error!("docker rm failed: {}", e);
+                anyhow::bail!("docker rm failed: {}", e);
             }
         }
 
