@@ -7,18 +7,20 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use bollard::container::LogOutput;
+use bollard::exec::StartExecResults;
 use bollard::query_parameters::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
 };
-use bollard::secret::{ContainerCreateBody, HostConfig};
+use bollard::secret::{ContainerCreateBody, ExecConfig, HostConfig};
 use bollard::Docker;
 use indoc::indoc;
 use log::error;
 use rusqlite::Connection;
 use tokio::net::UnixListener;
+use tokio_stream::StreamExt;
 
 use crate::async_runtime::block_on;
-use crate::command_ext::CommandExt;
 use crate::config::{Network, Runtime};
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState};
@@ -171,6 +173,59 @@ fn start_container(docker: &Docker, container_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Execute a command inside a container and return the output.
+///
+/// Returns the combined stdout/stderr output. Returns an error if the command
+/// fails (non-zero exit code) or if there's a Docker API error.
+fn exec_in_container(
+    docker: &Docker,
+    container_id: &str,
+    user: Option<&str>,
+    cmd: Vec<&str>,
+) -> Result<Vec<u8>> {
+    let config = ExecConfig {
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        cmd: Some(cmd.into_iter().map(String::from).collect()),
+        user: user.map(String::from),
+        ..Default::default()
+    };
+
+    let exec = block_on(docker.create_exec(container_id, config)).context("creating exec")?;
+
+    let output = block_on(async {
+        let start_result = docker.start_exec(&exec.id, None).await?;
+
+        match start_result {
+            StartExecResults::Attached { mut output, .. } => {
+                let mut result = Vec::new();
+                while let Some(chunk) = output.next().await {
+                    match chunk? {
+                        LogOutput::StdOut { message } | LogOutput::StdErr { message } => {
+                            result.extend_from_slice(&message);
+                        }
+                        _ => {}
+                    }
+                }
+                Ok::<_, bollard::errors::Error>(result)
+            }
+            StartExecResults::Detached => Ok(Vec::new()),
+        }
+    })
+    .context("executing command")?;
+
+    // Check exit code
+    let inspect = block_on(docker.inspect_exec(&exec.id)).context("inspecting exec")?;
+    let exit_code = inspect.exit_code.unwrap_or(0);
+
+    if exit_code != 0 {
+        let stderr = String::from_utf8_lossy(&output);
+        anyhow::bail!("command exited with code {}: {}", exit_code, stderr.trim());
+    }
+
+    Ok(output)
+}
+
 /// Clean up gateway refs for a deleted sandbox.
 ///
 /// Removes all refs matching `sandbox/*@<sandbox_name>` from both the gateway
@@ -220,18 +275,22 @@ fn cleanup_sandbox_refs(gateway_path: &Path, repo_path: &Path, sandbox_name: &Sa
 /// Check that the .git directory inside the container is owned by the expected user.
 /// Returns an error with a helpful message if ownership doesn't match.
 fn check_git_directory_ownership(
+    docker: &Docker,
     container_id: &str,
     container_repo_path: &Path,
     user: &str,
 ) -> Result<()> {
     let git_dir = container_repo_path.join(".git");
-    let git_dir_str = git_dir.to_string_lossy();
+    let git_dir_str = git_dir.to_string_lossy().to_string();
 
     // Get the owner of the .git directory
-    let owner_output = Command::new("docker")
-        .args(["exec", container_id, "stat", "-c", "%U", &git_dir_str])
-        .success()
-        .with_context(|| format!("checking ownership of {}", git_dir_str))?;
+    let owner_output = exec_in_container(
+        docker,
+        container_id,
+        None,
+        vec!["stat", "-c", "%U", &git_dir_str],
+    )
+    .with_context(|| format!("checking ownership of {}", git_dir_str))?;
 
     let owner = String::from_utf8_lossy(&owner_output).trim().to_string();
 
@@ -273,6 +332,7 @@ fn check_git_directory_ownership(
 /// will be set to `host/<host_branch>`. This allows `git pull` and `git status` to
 /// show meaningful tracking information relative to the host branch.
 fn setup_git_remotes(
+    docker: &Docker,
     container_id: &str,
     git_http_url: &str,
     token: &str,
@@ -281,19 +341,15 @@ fn setup_git_remotes(
     user: &str,
     host_branch: Option<&str>,
 ) -> Result<()> {
-    check_git_directory_ownership(container_id, container_repo_path, user)?;
+    check_git_directory_ownership(docker, container_id, container_repo_path, user)?;
 
-    let repo_path_str = container_repo_path.to_string_lossy();
+    let repo_path_str = container_repo_path.to_string_lossy().to_string();
 
     // Helper to run a git command inside the container
     let run_git = |args: &[&str]| -> Result<Vec<u8>> {
-        Command::new("docker")
-            .args(["exec", "--user", user, container_id])
-            .arg("git")
-            .arg("-C")
-            .arg(&*repo_path_str)
-            .args(args)
-            .success()
+        let mut cmd = vec!["git", "-C", &repo_path_str];
+        cmd.extend(args);
+        exec_in_container(docker, container_id, Some(user), cmd)
     };
 
     // Configure Bearer authentication
@@ -359,6 +415,7 @@ fn setup_git_remotes(
     // We install the hook first because we use its presence to detect whether this
     // is the first entry (hook not installed) or a re-entry (hook already installed).
     let is_first_entry = install_sandbox_reference_transaction_hook(
+        docker,
         container_id,
         container_repo_path,
         sandbox_name,
@@ -443,6 +500,7 @@ const SANDBOX_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
 /// Install the reference-transaction hook in the sandbox repository.
 /// Returns true if this is the first installation (first entry), false if already installed.
 fn install_sandbox_reference_transaction_hook(
+    docker: &Docker,
     container_id: &str,
     container_repo_path: &Path,
     _sandbox_name: &SandboxName,
@@ -450,23 +508,27 @@ fn install_sandbox_reference_transaction_hook(
 ) -> Result<bool> {
     let hooks_dir = container_repo_path.join(".git").join("hooks");
     let hook_path = hooks_dir.join("reference-transaction");
-    let hooks_dir_str = hooks_dir.to_string_lossy();
-    let hook_path_str = hook_path.to_string_lossy();
+    let hooks_dir_str = hooks_dir.to_string_lossy().to_string();
+    let hook_path_str = hook_path.to_string_lossy().to_string();
 
     // Ensure hooks directory exists
-    Command::new("docker")
-        .args(["exec", "--user", user, container_id])
-        .args(["mkdir", "-p", &hooks_dir_str])
-        .success()
-        .context("creating hooks directory")?;
+    exec_in_container(
+        docker,
+        container_id,
+        Some(user),
+        vec!["mkdir", "-p", &hooks_dir_str],
+    )
+    .context("creating hooks directory")?;
 
     // Check if hook already exists and contains our signature
-    let existing_hook = Command::new("docker")
-        .args(["exec", "--user", user, container_id])
-        .args(["cat", &hook_path_str])
-        .success()
-        .ok()
-        .map(|b| String::from_utf8_lossy(&b).to_string());
+    let existing_hook = exec_in_container(
+        docker,
+        container_id,
+        Some(user),
+        vec!["cat", &hook_path_str],
+    )
+    .ok()
+    .map(|b| String::from_utf8_lossy(&b).to_string());
 
     let hook_signature = "Installed by sandbox to sync branch updates";
 
@@ -486,25 +548,25 @@ fn install_sandbox_reference_transaction_hook(
         None => SANDBOX_REFERENCE_TRANSACTION_HOOK.to_string(),
     };
 
-    // Write the hook using sh -c with echo to avoid stdin piping issues
-    // Use printf to handle the hook content properly
+    // Write the hook using sh -c with printf to avoid stdin piping issues
     let escaped_hook = final_hook.replace('\\', "\\\\").replace('\'', "'\\''");
-    Command::new("docker")
-        .args(["exec", "--user", user, container_id])
-        .args([
-            "sh",
-            "-c",
-            &format!("printf '%s' '{}' > '{}'", escaped_hook, hook_path_str),
-        ])
-        .success()
-        .context("writing reference-transaction hook")?;
+    let write_cmd = format!("printf '%s' '{}' > '{}'", escaped_hook, hook_path_str);
+    exec_in_container(
+        docker,
+        container_id,
+        Some(user),
+        vec!["sh", "-c", &write_cmd],
+    )
+    .context("writing reference-transaction hook")?;
 
     // Make hook executable
-    Command::new("docker")
-        .args(["exec", "--user", user, container_id])
-        .args(["chmod", "+x", &hook_path_str])
-        .success()
-        .context("making reference-transaction hook executable")?;
+    exec_in_container(
+        docker,
+        container_id,
+        Some(user),
+        vec!["chmod", "+x", &hook_path_str],
+    )
+    .context("making reference-transaction hook executable")?;
 
     // First installation - this is the first entry
     Ok(true)
@@ -698,6 +760,7 @@ impl Daemon for DaemonServer {
             // On re-entry, don't pass host_branch - we don't want to change
             // the upstream of an existing branch.
             setup_git_remotes(
+                &docker,
                 &state.id,
                 &url,
                 &token,
@@ -730,6 +793,7 @@ impl Daemon for DaemonServer {
         let url = git_http_server::git_http_url(&server_ip, server_port);
 
         setup_git_remotes(
+            &docker,
             &container_id.0,
             &url,
             &token,
