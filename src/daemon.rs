@@ -164,11 +164,8 @@ fn inspect_container(docker: &Docker, container_name: &str) -> Result<Option<Con
 }
 
 /// Start a stopped container.
-fn start_container(container_name: &str) -> Result<()> {
-    Command::new("docker")
-        .args(["start", container_name])
-        .success()
-        .context("starting container")?;
+fn start_container(docker: &Docker, container_name: &str) -> Result<()> {
+    block_on(docker.start_container(container_name, None)).context("starting container")?;
     Ok(())
 }
 
@@ -689,7 +686,7 @@ impl Daemon for DaemonServer {
 
             if state.status != "running" {
                 // Container exists but is stopped - restart it
-                start_container(&name)?;
+                start_container(&docker, &name)?;
             }
 
             // Register sandbox with the git HTTP server (may already be registered, that's OK)
