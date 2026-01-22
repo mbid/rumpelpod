@@ -14,8 +14,9 @@
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::{Arc, Mutex};
+
+use bollard::Docker;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
@@ -31,7 +32,6 @@ use tokio::task::JoinHandle;
 use tower_service::Service;
 
 use crate::async_runtime::RUNTIME;
-use crate::command_ext::CommandExt;
 
 /// Path to git-http-backend CGI script.
 const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";
@@ -219,21 +219,23 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
 /// Get the gateway IP address for a docker network.
 /// This is the IP address the host uses on the network, which containers can reach.
 pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
-    let output = Command::new("docker")
-        .args([
-            "network",
-            "inspect",
-            "--format",
-            "{{range .IPAM.Config}}{{.Gateway}}{{end}}",
-            network_name,
-        ])
-        .success()
-        .context("getting network gateway IP")?;
+    use crate::async_runtime::block_on;
 
-    let gateway_ip = String::from_utf8_lossy(&output).trim().to_string();
-    if gateway_ip.is_empty() {
-        anyhow::bail!("no gateway IP found for network {}", network_name);
-    }
+    let docker = Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+
+    let network =
+        block_on(docker.inspect_network(network_name, None)).context("inspecting network")?;
+
+    // Find the first gateway IP in the IPAM config
+    let gateway_ip = network
+        .ipam
+        .and_then(|ipam| ipam.config)
+        .and_then(|configs| {
+            configs
+                .into_iter()
+                .find_map(|config| config.gateway.filter(|g| !g.is_empty()))
+        })
+        .with_context(|| format!("no gateway IP found for network {}", network_name))?;
 
     Ok(gateway_ip)
 }
