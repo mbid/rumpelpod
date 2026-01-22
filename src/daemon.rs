@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use bollard::query_parameters::{
-    CreateContainerOptions, RemoveContainerOptions, StopContainerOptions,
+    CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
 };
 use bollard::secret::{ContainerCreateBody, HostConfig};
 use bollard::Docker;
@@ -571,56 +571,47 @@ fn create_container(
 
 /// List all sandbox containers for a given repository path.
 fn list_sandboxes_for_repo(repo_path: &Path) -> Result<Vec<SandboxInfo>> {
-    // Use docker ps with filter by label to find containers for this repo
-    let output = Command::new("docker")
-        .args([
-            "ps",
-            "-a", // Include stopped containers
-            "--filter",
-            &format!("label={}={}", REPO_PATH_LABEL, repo_path.display()),
-            "--format",
-            // Output: name, status, created timestamp, sandbox_name label
-            "{{.Names}}\t{{.Status}}\t{{.CreatedAt}}\t{{.Label \"dev.sandbox.name\"}}",
-        ])
-        .success()
-        .context("listing containers")?;
+    use bollard::models::ContainerSummaryStateEnum;
+    use chrono::{DateTime, Utc};
 
-    let stdout = String::from_utf8_lossy(&output);
+    let docker = Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+
+    // Filter by label to find containers for this repo
+    let mut filters = HashMap::new();
+    filters.insert(
+        "label".to_string(),
+        vec![format!("{}={}", REPO_PATH_LABEL, repo_path.display())],
+    );
+
+    let options = ListContainersOptions {
+        all: true, // Include stopped containers
+        filters: Some(filters),
+        ..Default::default()
+    };
+
+    let containers =
+        block_on(docker.list_containers(Some(options))).context("listing containers")?;
+
     let mut sandboxes = Vec::new();
 
-    for line in stdout.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 4 {
-            continue;
-        }
-
-        let status_str = parts[1];
-        let status = if status_str.starts_with("Up") {
-            SandboxStatus::Running
-        } else {
-            SandboxStatus::Stopped
+    for container in containers {
+        let labels = container.labels.unwrap_or_default();
+        let sandbox_name = match labels.get(SANDBOX_NAME_LABEL) {
+            Some(name) => name.clone(),
+            None => continue, // Skip containers without sandbox name label
         };
 
-        // Parse created timestamp (format: "2026-01-09 12:58:00 +0000 UTC")
-        // We only want "2026-01-09 12:58"
-        let created_raw = parts[2];
-        let created = if let Some((date_time, _rest)) = created_raw.split_once(" +") {
-            // date_time is "2026-01-09 12:58:00", we want "2026-01-09 12:58"
-            // Find last colon and truncate
-            if let Some(last_colon_idx) = date_time.rfind(':') {
-                date_time[..last_colon_idx].to_string()
-            } else {
-                date_time.to_string()
-            }
-        } else {
-            created_raw.to_string()
+        let status = match container.state {
+            Some(ContainerSummaryStateEnum::RUNNING) => SandboxStatus::Running,
+            _ => SandboxStatus::Stopped,
         };
 
-        let sandbox_name = parts[3].to_string();
+        // Format created timestamp: Unix timestamp -> "YYYY-MM-DD HH:MM"
+        let created = container
+            .created
+            .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
 
         sandboxes.push(SandboxInfo {
             name: sandbox_name,
