@@ -44,6 +44,7 @@ cgi-service = "*"
 rusqlite = { version = "*", features = ["bundled"] }
 socket2 = "*"
 tower-service = ">=0"
+bollard = "*"
 
 [dev-dependencies]
 assert_cmd = "*"

@@ -1,17 +1,21 @@
 pub mod db;
 pub mod protocol;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use bollard::query_parameters::CreateContainerOptions;
+use bollard::secret::{ContainerCreateBody, HostConfig};
+use bollard::Docker;
 use indoc::indoc;
 use log::error;
 use rusqlite::Connection;
 use tokio::net::UnixListener;
 
+use crate::async_runtime::block_on;
 use crate::command_ext::CommandExt;
 use crate::config::{Network, Runtime};
 use crate::gateway;
@@ -527,7 +531,7 @@ fn docker_runtime_flag(runtime: Runtime) -> &'static str {
     }
 }
 
-/// Create a new container with docker run.
+/// Create a new container using the bollard Docker API.
 fn create_container(
     name: &str,
     sandbox_name: &SandboxName,
@@ -536,38 +540,45 @@ fn create_container(
     runtime: Runtime,
     network_config: Network,
 ) -> Result<ContainerId> {
-    let network_arg = match network_config {
+    let network_mode = match network_config {
         Network::UnsafeHost => "host",
         Network::Default => "bridge",
     };
 
-    let output = Command::new("docker")
-        .args([
-            "run",
-            "-d", // Detach to get container ID
-            "--runtime",
-            docker_runtime_flag(runtime),
-            "--name",
-            name,
-            "--hostname",
-            &sandbox_name.0,
-            "--network",
-            network_arg,
-            "--label",
-            &format!("{}={}", REPO_PATH_LABEL, repo_path.display()),
-            "--label",
-            &format!("{}={}", SANDBOX_NAME_LABEL, sandbox_name.0),
-            &image.0,
-            "sleep",
-            "infinity", // Keep container running
-        ])
-        .success()
-        .context("creating container")?;
+    let mut labels = HashMap::new();
+    labels.insert(REPO_PATH_LABEL.to_string(), repo_path.display().to_string());
+    labels.insert(SANDBOX_NAME_LABEL.to_string(), sandbox_name.0.clone());
 
-    // Container ID is printed to stdout (without trailing newline)
-    let container_id = String::from_utf8_lossy(&output).trim().to_string();
+    let host_config = HostConfig {
+        runtime: Some(docker_runtime_flag(runtime).to_string()),
+        network_mode: Some(network_mode.to_string()),
+        ..Default::default()
+    };
 
-    Ok(ContainerId(container_id))
+    let config = ContainerCreateBody {
+        image: Some(image.0.clone()),
+        hostname: Some(sandbox_name.0.clone()),
+        labels: Some(labels),
+        cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+        host_config: Some(host_config),
+        ..Default::default()
+    };
+
+    let options = CreateContainerOptions {
+        name: Some(name.to_string()),
+        ..Default::default()
+    };
+
+    let docker = Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+
+    // Create the container
+    let response =
+        block_on(docker.create_container(Some(options), config)).context("creating container")?;
+
+    // Start the container (equivalent to docker run's behavior)
+    block_on(docker.start_container(&response.id, None)).context("starting container")?;
+
+    Ok(ContainerId(response.id))
 }
 
 /// List all sandbox containers for a given repository path.
