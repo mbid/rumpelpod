@@ -292,6 +292,7 @@ fn check_git_directory_ownership(
 /// If `host_branch` is provided (only on first entry), the primary branch's upstream
 /// will be set to `host/<host_branch>`. This allows `git pull` and `git status` to
 /// show meaningful tracking information relative to the host branch.
+#[allow(clippy::too_many_arguments)]
 fn setup_git_remotes(
     docker: &Docker,
     container_id: &str,
@@ -322,12 +323,12 @@ fn setup_git_remotes(
     .context("configuring git http.extraHeader")?;
 
     // Add "host" remote (or update if exists)
-    match run_git(&["remote", "add", "host", &git_http_url]) {
+    match run_git(&["remote", "add", "host", git_http_url]) {
         Ok(_) => {}
         Err(e) => {
             let error_msg = e.to_string();
             if error_msg.contains("already exists") {
-                run_git(&["remote", "set-url", "host", &git_http_url])
+                run_git(&["remote", "set-url", "host", git_http_url])
                     .context("updating host remote URL")?;
             } else {
                 return Err(e).context("adding host remote");
@@ -350,12 +351,12 @@ fn setup_git_remotes(
         .context("disabling push for host remote")?;
 
     // Add "sandbox" remote (same URL, for pushing sandbox commits to gateway)
-    match run_git(&["remote", "add", "sandbox", &git_http_url]) {
+    match run_git(&["remote", "add", "sandbox", git_http_url]) {
         Ok(_) => {}
         Err(e) => {
             let error_msg = e.to_string();
             if error_msg.contains("already exists") {
-                run_git(&["remote", "set-url", "sandbox", &git_http_url])
+                run_git(&["remote", "set-url", "sandbox", git_http_url])
                     .context("updating sandbox remote URL")?;
             } else {
                 return Err(e).context("adding sandbox remote");

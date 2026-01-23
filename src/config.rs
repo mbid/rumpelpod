@@ -25,12 +25,13 @@ pub enum Runtime {
 }
 
 /// Model to use for the agent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize, Default)]
 pub enum Model {
     // Anthropic
     /// Claude Opus 4.5 - most capable model
     #[serde(rename = "claude-opus-4-5")]
     #[value(name = "claude-opus-4-5")]
+    #[default]
     ClaudeOpus,
     /// Claude Sonnet 4.5 - balanced performance and cost
     #[serde(rename = "claude-sonnet-4-5")]
@@ -68,12 +69,6 @@ pub enum Model {
     #[serde(rename = "grok-4-1-fast-reasoning")]
     #[value(name = "grok-4-1-fast-reasoning")]
     Grok41Fast,
-}
-
-impl Default for Model {
-    fn default() -> Self {
-        Model::ClaudeOpus
-    }
 }
 
 impl std::fmt::Display for Model {

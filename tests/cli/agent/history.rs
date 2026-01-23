@@ -200,7 +200,7 @@ fn agent_interactive_resume_shows_history() {
 
     let sandbox_bin = cargo::cargo_bin!("sandbox");
 
-    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    let mut cmd = CommandBuilder::new(sandbox_bin);
     cmd.cwd(repo.path());
     cmd.env(
         "SANDBOX_DAEMON_SOCKET",

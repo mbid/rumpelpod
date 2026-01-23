@@ -172,6 +172,7 @@ struct ErrorResponse {
 pub trait Daemon: Send + Sync + 'static {
     // PUT /sandbox
     // with JSON content type for request and response bodies.
+    #[allow(clippy::too_many_arguments)]
     fn launch_sandbox(
         &self,
         sandbox_name: SandboxName,

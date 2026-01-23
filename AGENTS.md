@@ -9,3 +9,5 @@ This is a rust project implementing a sandboxed LLM agent.
 - Don't run commands in interactive mode (e.g. git rebase, git rebase --continue):
   You can't operate the UI, only run commands.
 - Don't use --test-threads unless you are debugging a concurrency issue.
+- Run ./pipeline before finishing your work to ensure everything is properly formatted, builds without warnings, and passes clippy.
+- After committing, fetch and rebase on host/master to stay up to date.

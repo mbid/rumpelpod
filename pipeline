@@ -1,0 +1,34 @@
+#!/bin/bash
+set -e
+
+echo "=== Checking formatting ==="
+cargo fmt -- --check
+
+echo ""
+echo "=== Building (with tests, no warnings) ==="
+RUSTFLAGS="-D warnings" cargo build --all-targets
+
+echo ""
+echo "=== Running tests ==="
+timeout 120 cargo test
+
+echo ""
+echo "=== Running clippy (no warnings) ==="
+RUSTFLAGS="-D warnings" cargo clippy --all-targets
+
+echo ""
+echo "=== Checking git status ==="
+if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    echo "⚠️  WARNING: Working directory is not clean!"
+    echo ""
+    echo "Modified or staged files:"
+    git status --short
+    echo ""
+    echo "Untracked files:"
+    git ls-files --others --exclude-standard
+else
+    echo "✓ Working directory is clean"
+fi
+
+echo ""
+echo "=== Pipeline complete ==="

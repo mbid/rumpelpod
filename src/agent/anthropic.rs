@@ -77,6 +77,7 @@ fn filter_invalid_content(Message { role, content }: Message) -> Option<Message>
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_claude_agent(
     container_name: &str,
     user: &str,

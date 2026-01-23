@@ -190,8 +190,9 @@ const TEST_IMAGE_LABEL: &str = "dev.sandbox.test.dockerfile_hash";
 /// The mutex ensures only one build happens at a time (avoiding parallel builds
 /// of the same image) and enables caching of results.
 /// Arc is needed because anyhow::Error is not Clone.
-static DOCKER_IMAGE_CACHE: Mutex<Option<BTreeMap<[u8; 32], Arc<anyhow::Result<ImageId>>>>> =
-    Mutex::new(None);
+type ImageCache = BTreeMap<[u8; 32], Arc<anyhow::Result<ImageId>>>;
+#[allow(clippy::type_complexity)]
+static DOCKER_IMAGE_CACHE: Mutex<Option<ImageCache>> = Mutex::new(None);
 
 /// Encode a file type as a single byte for hashing.
 fn file_type_byte(ft: FileType) -> u8 {

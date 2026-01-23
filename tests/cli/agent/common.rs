@@ -153,6 +153,7 @@ pub struct InteractiveOutput {
 }
 
 /// Action to take when the conversation picker is shown.
+#[allow(dead_code)]
 pub enum PickerAction {
     /// Select a conversation by index (e.g., 0 for most recent).
     Select(usize),
@@ -166,6 +167,7 @@ pub enum PickerAction {
 /// Messages are sent one at a time via a mock editor.
 /// The first message is the initial prompt, subsequent messages are follow-ups.
 /// After all messages are sent, the agent exits (empty editor input triggers exit).
+#[allow(dead_code)]
 pub fn run_agent_interactive(
     repo: &TestRepo,
     daemon: &TestDaemon,
@@ -175,6 +177,7 @@ pub fn run_agent_interactive(
 }
 
 /// Run agent interactively with a specific model.
+#[allow(dead_code)]
 pub fn run_agent_interactive_and_model(
     repo: &TestRepo,
     daemon: &TestDaemon,
@@ -185,6 +188,7 @@ pub fn run_agent_interactive_and_model(
 }
 
 /// Run agent interactively with extra CLI arguments.
+#[allow(dead_code)]
 pub fn run_agent_interactive_and_args(
     repo: &TestRepo,
     daemon: &TestDaemon,
@@ -219,7 +223,7 @@ pub fn run_agent_interactive_model_and_args(
 
     let sandbox_bin = cargo::cargo_bin!("sandbox");
 
-    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    let mut cmd = CommandBuilder::new(sandbox_bin);
     cmd.cwd(repo.path());
     cmd.env(
         "SANDBOX_DAEMON_SOCKET",
@@ -354,7 +358,7 @@ pub fn run_agent_expecting_picker(
 
     let sandbox_bin = cargo::cargo_bin!("sandbox");
 
-    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    let mut cmd = CommandBuilder::new(sandbox_bin);
     cmd.cwd(repo.path());
     cmd.env(
         "SANDBOX_DAEMON_SOCKET",
