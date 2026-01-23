@@ -30,6 +30,16 @@ use protocol::{
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
 
+/// The default Docker socket path.
+const DEFAULT_DOCKER_SOCKET: &str = "/var/run/docker.sock";
+
+/// Returns the default Docker socket path.
+/// For now, this always returns the local socket path, but will change
+/// in the future to support remote Docker hosts via SSH forwarding.
+fn default_docker_socket() -> PathBuf {
+    PathBuf::from(DEFAULT_DOCKER_SOCKET)
+}
+
 /// Get the daemon socket path.
 /// Uses $SANDBOX_DAEMON_SOCKET if set, otherwise $XDG_RUNTIME_DIR/sandbox.sock.
 pub fn socket_path() -> Result<PathBuf> {
@@ -728,6 +738,7 @@ impl Daemon for DaemonServer {
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
+                docker_socket: default_docker_socket(),
             });
         }
 
@@ -758,7 +769,11 @@ impl Daemon for DaemonServer {
             host_branch.as_deref(),
         )?;
 
-        Ok(LaunchResult { container_id, user })
+        Ok(LaunchResult {
+            container_id,
+            user,
+            docker_socket: default_docker_socket(),
+        })
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {

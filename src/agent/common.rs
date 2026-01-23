@@ -35,8 +35,13 @@ pub fn model_provider(model: Model) -> Provider {
 }
 
 /// Create a Docker connection for executing commands in containers.
-fn docker_connect() -> Result<Docker> {
-    Docker::connect_with_socket_defaults().context("connecting to Docker daemon")
+fn docker_connect(docker_socket: &Path) -> Result<Docker> {
+    Docker::connect_with_socket(
+        docker_socket.to_string_lossy().as_ref(),
+        120,
+        bollard::API_DEFAULT_VERSION,
+    )
+    .context("connecting to Docker daemon")
 }
 
 pub const BASE_SYSTEM_PROMPT: &str = "You are a helpful assistant running inside a sandboxed environment. You can execute bash commands to help the user.";
@@ -133,9 +138,14 @@ impl ToolName {
 }
 
 /// Read AGENTS.md from the sandbox if it exists.
-pub fn read_agents_md(container_name: &str, user: &str, repo_path: &Path) -> Option<String> {
+pub fn read_agents_md(
+    container_name: &str,
+    user: &str,
+    repo_path: &Path,
+    docker_socket: &Path,
+) -> Option<String> {
     debug!("Reading {} from sandbox", AGENTS_MD_PATH);
-    let docker = docker_connect().ok()?;
+    let docker = docker_connect(docker_socket).ok()?;
     let workdir = repo_path.to_string_lossy().to_string();
 
     let output = exec_command(
@@ -163,11 +173,12 @@ pub fn execute_edit_in_sandbox(
     container_name: &str,
     user: &str,
     repo_path: &Path,
+    docker_socket: &Path,
     file_path: &str,
     old_string: &str,
     new_string: &str,
 ) -> Result<(String, bool)> {
-    let docker = docker_connect()?;
+    let docker = docker_connect(docker_socket)?;
     let workdir = repo_path.to_string_lossy().to_string();
     let env = vec!["GIT_EDITOR=false"];
 
@@ -232,10 +243,11 @@ pub fn execute_write_in_sandbox(
     container_name: &str,
     user: &str,
     repo_path: &Path,
+    docker_socket: &Path,
     file_path: &str,
     content: &str,
 ) -> Result<(String, bool)> {
-    let docker = docker_connect()?;
+    let docker = docker_connect(docker_socket)?;
     let workdir = repo_path.to_string_lossy().to_string();
     let env = vec!["GIT_EDITOR=false"];
 
@@ -343,11 +355,12 @@ pub fn execute_bash_in_sandbox(
     container_name: &str,
     user: &str,
     repo_path: &Path,
+    docker_socket: &Path,
     command: &str,
 ) -> Result<(String, bool)> {
     const MAX_OUTPUT_SIZE: usize = 30000;
 
-    let docker = docker_connect()?;
+    let docker = docker_connect(docker_socket)?;
     let workdir = repo_path.to_string_lossy().to_string();
     let env = vec!["GIT_EDITOR=false"];
 

@@ -49,7 +49,11 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
     let config = SandboxConfig::load(&repo_root)?;
 
-    let LaunchResult { container_id, user } = launch_sandbox(&cmd.name)?;
+    let LaunchResult {
+        container_id,
+        user,
+        docker_socket,
+    } = launch_sandbox(&cmd.name)?;
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
@@ -61,6 +65,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let workdir = config.repo_path.join(relative);
 
     let mut docker_cmd = Command::new("docker");
+    docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
     docker_cmd.arg("exec");
     docker_cmd.args(["--user", &user]);
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);

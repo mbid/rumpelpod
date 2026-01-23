@@ -35,6 +35,7 @@ pub fn run_grok_agent(
     container_name: &str,
     user: &str,
     repo_path: &Path,
+    docker_socket: &Path,
     model: Model,
     cache: Option<LlmCache>,
     initial_history: Option<serde_json::Value>,
@@ -45,7 +46,7 @@ pub fn run_grok_agent(
     let mut stdout = std::io::stdout();
 
     // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, user, repo_path);
+    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
     // Load initial history if resuming, otherwise start with system message
@@ -182,8 +183,13 @@ pub fn run_grok_agent(
 
                             println!("$ {command}");
 
-                            let (output, success) =
-                                execute_bash_in_sandbox(container_name, user, repo_path, command)?;
+                            let (output, success) = execute_bash_in_sandbox(
+                                container_name,
+                                user,
+                                repo_path,
+                                docker_socket,
+                                command,
+                            )?;
 
                             if !output.is_empty() {
                                 println!("{output}");
@@ -207,6 +213,7 @@ pub fn run_grok_agent(
                                 container_name,
                                 user,
                                 repo_path,
+                                docker_socket,
                                 file_path,
                                 old_string,
                                 new_string,
@@ -230,6 +237,7 @@ pub fn run_grok_agent(
                                 container_name,
                                 user,
                                 repo_path,
+                                docker_socket,
                                 file_path,
                                 content,
                             )?;

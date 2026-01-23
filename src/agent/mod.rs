@@ -195,6 +195,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     // Run the agent loop
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
+    let docker_socket = &launch_result.docker_socket;
     let repo_path = &sandbox_config.repo_path;
     let thinking_budget = cmd.thinking_budget.or(sandbox_config.agent.thinking_budget);
 
@@ -212,6 +213,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
                 container_name,
                 user,
                 repo_path,
+                docker_socket,
                 m,
                 thinking_budget,
                 cache,
@@ -225,6 +227,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             container_name,
             user,
             repo_path,
+            docker_socket,
             m,
             cache,
             initial_history,
@@ -234,6 +237,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             container_name,
             user,
             repo_path,
+            docker_socket,
             m,
             cache,
             initial_history,

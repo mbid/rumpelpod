@@ -31,6 +31,9 @@ pub struct LaunchResult {
     /// The resolved user for the sandbox. This is either the user specified in the config,
     /// or the user from the image's USER directive.
     pub user: String,
+    /// The Docker socket path to use for connecting to the Docker daemon.
+    /// Clients must use this socket for all Docker operations on this sandbox.
+    pub docker_socket: std::path::PathBuf,
 }
 
 /// Human-readable sandbox name to distinguish multiple sandboxes for the same repo.
@@ -79,6 +82,8 @@ struct LaunchSandboxResponse {
     container_id: ContainerId,
     /// The resolved user for the sandbox.
     user: String,
+    /// The Docker socket path to use for connecting to the Docker daemon.
+    docker_socket: PathBuf,
 }
 
 /// Request body for delete_sandbox endpoint.
@@ -276,6 +281,7 @@ impl Daemon for DaemonClient {
             Ok(LaunchResult {
                 container_id: body.container_id,
                 user: body.user,
+                docker_socket: body.docker_socket,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -452,6 +458,7 @@ async fn launch_sandbox_handler<D: Daemon>(
         Ok(launch_result) => Ok(Json(LaunchSandboxResponse {
             container_id: launch_result.container_id,
             user: launch_result.user,
+            docker_socket: launch_result.docker_socket,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -635,6 +642,7 @@ mod tests {
             Ok(LaunchResult {
                 container_id: ContainerId(format!("{}:{}", sandbox_name.0, image.0)),
                 user: user.unwrap_or_else(|| "mockuser".to_string()),
+                docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
         }
 

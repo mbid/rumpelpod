@@ -81,6 +81,7 @@ pub fn run_claude_agent(
     container_name: &str,
     user: &str,
     repo_path: &Path,
+    docker_socket: &Path,
     model: Model,
     thinking_budget: Option<u32>,
     cache: Option<LlmCache>,
@@ -101,7 +102,7 @@ pub fn run_claude_agent(
     };
 
     // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, user, repo_path);
+    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
     let is_tty = std::io::stdin().is_terminal();
@@ -278,6 +279,7 @@ pub fn run_claude_agent(
                                     container_name,
                                     user,
                                     repo_path,
+                                    docker_socket,
                                     command,
                                 )?;
 
@@ -305,6 +307,7 @@ pub fn run_claude_agent(
                                     container_name,
                                     user,
                                     repo_path,
+                                    docker_socket,
                                     file_path,
                                     old_string,
                                     new_string,
@@ -330,6 +333,7 @@ pub fn run_claude_agent(
                                     container_name,
                                     user,
                                     repo_path,
+                                    docker_socket,
                                     file_path,
                                     content,
                                 )?;
