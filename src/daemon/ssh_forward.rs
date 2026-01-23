@@ -9,13 +9,15 @@
 //! connection per remote host, allowing dynamic addition of forwards via `-O forward`.
 
 use std::collections::HashMap;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use sha2::{Digest, Sha256};
 
 use crate::config::{get_runtime_dir, RemoteDocker};
@@ -272,9 +274,9 @@ impl SshForwardManager {
 
         debug!("Starting SSH: {:?}", cmd);
 
-        let process = cmd
+        let mut process = cmd
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| {
@@ -283,6 +285,55 @@ impl SshForwardManager {
                     host.user, host.host, host.port
                 )
             })?;
+
+        // Spawn threads to log stdout and stderr from the SSH process
+        let ssh_target = format!("{}@{}:{}", host.user, host.host, host.port);
+
+        if let Some(stdout) = process.stdout.take() {
+            let target = ssh_target.clone();
+            thread::Builder::new()
+                .name(format!("ssh-stdout-{}", host.hash_prefix()))
+                .spawn(move || {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(line) => {
+                                if !line.trim().is_empty() {
+                                    info!("SSH {}: {}", target, line);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Error reading SSH stdout for {}: {}", target, e);
+                                break;
+                            }
+                        }
+                    }
+                })
+                .context("Failed to spawn SSH stdout logging thread")?;
+        }
+
+        if let Some(stderr) = process.stderr.take() {
+            let target = ssh_target.clone();
+            thread::Builder::new()
+                .name(format!("ssh-stderr-{}", host.hash_prefix()))
+                .spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for line in reader.lines() {
+                        match line {
+                            Ok(line) => {
+                                if !line.trim().is_empty() {
+                                    error!("SSH {}: {}", target, line);
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Error reading SSH stderr for {}: {}", target, e);
+                                break;
+                            }
+                        }
+                    }
+                })
+                .context("Failed to spawn SSH stderr logging thread")?;
+        }
 
         // Wait for the docker socket to appear (SSH needs time to establish the tunnel)
         let start = Instant::now();
@@ -311,31 +362,14 @@ impl SshForwardManager {
         }
 
         // Timeout - kill the process and return error
-        let mut process = process;
         let _ = process.kill();
 
-        // Try to get stderr for error message
-        let stderr = process.stderr.take();
-        let error_msg = stderr
-            .and_then(|mut s| {
-                use std::io::Read;
-                let mut buf = String::new();
-                s.read_to_string(&mut buf).ok()?;
-                Some(buf)
-            })
-            .unwrap_or_default();
-
         anyhow::bail!(
-            "SSH tunnel to {}@{}:{} failed to establish within {:?}. {}",
+            "SSH tunnel to {}@{}:{} failed to establish within {:?}. Check SSH configuration and connectivity. See logs above for SSH error details.",
             host.user,
             host.host,
             host.port,
-            timeout,
-            if error_msg.is_empty() {
-                "Check SSH configuration and connectivity.".to_string()
-            } else {
-                format!("SSH error: {}", error_msg.trim())
-            }
+            timeout
         );
     }
 
