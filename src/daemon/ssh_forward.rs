@@ -98,13 +98,19 @@ struct ForwardSession {
 }
 
 impl ForwardSession {
-    /// Check if the SSH process is still running.
+    /// Check if the SSH process is still running and sockets exist.
     fn is_alive(&mut self) -> bool {
-        match self.process.try_wait() {
+        // First check if the process is still running
+        let process_alive = match self.process.try_wait() {
             Ok(None) => true,     // Still running
             Ok(Some(_)) => false, // Exited
             Err(_) => false,      // Error checking - assume dead
-        }
+        };
+
+        // Also verify that the responsible sockets exist
+        let sockets_exist = self.control_socket.exists() && self.docker_socket.exists();
+
+        process_alive && sockets_exist
     }
 }
 
@@ -222,10 +228,7 @@ impl SshForwardManager {
         // Remove stale socket files if they exist
         if docker_socket.exists() {
             std::fs::remove_file(&docker_socket).with_context(|| {
-                format!(
-                    "Failed to remove stale socket: {}",
-                    docker_socket.display()
-                )
+                format!("Failed to remove stale socket: {}", docker_socket.display())
             })?;
         }
         if control_socket.exists() {
@@ -404,13 +407,20 @@ impl SshForwardManager {
 
         // Check if forwards are already set up
         if session.remote_forwards.bridge_port.is_some() {
-            debug!("Remote forwards already configured for {}@{}", host.user, host.host);
+            debug!(
+                "Remote forwards already configured for {}@{}",
+                host.user, host.host
+            );
             return Ok(session.remote_forwards.clone());
         }
 
         // Add forward for bridge network (containers in default network mode)
-        let bridge_port =
-            self.add_remote_forward(&host, &session.control_socket, remote_bridge_ip, local_git_socket)?;
+        let bridge_port = self.add_remote_forward(
+            &host,
+            &session.control_socket,
+            remote_bridge_ip,
+            local_git_socket,
+        )?;
         info!(
             "Remote forward established: {}:{} -> {}",
             remote_bridge_ip,
@@ -419,8 +429,12 @@ impl SshForwardManager {
         );
 
         // Add forward for localhost (containers in unsafe-host network mode)
-        let localhost_port =
-            self.add_remote_forward(&host, &session.control_socket, "127.0.0.1", local_git_socket)?;
+        let localhost_port = self.add_remote_forward(
+            &host,
+            &session.control_socket,
+            "127.0.0.1",
+            local_git_socket,
+        )?;
         info!(
             "Remote forward established: 127.0.0.1:{} -> {}",
             localhost_port,
@@ -567,7 +581,8 @@ mod tests {
         assert_eq!(parse_allocated_port(output), Some(12345));
 
         // With extra lines (verbose format)
-        let output = "Some other output\nAllocated port 12345 for remote forward to /path\nMore stuff";
+        let output =
+            "Some other output\nAllocated port 12345 for remote forward to /path\nMore stuff";
         assert_eq!(parse_allocated_port(output), Some(12345));
 
         // No match

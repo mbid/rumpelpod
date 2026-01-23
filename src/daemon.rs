@@ -704,9 +704,11 @@ impl Daemon for DaemonServer {
                     Some(f) => f,
                     None => {
                         // Need to set up forwards - first get the remote's bridge network IP
-                        let remote_bridge_ip =
-                            git_http_server::get_network_gateway_ip_via_socket(&docker_socket, "bridge")
-                                .context("getting remote bridge network gateway IP")?;
+                        let remote_bridge_ip = git_http_server::get_network_gateway_ip_via_socket(
+                            &docker_socket,
+                            "bridge",
+                        )
+                        .context("getting remote bridge network gateway IP")?;
 
                         self.ssh_forward
                             .setup_git_http_forwards(r, &self.git_unix_socket, &remote_bridge_ip)
@@ -717,7 +719,9 @@ impl Daemon for DaemonServer {
                 match network {
                     Network::UnsafeHost => (
                         "127.0.0.1".to_string(),
-                        forwards.localhost_port.context("localhost forward not set up")?,
+                        forwards
+                            .localhost_port
+                            .context("localhost forward not set up")?,
                     ),
                     Network::Default => (
                         forwards.bridge_ip.context("bridge IP not set")?,

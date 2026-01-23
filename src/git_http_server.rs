@@ -200,10 +200,7 @@ impl UnixGitHttpServer {
         // Remove stale socket file if it exists
         if socket_path.exists() {
             std::fs::remove_file(&socket_path).with_context(|| {
-                format!(
-                    "Failed to remove stale socket: {}",
-                    socket_path.display()
-                )
+                format!("Failed to remove stale socket: {}", socket_path.display())
             })?;
         }
 
@@ -240,21 +237,22 @@ impl UnixGitHttpServer {
                         let app = app.clone();
                         tokio::spawn(async move {
                             let io = TokioIo::new(stream);
-                            let service =
-                                hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                            let service = hyper::service::service_fn(
+                                move |req: Request<hyper::body::Incoming>| {
                                     // Convert incoming body to axum's Body type
                                     let (parts, body) = req.into_parts();
                                     let body = Body::new(body);
                                     let req = Request::from_parts(parts, body);
                                     let app = app.clone();
                                     async move {
-                                        let response: Response = app.oneshot(req).await.unwrap_or_else(|e| match e {});
+                                        let response: Response =
+                                            app.oneshot(req).await.unwrap_or_else(|e| match e {});
                                         Ok::<_, std::convert::Infallible>(response)
                                     }
-                                });
-                            if let Err(e) = http1::Builder::new()
-                                .serve_connection(io, service)
-                                .await
+                                },
+                            );
+                            if let Err(e) =
+                                http1::Builder::new().serve_connection(io, service).await
                             {
                                 debug!("Unix socket connection error: {}", e);
                             }
