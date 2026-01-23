@@ -40,6 +40,9 @@ tempfile = "*"
 listenfd = "*"
 url = "*"
 axum = "*"
+hyper = { version = "*", features = ["server", "http1"] }
+hyper-util = { version = "*", features = ["tokio"] }
+tower = { version = "*", features = ["util"] }
 cgi-service = "*"
 rusqlite = { version = "*", features = ["bundled"] }
 socket2 = "*"

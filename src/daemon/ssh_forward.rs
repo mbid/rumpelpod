@@ -1,11 +1,16 @@
 //! SSH socket forwarding for remote Docker hosts.
 //!
 //! This module manages SSH tunnels that forward remote Docker sockets to local
-//! Unix sockets, enabling transparent remote Docker operations.
+//! Unix sockets, enabling transparent remote Docker operations. It also supports
+//! remote port forwarding to expose local services (like the git HTTP server)
+//! to containers running on remote Docker hosts.
+//!
+//! The module uses SSH control sockets (multiplexing) to maintain a single SSH
+//! connection per remote host, allowing dynamic addition of forwards via `-O forward`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -41,21 +46,45 @@ impl RemoteHost {
         }
     }
 
-    /// Generate a unique socket filename based on host+port+user.
-    fn socket_name(&self) -> String {
+    /// Generate a hash prefix for unique naming based on host+port+user.
+    fn hash_prefix(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.host.as_bytes());
         hasher.update(self.port.to_le_bytes());
         hasher.update(self.user.as_bytes());
         let hash = hex::encode(hasher.finalize());
-        format!("docker-{}.sock", &hash[..12])
+        hash[..12].to_string()
     }
+
+    /// Generate a unique socket filename for the Docker socket forward.
+    fn docker_socket_name(&self) -> String {
+        format!("docker-{}.sock", self.hash_prefix())
+    }
+
+    /// Generate a unique socket filename for the SSH control socket.
+    fn control_socket_name(&self) -> String {
+        format!("ssh-ctl-{}.sock", self.hash_prefix())
+    }
+}
+
+/// Information about remote port forwards for a connection.
+/// These are used to expose the local git HTTP server to remote containers.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteForwards {
+    /// Port on remote's bridge network gateway IP forwarding to local git HTTP socket.
+    pub bridge_port: Option<u16>,
+    /// Port on remote's localhost forwarding to local git HTTP socket.
+    pub localhost_port: Option<u16>,
+    /// The remote's bridge network gateway IP.
+    pub bridge_ip: Option<String>,
 }
 
 /// An active SSH forwarding session.
 struct ForwardSession {
-    /// Path to the local Unix socket.
-    local_socket: PathBuf,
+    /// Path to the local Unix socket for Docker.
+    docker_socket: PathBuf,
+    /// Path to the SSH control socket for multiplexing.
+    control_socket: PathBuf,
     /// The SSH process handle.
     process: Child,
     /// Last time we verified the connection was alive.
@@ -64,6 +93,8 @@ struct ForwardSession {
     backoff: Duration,
     /// Number of consecutive failures.
     failures: u32,
+    /// Remote port forwards (for git HTTP server).
+    remote_forwards: RemoteForwards,
 }
 
 impl ForwardSession {
@@ -83,8 +114,9 @@ impl Drop for ForwardSession {
         let _ = self.process.kill();
         let _ = self.process.wait();
 
-        // Clean up the socket file
-        let _ = std::fs::remove_file(&self.local_socket);
+        // Clean up socket files
+        let _ = std::fs::remove_file(&self.docker_socket);
+        let _ = std::fs::remove_file(&self.control_socket);
     }
 }
 
@@ -138,7 +170,7 @@ impl SshForwardManager {
                     "Reusing existing SSH connection to {}@{}:{}",
                     host.user, host.host, host.port
                 );
-                return Ok(session.local_socket.clone());
+                return Ok(session.docker_socket.clone());
             }
 
             // Connection died, remove it and reconnect with backoff
@@ -161,7 +193,7 @@ impl SshForwardManager {
 
             // Start new connection with accumulated backoff
             let session = self.start_forwarding(host, backoff, failures)?;
-            let socket = session.local_socket.clone();
+            let socket = session.docker_socket.clone();
             connections.insert(host.clone(), session);
             return Ok(socket);
         }
@@ -172,24 +204,36 @@ impl SshForwardManager {
             host.user, host.host, host.port
         );
         let session = self.start_forwarding(host, INITIAL_DELAY, 0)?;
-        let socket = session.local_socket.clone();
+        let socket = session.docker_socket.clone();
         connections.insert(host.clone(), session);
         Ok(socket)
     }
 
-    /// Start a new SSH forwarding process.
+    /// Start a new SSH forwarding process with control socket for multiplexing.
     fn start_forwarding(
         &self,
         host: &RemoteHost,
         backoff: Duration,
         failures: u32,
     ) -> Result<ForwardSession> {
-        let local_socket = self.socket_dir.join(host.socket_name());
+        let docker_socket = self.socket_dir.join(host.docker_socket_name());
+        let control_socket = self.socket_dir.join(host.control_socket_name());
 
-        // Remove stale socket file if it exists
-        if local_socket.exists() {
-            std::fs::remove_file(&local_socket).with_context(|| {
-                format!("Failed to remove stale socket: {}", local_socket.display())
+        // Remove stale socket files if they exist
+        if docker_socket.exists() {
+            std::fs::remove_file(&docker_socket).with_context(|| {
+                format!(
+                    "Failed to remove stale socket: {}",
+                    docker_socket.display()
+                )
+            })?;
+        }
+        if control_socket.exists() {
+            std::fs::remove_file(&control_socket).with_context(|| {
+                format!(
+                    "Failed to remove stale control socket: {}",
+                    control_socket.display()
+                )
             })?;
         }
 
@@ -198,11 +242,16 @@ impl SshForwardManager {
         // Don't execute a remote command
         cmd.arg("-N");
 
+        // Enable control socket for multiplexing (allows adding forwards later)
+        cmd.args(["-o", &format!("ControlPath={}", control_socket.display())]);
+        cmd.args(["-o", "ControlMaster=yes"]);
+        cmd.args(["-o", "ControlPersist=yes"]);
+
         // Local socket forwarding: local_socket -> remote docker socket
         cmd.arg("-L");
         cmd.arg(format!(
             "{}:{}",
-            local_socket.display(),
+            docker_socket.display(),
             REMOTE_DOCKER_SOCKET
         ));
 
@@ -211,7 +260,6 @@ impl SshForwardManager {
         cmd.args(["-o", "ServerAliveCountMax=3"]);
         cmd.args(["-o", "ExitOnForwardFailure=yes"]);
         cmd.args(["-o", "BatchMode=yes"]);
-        cmd.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
 
         // SSH port
         cmd.args(["-p", &host.port.to_string()]);
@@ -222,9 +270,9 @@ impl SshForwardManager {
         debug!("Starting SSH: {:?}", cmd);
 
         let process = cmd
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .with_context(|| {
                 format!(
@@ -233,25 +281,27 @@ impl SshForwardManager {
                 )
             })?;
 
-        // Wait for the socket to appear (SSH needs time to establish the tunnel)
+        // Wait for the docker socket to appear (SSH needs time to establish the tunnel)
         let start = Instant::now();
         let timeout = Duration::from_secs(30);
 
         while start.elapsed() < timeout {
-            if local_socket.exists() {
+            if docker_socket.exists() {
                 info!(
                     "SSH tunnel established to {}@{}:{} -> {}",
                     host.user,
                     host.host,
                     host.port,
-                    local_socket.display()
+                    docker_socket.display()
                 );
                 return Ok(ForwardSession {
-                    local_socket,
+                    docker_socket,
+                    control_socket,
                     process,
                     last_check: Instant::now(),
                     backoff,
                     failures,
+                    remote_forwards: RemoteForwards::default(),
                 });
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -285,6 +335,116 @@ impl SshForwardManager {
             }
         );
     }
+
+    /// Add a remote port forward using the SSH control socket.
+    ///
+    /// Uses `-O forward` to dynamically add a forward to an existing connection.
+    /// Returns the allocated port on the remote host.
+    fn add_remote_forward(
+        &self,
+        host: &RemoteHost,
+        control_socket: &Path,
+        remote_bind_addr: &str,
+        local_socket: &Path,
+    ) -> Result<u16> {
+        let forward_spec = format!("{}:0:{}", remote_bind_addr, local_socket.display());
+
+        debug!(
+            "Adding remote forward via control socket: -R {}",
+            forward_spec
+        );
+
+        let output = Command::new("ssh")
+            .args(["-o", &format!("ControlPath={}", control_socket.display())])
+            .args(["-O", "forward"])
+            .args(["-R", &forward_spec])
+            .arg(format!("{}@{}", host.user, host.host))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("Failed to execute ssh -O forward")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "Failed to add remote forward -R {}: {}",
+                forward_spec,
+                stderr.trim()
+            );
+        }
+
+        // Parse the allocated port from stdout
+        // Format: "Allocated port XXXXX for remote forward to /path/to/socket"
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_allocated_port(&stdout).with_context(|| {
+            format!(
+                "Failed to parse allocated port from ssh output: {}",
+                stdout.trim()
+            )
+        })
+    }
+
+    /// Set up remote port forwards for the git HTTP server.
+    ///
+    /// This forwards connections from the remote host (both bridge network IP and localhost)
+    /// to a local unix socket where the git HTTP server is listening.
+    pub fn setup_git_http_forwards(
+        &self,
+        remote: &RemoteDocker,
+        local_git_socket: &Path,
+        remote_bridge_ip: &str,
+    ) -> Result<RemoteForwards> {
+        let host = RemoteHost::from_remote_docker(remote);
+        let mut connections = self.connections.lock().unwrap();
+
+        let session = connections
+            .get_mut(&host)
+            .context("No SSH connection for this remote host")?;
+
+        // Check if forwards are already set up
+        if session.remote_forwards.bridge_port.is_some() {
+            debug!("Remote forwards already configured for {}@{}", host.user, host.host);
+            return Ok(session.remote_forwards.clone());
+        }
+
+        // Add forward for bridge network (containers in default network mode)
+        let bridge_port =
+            self.add_remote_forward(&host, &session.control_socket, remote_bridge_ip, local_git_socket)?;
+        info!(
+            "Remote forward established: {}:{} -> {}",
+            remote_bridge_ip,
+            bridge_port,
+            local_git_socket.display()
+        );
+
+        // Add forward for localhost (containers in unsafe-host network mode)
+        let localhost_port =
+            self.add_remote_forward(&host, &session.control_socket, "127.0.0.1", local_git_socket)?;
+        info!(
+            "Remote forward established: 127.0.0.1:{} -> {}",
+            localhost_port,
+            local_git_socket.display()
+        );
+
+        session.remote_forwards = RemoteForwards {
+            bridge_port: Some(bridge_port),
+            localhost_port: Some(localhost_port),
+            bridge_ip: Some(remote_bridge_ip.to_string()),
+        };
+
+        Ok(session.remote_forwards.clone())
+    }
+
+    /// Get the current remote forwards for a remote host, if any.
+    pub fn get_remote_forwards(&self, remote: &RemoteDocker) -> Option<RemoteForwards> {
+        let host = RemoteHost::from_remote_docker(remote);
+        let connections = self.connections.lock().unwrap();
+        connections
+            .get(&host)
+            .map(|s| s.remote_forwards.clone())
+            .filter(|f| f.bridge_port.is_some())
+    }
 }
 
 impl Drop for SshForwardManager {
@@ -306,6 +466,35 @@ fn next_backoff(current: Duration) -> Duration {
     std::cmp::min(current.saturating_mul(2), MAX_DELAY)
 }
 
+/// Parse the allocated port from SSH's `-O forward` output.
+///
+/// Handles multiple SSH output formats:
+/// - "Allocated port XXXXX for remote forward to ..." (verbose format)
+/// - "XXXXX" (just the port number, some SSH versions)
+fn parse_allocated_port(output: &str) -> Option<u16> {
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        // Try verbose format: "Allocated port XXXXX for remote forward to ..."
+        if let Some(rest) = line.strip_prefix("Allocated port ") {
+            if let Some(port_str) = rest.split_whitespace().next() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return Some(port);
+                }
+            }
+        }
+
+        // Try bare port number format
+        if let Ok(port) = line.parse::<u16>() {
+            return Some(port);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_socket_name() {
+    fn test_socket_names() {
         let host1 = RemoteHost {
             host: "docker1.example.com".to_string(),
             port: 22,
@@ -337,14 +526,18 @@ mod tests {
         };
 
         // Different hosts should have different socket names
-        assert_ne!(host1.socket_name(), host2.socket_name());
+        assert_ne!(host1.docker_socket_name(), host2.docker_socket_name());
+        assert_ne!(host1.control_socket_name(), host2.control_socket_name());
 
         // Same host should always produce the same socket name
-        assert_eq!(host1.socket_name(), host1.socket_name());
+        assert_eq!(host1.docker_socket_name(), host1.docker_socket_name());
+        assert_eq!(host1.control_socket_name(), host1.control_socket_name());
 
-        // Socket name should have expected format
-        assert!(host1.socket_name().starts_with("docker-"));
-        assert!(host1.socket_name().ends_with(".sock"));
+        // Socket names should have expected format
+        assert!(host1.docker_socket_name().starts_with("docker-"));
+        assert!(host1.docker_socket_name().ends_with(".sock"));
+        assert!(host1.control_socket_name().starts_with("ssh-ctl-"));
+        assert!(host1.control_socket_name().ends_with(".sock"));
     }
 
     #[test]
@@ -357,5 +550,40 @@ mod tests {
 
         let delay = Duration::from_secs(60);
         assert_eq!(next_backoff(delay), Duration::from_secs(60)); // Stays at MAX_DELAY
+    }
+
+    #[test]
+    fn test_parse_allocated_port() {
+        // Standard verbose format from ssh -O forward
+        let output = "Allocated port 43567 for remote forward to /run/sandbox/git-http.sock\n";
+        assert_eq!(parse_allocated_port(output), Some(43567));
+
+        // Bare port number format (some SSH versions)
+        let output = "36481\n";
+        assert_eq!(parse_allocated_port(output), Some(36481));
+
+        // Bare port number without newline
+        let output = "12345";
+        assert_eq!(parse_allocated_port(output), Some(12345));
+
+        // With extra lines (verbose format)
+        let output = "Some other output\nAllocated port 12345 for remote forward to /path\nMore stuff";
+        assert_eq!(parse_allocated_port(output), Some(12345));
+
+        // No match
+        let output = "Connection established\n";
+        assert_eq!(parse_allocated_port(output), None);
+
+        // Invalid port number in verbose format
+        let output = "Allocated port notaport for remote forward";
+        assert_eq!(parse_allocated_port(output), None);
+
+        // Empty output
+        let output = "";
+        assert_eq!(parse_allocated_port(output), None);
+
+        // Whitespace only
+        let output = "   \n  \n";
+        assert_eq!(parse_allocated_port(output), None);
     }
 }
