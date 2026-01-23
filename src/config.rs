@@ -131,6 +131,51 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_remote_docker_parse_host_only() {
+        let remote = RemoteDocker::parse("docker.example.com").unwrap();
+        assert_eq!(remote.host, "docker.example.com");
+        assert_eq!(remote.port, 22);
+        // User depends on environment, just check it's not empty
+        assert!(!remote.user.is_empty());
+    }
+
+    #[test]
+    fn test_remote_docker_parse_user_and_host() {
+        let remote = RemoteDocker::parse("deploy@docker.example.com").unwrap();
+        assert_eq!(remote.host, "docker.example.com");
+        assert_eq!(remote.user, "deploy");
+        assert_eq!(remote.port, 22);
+    }
+
+    #[test]
+    fn test_remote_docker_parse_host_and_port() {
+        let remote = RemoteDocker::parse("docker.example.com:2222").unwrap();
+        assert_eq!(remote.host, "docker.example.com");
+        assert_eq!(remote.port, 2222);
+    }
+
+    #[test]
+    fn test_remote_docker_parse_full() {
+        let remote = RemoteDocker::parse("deploy@docker.example.com:2222").unwrap();
+        assert_eq!(remote.host, "docker.example.com");
+        assert_eq!(remote.user, "deploy");
+        assert_eq!(remote.port, 2222);
+    }
+
+    #[test]
+    fn test_remote_docker_parse_empty_host_fails() {
+        assert!(RemoteDocker::parse("").is_err());
+        assert!(RemoteDocker::parse("deploy@").is_err());
+        assert!(RemoteDocker::parse("deploy@:22").is_err());
+    }
+
+    #[test]
+    fn test_remote_docker_parse_invalid_port_fails() {
+        assert!(RemoteDocker::parse("docker.example.com:notaport").is_err());
+        assert!(RemoteDocker::parse("docker.example.com:99999").is_err());
+    }
 }
 
 /// Network configuration.
@@ -142,6 +187,57 @@ pub enum Network {
     Default,
     /// Host network - shares network namespace with host (unsafe)
     UnsafeHost,
+}
+
+/// Parsed remote Docker host specification.
+///
+/// Parsed from a string like `user@host:port`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteDocker {
+    /// SSH user for remote connection.
+    pub user: String,
+    /// Remote Docker host (hostname or IP).
+    pub host: String,
+    /// SSH port.
+    pub port: u16,
+}
+
+impl RemoteDocker {
+    /// Parse a remote specification string.
+    ///
+    /// Supported formats:
+    /// - `host` - just hostname, default user and port
+    /// - `user@host` - user and host, default port
+    /// - `host:port` - host and port, default user
+    /// - `user@host:port` - all three
+    pub fn parse(s: &str) -> Result<Self> {
+        let default_user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+        const DEFAULT_PORT: u16 = 22;
+
+        // Check for user@ prefix
+        let (user, rest) = if let Some(idx) = s.find('@') {
+            (s[..idx].to_string(), &s[idx + 1..])
+        } else {
+            (default_user, s)
+        };
+
+        // Check for :port suffix
+        let (host, port) = if let Some(idx) = rest.rfind(':') {
+            let port_str = &rest[idx + 1..];
+            let port = port_str
+                .parse::<u16>()
+                .with_context(|| format!("Invalid port number: {}", port_str))?;
+            (rest[..idx].to_string(), port)
+        } else {
+            (rest.to_string(), DEFAULT_PORT)
+        };
+
+        if host.is_empty() {
+            bail!("Remote host cannot be empty");
+        }
+
+        Ok(Self { user, host, port })
+    }
 }
 
 /// Top-level configuration structure parsed from `.sandbox.toml`.
@@ -170,6 +266,11 @@ pub struct SandboxConfig {
 
     #[serde(default)]
     pub agent: AgentConfig,
+
+    /// Remote Docker host specification (e.g., "user@host:port").
+    /// If not set, uses local Docker.
+    #[serde(default)]
+    pub remote: Option<String>,
 }
 
 impl SandboxConfig {
@@ -241,4 +342,18 @@ pub fn get_state_dir() -> Result<PathBuf> {
         });
 
     Ok(state_base.join("sandbox"))
+}
+
+/// Get the runtime directory for sandbox sockets.
+/// Uses $XDG_RUNTIME_DIR/sandbox or /tmp/sandbox-<uid> as fallback.
+pub fn get_runtime_dir() -> Result<PathBuf> {
+    let runtime_base = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            // Fallback to /tmp/sandbox-<uid>
+            let uid = unsafe { libc::getuid() };
+            PathBuf::from(format!("/tmp/sandbox-{}", uid))
+        });
+
+    Ok(runtime_base.join("sandbox"))
 }

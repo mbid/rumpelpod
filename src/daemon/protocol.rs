@@ -14,7 +14,7 @@ use tokio::task::block_in_place;
 use url::Url;
 
 use crate::async_runtime::block_on;
-use crate::config::{Network, Runtime};
+use crate::config::{Network, RemoteDocker, Runtime};
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +74,10 @@ struct LaunchSandboxRequest {
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the sandbox.
     host_branch: Option<String>,
+    /// Remote Docker host specification (e.g., "user@host:port").
+    /// If not set, uses local Docker.
+    #[serde(default)]
+    remote: Option<RemoteDocker>,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -178,6 +182,7 @@ pub trait Daemon: Send + Sync + 'static {
         runtime: Runtime,
         network: Network,
         host_branch: Option<String>,
+        remote: Option<RemoteDocker>,
     ) -> Result<LaunchResult>;
 
     // DELETE /sandbox
@@ -254,6 +259,7 @@ impl Daemon for DaemonClient {
         runtime: Runtime,
         network: Network,
         host_branch: Option<String>,
+        remote: Option<RemoteDocker>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -265,6 +271,7 @@ impl Daemon for DaemonClient {
             runtime,
             network,
             host_branch,
+            remote,
         };
 
         let response = self
@@ -451,6 +458,7 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.runtime,
             request.network,
             request.host_branch,
+            request.remote,
         )
     });
 
@@ -637,6 +645,7 @@ mod tests {
             _runtime: Runtime,
             _network: Network,
             _host_branch: Option<String>,
+            _remote: Option<RemoteDocker>,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -744,6 +753,7 @@ mod tests {
             Runtime::Runc,
             Network::Default,
             Some("main".to_string()),
+            None, // No remote Docker
         );
 
         let launch_result = result.unwrap();
@@ -775,6 +785,7 @@ mod tests {
             _runtime: Runtime,
             _network: Network,
             _host_branch: Option<String>,
+            _remote: Option<RemoteDocker>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }

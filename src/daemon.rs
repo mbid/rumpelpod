@@ -1,5 +1,6 @@
 pub mod db;
 pub mod protocol;
+pub mod ssh_forward;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{Network, Runtime};
+use crate::config::{Network, RemoteDocker, Runtime};
 use crate::docker_exec::exec_command;
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState};
@@ -26,6 +27,7 @@ use protocol::{
     ContainerId, ConversationSummary, Daemon, GetConversationResponse, Image, LaunchResult,
     SandboxInfo, SandboxName, SandboxStatus,
 };
+use ssh_forward::SshForwardManager;
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
@@ -66,6 +68,8 @@ struct DaemonServer {
     /// Active tokens for each sandbox: (repo_path, sandbox_name) -> token
     /// Used to clean up tokens when sandboxes are deleted.
     active_tokens: Mutex<BTreeMap<(PathBuf, String), String>>,
+    /// SSH forward manager for remote Docker hosts.
+    ssh_forward: SshForwardManager,
 }
 
 /// Label key used to store the repository path on containers.
@@ -548,6 +552,7 @@ fn docker_runtime_flag(runtime: Runtime) -> &'static str {
 
 /// Create a new container using the bollard Docker API.
 fn create_container(
+    docker: &Docker,
     name: &str,
     sandbox_name: &SandboxName,
     image: &Image,
@@ -583,8 +588,6 @@ fn create_container(
         name: Some(name.to_string()),
         ..Default::default()
     };
-
-    let docker = Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
 
     // Create the container
     let response =
@@ -661,20 +664,44 @@ impl Daemon for DaemonServer {
         runtime: Runtime,
         network: Network,
         host_branch: Option<String>,
+        remote: Option<RemoteDocker>,
     ) -> Result<LaunchResult> {
         // Validate network configuration
         if network == Network::UnsafeHost && runtime != Runtime::Runc {
             anyhow::bail!("network='unsafe-host' is only supported with runtime='runc'");
         }
 
-        let docker =
-            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+        // Validate that remote Docker doesn't use features that require local access
+        if remote.is_some() {
+            // Git syncing between remote sandboxes and local repos is not supported
+            // because the git HTTP server runs locally and won't be accessible from
+            // the remote Docker host's containers.
+            log::warn!(
+                "Remote Docker configured. Git syncing between sandbox and host is NOT supported."
+            );
+        }
+
+        // Get the Docker socket to use (local or forwarded from remote)
+        let docker_socket = match &remote {
+            Some(r) => self.ssh_forward.get_socket(r)?,
+            None => default_docker_socket(),
+        };
+
+        let docker = Docker::connect_with_socket(
+            docker_socket.to_string_lossy().as_ref(),
+            120,
+            bollard::API_DEFAULT_VERSION,
+        )
+        .context("connecting to Docker daemon")?;
 
         // Resolve the user first, before any container operations
         let user = resolve_user(&docker, user, &image.0)?;
 
         // Set up gateway for git synchronization (idempotent)
-        gateway::setup_gateway(&repo_path)?;
+        // Skip for remote Docker since git sync is not supported
+        if !remote.is_some() {
+            gateway::setup_gateway(&repo_path)?;
+        }
 
         let name = docker_name(&repo_path, &sandbox_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
@@ -709,70 +736,94 @@ impl Daemon for DaemonServer {
                 start_container(&docker, &name)?;
             }
 
-            // Register sandbox with the git HTTP server (may already be registered, that's OK)
+            // Skip git setup for remote Docker
+            if !remote.is_some() {
+                // Register sandbox with the git HTTP server (may already be registered, that's OK)
+                let token = self
+                    .git_server_state
+                    .register(gateway_path.clone(), sandbox_name.0.clone());
+
+                // Store the token for cleanup on delete
+                self.active_tokens
+                    .lock()
+                    .unwrap()
+                    .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
+
+                let url = git_http_server::git_http_url(&server_ip, server_port);
+
+                // On re-entry, don't pass host_branch - we don't want to change
+                // the upstream of an existing branch.
+                setup_git_remotes(
+                    &docker,
+                    &state.id,
+                    &url,
+                    &token,
+                    &container_repo_path,
+                    &sandbox_name,
+                    &user,
+                    None,
+                )?;
+            }
+
+            return Ok(LaunchResult {
+                container_id: ContainerId(state.id),
+                user,
+                docker_socket,
+            });
+        }
+
+        // Skip git setup for remote Docker
+        if !remote.is_some() {
+            // Register sandbox with the git HTTP server
             let token = self
                 .git_server_state
-                .register(gateway_path.clone(), sandbox_name.0.clone());
+                .register(gateway_path, sandbox_name.0.clone());
 
             // Store the token for cleanup on delete
             self.active_tokens
                 .lock()
                 .unwrap()
                 .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
+        }
+
+        let container_id = create_container(
+            &docker,
+            &name,
+            &sandbox_name,
+            &image,
+            &repo_path,
+            runtime,
+            network,
+        )?;
+
+        // Skip git setup for remote Docker
+        if !remote.is_some() {
+            let token = self
+                .active_tokens
+                .lock()
+                .unwrap()
+                .get(&(repo_path.clone(), sandbox_name.0.clone()))
+                .cloned()
+                .expect("token should have been registered above");
 
             let url = git_http_server::git_http_url(&server_ip, server_port);
 
-            // On re-entry, don't pass host_branch - we don't want to change
-            // the upstream of an existing branch.
             setup_git_remotes(
                 &docker,
-                &state.id,
+                &container_id.0,
                 &url,
                 &token,
                 &container_repo_path,
                 &sandbox_name,
                 &user,
-                None,
+                host_branch.as_deref(),
             )?;
-
-            return Ok(LaunchResult {
-                container_id: ContainerId(state.id),
-                user,
-                docker_socket: default_docker_socket(),
-            });
         }
-
-        // Register sandbox with the git HTTP server
-        let token = self
-            .git_server_state
-            .register(gateway_path, sandbox_name.0.clone());
-
-        // Store the token for cleanup on delete
-        self.active_tokens
-            .lock()
-            .unwrap()
-            .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
-
-        let container_id =
-            create_container(&name, &sandbox_name, &image, &repo_path, runtime, network)?;
-
-        let url = git_http_server::git_http_url(&server_ip, server_port);
-
-        setup_git_remotes(
-            &docker,
-            &container_id.0,
-            &url,
-            &token,
-            &container_repo_path,
-            &sandbox_name,
-            &user,
-            host_branch.as_deref(),
-        )?;
 
         Ok(LaunchResult {
             container_id,
             user,
-            docker_socket: default_docker_socket(),
+            docker_socket,
         })
     }
 
@@ -898,6 +949,9 @@ pub fn run_daemon() -> Result<()> {
     let db_path = db::db_path()?;
     let db_conn = db::open_db(&db_path)?;
 
+    // Initialize SSH forward manager for remote Docker hosts
+    let ssh_forward = SshForwardManager::new().context("initializing SSH forward manager")?;
+
     // Enter the runtime context so UnixListener::bind can register with the reactor
     let _guard = crate::async_runtime::RUNTIME.enter();
 
@@ -927,6 +981,7 @@ pub fn run_daemon() -> Result<()> {
         bridge_server_port: bridge_server.port,
         localhost_server_port: localhost_server.port,
         active_tokens: Mutex::new(BTreeMap::new()),
+        ssh_forward,
     };
 
     // Keep servers alive for the lifetime of the daemon

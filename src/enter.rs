@@ -5,7 +5,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::cli::EnterCommand;
-use crate::config::SandboxConfig;
+use crate::config::{RemoteDocker, SandboxConfig};
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, Image, LaunchResult, SandboxName};
 use crate::git::{get_current_branch, get_repo_root};
@@ -32,6 +32,14 @@ pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
     // sandbox's primary branch.
     let host_branch = get_current_branch(&repo_root);
 
+    // Parse remote Docker specification if provided
+    let remote = config
+        .remote
+        .as_ref()
+        .map(|s| RemoteDocker::parse(s))
+        .transpose()
+        .context("Invalid remote Docker specification")?;
+
     client.launch_sandbox(
         SandboxName(sandbox_name.to_string()),
         Image(config.image.clone()),
@@ -41,6 +49,7 @@ pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
         runtime,
         config.network,
         host_branch,
+        remote,
     )
 }
 
