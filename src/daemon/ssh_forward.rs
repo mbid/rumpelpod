@@ -207,12 +207,11 @@ impl SshForwardManager {
         ));
 
         // SSH options for reliable connection handling
-        cmd.args(["-o", "ServerAliveInterval=5"]); // Keepalive every 5s
-        cmd.args(["-o", "ServerAliveCountMax=3"]); // Disconnect after 3 missed (15s)
-        cmd.args(["-o", "ExitOnForwardFailure=yes"]); // Fail fast if forwarding fails
-        cmd.args(["-o", "StrictHostKeyChecking=accept-new"]); // Accept new hosts
-        cmd.args(["-o", "BatchMode=yes"]); // No interactive prompts
-        cmd.args(["-o", "ControlMaster=no"]); // Don't use multiplexing
+        cmd.args(["-o", "ServerAliveInterval=5"]);
+        cmd.args(["-o", "ServerAliveCountMax=3"]);
+        cmd.args(["-o", "ExitOnForwardFailure=yes"]);
+        cmd.args(["-o", "BatchMode=yes"]);
+        cmd.args(["-o", "ControlMaster=no", "-o", "ControlPath=none"]);
 
         // SSH port
         cmd.args(["-p", &host.port.to_string()]);
