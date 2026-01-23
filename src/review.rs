@@ -3,14 +3,159 @@
 //! This module implements the `sandbox review` command, which shows the diff
 //! between a sandbox's primary branch and the merge base with its upstream.
 
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use tempfile::TempDir;
 
 use crate::cli::ReviewCommand;
 use crate::config::SandboxConfig;
 use crate::enter::launch_sandbox;
 use crate::git::get_repo_root;
+
+/// Get the configured difftool name from git config.
+fn get_difftool_name(repo_root: &std::path::Path) -> Result<String> {
+    let output = Command::new("git")
+        .args(["config", "--get", "diff.tool"])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to query git config for diff.tool")?;
+
+    if !output.status.success() {
+        bail!(
+            "No difftool configured. Set one with:\n  \
+             git config diff.tool <toolname>\n  \
+             git config difftool.<toolname>.cmd '<command>'"
+        );
+    }
+
+    let tool = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if tool.is_empty() {
+        bail!("diff.tool is set but empty");
+    }
+
+    Ok(tool)
+}
+
+/// Get the command for a difftool from git config.
+/// Returns None if no custom command is configured (meaning it's a built-in tool).
+fn get_difftool_cmd(repo_root: &std::path::Path, tool: &str) -> Result<Option<String>> {
+    let config_key = format!("difftool.{}.cmd", tool);
+    let output = Command::new("git")
+        .args(["config", "--get", &config_key])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to query git config for difftool cmd")?;
+
+    if !output.status.success() {
+        // No custom command configured - tool is either built-in or will be invoked directly
+        return Ok(None);
+    }
+
+    let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if cmd.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(cmd))
+    }
+}
+
+/// Get the list of files changed between two commits.
+fn get_changed_files(repo_root: &std::path::Path, base: &str, target: &str) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only", base, target])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to get list of changed files")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to get changed files: {}", stderr.trim());
+    }
+
+    let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+
+    Ok(files)
+}
+
+/// Get the content of a file at a specific commit.
+/// Returns Ok(None) if the file doesn't exist at that commit.
+fn get_file_at_commit(
+    repo_root: &std::path::Path,
+    commit: &str,
+    file_path: &str,
+) -> Result<Option<Vec<u8>>> {
+    let output = Command::new("git")
+        .args(["show", &format!("{}:{}", commit, file_path)])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to get file content from commit")?;
+
+    if !output.status.success() {
+        // File doesn't exist at this commit (new or deleted file)
+        return Ok(None);
+    }
+
+    Ok(Some(output.stdout))
+}
+
+/// Write content to a temporary file.
+fn write_temp_file(dir: &PathBuf, name: &str, content: Option<&[u8]>) -> Result<PathBuf> {
+    let path = dir.join(name);
+
+    // Create parent directories if the file path contains subdirectories
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("Failed to create parent directories")?;
+    }
+
+    let mut file = File::create(&path).context("Failed to create temp file")?;
+    if let Some(content) = content {
+        file.write_all(content)
+            .context("Failed to write temp file")?;
+    }
+
+    Ok(path)
+}
+
+/// Invoke the difftool for a pair of files.
+fn invoke_difftool(
+    tool: &str,
+    cmd_template: Option<&str>,
+    local_path: &PathBuf,
+    remote_path: &PathBuf,
+) -> Result<()> {
+    if let Some(template) = cmd_template {
+        // Custom command with $LOCAL and $REMOTE placeholders
+        let cmd = template
+            .replace("$LOCAL", &local_path.to_string_lossy())
+            .replace("$REMOTE", &remote_path.to_string_lossy());
+
+        Command::new("sh")
+            .args(["-c", &cmd])
+            .status()
+            .context("Failed to run difftool command")?;
+    } else {
+        // Built-in tool - invoke directly with two file arguments
+        Command::new(tool)
+            .arg(local_path)
+            .arg(remote_path)
+            .status()
+            .context("Failed to run difftool")?;
+    }
+
+    // Note: We don't check the exit status here. Many difftools return
+    // non-zero when files differ, and git difftool doesn't propagate
+    // individual tool exit codes as errors.
+
+    Ok(())
+}
 
 /// Get the upstream branch for a branch inside the sandbox.
 /// Returns the upstream in the format "host/<branch>" or None if no upstream is set.
@@ -121,16 +266,39 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         .trim()
         .to_string();
 
-    // Invoke git difftool to show the diff
-    // Use --no-prompt (-y) to avoid prompting for each file
-    let status = Command::new("git")
-        .args(["difftool", "-y", &merge_base, &sandbox_ref])
-        .current_dir(&repo_root)
-        .status()
-        .context("Failed to run git difftool")?;
+    // Get the configured difftool
+    let tool = get_difftool_name(&repo_root)?;
+    let cmd_template = get_difftool_cmd(&repo_root, &tool)?;
 
-    if !status.success() {
-        bail!("git difftool exited with status {}", status);
+    // Get the list of changed files
+    let changed_files = get_changed_files(&repo_root, &merge_base, &sandbox_ref)?;
+
+    if changed_files.is_empty() {
+        // No changes to review
+        return Ok(());
+    }
+
+    // Create a temporary directory for the diff files (cleaned up on drop)
+    let temp_dir = TempDir::with_prefix("sandbox-review-")?;
+    let local_dir = temp_dir.path().join("local");
+    let remote_dir = temp_dir.path().join("remote");
+    fs::create_dir_all(&local_dir).context("Failed to create local temp dir")?;
+    fs::create_dir_all(&remote_dir).context("Failed to create remote temp dir")?;
+
+    // Process each changed file
+    for file_path in &changed_files {
+        // Get file content at merge base (local/old version)
+        let local_content = get_file_at_commit(&repo_root, &merge_base, file_path)?;
+
+        // Get file content at sandbox ref (remote/new version)
+        let remote_content = get_file_at_commit(&repo_root, &sandbox_ref, file_path)?;
+
+        // Write temp files
+        let local_file = write_temp_file(&local_dir, file_path, local_content.as_deref())?;
+        let remote_file = write_temp_file(&remote_dir, file_path, remote_content.as_deref())?;
+
+        // Invoke the difftool
+        invoke_difftool(&tool, cmd_template.as_deref(), &local_file, &remote_file)?;
     }
 
     Ok(())
