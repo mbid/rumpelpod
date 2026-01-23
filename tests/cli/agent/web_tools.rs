@@ -68,7 +68,9 @@ fn agent_web_search_disabled_anthropic() {
     // The agent should refuse or fail to find the info.
     // Based on previous failure, it says "I don't have the ability to search the web".
     assert!(
-        output.stdout.contains("don't have the ability to search the web")
+        output
+            .stdout
+            .contains("don't have the ability to search the web")
             || output.stdout.contains("cannot search the web")
             || !output.stdout.contains("2025-11-12"),
         "Agent should NOT find the date when web search is disabled.\nstdout: {}",
@@ -100,7 +102,9 @@ fn agent_web_search_anthropic_config_disable_works() {
     );
 
     assert!(
-        output.stdout.contains("don't have the ability to search the web")
+        output
+            .stdout
+            .contains("don't have the ability to search the web")
             || output.stdout.contains("cannot search the web")
             || !output.stdout.contains("2025-11-12"),
         "Agent should NOT find the date when web search is disabled via config.\nstdout: {}",
@@ -196,7 +200,9 @@ fn agent_web_search_anthropic_config_enable_cli_disable() {
     );
 
     assert!(
-        output.stdout.contains("don't have the ability to search the web")
+        output
+            .stdout
+            .contains("don't have the ability to search the web")
             || output.stdout.contains("cannot search the web")
             || !output.stdout.contains("2025-11-12"),
         "Agent should NOT find the date when web search is disabled via CLI override.\nstdout: {}",

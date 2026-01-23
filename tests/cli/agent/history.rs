@@ -5,7 +5,7 @@
 //! all providers.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,8 +16,8 @@ use tempfile::TempDir;
 use crate::common::TestDaemon;
 
 use super::common::{
-    create_mock_editor_exit, llm_cache_dir, run_agent_with_prompt, run_agent_with_prompt_and_args,
-    setup_test_repo, DEFAULT_MODEL,
+    create_mock_editor_exit, llm_cache_dir, run_agent_expecting_picker, run_agent_with_prompt,
+    run_agent_with_prompt_and_args, setup_test_repo, PickerAction, DEFAULT_MODEL,
 };
 
 #[test]
@@ -30,7 +30,10 @@ fn agent_new_flag_starts_fresh_conversation() {
 
     let output2 =
         run_agent_with_prompt_and_args(&repo, &daemon, "Say 'second conversation'", &["--new"]);
-    assert!(output2.success, "Second agent run with --new should succeed");
+    assert!(
+        output2.success,
+        "Second agent run with --new should succeed"
+    );
 
     assert!(
         !output2.stdout.contains("first conversation"),
@@ -102,16 +105,22 @@ fn agent_errors_with_multiple_conversations_no_flag() {
     let output2 = run_agent_with_prompt_and_args(&repo, &daemon, "Second conversation", &["--new"]);
     assert!(output2.success, "Second agent run should succeed");
 
-    let output3 = run_agent_with_prompt(&repo, &daemon, "Which conversation am I in?");
+    // In interactive mode, the picker is shown. Cancel it with Ctrl+C.
+    let output3 = run_agent_expecting_picker(
+        &repo,
+        &daemon,
+        &["Which conversation am I in?"],
+        PickerAction::Cancel,
+    );
     assert!(
         !output3.success,
-        "Agent should fail when multiple conversations exist without flags"
+        "Agent should fail when picker is cancelled"
     );
 
-    // In interactive mode, stdout and stderr are combined
     assert!(
-        output3.stdout.contains("Multiple conversations") || output3.stdout.contains("--continue"),
-        "Error should mention multiple conversations.\noutput: {}",
+        output3.stdout.contains("existing conversations")
+            || output3.stdout.contains("Multiple conversations"),
+        "Output should mention existing conversations.\noutput: {}",
         output3.stdout
     );
 }
@@ -271,104 +280,22 @@ fn agent_picker_default_selection_on_enter() {
         &["--new"],
     );
 
-    // 3. Run interactively, press Enter at picker
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("Failed to create PTY");
-
-    let sandbox_bin = cargo::cargo_bin!("sandbox");
-    let mut cmd = CommandBuilder::new(&sandbox_bin);
-    cmd.cwd(repo.path());
-    cmd.env(
-        "SANDBOX_DAEMON_SOCKET",
-        daemon.socket_path.to_str().unwrap(),
-    );
-    cmd.args(["agent", "test", "--model", DEFAULT_MODEL]);
-
-    let _child = pair
-        .slave
-        .spawn_command(cmd)
-        .expect("Failed to spawn interactive agent");
-
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .expect("Failed to clone reader");
-    let mut writer = pair.master.take_writer().expect("Failed to get writer");
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buffer = [0u8; 1024];
-        while let Ok(n) = reader.read(&mut buffer) {
-            if n == 0 {
-                break;
-            }
-            if tx
-                .send(String::from_utf8_lossy(&buffer[..n]).to_string())
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    // Read until we see the picker prompt
-    let mut output_acc = String::new();
-    let start = Instant::now();
-    let timeout = Duration::from_secs(30);
-    let mut prompted = false;
-
-    while start.elapsed() < timeout {
-        while let Ok(s) = rx.try_recv() {
-            output_acc.push_str(&s);
-        }
-        if output_acc.contains("Select [0-") && output_acc.contains("default 0") {
-            prompted = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        prompted,
-        "Did not see selection prompt in time. Output:\n{}",
-        output_acc
+    // 3. Run interactively, press Enter at picker to select default (most recent)
+    let output = run_agent_expecting_picker(
+        &repo,
+        &daemon,
+        &["What color did I tell you?"],
+        PickerAction::SelectDefault,
     );
 
-    // Press Enter
-    writeln!(writer).expect("Failed to send newline");
-
-    // Now the agent should be running in the selected conversation (RED_11).
-    // We send a question and check the response.
-    // Wait for the next prompt "You: " or similar if it exists, or just wait a bit.
-    thread::sleep(Duration::from_secs(2));
-    writeln!(writer, "What color did I tell you?").expect("Failed to send question");
-
-    // Check for RED_11 in output
-    let mut saw_red = false;
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(30) {
-        while let Ok(s) = rx.try_recv() {
-            output_acc.push_str(&s);
-        }
-        if output_acc.contains("RED_11") {
-            saw_red = true;
-            break;
-        }
-        if output_acc.contains("BLUE_99") {
-            panic!("Picked wrong conversation (BLUE_99 instead of RED_11)");
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-
     assert!(
-        saw_red,
-        "Agent did not remember the correct color (RED_11). Output:\n{}",
-        output_acc
+        output.stdout.contains("RED_11"),
+        "Agent should remember color from most recent conversation (RED_11).\nOutput:\n{}",
+        output.stdout
+    );
+    assert!(
+        !output.stdout.contains("BLUE_99"),
+        "Agent should NOT remember color from older conversation (BLUE_99).\nOutput:\n{}",
+        output.stdout
     );
 }

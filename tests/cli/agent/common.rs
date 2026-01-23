@@ -107,8 +107,7 @@ pub fn create_mock_editor_with_messages(script_dir: &Path, messages: &[&str]) ->
             base64::engine::general_purpose::STANDARD.encode(m.as_bytes())
         })
         .collect();
-    fs::write(&messages_file, encoded_messages.join("\n"))
-        .expect("Failed to write messages file");
+    fs::write(&messages_file, encoded_messages.join("\n")).expect("Failed to write messages file");
 
     // Initialize state to 0
     fs::write(&state_file, "0").expect("Failed to write state file");
@@ -151,6 +150,16 @@ pub fn create_mock_editor_with_messages(script_dir: &Path, messages: &[&str]) ->
 pub struct InteractiveOutput {
     pub stdout: String,
     pub success: bool,
+}
+
+/// Action to take when the conversation picker is shown.
+pub enum PickerAction {
+    /// Select a conversation by index (e.g., 0 for most recent).
+    Select(usize),
+    /// Press Enter to select the default (most recent) conversation.
+    SelectDefault,
+    /// Cancel the picker with Ctrl+C.
+    Cancel,
 }
 
 /// Run agent interactively with a list of messages using PTY.
@@ -293,7 +302,150 @@ pub fn run_agent_interactive_model_and_args(
             let _ = writeln!(writer, "y");
         }
 
+        // Check for unexpected conversation picker prompt
+        // Tests that expect the picker should use run_agent_expecting_picker instead
+        if output.contains("Select [0-") && output.contains("default") {
+            let _ = child.kill();
+            panic!(
+                "Unexpected conversation picker prompt. Use run_agent_expecting_picker for tests \
+                 that expect the picker.\nOutput so far:\n{}",
+                output
+            );
+        }
+
         // Check timeout
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            panic!(
+                "Process did not exit within timeout.\nOutput so far:\n{}",
+                output
+            );
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Run agent expecting the conversation picker to appear.
+///
+/// Use this for tests that verify behavior when multiple conversations exist
+/// and no --continue or --new flag is provided. The picker will be handled
+/// according to the specified action.
+pub fn run_agent_expecting_picker(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    messages: &[&str],
+    picker_action: PickerAction,
+) -> InteractiveOutput {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let editor_path = create_mock_editor_with_messages(temp_dir.path(), messages);
+
+    let cache_dir = llm_cache_dir();
+    let pty_system = native_pty_system();
+
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("Failed to create PTY");
+
+    let sandbox_bin = cargo::cargo_bin!("sandbox");
+
+    let mut cmd = CommandBuilder::new(&sandbox_bin);
+    cmd.cwd(repo.path());
+    cmd.env(
+        "SANDBOX_DAEMON_SOCKET",
+        daemon.socket_path.to_str().unwrap(),
+    );
+    cmd.env("EDITOR", editor_path.to_str().unwrap());
+    cmd.args([
+        "agent",
+        "test",
+        "--model",
+        DEFAULT_MODEL,
+        "--cache",
+        cache_dir.to_str().unwrap(),
+    ]);
+
+    let mut child = pair
+        .slave
+        .spawn_command(cmd)
+        .expect("Failed to spawn command");
+
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("Failed to clone reader");
+    let mut writer = pair.master.take_writer().expect("Failed to get writer");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            if tx
+                .send(String::from_utf8_lossy(&buffer[..n]).to_string())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    let mut output = String::new();
+    let start = Instant::now();
+    let timeout = Duration::from_secs(120);
+    let mut picker_handled = false;
+
+    loop {
+        // Check if process has exited
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                while let Ok(s) = rx.try_recv() {
+                    output.push_str(&s);
+                }
+                return InteractiveOutput {
+                    stdout: output,
+                    success: status.exit_code() == 0,
+                };
+            }
+            Ok(None) => {}
+            Err(e) => panic!("Error waiting for process: {}", e),
+        }
+
+        while let Ok(s) = rx.try_recv() {
+            output.push_str(&s);
+        }
+
+        // Handle the conversation picker prompt
+        if !picker_handled && output.contains("Select [0-") && output.contains("default") {
+            picker_handled = true;
+            match picker_action {
+                PickerAction::Select(index) => {
+                    let _ = writeln!(writer, "{}", index);
+                }
+                PickerAction::SelectDefault => {
+                    // Press Enter to select the default
+                    let _ = writeln!(writer);
+                }
+                PickerAction::Cancel => {
+                    // Send Ctrl+C (ASCII 3) to cancel
+                    let _ = writer.write_all(&[3]);
+                }
+            }
+        }
+
+        // Handle exit confirmation
+        if output.contains("Exit? [Y/n]") {
+            output = output.replace("Exit? [Y/n]", "Exit? [Y/n] (answered)");
+            let _ = writeln!(writer, "y");
+        }
+
         if start.elapsed() > timeout {
             let _ = child.kill();
             panic!(
