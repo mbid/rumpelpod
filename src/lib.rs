@@ -15,6 +15,7 @@ mod git;
 mod git_http_server;
 mod list;
 mod llm;
+mod review;
 mod systemd;
 
 use anyhow::Result;
@@ -44,6 +45,9 @@ pub fn run() -> Result<()> {
         }
         Command::Delete(ref cmd) => {
             delete::delete(cmd)?;
+        }
+        Command::Review(ref cmd) => {
+            review::review(cmd)?;
         }
         Command::Agent(ref cmd) => {
             agent::agent(cmd)?;

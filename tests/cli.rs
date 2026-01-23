@@ -14,3 +14,5 @@ mod gateway;
 mod list;
 #[path = "cli/network.rs"]
 mod network;
+#[path = "cli/review.rs"]
+mod review;

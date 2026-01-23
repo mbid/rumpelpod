@@ -69,6 +69,18 @@ This stops the container if running and removes all sandbox state. Any uncommitt
 ")]
     Delete(DeleteCommand),
 
+    /// Review changes in a sandbox using git difftool
+    #[command(long_about = "Review changes in a sandbox using git difftool.
+
+Shows the diff between the sandbox's primary branch and the merge base with its upstream branch. This effectively shows all changes made in the sandbox since it diverged from the host branch.
+
+The sandbox must have been created while the host was on a branch (not in detached HEAD state) for the upstream to be set.
+
+Examples:
+  sandbox review dev             # Review changes in 'dev' sandbox
+")]
+    Review(ReviewCommand),
+
     /// Run an LLM agent inside a sandbox
     #[command(long_about = "Run an LLM agent inside a sandbox.
 
@@ -114,6 +126,13 @@ pub struct EnterCommand {
 pub struct DeleteCommand {
     /// Name of the sandbox to delete
     #[arg(help = "Name of the sandbox to delete")]
+    pub name: String,
+}
+
+#[derive(Args)]
+pub struct ReviewCommand {
+    /// Name of the sandbox to review
+    #[arg(help = "Name of the sandbox to review")]
     pub name: String,
 }
 
