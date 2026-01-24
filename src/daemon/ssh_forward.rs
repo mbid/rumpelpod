@@ -250,7 +250,8 @@ impl SshForwardManager {
         // Enable control socket for multiplexing (allows adding forwards later)
         cmd.args(["-o", &format!("ControlPath={}", control_socket.display())]);
         cmd.args(["-o", "ControlMaster=yes"]);
-        cmd.args(["-o", "ControlPersist=yes"]);
+        // Do not fork to background
+        cmd.args(["-o", "ControlPersist=no"]);
 
         // Local socket forwarding: local_socket -> remote docker socket
         cmd.arg("-L");
