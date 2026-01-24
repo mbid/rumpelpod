@@ -2,12 +2,13 @@ This is a rust project implementing a sandboxed LLM agent.
 
 - Be resourceful about commands with long output.
   Use head, tail, grep etc. and check file sizes before checking their full contents.
-- Comments and commit messages should explain "why", not "what".
-  Don't paraphrase code next to the comment.
-- Format, run tests before committing.
-- Always run tests with a timeout, e.g. 60 seconds, to prevent getting stuck.
+  If you need to run multiple commands, try invoke all commands at once or put all of them in a single bash invocation.
 - Don't run commands in interactive mode (e.g. git rebase, git rebase --continue):
   You can't operate the UI, only run commands.
-- Don't use --test-threads unless you are debugging a concurrency issue.
-- Run ./pipeline before finishing your work to ensure everything is properly formatted, builds without warnings, and passes clippy.
+- Comments and commit messages should explain "why", not "what".
+  Don't paraphrase code next to the comment.
+- If you write code, you should commit your changes.
+  DON'T STOP BEFORE YOU'RE DONE!
+- Run ./pipeline to ensure your commit doesn't break anything.
+- Always run tests and ./pipeline with a timeout, e.g. 90 seconds, to prevent getting stuck.
 - After committing, fetch and rebase on host/master to stay up to date.
