@@ -90,9 +90,22 @@ fn convert_config_model(m: ConfigModel) -> EffectiveModel {
         ConfigModel::Gemini25Flash => EffectiveModel::Gemini(gemini_types::Model::Gemini25Flash),
         ConfigModel::Gemini3Flash => EffectiveModel::Gemini(gemini_types::Model::Gemini3Flash),
         ConfigModel::Gemini3Pro => EffectiveModel::Gemini(gemini_types::Model::Gemini3Pro),
-        ConfigModel::Grok3Mini => EffectiveModel::Xai(xai_types::Model::Grok3Mini),
-        ConfigModel::Grok4 => EffectiveModel::Xai(xai_types::Model::Grok4),
+        // Mapping ConfigModel variants to xai_types::Model variants.
+        // Grok3Mini and Grok4 are no longer supported in the new API/library update.
+        // We map them to the closest available model or handle them as errors/legacy.
+        // For now, let's map them to Grok41Fast as the new standard, or remove them from ConfigModel if possible.
+        // But since ConfigModel is public config, removing might break config parsing for old files (though we control the codebase).
+        // Since I removed them from ConfigModel in src/config.rs (in previous step),
+        // I must also ensure I removed them here.
+        //
+        // In src/config.rs I kept Grok41Fast and Grok41FastNonReasoning.
+        // I removed Grok3Mini and Grok4.
+        //
+        // So I should update this match arm to reflect src/config.rs changes.
         ConfigModel::Grok41Fast => EffectiveModel::Xai(xai_types::Model::Grok41Fast),
+        ConfigModel::Grok41FastNonReasoning => {
+            EffectiveModel::Xai(xai_types::Model::Grok41FastNonReasoning)
+        }
     }
 }
 

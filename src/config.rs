@@ -57,18 +57,14 @@ pub enum Model {
     Gemini3Pro,
 
     // xAI
-    /// Grok 3 Mini - lightweight reasoning model, cost-effective
-    #[serde(rename = "grok-3-mini")]
-    #[value(name = "grok-3-mini")]
-    Grok3Mini,
-    /// Grok 4 - most capable reasoning model from xAI
-    #[serde(rename = "grok-4")]
-    #[value(name = "grok-4")]
-    Grok4,
     /// Grok 4.1 Fast - frontier model optimized for agentic tool calling
     #[serde(rename = "grok-4-1-fast-reasoning")]
     #[value(name = "grok-4-1-fast-reasoning")]
     Grok41Fast,
+    /// Grok 4.1 Fast - non-reasoning variant
+    #[serde(rename = "grok-4-1-fast-non-reasoning")]
+    #[value(name = "grok-4-1-fast-non-reasoning")]
+    Grok41FastNonReasoning,
 }
 
 impl std::fmt::Display for Model {
@@ -80,9 +76,8 @@ impl std::fmt::Display for Model {
             Model::Gemini25Flash => "gemini-2.5-flash",
             Model::Gemini3Flash => "gemini-3-flash-preview",
             Model::Gemini3Pro => "gemini-3-pro-preview",
-            Model::Grok3Mini => "grok-3-mini",
-            Model::Grok4 => "grok-4",
             Model::Grok41Fast => "grok-4-1-fast-reasoning",
+            Model::Grok41FastNonReasoning => "grok-4-1-fast-non-reasoning",
         };
         write!(f, "{}", s)
     }

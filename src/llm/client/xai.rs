@@ -1,6 +1,6 @@
 //! xAI (Grok) API client.
 //!
-//! The xAI API is OpenAI-compatible, using the `/v1/chat/completions` endpoint.
+//! The xAI API uses the `/v1/responses` endpoint for agentic workflows.
 //! See https://docs.x.ai/docs/api-reference for the full API reference.
 
 use anyhow::{Context, Result};
@@ -9,9 +9,9 @@ use rand::Rng;
 use std::time::Duration;
 
 use crate::llm::cache::LlmCache;
-use crate::llm::types::xai::{ChatCompletionRequest, ChatCompletionResponse};
+use crate::llm::types::xai::{ResponseRequest, ResponseResponse};
 
-const XAI_API_URL: &str = "https://api.x.ai/v1/chat/completions";
+const XAI_API_URL: &str = "https://api.x.ai/v1/responses";
 
 pub struct Client {
     api_key: Option<String>,
@@ -70,10 +70,7 @@ impl Client {
 
     /// Retry logic follows claude code's behavior: up to 10 retries, first retry instant
     /// (unless rate-limited), then 2 minute delays with jitter.
-    pub fn chat_completion(
-        &self,
-        request: ChatCompletionRequest,
-    ) -> Result<ChatCompletionResponse> {
+    pub fn create_response(&self, request: ResponseRequest) -> Result<ResponseResponse> {
         const MAX_RETRIES: u32 = 10;
         const BASE_RETRY_DELAY: Duration = Duration::from_secs(120);
         const MAX_JITTER: Duration = Duration::from_secs(30);
@@ -93,7 +90,7 @@ impl Client {
             // Include URL in cache key for consistency with other clients
             let cache_key = cache.compute_key(XAI_API_URL, &cache_header_refs, &body);
             if let Some(cached_response) = cache.get(&cache_key) {
-                let response: ChatCompletionResponse = serde_json::from_str(&cached_response)
+                let response: ResponseResponse = serde_json::from_str(&cached_response)
                     .with_context(|| {
                         format!("Failed to parse cached response: {cached_response}")
                     })?;
@@ -105,9 +102,7 @@ impl Client {
         if self.api_key.is_none() {
             if self.offline_test_mode {
                 anyhow::bail!(
-                    "LLM Cache miss in test offline mode.\n\
-                     See llm-cache/README.md for details.\n\
-                     To populate the cache, rerun the test with SANDBOX_TEST_LLM_OFFLINE=0 set in the environment."
+                    "LLM Cache miss in test offline mode.\n                     See llm-cache/README.md for details.\n                     To populate the cache, rerun the test with SANDBOX_TEST_LLM_OFFLINE=0 set in the environment."
                 );
             }
             anyhow::bail!("Cache miss and no XAI_API_KEY set - cannot make API request");
@@ -166,14 +161,12 @@ impl Client {
                     cache.put(&cache_key, &response_text)?;
                 }
 
-                let response: ChatCompletionResponse = serde_json::from_str(&response_text)
+                let response: ResponseResponse = serde_json::from_str(&response_text)
                     .with_context(|| {
                         format!("Failed to parse xAI API response: {response_text}")
                     })?;
-                debug!(
-                    "xAI API request successful: {} prompt tokens, {} completion tokens",
-                    response.usage.prompt_tokens, response.usage.completion_tokens
-                );
+
+                debug!("xAI API request successful");
                 return Ok(response);
             }
 
