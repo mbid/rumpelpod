@@ -16,6 +16,44 @@ use crate::config::SandboxConfig;
 use crate::enter::launch_sandbox;
 use crate::git::get_repo_root;
 
+/// Translate a difftool name to its executable path.
+/// This mirrors Git's `translate_merge_tool_path()` logic from the mergetools/ directory.
+///
+/// Git has built-in knowledge of certain tool aliases that map to different executables.
+/// For example, "nvimdiff" is not a real executable - it needs to be translated to "nvim".
+///
+/// This function implements the same mappings as Git's built-in mergetool definitions.
+fn translate_tool_path(tool: &str) -> String {
+    // vimdiff variants (from mergetools/vimdiff)
+    // These cover: vimdiff, vimdiff1, vimdiff2, vimdiff3 and g/n prefixed versions
+    if tool.starts_with("nvimdiff") {
+        return "nvim".to_string();
+    }
+    if tool.starts_with("gvimdiff") {
+        return "gvim".to_string();
+    }
+    if tool.starts_with("vimdiff") {
+        return "vim".to_string();
+    }
+
+    // Other common tool mappings from Git's mergetools/
+    match tool {
+        "araxis" => "compare".to_string(),
+        "emerge" => "emacs".to_string(),
+        "vscode" => "code".to_string(),
+        "deltawalker" => "DeltaWalker".to_string(),
+
+        // bc (Beyond Compare) - we use the simpler form here
+        // Git checks if bcomp exists first, but we'll let the OS handle that
+        "bc" | "bc3" | "bc4" => "bcomp".to_string(),
+
+        // Tools where the name matches the executable (no translation needed)
+        // Including: meld, kdiff3, diffuse, kompare, tkdiff, xxdiff, opendiff,
+        // p4merge, smerge, diffmerge, ecmerge, guiffy, tortoisemerge, etc.
+        _ => tool.to_string(),
+    }
+}
+
 /// Get the configured difftool name from git config.
 fn get_difftool_name(repo_root: &std::path::Path) -> Result<String> {
     let output = Command::new("git")
@@ -38,6 +76,46 @@ fn get_difftool_name(repo_root: &std::path::Path) -> Result<String> {
     }
 
     Ok(tool)
+}
+
+/// Get the executable path for a difftool.
+/// This mirrors Git's logic in git-mergetool--lib.sh:
+/// 1. Check difftool.<tool>.path config
+/// 2. Check mergetool.<tool>.path config  
+/// 3. Fall back to translate_tool_path()
+fn get_tool_path(repo_root: &std::path::Path, tool: &str) -> Result<String> {
+    // First check difftool.<tool>.path
+    let difftool_path_key = format!("difftool.{}.path", tool);
+    let output = Command::new("git")
+        .args(["config", "--get", &difftool_path_key])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to query git config for difftool path")?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(path);
+        }
+    }
+
+    // Then check mergetool.<tool>.path
+    let mergetool_path_key = format!("mergetool.{}.path", tool);
+    let output = Command::new("git")
+        .args(["config", "--get", &mergetool_path_key])
+        .current_dir(repo_root)
+        .output()
+        .context("Failed to query git config for mergetool path")?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Ok(path);
+        }
+    }
+
+    // Fall back to translating the tool name
+    Ok(translate_tool_path(tool))
 }
 
 /// Get the command for a difftool from git config.
@@ -126,7 +204,7 @@ fn write_temp_file(dir: &std::path::Path, name: &str, content: Option<&[u8]>) ->
 
 /// Invoke the difftool for a pair of files.
 fn invoke_difftool(
-    tool: &str,
+    tool_path: &str,
     cmd_template: Option<&str>,
     local_path: &PathBuf,
     remote_path: &PathBuf,
@@ -142,8 +220,8 @@ fn invoke_difftool(
             .status()
             .context("Failed to run difftool command")?;
     } else {
-        // Built-in tool - invoke directly with two file arguments
-        Command::new(tool)
+        // Built-in tool - invoke the executable path directly with two file arguments
+        Command::new(tool_path)
             .arg(local_path)
             .arg(remote_path)
             .status()
@@ -269,6 +347,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     // Get the configured difftool
     let tool = get_difftool_name(&repo_root)?;
     let cmd_template = get_difftool_cmd(&repo_root, &tool)?;
+    let tool_path = get_tool_path(&repo_root, &tool)?;
 
     // Get the list of changed files
     let changed_files = get_changed_files(&repo_root, &merge_base, &sandbox_ref)?;
@@ -298,7 +377,12 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         let remote_file = write_temp_file(&remote_dir, file_path, remote_content.as_deref())?;
 
         // Invoke the difftool
-        invoke_difftool(&tool, cmd_template.as_deref(), &local_file, &remote_file)?;
+        invoke_difftool(
+            &tool_path,
+            cmd_template.as_deref(),
+            &local_file,
+            &remote_file,
+        )?;
     }
 
     Ok(())
