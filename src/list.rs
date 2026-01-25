@@ -13,18 +13,22 @@ pub fn list() -> Result<()> {
     let sandboxes = client.list_sandboxes(repo_path)?;
 
     // Print header
-    println!("{:<20} {:<15} {:<20}", "NAME", "STATUS", "CREATED");
-    println!("{}", "-".repeat(55));
+    println!(
+        "{:<20} {:<15} {:<20} {:<20}",
+        "NAME", "STATUS", "CREATED", "HOST"
+    );
+    println!("{}", "-".repeat(75));
 
     // Print sandboxes
     for sandbox in sandboxes {
         let status_str = match sandbox.status {
             SandboxStatus::Running => "running",
             SandboxStatus::Stopped => "stopped",
+            SandboxStatus::Gone => "gone",
         };
         println!(
-            "{:<20} {:<15} {:<20}",
-            sandbox.name, status_str, sandbox.created
+            "{:<20} {:<15} {:<20} {:<20}",
+            sandbox.name, status_str, sandbox.created, sandbox.host
         );
     }
 

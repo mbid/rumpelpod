@@ -45,6 +45,8 @@ pub struct SandboxName(pub String);
 pub enum SandboxStatus {
     Running,
     Stopped,
+    /// Container no longer exists (was deleted outside of sandbox tool)
+    Gone,
 }
 
 /// Information about a sandbox.
@@ -53,6 +55,8 @@ pub struct SandboxInfo {
     pub name: String,
     pub status: SandboxStatus,
     pub created: String,
+    /// Host where the sandbox runs: "local" or an SSH URL like "user@host:port".
+    pub host: String,
 }
 
 /// Request body for launch_sandbox endpoint.
@@ -856,10 +860,24 @@ mod tests {
     fn test_conversation_save_and_list() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
+
+        let repo_path = PathBuf::from("/home/user/project");
+
+        // Create sandbox first (directly in DB since protocol doesn't expose this)
+        {
+            let conn = crate::daemon::db::open_db(&db_path).unwrap();
+            crate::daemon::db::create_sandbox(
+                &conn,
+                &repo_path,
+                "dev",
+                crate::daemon::db::LOCAL_HOST,
+            )
+            .unwrap();
+        }
+
         let server = TestServer::start(MockDaemonWithDb::new(&db_path));
         let client = server.client();
 
-        let repo_path = PathBuf::from("/home/user/project");
         let history = serde_json::json!([{"role": "user", "content": "hello"}]);
 
         // Save a conversation
@@ -895,10 +913,24 @@ mod tests {
     fn test_conversation_update() {
         let temp_dir = tempfile::tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
+
+        let repo_path = PathBuf::from("/home/user/project");
+
+        // Create sandbox first (directly in DB since protocol doesn't expose this)
+        {
+            let conn = crate::daemon::db::open_db(&db_path).unwrap();
+            crate::daemon::db::create_sandbox(
+                &conn,
+                &repo_path,
+                "dev",
+                crate::daemon::db::LOCAL_HOST,
+            )
+            .unwrap();
+        }
+
         let server = TestServer::start(MockDaemonWithDb::new(&db_path));
         let client = server.client();
 
-        let repo_path = PathBuf::from("/home/user/project");
         let history1 = serde_json::json!([{"role": "user", "content": "hello"}]);
         let history2 = serde_json::json!([
             {"role": "user", "content": "hello"},

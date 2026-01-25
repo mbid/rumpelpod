@@ -28,6 +28,7 @@ fn list_empty_returns_header_only() {
     assert!(stdout.contains("NAME"));
     assert!(stdout.contains("STATUS"));
     assert!(stdout.contains("CREATED"));
+    assert!(stdout.contains("HOST"));
     assert!(stdout.contains("---"));
 }
 
@@ -72,6 +73,11 @@ fn list_shows_created_sandbox() {
     assert!(
         stdout.contains("running"),
         "Expected 'running' status in output: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("local"),
+        "Expected 'local' host in output: {}",
         stdout
     );
 }

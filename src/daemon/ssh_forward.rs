@@ -166,6 +166,22 @@ impl SshForwardManager {
         self.ensure_connection(&remote_host)
     }
 
+    /// Try to get an existing forwarded socket for the given remote Docker specification.
+    ///
+    /// Returns the socket path if a connection already exists and is alive, otherwise None.
+    /// Unlike `get_socket`, this does not create a new connection.
+    pub fn try_get_socket(&self, remote: &RemoteDocker) -> Option<PathBuf> {
+        let remote_host = RemoteHost::from_remote_docker(remote);
+        let mut connections = self.connections.lock().unwrap();
+
+        if let Some(session) = connections.get_mut(&remote_host) {
+            if session.is_alive() {
+                return Some(session.docker_socket.clone());
+            }
+        }
+        None
+    }
+
     /// Ensure a connection exists and is alive for the given remote host.
     fn ensure_connection(&self, host: &RemoteHost) -> Result<PathBuf> {
         let mut connections = self.connections.lock().unwrap();

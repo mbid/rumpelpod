@@ -603,11 +603,20 @@ fn create_container(
 }
 
 /// List all sandbox containers for a given repository path.
-fn list_sandboxes_for_repo(repo_path: &Path) -> Result<Vec<SandboxInfo>> {
+/// Get the status of containers for a repository via a Docker socket.
+/// Returns a map from sandbox name to container status.
+fn get_container_status_via_socket(
+    docker_socket: &Path,
+    repo_path: &Path,
+) -> Result<HashMap<String, SandboxStatus>> {
     use bollard::models::ContainerSummaryStateEnum;
-    use chrono::{DateTime, Utc};
 
-    let docker = Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+    let docker = Docker::connect_with_socket(
+        docker_socket.to_string_lossy().as_ref(),
+        120,
+        bollard::API_DEFAULT_VERSION,
+    )
+    .context("connecting to Docker daemon")?;
 
     // Filter by label to find containers for this repo
     let mut filters = HashMap::new();
@@ -625,7 +634,7 @@ fn list_sandboxes_for_repo(repo_path: &Path) -> Result<Vec<SandboxInfo>> {
     let containers =
         block_on(docker.list_containers(Some(options))).context("listing containers")?;
 
-    let mut sandboxes = Vec::new();
+    let mut status_map = HashMap::new();
 
     for container in containers {
         let labels = container.labels.unwrap_or_default();
@@ -639,21 +648,10 @@ fn list_sandboxes_for_repo(repo_path: &Path) -> Result<Vec<SandboxInfo>> {
             _ => SandboxStatus::Stopped,
         };
 
-        // Format created timestamp: Unix timestamp -> "YYYY-MM-DD HH:MM"
-        let created = container
-            .created
-            .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
-            .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_default();
-
-        sandboxes.push(SandboxInfo {
-            name: sandbox_name,
-            status,
-            created,
-        });
+        status_map.insert(sandbox_name, status);
     }
 
-    Ok(sandboxes)
+    Ok(status_map)
 }
 
 impl Daemon for DaemonServer {
@@ -672,6 +670,30 @@ impl Daemon for DaemonServer {
         // Validate network configuration
         if network == Network::UnsafeHost && runtime != Runtime::Runc {
             anyhow::bail!("network='unsafe-host' is only supported with runtime='runc'");
+        }
+
+        // Get the host specification string for the database
+        let host_spec = remote
+            .as_ref()
+            .map(|r| format!("{}@{}:{}", r.user, r.host, r.port))
+            .unwrap_or_else(|| db::LOCAL_HOST.to_string());
+
+        // Check for name conflicts between local and remote sandboxes
+        {
+            let conn = self.db.lock().unwrap();
+            if let Some(existing) = db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
+                // A sandbox with this name exists - check if the host matches
+                if existing.host != host_spec {
+                    anyhow::bail!(
+                        "Sandbox '{}' already exists on {} but was requested on {}.\n\
+                         Delete the existing sandbox first with 'sandbox delete {}'.",
+                        sandbox_name.0,
+                        existing.host,
+                        host_spec,
+                        sandbox_name.0
+                    );
+                }
+            }
         }
 
         // Get the Docker socket to use (local or forwarded from remote)
@@ -762,6 +784,20 @@ impl Daemon for DaemonServer {
                 start_container(&docker, &name)?;
             }
 
+            // Ensure sandbox record exists in database (for re-entry or migration)
+            {
+                let conn = self.db.lock().unwrap();
+                let sandbox_id = match db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
+                    Some(sandbox) => sandbox.id,
+                    None => {
+                        // Container exists but no DB record - create one (migration case)
+                        db::create_sandbox(&conn, &repo_path, &sandbox_name.0, &host_spec)?
+                    }
+                };
+                // Mark as ready since the container exists
+                db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Ready)?;
+            }
+
             // Register sandbox with the git HTTP server (may already be registered, that's OK)
             let token = self
                 .git_server_state
@@ -806,6 +842,20 @@ impl Daemon for DaemonServer {
             .unwrap()
             .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
 
+        // Create sandbox record in database with status "initializing"
+        let sandbox_id = {
+            let conn = self.db.lock().unwrap();
+            db::create_sandbox(&conn, &repo_path, &sandbox_name.0, &host_spec)?
+        };
+
+        // Helper to mark sandbox as error and propagate the original error
+        let mark_error = |e: anyhow::Error| -> anyhow::Error {
+            if let Ok(conn) = self.db.lock() {
+                let _ = db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Error);
+            }
+            e
+        };
+
         let container_id = create_container(
             &docker,
             &name,
@@ -814,7 +864,8 @@ impl Daemon for DaemonServer {
             &repo_path,
             runtime,
             network,
-        )?;
+        )
+        .map_err(mark_error)?;
 
         let url = git_http_server::git_http_url(&server_ip, server_port);
 
@@ -827,7 +878,14 @@ impl Daemon for DaemonServer {
             &sandbox_name,
             &user,
             host_branch.as_deref(),
-        )?;
+        )
+        .map_err(mark_error)?;
+
+        // Mark sandbox as ready
+        {
+            let conn = self.db.lock().unwrap();
+            db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Ready)?;
+        }
 
         Ok(LaunchResult {
             container_id,
@@ -885,15 +943,93 @@ impl Daemon for DaemonServer {
             cleanup_sandbox_refs(&gateway_path, &repo_path, &sandbox_name);
         }
 
-        // Delete conversation history for this sandbox
+        // Delete sandbox from database (cascades to conversations)
         let conn = self.db.lock().unwrap();
-        db::delete_conversations(&conn, &repo_path, &sandbox_name.0)?;
+        db::delete_sandbox(&conn, &repo_path, &sandbox_name.0)?;
 
         Ok(())
     }
 
     fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
-        list_sandboxes_for_repo(&repo_path)
+        // Get sandboxes from database (includes remote sandboxes)
+        let conn = self.db.lock().unwrap();
+        let db_sandboxes = db::list_sandboxes(&conn, &repo_path)?;
+        drop(conn); // Release lock before calling Docker API
+
+        // Get container status from local Docker
+        let local_container_status =
+            get_container_status_via_socket(&default_docker_socket(), &repo_path)?;
+
+        // Collect unique remote hosts and check for existing connections
+        let mut remote_status_maps: HashMap<String, Option<HashMap<String, SandboxStatus>>> =
+            HashMap::new();
+        for sandbox in &db_sandboxes {
+            if sandbox.host != db::LOCAL_HOST && !remote_status_maps.contains_key(&sandbox.host) {
+                // Try to get existing socket for this remote
+                let status_map = RemoteDocker::parse(&sandbox.host)
+                    .ok()
+                    .and_then(|remote| self.ssh_forward.try_get_socket(&remote))
+                    .and_then(|socket| get_container_status_via_socket(&socket, &repo_path).ok());
+                remote_status_maps.insert(sandbox.host.clone(), status_map);
+            }
+        }
+
+        // Build combined list with status from Docker where available
+        let mut sandboxes = Vec::new();
+        for sandbox in db_sandboxes {
+            let status = if sandbox.host == db::LOCAL_HOST {
+                // Local sandbox - check actual container status
+                match local_container_status.get(&sandbox.name) {
+                    Some(status) => status.clone(),
+                    None => {
+                        // Container doesn't exist
+                        match sandbox.status {
+                            db::SandboxStatus::Ready => SandboxStatus::Gone,
+                            db::SandboxStatus::Initializing => SandboxStatus::Stopped,
+                            db::SandboxStatus::Error => SandboxStatus::Stopped,
+                        }
+                    }
+                }
+            } else {
+                // Remote sandbox - check if we have live container status
+                match remote_status_maps
+                    .get(&sandbox.host)
+                    .and_then(|m| m.as_ref())
+                {
+                    Some(status_map) => {
+                        // We have a connection - use actual container status
+                        match status_map.get(&sandbox.name) {
+                            Some(status) => status.clone(),
+                            None => {
+                                // Container doesn't exist on remote
+                                match sandbox.status {
+                                    db::SandboxStatus::Ready => SandboxStatus::Gone,
+                                    db::SandboxStatus::Initializing => SandboxStatus::Stopped,
+                                    db::SandboxStatus::Error => SandboxStatus::Stopped,
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        // No connection - fall back to database status
+                        match sandbox.status {
+                            db::SandboxStatus::Initializing => SandboxStatus::Stopped,
+                            db::SandboxStatus::Ready => SandboxStatus::Running,
+                            db::SandboxStatus::Error => SandboxStatus::Stopped,
+                        }
+                    }
+                }
+            };
+
+            sandboxes.push(SandboxInfo {
+                name: sandbox.name,
+                status,
+                created: sandbox.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                host: sandbox.host,
+            });
+        }
+
+        Ok(sandboxes)
     }
 
     fn save_conversation(
