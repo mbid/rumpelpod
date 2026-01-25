@@ -31,6 +31,7 @@ fn make_tool(name: ToolName) -> Tool {
 }
 
 /// Convert the internal messages to JSON for persistence.
+#[allow(clippy::too_many_arguments)]
 pub fn run_grok_agent(
     container_name: &str,
     user: &str,

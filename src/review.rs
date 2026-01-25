@@ -107,7 +107,7 @@ fn get_file_at_commit(
 }
 
 /// Write content to a temporary file.
-fn write_temp_file(dir: &PathBuf, name: &str, content: Option<&[u8]>) -> Result<PathBuf> {
+fn write_temp_file(dir: &std::path::Path, name: &str, content: Option<&[u8]>) -> Result<PathBuf> {
     let path = dir.join(name);
 
     // Create parent directories if the file path contains subdirectories

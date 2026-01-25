@@ -76,6 +76,7 @@ fn execute_web_search(client: &Client, model: &str, query: &str) -> Result<Strin
     Ok(text)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_gemini_agent(
     container_name: &str,
     user: &str,
