@@ -51,10 +51,16 @@ impl TestDaemon {
 
         let socket_path = temp_dir.path().join("sandbox.sock");
         let state_dir = temp_dir.path().join("state");
+        let runtime_dir = temp_dir.path().join("runtime");
+
+        // Ensure runtime directory exists, including the 'sandbox' subdirectory that
+        // the daemon expects for the git socket.
+        std::fs::create_dir_all(runtime_dir.join("sandbox")).expect("Failed to create runtime dir");
 
         let process = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
             .env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
             .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
