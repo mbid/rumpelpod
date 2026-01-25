@@ -9,9 +9,9 @@ use anyhow::{Context, Result};
 use crate::llm::cache::LlmCache;
 use crate::llm::client::xai::Client;
 use crate::llm::types::xai::{
-    FunctionCall, FunctionDefinition, Message, MessageContent, Model, ResponseInput,
+    FunctionCall, Message, MessageContent, MessageContentPart, Model, ResponseInput,
     ResponseInputItem, ResponseOutputItem, ResponseRequest, Role, Tool, ToolCall, ToolCallType,
-    ToolType,
+    WebSearchDefinition,
 };
 
 use super::common::{
@@ -21,13 +21,10 @@ use super::common::{
 use super::history::ConversationTracker;
 
 fn make_tool(name: ToolName) -> Tool {
-    Tool {
-        tool_type: ToolType::Function,
-        function: FunctionDefinition {
-            name: name.to_string(),
-            description: name.description().to_string(),
-            parameters: name.parameters(),
-        },
+    Tool::Function {
+        name: name.to_string(),
+        description: name.description().to_string(),
+        parameters: name.parameters(),
     }
 }
 
@@ -170,6 +167,11 @@ pub fn run_grok_agent(
                     make_tool(ToolName::Bash),
                     make_tool(ToolName::Edit),
                     make_tool(ToolName::Write),
+                    Tool::WebSearch {
+                        web_search: Some(WebSearchDefinition {
+                            allowed_domains: None,
+                        }),
+                    },
                 ]),
                 stream: Some(false),
                 store: Some(true), // Ensure history is stored
@@ -292,6 +294,19 @@ pub fn run_grok_agent(
 
                         tool_outputs
                             .push(ResponseInputItem::FunctionCallOutput { call_id, output });
+                    }
+                    ResponseOutputItem::Message { content, role: _ } => {
+                        for part in content {
+                            match part {
+                                MessageContentPart::OutputText { text } => {
+                                    println!("{}", text);
+                                    assistant_text_parts.push(text);
+                                }
+                                MessageContentPart::Unknown => {
+                                    println!("[warn] Unknown message content part");
+                                }
+                            }
+                        }
                     }
                     ResponseOutputItem::Unknown => {
                         println!("[warn] Unknown response item type");

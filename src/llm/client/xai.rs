@@ -77,6 +77,7 @@ impl Client {
 
         // Serialize request body to a string once
         let body = serde_json::to_string(&request).context("Failed to serialize request")?;
+        debug!("Request body: {}", body);
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
         let cache_headers = self.build_headers(true);
@@ -160,6 +161,8 @@ impl Client {
                     let cache_key = cache.compute_key(XAI_API_URL, &cache_header_refs, &body);
                     cache.put(&cache_key, &response_text)?;
                 }
+
+                println!("xAI API response body: {}", response_text);
 
                 let response: ResponseResponse = serde_json::from_str(&response_text)
                     .with_context(|| {

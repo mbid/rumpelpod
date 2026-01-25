@@ -19,7 +19,7 @@ pub const DEFAULT_MODEL: &str = "claude-haiku-4-5";
 
 /// Provider-specific models for tests that need to verify provider-specific behavior.
 pub const ANTHROPIC_MODEL: &str = "claude-haiku-4-5";
-pub const XAI_MODEL: &str = "grok-3-mini";
+pub const XAI_MODEL: &str = "grok-4-1-fast-reasoning";
 pub const GEMINI_MODEL: &str = "gemini-2.5-flash";
 
 /// Get the llm-cache directory path.

@@ -42,25 +42,39 @@ pub enum Role {
 
 /// Tool definition for function calling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tool {
-    #[serde(rename = "type")]
-    pub tool_type: ToolType,
-    pub function: FunctionDefinition,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Tool {
+    Function {
+        name: String,
+        description: String,
+        /// JSON Schema for the function parameters
+        parameters: serde_json::Value,
+    },
+    WebSearch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        web_search: Option<WebSearchDefinition>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolType {
     Function,
+    WebSearch,
 }
 
-/// Function definition for a tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
     pub name: String,
     pub description: String,
     /// JSON Schema for the function parameters
     pub parameters: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchDefinition {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_domains: Option<Vec<String>>,
 }
 
 /// Request body for the responses endpoint.
@@ -97,6 +111,7 @@ pub enum ResponseInputItem {
 pub struct ResponseResponse {
     pub id: String,
     pub output: Option<Vec<ResponseOutputItem>>,
+    #[serde(alias = "created_at")]
     pub created: u64,
     pub model: String,
 }
@@ -112,7 +127,21 @@ pub enum ResponseOutputItem {
     Text {
         text: String,
     },
+    Message {
+        content: Vec<MessageContentPart>,
+        role: Role,
+    },
     // Handle unknown types gracefully?
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MessageContentPart {
+    OutputText {
+        text: String,
+    },
     #[serde(other)]
     Unknown,
 }

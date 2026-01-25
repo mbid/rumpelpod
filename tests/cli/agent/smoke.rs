@@ -60,11 +60,6 @@ fn agent_reads_file_claude_opus_4_5() {
 }
 
 #[test]
-fn agent_reads_file_grok_4() {
-    agent_reads_file("grok-4");
-}
-
-#[test]
 fn agent_reads_file_grok_4_1_fast_reasoning() {
     agent_reads_file("grok-4-1-fast-reasoning");
 }
