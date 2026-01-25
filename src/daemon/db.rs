@@ -2,9 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use indoc::indoc;
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
 /// Summary of a conversation for listing.
 #[derive(Debug, Clone)]
@@ -26,7 +27,7 @@ pub struct Conversation {
 }
 
 /// Get the database path.
-/// Uses $XDG_STATE_HOME/sandbox/conversations.db
+/// Uses $XDG_STATE_HOME/sandbox/db.sqlite
 pub fn db_path() -> Result<PathBuf> {
     let state_base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -36,7 +37,34 @@ pub fn db_path() -> Result<PathBuf> {
                 .join(".local/state")
         });
 
-    Ok(state_base.join("sandbox").join("conversations.db"))
+    Ok(state_base.join("sandbox").join("db.sqlite"))
+}
+
+const SCHEMA_SQL: &str = indoc! {"
+    CREATE TABLE conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo_path TEXT NOT NULL,
+        sandbox_name TEXT NOT NULL,
+        model TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        history JSON NOT NULL
+    );
+
+    CREATE INDEX idx_conversations_lookup
+        ON conversations(repo_path, sandbox_name, updated_at DESC);
+
+    CREATE TABLE db_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+"};
+
+fn get_schema_hash() -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(SCHEMA_SQL);
+    hex::encode(hasher.finalize())
 }
 
 /// Open a database connection, creating the database and tables if needed.
@@ -47,34 +75,76 @@ pub fn open_db(path: &Path) -> Result<Connection> {
             .with_context(|| format!("Failed to create directory {}", parent.display()))?;
     }
 
+    if !path.exists() {
+        return create_and_init_db(path);
+    }
+
     let conn = Connection::open(path)
         .with_context(|| format!("Failed to open database at {}", path.display()))?;
 
-    init_db(&conn)?;
+    // Check version
+    let current_hash = get_schema_hash();
+    let stored_hash: Result<String, _> = conn.query_row(
+        "SELECT value FROM db_meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get(0),
+    );
+
+    match stored_hash {
+        Ok(hash) => {
+            if hash != current_hash {
+                bail!(
+                    indoc! {"
+                    Database schema mismatch.
+                    Expected hash: {}
+                    Found hash:    {}
+                    
+                    Please delete the database file to start over:
+                    rm {}
+                "},
+                    current_hash,
+                    hash,
+                    path.display()
+                );
+            }
+        }
+        Err(rusqlite::Error::SqliteFailure(_, _)) | Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // Treat missing table or missing row as "no version".
+            // Close connection, delete file, and start over.
+            drop(conn);
+            std::fs::remove_file(path).with_context(|| {
+                format!("Failed to remove outdated database at {}", path.display())
+            })?;
+            return create_and_init_db(path);
+        }
+        Err(e) => {
+            // Other errors (e.g. database corruption)
+            return Err(e).context("Failed to read schema version from database");
+        }
+    }
 
     Ok(conn)
 }
 
-/// Initialize the database schema if it doesn't exist.
-fn init_db(conn: &Connection) -> Result<()> {
-    conn.execute_batch(indoc! {"
-        CREATE TABLE IF NOT EXISTS conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            repo_path TEXT NOT NULL,
-            sandbox_name TEXT NOT NULL,
-            model TEXT NOT NULL,
-            provider TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            history JSON NOT NULL
-        );
+fn create_and_init_db(path: &Path) -> Result<Connection> {
+    let mut conn = Connection::open(path)
+        .with_context(|| format!("Failed to open new database at {}", path.display()))?;
 
-        CREATE INDEX IF NOT EXISTS idx_conversations_lookup
-            ON conversations(repo_path, sandbox_name, updated_at DESC);
-    "})
+    let tx = conn.transaction()?;
+
+    tx.execute_batch(SCHEMA_SQL)
         .context("Failed to initialize database schema")?;
 
-    Ok(())
+    let hash = get_schema_hash();
+    tx.execute(
+        "INSERT INTO db_meta (key, value) VALUES ('schema_version', ?)",
+        [&hash],
+    )
+    .context("Failed to insert schema version")?;
+
+    tx.commit()?;
+
+    Ok(conn)
 }
 
 /// Save or update a conversation.
@@ -468,5 +538,72 @@ mod tests {
         // Deleting from a sandbox that doesn't exist should succeed with 0 deleted
         let deleted = delete_conversations(&conn, &repo_path, "nonexistent").unwrap();
         assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn test_db_versioning_recreation() {
+        let temp_dir = TempDir::with_prefix("sandbox-db-test-versioning-").unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        // 1. Create fresh DB
+        {
+            let conn = open_db(&db_path).unwrap();
+            // Verify version exists
+            let hash: String = conn
+                .query_row(
+                    "SELECT value FROM db_meta WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(hash, get_schema_hash());
+        }
+
+        // 2. Corrupt DB (remove version)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("DELETE FROM db_meta WHERE key = 'schema_version'", [])
+                .unwrap();
+        }
+
+        // 3. Open again - should detect missing version and re-create
+        {
+            let conn = open_db(&db_path).unwrap();
+            let hash: String = conn
+                .query_row(
+                    "SELECT value FROM db_meta WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(hash, get_schema_hash());
+
+            // Verify it was re-created (tables should be empty if we had added data,
+            // but here we just check it opened successfully and has version)
+        }
+    }
+
+    #[test]
+    fn test_db_versioning_mismatch() {
+        let temp_dir = TempDir::with_prefix("sandbox-db-test-mismatch-").unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        // 1. Create DB with wrong version hash manually
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute(
+                "INSERT INTO db_meta (key, value) VALUES ('schema_version', 'wrong_hash')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // 2. Open should fail
+        let result = open_db(&db_path);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("Database schema mismatch"));
+        assert!(err.to_string().contains("rm "));
     }
 }
