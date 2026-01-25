@@ -4,6 +4,7 @@ mod async_runtime;
 mod cli;
 mod command_ext;
 pub mod config;
+pub mod devcontainer;
 mod docker_exec;
 
 pub use command_ext::CommandExt;
