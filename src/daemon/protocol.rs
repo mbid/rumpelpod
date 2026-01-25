@@ -230,10 +230,11 @@ impl DaemonClient {
     /// Create a client that connects via TCP to the given URL.
     #[allow(dead_code)]
     pub fn new(url: Url) -> Self {
-        Self {
-            client: reqwest::blocking::Client::new(),
-            url,
-        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(None)
+            .build()
+            .expect("Failed to build reqwest client");
+        Self { client, url }
     }
 
     /// Create a client that connects via Unix domain socket.
@@ -241,6 +242,7 @@ impl DaemonClient {
     pub fn new_unix(socket_path: &Path) -> Self {
         let client = reqwest::blocking::Client::builder()
             .unix_socket(socket_path)
+            .timeout(None)
             .build()
             .expect("Failed to build reqwest client");
         // URL host is ignored for Unix sockets, but we need a valid URL
