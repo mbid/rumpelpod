@@ -4,7 +4,7 @@ use rand::Rng;
 use std::time::Duration;
 
 use crate::llm::cache::LlmCache;
-use crate::llm::types::anthropic::{MessagesRequest, MessagesResponse};
+use crate::llm::types::anthropic::{MessagesRequest, MessagesResponse, ServerTool, Tool};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -64,10 +64,14 @@ impl Client {
     fn build_headers(
         &self,
         for_cache_key: bool,
+        enable_web_fetch: bool,
         enable_thinking: bool,
         enable_effort: bool,
     ) -> Vec<(&'static str, String)> {
-        let mut beta_flags = vec!["web-fetch-2025-09-10"];
+        let mut beta_flags = Vec::new();
+        if enable_web_fetch {
+            beta_flags.push("web-fetch-2025-09-10");
+        }
         if enable_thinking {
             beta_flags.push("interleaved-thinking-2025-05-14");
         }
@@ -77,9 +81,11 @@ impl Client {
 
         let mut headers = vec![
             ("anthropic-version", ANTHROPIC_VERSION.to_string()),
-            ("anthropic-beta", beta_flags.join(",")),
             ("content-type", "application/json".to_string()),
         ];
+        if !beta_flags.is_empty() {
+            headers.push(("anthropic-beta", beta_flags.join(",")));
+        }
         if !for_cache_key {
             if let Some(ref api_key) = self.api_key {
                 headers.push(("x-api-key", api_key.clone()));
@@ -97,12 +103,18 @@ impl Client {
 
         let enable_thinking = request.thinking.is_some();
         let enable_effort = request.output_config.is_some();
+        let enable_web_fetch = request.tools.as_ref().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|t| matches!(t, Tool::Server(ServerTool::WebFetch { .. })))
+        });
 
         // Serialize request body to a string once
         let body = serde_json::to_string(&request).context("Failed to serialize request")?;
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
-        let cache_headers = self.build_headers(true, enable_thinking, enable_effort);
+        let cache_headers =
+            self.build_headers(true, enable_web_fetch, enable_thinking, enable_effort);
         let cache_header_refs: Vec<(&str, &str)> = cache_headers
             .iter()
             .map(|(k, v)| (*k, v.as_str()))
@@ -134,7 +146,8 @@ impl Client {
         }
 
         // Build headers including API key for actual requests
-        let request_headers = self.build_headers(false, enable_thinking, enable_effort);
+        let request_headers =
+            self.build_headers(false, enable_web_fetch, enable_thinking, enable_effort);
 
         let mut attempt = 0;
 
