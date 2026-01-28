@@ -1011,12 +1011,8 @@ impl Daemon for DaemonServer {
                         }
                     }
                     None => {
-                        // No connection - fall back to database status
-                        match sandbox.status {
-                            db::SandboxStatus::Initializing => SandboxStatus::Stopped,
-                            db::SandboxStatus::Ready => SandboxStatus::Running,
-                            db::SandboxStatus::Error => SandboxStatus::Stopped,
-                        }
+                        // No connection - we can't determine the actual status
+                        SandboxStatus::Disconnected
                     }
                 }
             };

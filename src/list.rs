@@ -25,6 +25,7 @@ pub fn list() -> Result<()> {
             SandboxStatus::Running => "running",
             SandboxStatus::Stopped => "stopped",
             SandboxStatus::Gone => "gone",
+            SandboxStatus::Disconnected => "disconnected",
         };
         println!(
             "{:<20} {:<15} {:<20} {:<20}",

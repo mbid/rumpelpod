@@ -47,6 +47,8 @@ pub enum SandboxStatus {
     Stopped,
     /// Container no longer exists (was deleted outside of sandbox tool)
     Gone,
+    /// Remote sandbox where we don't have a connection to check actual status
+    Disconnected,
 }
 
 /// Information about a sandbox.
