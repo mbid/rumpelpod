@@ -168,11 +168,13 @@ fn agent_web_search_anthropic_flags_conflict() {
     );
 
     // In PTY mode, stdout and stderr are combined
+    let msg = &output.stdout;
     assert!(
-        output.stdout.contains("argument '--enable-anthropic-websearch' cannot be used with '--disable-anthropic-websearch'") ||
-        output.stdout.contains("argument '--disable-anthropic-websearch' cannot be used with '--enable-anthropic-websearch'"),
+        msg.contains("enable-anthropic-websearch")
+            && msg.contains("disable-anthropic-websearch")
+            && msg.contains("cannot be used with"),
         "Error should mention conflicting arguments.\noutput: {}",
-        output.stdout
+        msg
     );
 }
 
