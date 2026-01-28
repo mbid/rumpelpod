@@ -3,8 +3,10 @@
 //! This module implements types according to the Dev Container specification.
 //! See <https://containers.dev/implementors/json_reference/> for details.
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 
 /// A devcontainer.json configuration.
 ///
@@ -415,6 +417,43 @@ pub enum WaitFor {
     PostAttachCommand,
 }
 
+impl DevContainer {
+    /// Load a devcontainer.json from the given path using json5 (supports comments).
+    pub fn load(path: &Path) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+
+        json5::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
+    }
+
+    /// Find and load a devcontainer.json from standard locations in the repo.
+    ///
+    /// Searches for:
+    /// 1. `.devcontainer/devcontainer.json`
+    /// 2. `.devcontainer.json`
+    pub fn find_and_load(repo_root: &Path) -> Result<Option<Self>> {
+        let candidates = [
+            repo_root.join(".devcontainer/devcontainer.json"),
+            repo_root.join(".devcontainer.json"),
+        ];
+
+        for candidate in &candidates {
+            if candidate.exists() {
+                return Self::load(candidate).map(Some);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Get the user to run as (prefers remoteUser over containerUser).
+    pub fn user(&self) -> Option<&str> {
+        self.remote_user
+            .as_deref()
+            .or(self.container_user.as_deref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,5 +615,56 @@ mod tests {
         assert_eq!(parsed.name, config.name);
         assert_eq!(parsed.image, config.image);
         assert_eq!(parsed.remote_user, config.remote_user);
+    }
+
+    #[test]
+    fn test_user_prefers_remote_user() {
+        let config = DevContainer {
+            remote_user: Some("developer".to_string()),
+            container_user: Some("root".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.user(), Some("developer"));
+    }
+
+    #[test]
+    fn test_user_falls_back_to_container_user() {
+        let config = DevContainer {
+            container_user: Some("root".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(config.user(), Some("root"));
+    }
+
+    #[test]
+    fn test_json5_comments_single_line() {
+        let input = r#"{
+            // This is a comment
+            "key": "value"
+        }"#;
+        let config: DevContainer = json5::from_str(input).unwrap();
+        assert!(config.name.is_none()); // "key" is not a known field
+    }
+
+    #[test]
+    fn test_json5_comments_multi_line() {
+        let input = r#"{
+            /* This is a
+               multi-line comment */
+            "image": "ubuntu"
+        }"#;
+        let config: DevContainer = json5::from_str(input).unwrap();
+        assert_eq!(config.image, Some("ubuntu".to_string()));
+    }
+
+    #[test]
+    fn test_json5_trailing_commas() {
+        let input = r#"{
+            "image": "ubuntu",
+            "remoteUser": "dev",
+        }"#;
+        let config: DevContainer = json5::from_str(input).unwrap();
+        assert_eq!(config.image, Some("ubuntu".to_string()));
+        assert_eq!(config.remote_user, Some("dev".to_string()));
     }
 }

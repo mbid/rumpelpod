@@ -4,7 +4,12 @@
 //! - Runtime and Model enums for CLI and config file parsing
 //! - SandboxConfig for parsing `.sandbox.toml` at the repository root
 //! - Utility functions for state directory paths
+//!
+//! Configuration is loaded with the following precedence (highest to lowest):
+//! 1. `.sandbox.toml` in the repository root
+//! 2. `devcontainer.json` (in `.devcontainer/` or root)
 
+use crate::devcontainer::DevContainer;
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
@@ -166,6 +171,80 @@ mod tests {
         assert!(RemoteDocker::parse("docker.example.com:notaport").is_err());
         assert!(RemoteDocker::parse("docker.example.com:99999").is_err());
     }
+
+    #[test]
+    fn test_parse_run_args_network_equals() {
+        let args = vec!["--network=host".to_string()];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, Some(Network::UnsafeHost));
+        assert_eq!(runtime, None);
+    }
+
+    #[test]
+    fn test_parse_run_args_network_separate() {
+        let args = vec!["--network".to_string(), "host".to_string()];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, Some(Network::UnsafeHost));
+        assert_eq!(runtime, None);
+    }
+
+    #[test]
+    fn test_parse_run_args_runtime_equals() {
+        let args = vec!["--runtime=sysbox-runc".to_string()];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, None);
+        assert_eq!(runtime, Some(Runtime::SysboxRunc));
+    }
+
+    #[test]
+    fn test_parse_run_args_runtime_separate() {
+        let args = vec!["--runtime".to_string(), "runsc".to_string()];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, None);
+        assert_eq!(runtime, Some(Runtime::Runsc));
+    }
+
+    #[test]
+    fn test_parse_run_args_both() {
+        let args = vec![
+            "--network=host".to_string(),
+            "--runtime=sysbox-runc".to_string(),
+        ];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, Some(Network::UnsafeHost));
+        assert_eq!(runtime, Some(Runtime::SysboxRunc));
+    }
+
+    #[test]
+    fn test_parse_run_args_mixed_with_other_args() {
+        let args = vec![
+            "--privileged".to_string(),
+            "--network".to_string(),
+            "host".to_string(),
+            "-v".to_string(),
+            "/host:/container".to_string(),
+            "--runtime=runc".to_string(),
+        ];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, Some(Network::UnsafeHost));
+        assert_eq!(runtime, Some(Runtime::Runc));
+    }
+
+    #[test]
+    fn test_parse_run_args_unknown_runtime() {
+        let args = vec!["--runtime=unknown-runtime".to_string()];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, None);
+        assert_eq!(runtime, None);
+    }
+
+    #[test]
+    fn test_parse_run_args_non_host_network() {
+        let args = vec!["--network=bridge".to_string()];
+        let (network, runtime) = super::parse_run_args(&args);
+        assert_eq!(network, None);
+        assert_eq!(runtime, None);
+    }
 }
 
 /// Network configuration.
@@ -230,71 +309,195 @@ impl RemoteDocker {
     }
 }
 
-/// Top-level configuration structure parsed from `.sandbox.toml`.
-#[derive(Debug, Clone, Deserialize)]
+/// Raw configuration structure parsed from `.sandbox.toml`.
+/// All fields are optional to allow merging with devcontainer.json.
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct TomlConfig {
+    /// Container runtime (runsc, runc, sysbox-runc).
+    runtime: Option<Runtime>,
+
+    /// Network configuration.
+    network: Option<Network>,
+
+    /// Docker image to use.
+    image: Option<String>,
+
+    /// User to run as inside the sandbox container.
+    user: Option<String>,
+
+    /// Path to the repo checkout inside the container.
+    repo_path: Option<PathBuf>,
+
+    #[serde(default)]
+    agent: AgentConfig,
+
+    /// Remote Docker host specification (e.g., "user@host:port").
+    remote: Option<String>,
+}
+
+/// Merged configuration from `.sandbox.toml` and `devcontainer.json`.
+#[derive(Debug, Clone)]
 pub struct SandboxConfig {
     /// Container runtime (runsc, runc, sysbox-runc).
-    #[serde(default)]
     pub runtime: Option<Runtime>,
 
     /// Network configuration.
-    #[serde(default)]
     pub network: Network,
 
+    /// Docker image to use.
     pub image: String,
 
     /// User to run as inside the sandbox container.
     /// If not specified, the image's USER directive is used.
     /// The image must have a non-root USER set, or this field must be explicitly provided.
-    #[serde(default)]
     pub user: Option<String>,
 
     /// Path to the repo checkout inside the container.
     /// `sandbox enter` will use this as the working directory base.
     pub repo_path: PathBuf,
 
-    #[serde(default)]
+    /// Agent configuration.
     pub agent: AgentConfig,
 
     /// Remote Docker host specification (e.g., "user@host:port").
     /// If not set, uses local Docker.
-    #[serde(default)]
     pub remote: Option<String>,
 }
 
 impl SandboxConfig {
-    /// Load config from the `.sandbox.toml` file in the given repo root.
-    /// Returns an error if the file doesn't exist.
+    /// Load config from `.sandbox.toml` and/or `devcontainer.json`.
+    ///
+    /// Precedence (highest to lowest):
+    /// 1. `.sandbox.toml` values
+    /// 2. `devcontainer.json` values (from `.devcontainer/` or root)
+    ///
+    /// At least one config source must provide `image` and `repo_path`.
     pub fn load(repo_root: &Path) -> Result<Self> {
+        // Load devcontainer.json if present (lowest precedence)
+        let devcontainer = DevContainer::find_and_load(repo_root)?;
+
+        // Load .sandbox.toml if present (highest precedence)
         let config_path = repo_root.join(".sandbox.toml");
+        let toml_config = if config_path.exists() {
+            let contents = std::fs::read_to_string(&config_path)
+                .with_context(|| format!("Failed to read {}", config_path.display()))?;
+            toml::from_str(&contents)
+                .with_context(|| format!("Failed to parse {}", config_path.display()))?
+        } else {
+            TomlConfig::default()
+        };
 
-        if !config_path.exists() {
-            let path = config_path.display();
-            bail!(formatdoc! {"
-                No .sandbox.toml config file found at {path}.
-                Please create a .sandbox.toml file to configure the sandbox.
-            "});
-        }
+        // Parse run_args from devcontainer.json for network and runtime
+        let (dc_network, dc_runtime) = devcontainer
+            .as_ref()
+            .and_then(|dc| dc.run_args.as_ref())
+            .map(|args| parse_run_args(args))
+            .unwrap_or((None, None));
 
-        let path = config_path.display();
-        let contents = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read {path}"))?;
+        // Merge with toml taking precedence
+        let image = toml_config
+            .image
+            .or_else(|| devcontainer.as_ref().and_then(|dc| dc.image.clone()));
 
-        let config: SandboxConfig =
-            toml::from_str(&contents).with_context(|| format!("Failed to parse {path}"))?;
+        let repo_path = toml_config.repo_path.or_else(|| {
+            devcontainer
+                .as_ref()
+                .and_then(|dc| dc.workspace_folder.as_ref())
+                .map(PathBuf::from)
+        });
 
-        // Validate that only one model option is set
-        let model_options_count = config.agent.model.is_some() as usize
-            + config.agent.custom_anthropic_model.is_some() as usize
-            + config.agent.custom_gemini_model.is_some() as usize
-            + config.agent.custom_xai_model.is_some() as usize;
+        let user = toml_config.user.or_else(|| {
+            devcontainer
+                .as_ref()
+                .and_then(|dc| dc.user().map(String::from))
+        });
+
+        let runtime = toml_config.runtime.or(dc_runtime);
+
+        let network = toml_config.network.or(dc_network).unwrap_or_default();
+
+        // Validate required fields
+        let image = image.ok_or_else(|| {
+            anyhow::anyhow!(formatdoc! {"
+                No image specified.
+                Please set 'image' in .sandbox.toml or devcontainer.json.
+            "})
+        })?;
+
+        let repo_path = repo_path.ok_or_else(|| {
+            anyhow::anyhow!(formatdoc! {"
+                No repo path specified.
+                Please set 'repo-path' in .sandbox.toml or 'workspaceFolder' in devcontainer.json.
+            "})
+        })?;
+
+        // Validate agent model options
+        let model_options_count = toml_config.agent.model.is_some() as usize
+            + toml_config.agent.custom_anthropic_model.is_some() as usize
+            + toml_config.agent.custom_gemini_model.is_some() as usize
+            + toml_config.agent.custom_xai_model.is_some() as usize;
 
         if model_options_count > 1 {
             bail!("Configuration error: Only one of 'model', 'custom-anthropic-model', 'custom-gemini-model', or 'custom-xai-model' can be specified in [agent] section.");
         }
 
-        Ok(config)
+        Ok(Self {
+            runtime,
+            network,
+            image,
+            user,
+            repo_path,
+            agent: toml_config.agent,
+            remote: toml_config.remote,
+        })
+    }
+}
+
+/// Parse run_args to extract network and runtime settings.
+///
+/// Looks for:
+/// - `--network=host` or `--network host` -> Network::UnsafeHost
+/// - `--runtime=<runtime>` or `--runtime <runtime>` -> appropriate Runtime
+fn parse_run_args(args: &[String]) -> (Option<Network>, Option<Runtime>) {
+    let mut network = None;
+    let mut runtime = None;
+    let mut iter = args.iter().peekable();
+
+    while let Some(arg) = iter.next() {
+        // Handle --network
+        if let Some(value) = arg.strip_prefix("--network=") {
+            if value == "host" {
+                network = Some(Network::UnsafeHost);
+            }
+        } else if arg == "--network" {
+            if let Some(value) = iter.next() {
+                if value == "host" {
+                    network = Some(Network::UnsafeHost);
+                }
+            }
+        }
+
+        // Handle --runtime
+        if let Some(value) = arg.strip_prefix("--runtime=") {
+            runtime = parse_runtime_value(value);
+        } else if arg == "--runtime" {
+            if let Some(value) = iter.next() {
+                runtime = parse_runtime_value(value);
+            }
+        }
+    }
+
+    (network, runtime)
+}
+
+/// Parse a runtime string value into a Runtime enum.
+fn parse_runtime_value(value: &str) -> Option<Runtime> {
+    match value {
+        "runsc" => Some(Runtime::Runsc),
+        "runc" => Some(Runtime::Runc),
+        "sysbox-runc" => Some(Runtime::SysboxRunc),
+        _ => None,
     }
 }
 
