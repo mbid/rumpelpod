@@ -43,9 +43,24 @@ pub struct TestDaemon {
     temp_dir: TempDir,
 }
 
+/// Environment variable for custom SSH config file (must match ssh_forward.rs).
+const SSH_CONFIG_FILE_ENV: &str = "SSH_CONFIG_FILE";
+
 impl TestDaemon {
     /// Start a new test daemon with an isolated socket and state directory.
     pub fn start() -> Self {
+        Self::start_internal(None)
+    }
+
+    /// Start a new test daemon with a custom SSH config file.
+    ///
+    /// This is used for testing SSH remote Docker functionality. The daemon
+    /// will use the specified SSH config file for all SSH connections.
+    pub fn start_with_ssh_config(ssh_config: &Path) -> Self {
+        Self::start_internal(Some(ssh_config))
+    }
+
+    fn start_internal(ssh_config: Option<&Path>) -> Self {
         let temp_dir =
             TempDir::with_prefix("sandbox-test-").expect("Failed to create temp directory");
 
@@ -57,10 +72,16 @@ impl TestDaemon {
         // the daemon expects for the git socket.
         std::fs::create_dir_all(runtime_dir.join("sandbox")).expect("Failed to create runtime dir");
 
-        let process = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"))
-            .env(SOCKET_PATH_ENV, &socket_path)
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
+        cmd.env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env("XDG_RUNTIME_DIR", &runtime_dir);
+
+        if let Some(config_path) = ssh_config {
+            cmd.env(SSH_CONFIG_FILE_ENV, config_path);
+        }
+
+        let process = cmd
             .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

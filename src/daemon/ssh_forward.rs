@@ -28,6 +28,14 @@ const INITIAL_DELAY: Duration = Duration::from_secs(1);
 /// Maximum delay for exponential backoff.
 const MAX_DELAY: Duration = Duration::from_secs(60);
 
+/// Environment variable to specify a custom SSH config file.
+///
+/// When set, SSH commands will use `-F <path>` to read configuration from the
+/// specified file instead of the default locations. This is primarily useful
+/// for testing, allowing tests to provide their own SSH keys and settings
+/// without depending on or polluting the user's SSH configuration.
+pub const SSH_CONFIG_FILE_ENV: &str = "SSH_CONFIG_FILE";
+
 /// Remote Docker socket path.
 const REMOTE_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 
@@ -260,6 +268,11 @@ impl SshForwardManager {
 
         let mut cmd = Command::new("ssh");
 
+        // Use custom config file if specified (for testing)
+        if let Ok(config_file) = std::env::var(SSH_CONFIG_FILE_ENV) {
+            cmd.args(["-F", &config_file]);
+        }
+
         // Don't execute a remote command
         cmd.arg("-N");
 
@@ -408,11 +421,19 @@ impl SshForwardManager {
             forward_spec
         );
 
-        let output = Command::new("ssh")
-            .args(["-o", &format!("ControlPath={}", control_socket.display())])
-            .args(["-O", "forward"])
-            .args(["-R", &forward_spec])
-            .arg(format!("{}@{}", host.user, host.host))
+        let mut cmd = Command::new("ssh");
+
+        // Use custom config file if specified (for testing)
+        if let Ok(config_file) = std::env::var(SSH_CONFIG_FILE_ENV) {
+            cmd.args(["-F", &config_file]);
+        }
+
+        cmd.args(["-o", &format!("ControlPath={}", control_socket.display())]);
+        cmd.args(["-O", "forward"]);
+        cmd.args(["-R", &forward_spec]);
+        cmd.arg(format!("{}@{}", host.user, host.host));
+
+        let output = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

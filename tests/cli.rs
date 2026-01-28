@@ -16,3 +16,5 @@ mod list;
 mod network;
 #[path = "cli/review.rs"]
 mod review;
+#[path = "cli/ssh/mod.rs"]
+mod ssh;
