@@ -40,41 +40,24 @@ pub enum Role {
     Tool,
 }
 
-/// Tool definition for function calling.
+/// Tool definition for function calling and server-side tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Tool {
+    /// Function tool for custom function calling
     Function {
         name: String,
         description: String,
         /// JSON Schema for the function parameters
         parameters: serde_json::Value,
     },
+    /// Server-side web search tool
     WebSearch {
         #[serde(skip_serializing_if = "Option::is_none")]
-        web_search: Option<WebSearchDefinition>,
+        allowed_domains: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        excluded_domains: Option<Vec<String>>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolType {
-    Function,
-    WebSearch,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FunctionDefinition {
-    pub name: String,
-    pub description: String,
-    /// JSON Schema for the function parameters
-    pub parameters: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WebSearchDefinition {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub allowed_domains: Option<Vec<String>>,
 }
 
 /// Request body for the responses endpoint.
@@ -119,19 +102,26 @@ pub struct ResponseResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseOutputItem {
+    /// Function call from the model requesting tool execution
     FunctionCall {
         call_id: String,
         name: String,
         arguments: String,
     },
-    Text {
-        text: String,
-    },
+    /// Direct text output
+    Text { text: String },
+    /// Message with structured content parts
     Message {
         content: Vec<MessageContentPart>,
         role: Role,
     },
-    // Handle unknown types gracefully?
+    /// Server-side web search was performed (results in subsequent Message)
+    WebSearchCall { id: String, status: String },
+    /// Server-side X/Twitter search was performed
+    XSearchCall { id: String, status: String },
+    /// Reasoning/thinking output from the model
+    Reasoning { id: String, status: String },
+    /// Handle unknown types gracefully
     #[serde(other)]
     Unknown,
 }
@@ -194,4 +184,55 @@ pub struct FunctionCall {
     pub name: String,
     /// JSON-encoded arguments
     pub arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_serialization() {
+        // Test function tool serialization
+        let function_tool = Tool::Function {
+            name: "bash".to_string(),
+            description: "Execute bash".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let json = serde_json::to_string(&function_tool).unwrap();
+        assert!(
+            json.contains("\"type\":\"function\""),
+            "Function tool should have type:function"
+        );
+        assert!(
+            json.contains("\"name\":\"bash\""),
+            "Function tool should have name field"
+        );
+
+        // Test web_search tool serialization - should NOT have nested web_search field
+        let web_search_tool = Tool::WebSearch {
+            allowed_domains: None,
+            excluded_domains: None,
+        };
+        let json = serde_json::to_string(&web_search_tool).unwrap();
+        // Should serialize to just {"type":"web_search"} without any nested objects
+        assert_eq!(
+            json, r#"{"type":"web_search"}"#,
+            "WebSearch with no config should serialize cleanly"
+        );
+
+        // Test web_search with allowed_domains
+        let web_search_with_domains = Tool::WebSearch {
+            allowed_domains: Some(vec!["example.com".to_string()]),
+            excluded_domains: None,
+        };
+        let json = serde_json::to_string(&web_search_with_domains).unwrap();
+        assert!(
+            json.contains("\"allowed_domains\":[\"example.com\"]"),
+            "Should have allowed_domains at top level"
+        );
+        assert!(
+            !json.contains("\"web_search\":"),
+            "Should NOT have nested web_search field"
+        );
+    }
 }

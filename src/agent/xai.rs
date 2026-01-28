@@ -11,7 +11,6 @@ use crate::llm::client::xai::Client;
 use crate::llm::types::xai::{
     FunctionCall, Message, MessageContent, MessageContentPart, Model, ResponseInput,
     ResponseInputItem, ResponseOutputItem, ResponseRequest, Role, Tool, ToolCall, ToolCallType,
-    WebSearchDefinition,
 };
 
 use super::common::{
@@ -168,9 +167,8 @@ pub fn run_grok_agent(
                     make_tool(ToolName::Edit),
                     make_tool(ToolName::Write),
                     Tool::WebSearch {
-                        web_search: Some(WebSearchDefinition {
-                            allowed_domains: None,
-                        }),
+                        allowed_domains: None,
+                        excluded_domains: None,
                     },
                 ]),
                 stream: Some(false),
@@ -303,13 +301,20 @@ pub fn run_grok_agent(
                                     assistant_text_parts.push(text);
                                 }
                                 MessageContentPart::Unknown => {
-                                    println!("[warn] Unknown message content part");
+                                    // Skip unknown content parts (e.g., annotations)
                                 }
                             }
                         }
                     }
-                    ResponseOutputItem::Unknown => {
-                        println!("[warn] Unknown response item type");
+                    ResponseOutputItem::WebSearchCall { .. } => {
+                        // Server-side web search - results will be in the Message
+                        println!("[web search]");
+                    }
+                    ResponseOutputItem::XSearchCall { .. } => {
+                        anyhow::bail!("Unexpected X search call - X search is not enabled");
+                    }
+                    ResponseOutputItem::Reasoning { .. } | ResponseOutputItem::Unknown => {
+                        // Skip reasoning and unknown types silently
                     }
                 }
             }
