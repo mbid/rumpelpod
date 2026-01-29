@@ -76,6 +76,7 @@ struct DaemonServer {
 
 /// Label key used to store the repository path on containers.
 const REPO_PATH_LABEL: &str = "dev.sandbox.repo_path";
+const CONTAINER_REPO_PATH_LABEL: &str = "dev.sandbox.container_repo_path";
 
 /// Label key used to store the sandbox name on containers.
 const SANDBOX_NAME_LABEL: &str = "dev.sandbox.name";
@@ -554,12 +555,14 @@ fn docker_runtime_flag(runtime: Runtime) -> &'static str {
 }
 
 /// Create a new container using the bollard Docker API.
+#[allow(clippy::too_many_arguments)]
 fn create_container(
     docker: &Docker,
     name: &str,
     sandbox_name: &SandboxName,
     image: &Image,
     repo_path: &Path,
+    container_repo_path: &Path,
     runtime: Runtime,
     network_config: Network,
 ) -> Result<ContainerId> {
@@ -570,6 +573,10 @@ fn create_container(
 
     let mut labels = HashMap::new();
     labels.insert(REPO_PATH_LABEL.to_string(), repo_path.display().to_string());
+    labels.insert(
+        CONTAINER_REPO_PATH_LABEL.to_string(),
+        container_repo_path.display().to_string(),
+    );
     labels.insert(SANDBOX_NAME_LABEL.to_string(), sandbox_name.0.clone());
 
     let host_config = HostConfig {
@@ -602,13 +609,20 @@ fn create_container(
     Ok(ContainerId(response.id))
 }
 
+#[derive(Clone)]
+struct SandboxContainerInfo {
+    status: SandboxStatus,
+    container_repo_path: Option<PathBuf>,
+    container_id: String,
+}
+
 /// List all sandbox containers for a given repository path.
 /// Get the status of containers for a repository via a Docker socket.
 /// Returns a map from sandbox name to container status.
 fn get_container_status_via_socket(
     docker_socket: &Path,
     repo_path: &Path,
-) -> Result<HashMap<String, SandboxStatus>> {
+) -> Result<HashMap<String, SandboxContainerInfo>> {
     use bollard::models::ContainerSummaryStateEnum;
 
     let docker = Docker::connect_with_socket(
@@ -643,12 +657,23 @@ fn get_container_status_via_socket(
             None => continue, // Skip containers without sandbox name label
         };
 
+        let container_repo_path = labels.get(CONTAINER_REPO_PATH_LABEL).map(PathBuf::from);
+
         let status = match container.state {
             Some(ContainerSummaryStateEnum::RUNNING) => SandboxStatus::Running,
             _ => SandboxStatus::Stopped,
         };
 
-        status_map.insert(sandbox_name, status);
+        if let Some(id) = container.id {
+            status_map.insert(
+                sandbox_name,
+                SandboxContainerInfo {
+                    status,
+                    container_repo_path,
+                    container_id: id,
+                },
+            );
+        }
     }
 
     Ok(status_map)
@@ -862,6 +887,7 @@ impl Daemon for DaemonServer {
             &sandbox_name,
             &image,
             &repo_path,
+            &container_repo_path,
             runtime,
             network,
         )
@@ -961,7 +987,7 @@ impl Daemon for DaemonServer {
             get_container_status_via_socket(&default_docker_socket(), &repo_path)?;
 
         // Collect unique remote hosts and check for existing connections
-        let mut remote_status_maps: HashMap<String, Option<HashMap<String, SandboxStatus>>> =
+        let mut remote_status_maps: HashMap<String, Option<HashMap<String, SandboxContainerInfo>>> =
             HashMap::new();
         for sandbox in &db_sandboxes {
             if sandbox.host != db::LOCAL_HOST && !remote_status_maps.contains_key(&sandbox.host) {
@@ -977,10 +1003,11 @@ impl Daemon for DaemonServer {
         // Build combined list with status from Docker where available
         let mut sandboxes = Vec::new();
         for sandbox in db_sandboxes {
-            let status = if sandbox.host == db::LOCAL_HOST {
+            let (status, container_state, socket_path) = if sandbox.host == db::LOCAL_HOST {
                 // Local sandbox - check actual container status
-                match local_container_status.get(&sandbox.name) {
-                    Some(status) => status.clone(),
+                let state = local_container_status.get(&sandbox.name);
+                let status = match state {
+                    Some(s) => s.status.clone(),
                     None => {
                         // Container doesn't exist
                         match sandbox.status {
@@ -989,7 +1016,8 @@ impl Daemon for DaemonServer {
                             db::SandboxStatus::Error => SandboxStatus::Stopped,
                         }
                     }
-                }
+                };
+                (status, state, Some(default_docker_socket()))
             } else {
                 // Remote sandbox - check if we have live container status
                 match remote_status_maps
@@ -998,8 +1026,9 @@ impl Daemon for DaemonServer {
                 {
                     Some(status_map) => {
                         // We have a connection - use actual container status
-                        match status_map.get(&sandbox.name) {
-                            Some(status) => status.clone(),
+                        let state = status_map.get(&sandbox.name);
+                        let status = match state {
+                            Some(s) => s.status.clone(),
                             None => {
                                 // Container doesn't exist on remote
                                 match sandbox.status {
@@ -1008,20 +1037,68 @@ impl Daemon for DaemonServer {
                                     db::SandboxStatus::Error => SandboxStatus::Stopped,
                                 }
                             }
-                        }
+                        };
+
+                        let socket_path = RemoteDocker::parse(&sandbox.host)
+                            .ok()
+                            .and_then(|remote| self.ssh_forward.try_get_socket(&remote));
+
+                        (status, state, socket_path)
                     }
                     None => {
                         // No connection - we can't determine the actual status
-                        SandboxStatus::Disconnected
+                        (SandboxStatus::Disconnected, None, None)
                     }
                 }
             };
+
+            let mut repo_state = None;
+            if status == SandboxStatus::Running {
+                if let (Some(state), Some(socket)) = (container_state, socket_path) {
+                    if let Some(container_repo_path) = &state.container_repo_path {
+                        if let Ok(docker) = Docker::connect_with_socket(
+                            socket.to_string_lossy().as_ref(),
+                            120,
+                            bollard::API_DEFAULT_VERSION,
+                        ) {
+                            let repo_path_str = container_repo_path.to_string_lossy();
+                            let cmd = vec!["git", "-C", &repo_path_str, "status", "-sb"];
+
+                            if let Ok(output) = crate::docker_exec::exec_capture(
+                                &docker,
+                                &state.container_id,
+                                None,
+                                None,
+                                None,
+                                cmd,
+                            ) {
+                                if output.success() {
+                                    let output_str = String::from_utf8_lossy(&output.stdout);
+                                    if let Some(line) = output_str.lines().next() {
+                                        if let Some(start) = line.find('[') {
+                                            if let Some(end) = line.find(']') {
+                                                if end > start {
+                                                    repo_state =
+                                                        Some(line[start + 1..end].to_string());
+                                                }
+                                            }
+                                        } else if line.contains("...") {
+                                            repo_state = Some("up to date".to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             sandboxes.push(SandboxInfo {
                 name: sandbox.name,
                 status,
                 created: sandbox.created_at.format("%Y-%m-%d %H:%M").to_string(),
                 host: sandbox.host,
+                repo_state,
             });
         }
 

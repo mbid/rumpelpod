@@ -14,10 +14,10 @@ pub fn list() -> Result<()> {
 
     // Print header
     println!(
-        "{:<20} {:<15} {:<20} {:<20}",
-        "NAME", "STATUS", "CREATED", "HOST"
+        "{:<20} {:<25} {:<15} {:<20} {:<20}",
+        "NAME", "GIT", "STATUS", "CREATED", "HOST"
     );
-    println!("{}", "-".repeat(75));
+    println!("{}", "-".repeat(100));
 
     // Print sandboxes
     for sandbox in sandboxes {
@@ -27,9 +27,10 @@ pub fn list() -> Result<()> {
             SandboxStatus::Gone => "gone",
             SandboxStatus::Disconnected => "disconnected",
         };
+        let repo_state = sandbox.repo_state.as_deref().unwrap_or("");
         println!(
-            "{:<20} {:<15} {:<20} {:<20}",
-            sandbox.name, status_str, sandbox.created, sandbox.host
+            "{:<20} {:<25} {:<15} {:<20} {:<20}",
+            sandbox.name, repo_state, status_str, sandbox.created, sandbox.host
         );
     }
 

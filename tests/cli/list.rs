@@ -26,10 +26,11 @@ fn list_empty_returns_header_only() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Should have header line and separator
     assert!(stdout.contains("NAME"));
+    assert!(stdout.contains("GIT"));
     assert!(stdout.contains("STATUS"));
     assert!(stdout.contains("CREATED"));
     assert!(stdout.contains("HOST"));
-    assert!(stdout.contains("---"));
+    assert!(stdout.contains("----"));
 }
 
 #[test]
@@ -78,6 +79,80 @@ fn list_shows_created_sandbox() {
     assert!(
         stdout.contains("local"),
         "Expected 'local' host in output: {}",
+        stdout
+    );
+}
+
+#[test]
+fn list_shows_repo_state() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Create a sandbox
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", "test-state", "--", "echo", "hello"])
+        .output()
+        .expect("Failed to run sandbox enter command");
+
+    assert!(
+        output.status.success(),
+        "sandbox enter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Initial state should be "up to date" (tracked via branch)
+    let output = sandbox_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to run sandbox list command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("up to date") || stdout.contains("ahead") || stdout.contains("behind"),
+        "Expected repo state in output: {}",
+        stdout
+    );
+
+    // Make a commit in the sandbox
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", "test-state", "--", "touch", "newfile"])
+        .output()
+        .expect("Failed to touch file");
+    assert!(output.status.success());
+
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", "test-state", "--", "git", "add", "newfile"])
+        .output()
+        .expect("Failed to git add");
+    assert!(output.status.success());
+
+    let output = sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            "test-state",
+            "--",
+            "git",
+            "commit",
+            "-m",
+            "new file",
+        ])
+        .output()
+        .expect("Failed to git commit");
+    assert!(output.status.success());
+
+    // Check list again - should show ahead
+    let output = sandbox_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to run sandbox list command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ahead 1"),
+        "Expected 'ahead 1' in output: {}",
         stdout
     );
 }

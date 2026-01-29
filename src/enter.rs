@@ -35,7 +35,7 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
     // Parse remote Docker specification if provided
     let host_str = host_override.or(config.host.as_deref());
     let remote = host_str
-        .map(|s| RemoteDocker::parse(s))
+        .map(RemoteDocker::parse)
         .transpose()
         .context("Invalid remote Docker specification")?;
 

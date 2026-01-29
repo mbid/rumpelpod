@@ -59,6 +59,8 @@ pub struct SandboxInfo {
     pub created: String,
     /// Host where the sandbox runs: "local" or an SSH URL like "user@host:port".
     pub host: String,
+    /// State of the repository in the sandbox (e.g. "ahead 1, behind 2").
+    pub repo_state: Option<String>,
 }
 
 /// Request body for launch_sandbox endpoint.
