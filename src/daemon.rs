@@ -946,8 +946,31 @@ impl Daemon for DaemonServer {
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
         use bollard::errors::Error as BollardError;
 
-        let docker =
-            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+        // Retrieve sandbox info to determine host
+        let conn = self.db.lock().unwrap();
+        let sandbox_record = db::get_sandbox(&conn, &repo_path, &sandbox_name.0)?;
+        drop(conn);
+
+        let docker = if let Some(record) = sandbox_record {
+            if record.host != db::LOCAL_HOST {
+                // Remote sandbox
+                let remote =
+                    RemoteDocker::parse(&record.host).context("Invalid remote host spec")?;
+                let socket_path = self.ssh_forward.get_socket(&remote)?;
+                Docker::connect_with_socket(
+                    socket_path.to_string_lossy().as_ref(),
+                    120,
+                    bollard::API_DEFAULT_VERSION,
+                )
+                .context("connecting to remote Docker daemon")?
+            } else {
+                Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
+            }
+        } else {
+            // Sandbox not found in DB. Fallback to local.
+            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
+        };
+
         let name = docker_name(&repo_path, &sandbox_name);
 
         // Stop the container with immediate SIGKILL (-t 0) because containers typically
