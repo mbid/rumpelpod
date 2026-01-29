@@ -1,10 +1,10 @@
 //! Review sandbox changes using git difftool.
 //!
 //! This module implements the `sandbox review` command, which shows the diff
-//! between a sandbox's primary branch and the merge base with its upstream.
+//! between a sandbox's primary branch and the merge base with the host's current HEAD.
 
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -12,7 +12,6 @@ use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
 use crate::cli::ReviewCommand;
-use crate::config::SandboxConfig;
 use crate::enter::launch_sandbox;
 use crate::git::get_repo_root;
 
@@ -235,73 +234,26 @@ fn invoke_difftool(
     Ok(())
 }
 
-/// Get the upstream branch for a branch inside the sandbox.
-/// Returns the upstream in the format "host/<branch>" or None if no upstream is set.
-fn get_sandbox_upstream(
-    container_id: &str,
-    user: &str,
-    repo_path: &str,
-    branch: &str,
-) -> Result<Option<String>> {
-    // Use git rev-parse to get the upstream tracking branch
-    let result = Command::new("docker")
-        .arg("exec")
-        .args(["--user", user])
-        .args(["--workdir", repo_path])
-        .arg(container_id)
-        .args([
-            "git",
-            "rev-parse",
-            "--abbrev-ref",
-            &format!("{}@{{upstream}}", branch),
-        ])
-        .output()
-        .context("Failed to execute docker exec")?;
+/// Prompt the user before opening a file in the difftool.
+/// Returns true if the user wants to view the file, false to skip.
+fn prompt_for_file(file_path: &str) -> Result<bool> {
+    print!("View diff for '{}' [y/n]? ", file_path);
+    io::stdout().flush().context("Failed to flush stdout")?;
 
-    if !result.status.success() {
-        // No upstream set
-        return Ok(None);
-    }
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("Failed to read user input")?;
 
-    let upstream = String::from_utf8_lossy(&result.stdout).trim().to_string();
-    if upstream.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(upstream))
-    }
+    let input = input.trim().to_lowercase();
+    Ok(input == "y" || input == "yes")
 }
 
 pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
-    let config = SandboxConfig::load(&repo_root)?;
-    let container_repo_path = config.repo_path.to_string_lossy().to_string();
 
     // Launch the sandbox (or ensure it's running)
-    let launch_result = launch_sandbox(&cmd.name, None)?;
-    let container_id = &launch_result.container_id.0;
-    let user = &launch_result.user;
-
-    // Get the upstream of the sandbox's primary branch
-    let upstream = get_sandbox_upstream(container_id, user, &container_repo_path, &cmd.name)?;
-
-    let upstream = match upstream {
-        Some(u) => u,
-        None => {
-            bail!(
-                "Sandbox '{}' has no upstream branch set.\n\
-                 This typically happens when the sandbox was created while the host \
-                 was in detached HEAD state (not on a branch).\n\
-                 The review command requires an upstream to compute the merge base.",
-                cmd.name
-            );
-        }
-    };
-
-    // Parse the upstream to extract the host branch name
-    // The upstream is in the format "host/<branch>"
-    let host_branch = upstream
-        .strip_prefix("host/")
-        .with_context(|| format!("Unexpected upstream format: {}", upstream))?;
+    let _launch_result = launch_sandbox(&cmd.name, None)?;
 
     // Verify the sandbox remote-tracking ref exists on the host
     let sandbox_ref = format!("sandbox/{}", cmd.name);
@@ -323,9 +275,25 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         );
     }
 
-    // Compute the merge base between the sandbox branch and the host branch
+    // Get the current HEAD commit on the host
+    let head_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo_root)
+        .output()
+        .context("Failed to get HEAD commit")?;
+
+    if !head_output.status.success() {
+        let stderr = String::from_utf8_lossy(&head_output.stderr);
+        bail!("Failed to get HEAD commit: {}", stderr.trim());
+    }
+
+    let host_head = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+
+    // Compute the merge base between the sandbox branch and the host HEAD
     let merge_base_output = Command::new("git")
-        .args(["merge-base", &sandbox_ref, host_branch])
+        .args(["merge-base", &sandbox_ref, &host_head])
         .current_dir(&repo_root)
         .output()
         .context("Failed to compute merge base")?;
@@ -333,9 +301,8 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     if !merge_base_output.status.success() {
         let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
         bail!(
-            "Failed to compute merge base between '{}' and '{}':\n{}",
+            "Failed to compute merge base between '{}' and HEAD:\n{}",
             sandbox_ref,
-            host_branch,
             stderr.trim()
         );
     }
@@ -366,6 +333,11 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
     // Process each changed file
     for file_path in &changed_files {
+        // Prompt before opening each file (unless --yes flag is set)
+        if !cmd.yes && !prompt_for_file(file_path)? {
+            continue;
+        }
+
         // Get file content at merge base (local/old version)
         let local_content = get_file_at_commit(&repo_root, &merge_base, file_path)?;
 

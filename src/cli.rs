@@ -139,6 +139,14 @@ pub struct ReviewCommand {
     /// Name of the sandbox to review
     #[arg(help = "Name of the sandbox to review")]
     pub name: String,
+
+    /// Skip prompting before opening each file
+    #[arg(
+        short = 'y',
+        long = "yes",
+        help = "Skip prompting before opening each file"
+    )]
+    pub yes: bool,
 }
 
 #[derive(Args)]

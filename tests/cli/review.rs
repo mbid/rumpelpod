@@ -147,7 +147,7 @@ fn review_shows_sandbox_changes() {
 
     // Run review command
     sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name])
+        .args(["review", sandbox_name, "--yes"])
         .success()
         .expect("sandbox review failed");
 
@@ -223,7 +223,7 @@ fn review_shows_new_files() {
 
     // Run review command
     sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name])
+        .args(["review", sandbox_name, "--yes"])
         .success()
         .expect("sandbox review failed");
 
@@ -307,7 +307,7 @@ fn review_multiple_files() {
 
     // Run review command
     sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name])
+        .args(["review", sandbox_name, "--yes"])
         .success()
         .expect("sandbox review failed");
 
@@ -333,8 +333,17 @@ fn review_multiple_files() {
 }
 
 #[test]
-fn review_no_upstream_error() {
+fn review_works_in_detached_head() {
     let repo = TestRepo::new();
+
+    // Create a file before entering detached HEAD state
+    fs::write(repo.path().join("file.txt"), "initial content\n").expect("Failed to write file");
+    Command::new("git")
+        .args(["add", "file.txt"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git add failed");
+    create_commit(repo.path(), "Add file.txt");
 
     // Put the host in detached HEAD state before building the image
     let head_commit: String = Command::new("git")
@@ -356,7 +365,7 @@ fn review_no_upstream_error() {
     write_test_sandbox_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "review-no-upstream";
+    let sandbox_name = "review-detached-head";
 
     // Launch sandbox (created while host is in detached HEAD)
     sandbox_command(&repo, &daemon)
@@ -364,7 +373,25 @@ fn review_no_upstream_error() {
         .success()
         .expect("Failed to run sandbox enter");
 
-    // Make a commit so the sandbox ref exists
+    // Make a change in the sandbox
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "sh",
+            "-c",
+            "echo 'modified content' > file.txt",
+        ])
+        .success()
+        .expect("Failed to modify file in sandbox");
+
+    // Commit the change
+    sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "git", "add", "file.txt"])
+        .success()
+        .expect("Failed to stage file in sandbox");
+
     sandbox_command(&repo, &daemon)
         .args([
             "enter",
@@ -372,29 +399,27 @@ fn review_no_upstream_error() {
             "--",
             "git",
             "commit",
-            "--allow-empty",
             "-m",
-            "Test commit",
+            "Modify file in sandbox",
         ])
         .success()
         .expect("Failed to commit in sandbox");
 
-    // Run review command - should fail with no upstream error
-    let output = sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name])
-        .output()
-        .expect("Failed to run sandbox review");
+    // Set up mock difftool
+    let log_file = setup_mock_difftool(repo.path());
 
-    assert!(
-        !output.status.success(),
-        "sandbox review should fail when no upstream is set"
-    );
+    // Run review command - should succeed even in detached HEAD
+    sandbox_command(&repo, &daemon)
+        .args(["review", sandbox_name, "--yes"])
+        .success()
+        .expect("sandbox review should work in detached HEAD state");
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Verify the difftool was called with the expected content
+    let log = read_difftool_log(&log_file);
     assert!(
-        stderr.contains("no upstream") || stderr.contains("upstream"),
-        "Error message should mention 'upstream', got: {}",
-        stderr
+        log.contains("modified content"),
+        "Log should contain modified content, got: {}",
+        log
     );
 }
 
@@ -434,7 +459,7 @@ fn review_no_changes() {
 
     // Run review command - should succeed
     sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name])
+        .args(["review", sandbox_name, "--yes"])
         .success()
         .expect("sandbox review should succeed with no changes");
 
