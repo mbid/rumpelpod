@@ -612,8 +612,40 @@ fn create_container(
 #[derive(Clone)]
 struct SandboxContainerInfo {
     status: SandboxStatus,
-    container_repo_path: Option<PathBuf>,
-    container_id: String,
+}
+
+/// Compute the git status of the sandbox's primary branch vs the currently checked out commit.
+/// Returns a string like "ahead 2, behind 3" or "up to date" or None if the ref doesn't exist.
+/// "ahead N" means the sandbox is N commits ahead of the host HEAD.
+fn compute_git_status(repo_path: &Path, sandbox_name: &str) -> Option<String> {
+    use git2::Repository;
+
+    let repo = Repository::open(repo_path).ok()?;
+
+    // Get the current HEAD commit (host)
+    let head = repo.head().ok()?;
+    let host_oid = head.target()?;
+
+    // Get the sandbox's primary branch ref: refs/remotes/sandbox/<sandbox_name>
+    let remote_ref_name = format!("refs/remotes/sandbox/{}", sandbox_name);
+    let remote_ref = repo.find_reference(&remote_ref_name).ok()?;
+    let sandbox_oid = remote_ref.target()?;
+
+    // If they're the same, we're up to date
+    if host_oid == sandbox_oid {
+        return Some("up to date".to_string());
+    }
+
+    // Count ahead/behind from sandbox's perspective
+    // (ahead, behind) = how many commits sandbox is ahead/behind host
+    let (ahead, behind) = repo.graph_ahead_behind(sandbox_oid, host_oid).ok()?;
+
+    match (ahead, behind) {
+        (0, 0) => Some("up to date".to_string()),
+        (a, 0) => Some(format!("ahead {}", a)),
+        (0, b) => Some(format!("behind {}", b)),
+        (a, b) => Some(format!("ahead {}, behind {}", a, b)),
+    }
 }
 
 /// List all sandbox containers for a given repository path.
@@ -657,22 +689,13 @@ fn get_container_status_via_socket(
             None => continue, // Skip containers without sandbox name label
         };
 
-        let container_repo_path = labels.get(CONTAINER_REPO_PATH_LABEL).map(PathBuf::from);
-
         let status = match container.state {
             Some(ContainerSummaryStateEnum::RUNNING) => SandboxStatus::Running,
             _ => SandboxStatus::Stopped,
         };
 
-        if let Some(id) = container.id {
-            status_map.insert(
-                sandbox_name,
-                SandboxContainerInfo {
-                    status,
-                    container_repo_path,
-                    container_id: id,
-                },
-            );
+        if container.id.is_some() {
+            status_map.insert(sandbox_name, SandboxContainerInfo { status });
         }
     }
 
@@ -1003,10 +1026,9 @@ impl Daemon for DaemonServer {
         // Build combined list with status from Docker where available
         let mut sandboxes = Vec::new();
         for sandbox in db_sandboxes {
-            let (status, container_state, socket_path) = if sandbox.host == db::LOCAL_HOST {
+            let status = if sandbox.host == db::LOCAL_HOST {
                 // Local sandbox - check actual container status
-                let state = local_container_status.get(&sandbox.name);
-                let status = match state {
+                match local_container_status.get(&sandbox.name) {
                     Some(s) => s.status.clone(),
                     None => {
                         // Container doesn't exist
@@ -1016,8 +1038,7 @@ impl Daemon for DaemonServer {
                             db::SandboxStatus::Error => SandboxStatus::Stopped,
                         }
                     }
-                };
-                (status, state, Some(default_docker_socket()))
+                }
             } else {
                 // Remote sandbox - check if we have live container status
                 match remote_status_maps
@@ -1026,8 +1047,7 @@ impl Daemon for DaemonServer {
                 {
                     Some(status_map) => {
                         // We have a connection - use actual container status
-                        let state = status_map.get(&sandbox.name);
-                        let status = match state {
+                        match status_map.get(&sandbox.name) {
                             Some(s) => s.status.clone(),
                             None => {
                                 // Container doesn't exist on remote
@@ -1037,61 +1057,17 @@ impl Daemon for DaemonServer {
                                     db::SandboxStatus::Error => SandboxStatus::Stopped,
                                 }
                             }
-                        };
-
-                        let socket_path = RemoteDocker::parse(&sandbox.host)
-                            .ok()
-                            .and_then(|remote| self.ssh_forward.try_get_socket(&remote));
-
-                        (status, state, socket_path)
+                        }
                     }
                     None => {
                         // No connection - we can't determine the actual status
-                        (SandboxStatus::Disconnected, None, None)
+                        SandboxStatus::Disconnected
                     }
                 }
             };
 
-            let mut repo_state = None;
-            if status == SandboxStatus::Running {
-                if let (Some(state), Some(socket)) = (container_state, socket_path) {
-                    if let Some(container_repo_path) = &state.container_repo_path {
-                        if let Ok(docker) = Docker::connect_with_socket(
-                            socket.to_string_lossy().as_ref(),
-                            120,
-                            bollard::API_DEFAULT_VERSION,
-                        ) {
-                            let repo_path_str = container_repo_path.to_string_lossy();
-                            let cmd = vec!["git", "-C", &repo_path_str, "status", "-sb"];
-
-                            if let Ok(output) = crate::docker_exec::exec_capture(
-                                &docker,
-                                &state.container_id,
-                                None,
-                                None,
-                                None,
-                                cmd,
-                            ) {
-                                if output.success() {
-                                    let output_str = String::from_utf8_lossy(&output.stdout);
-                                    if let Some(line) = output_str.lines().next() {
-                                        if let Some(start) = line.find('[') {
-                                            if let Some(end) = line.find(']') {
-                                                if end > start {
-                                                    repo_state =
-                                                        Some(line[start + 1..end].to_string());
-                                                }
-                                            }
-                                        } else if line.contains("...") {
-                                            repo_state = Some("up to date".to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Compute git status on the host by comparing HEAD to sandbox/<sandbox_name>
+            let repo_state = compute_git_status(&repo_path, &sandbox.name);
 
             sandboxes.push(SandboxInfo {
                 name: sandbox.name,
