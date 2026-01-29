@@ -1,7 +1,4 @@
-image = "sandbox-dev"
-runtime = "sysbox-runc"
-user = "dev"
-repo-path = "/home/dev/sandbox"
+remote = "dev"
 
 [agent]
 model = "gemini-3-pro-preview"

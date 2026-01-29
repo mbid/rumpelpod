@@ -1,0 +1,8 @@
+{
+    "image": "sandbox-dev",
+    "runArgs": [
+        "--runtime=sysbox-runc"
+    ],
+    "containerUser": "dev",
+    "workspaceFolder": "/home/dev/sandbox"
+}
