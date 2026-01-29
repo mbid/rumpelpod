@@ -419,7 +419,6 @@ pub fn write_remote_sandbox_config(repo: &TestRepo, image_id: &ImageId, remote_s
 // available in all CI environments.
 
 #[test]
-#[ignore] // Run with --ignored to execute
 fn ssh_remote_docker_smoke_test() {
     let remote = SshRemoteHost::start();
     let ssh_config = create_ssh_config(&[&remote]);
@@ -444,7 +443,6 @@ fn ssh_remote_docker_smoke_test() {
 }
 
 #[test]
-#[ignore] // Run with --ignored to execute
 fn ssh_remote_sandbox_enter() {
     let repo = TestRepo::new();
 
@@ -484,7 +482,6 @@ fn ssh_remote_sandbox_enter() {
 }
 
 #[test]
-#[ignore] // Run with --ignored to execute
 fn ssh_remote_sandbox_list() {
     let repo = TestRepo::new();
 
