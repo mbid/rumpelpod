@@ -61,7 +61,7 @@ pub enum Tool {
 }
 
 /// Request body for the responses endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResponseRequest {
     pub model: String,
     pub input: ResponseInput,
@@ -76,14 +76,14 @@ pub struct ResponseRequest {
     pub store: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum ResponseInput {
     Prompt(String),
     Items(Vec<ResponseInputItem>),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseInputItem {
     FunctionCallOutput { call_id: String, output: String },

@@ -3,11 +3,15 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::str::FromStr;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use retry::delay::jitter;
 
 use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
+use crate::llm::error::LlmError;
 use crate::llm::types::gemini::{
     Content, FinishReason, FunctionCallingConfig, FunctionCallingMode, FunctionDeclaration,
     GenerateContentRequest, GenerationConfig, GoogleSearch, Model, Part, PartContent, Role,
@@ -65,7 +69,46 @@ fn execute_web_search(client: &Client, model: &str, query: &str) -> Result<Strin
         }),
     };
 
-    let response = client.generate_content(model, request)?;
+    // Retry logic: up to 3 retries with 60s, 600s, 3600s delays with full jitter.
+    let mut delays = [
+        Duration::from_secs(60),
+        Duration::from_secs(600),
+        Duration::from_secs(3600),
+    ]
+    .into_iter()
+    .map(jitter);
+
+    let response = loop {
+        let err = match client.generate_content(model, request.clone()) {
+            Ok(response) => break response,
+            Err(err) => err,
+        };
+
+        let delay = match &err {
+            LlmError::RateLimited { retry_after } => {
+                let delay = match delays.next() {
+                    Some(delay) => delay,
+                    None => {
+                        return Err(err.into());
+                    }
+                };
+                delay + retry_after.unwrap_or(Duration::ZERO)
+            }
+            LlmError::RequestError(_) => match delays.next() {
+                Some(delay) => delay,
+                None => {
+                    return Err(err.into());
+                }
+            },
+            LlmError::Other(_) => {
+                return Err(err.into());
+            }
+        };
+
+        eprintln!("{err}");
+        eprintln!("Retrying in {delay} seconds", delay = delay.as_secs());
+        thread::sleep(delay);
+    };
 
     if response.candidates.is_empty() {
         return Ok("No search results found.".to_string());
@@ -206,7 +249,46 @@ pub fn run_gemini_agent(
                 }),
             };
 
-            let response = client.generate_content(&model.to_string(), request)?;
+            // Retry logic: up to 3 retries with 60s, 600s, 3600s delays with full jitter.
+            let mut delays = [
+                Duration::from_secs(60),
+                Duration::from_secs(600),
+                Duration::from_secs(3600),
+            ]
+            .into_iter()
+            .map(jitter);
+
+            let response = loop {
+                let err = match client.generate_content(&model.to_string(), request.clone()) {
+                    Ok(response) => break response,
+                    Err(err) => err,
+                };
+
+                let delay = match &err {
+                    LlmError::RateLimited { retry_after } => {
+                        let delay = match delays.next() {
+                            Some(delay) => delay,
+                            None => {
+                                return Err(err.into());
+                            }
+                        };
+                        delay + retry_after.unwrap_or(Duration::ZERO)
+                    }
+                    LlmError::RequestError(_) => match delays.next() {
+                        Some(delay) => delay,
+                        None => {
+                            return Err(err.into());
+                        }
+                    },
+                    LlmError::Other(_) => {
+                        return Err(err.into());
+                    }
+                };
+
+                eprintln!("{err}");
+                eprintln!("Retrying in {delay} seconds", delay = delay.as_secs());
+                thread::sleep(delay);
+            };
 
             if response.candidates.is_empty() {
                 anyhow::bail!("No candidates in response");

@@ -3,11 +3,15 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::str::FromStr;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use retry::delay::jitter;
 
 use crate::llm::cache::LlmCache;
 use crate::llm::client::xai::Client;
+use crate::llm::error::LlmError;
 use crate::llm::types::xai::{
     FunctionCall, Message, MessageContent, MessageContentPart, Model, ResponseInput,
     ResponseInputItem, ResponseOutputItem, ResponseRequest, Role, Tool, ToolCall, ToolCallType,
@@ -196,7 +200,46 @@ pub fn run_grok_agent(
                 store: Some(true), // Ensure history is stored
             };
 
-            let response = client.create_response(request)?;
+            // Retry logic: up to 3 retries with 60s, 600s, 3600s delays with full jitter.
+            let mut delays = [
+                Duration::from_secs(60),
+                Duration::from_secs(600),
+                Duration::from_secs(3600),
+            ]
+            .into_iter()
+            .map(jitter);
+
+            let response = loop {
+                let err = match client.create_response(request.clone()) {
+                    Ok(response) => break response,
+                    Err(err) => err,
+                };
+
+                let delay = match &err {
+                    LlmError::RateLimited { retry_after } => {
+                        let delay = match delays.next() {
+                            Some(delay) => delay,
+                            None => {
+                                return Err(err.into());
+                            }
+                        };
+                        delay + retry_after.unwrap_or(Duration::ZERO)
+                    }
+                    LlmError::RequestError(_) => match delays.next() {
+                        Some(delay) => delay,
+                        None => {
+                            return Err(err.into());
+                        }
+                    },
+                    LlmError::Other(_) => {
+                        return Err(err.into());
+                    }
+                };
+
+                eprintln!("{err}");
+                eprintln!("Retrying in {delay} seconds", delay = delay.as_secs());
+                thread::sleep(delay);
+            };
 
             // Update session ID
             state.response_id = Some(response.id.clone());

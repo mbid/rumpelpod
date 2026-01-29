@@ -396,7 +396,7 @@ pub struct GenerationConfig {
 }
 
 /// Request body for the generateContent endpoint.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateContentRequest {
     pub contents: Vec<Content>,

@@ -16,13 +16,12 @@
 //!
 //! Vertex AI takes precedence over AI Studio when both are configured.
 
-use anyhow::{Context, Result};
-use log::{debug, info, warn};
-use rand::Rng;
+use log::{debug, info};
 use std::time::Duration;
 
 use super::vertex_auth::{VertexAuthenticator, VertexConfig};
 use crate::llm::cache::LlmCache;
+use crate::llm::error::LlmError;
 use crate::llm::types::gemini::{GenerateContentRequest, GenerateContentResponse};
 
 /// AI Studio API base URL.
@@ -63,7 +62,7 @@ impl Client {
     /// If cache is provided and no credentials are set, only cached responses will work.
     ///
     /// See [`llm-cache/README.md`](../../../llm-cache/README.md) for cache documentation.
-    pub fn new_with_cache(cache: Option<LlmCache>) -> Result<Self> {
+    pub fn new_with_cache(cache: Option<LlmCache>) -> Result<Self, LlmError> {
         // If SANDBOX_TEST_LLM_OFFLINE is set, ignore API key/credentials to ensure strict caching in tests
         let offline_test_mode = std::env::var("SANDBOX_TEST_LLM_OFFLINE")
             .map(|s| s == "1" || s.to_lowercase() == "true")
@@ -74,7 +73,7 @@ impl Client {
         let http_client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .context("Failed to build HTTP client")?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
 
         // Try Vertex AI first (preferred backend)
         let vertex_config = if offline_test_mode {
@@ -109,11 +108,11 @@ impl Client {
         };
 
         if api_key.is_none() && cache.is_none() && !offline_test_mode {
-            anyhow::bail!(
+            return Err(LlmError::Other(anyhow::anyhow!(
                 "No Gemini credentials found. Set either:\n\
                  - GOOGLE_APPLICATION_CREDENTIALS (for Vertex AI)\n\
                  - GEMINI_API_KEY (for AI Studio)"
-            );
+            )));
         }
 
         if api_key.is_some() {
@@ -166,7 +165,7 @@ impl Client {
     }
 
     /// Build headers for the API request.
-    fn build_headers(&self) -> Result<Vec<(&'static str, String)>> {
+    fn build_headers(&self) -> anyhow::Result<Vec<(&'static str, String)>> {
         let mut headers = vec![("content-type", "application/json".to_string())];
 
         // Add Authorization header for Vertex AI
@@ -183,17 +182,16 @@ impl Client {
     /// (unless rate-limited), then 2 minute delays with jitter.
     ///
     /// For Vertex AI, 401 errors trigger a token refresh (once) before retrying.
+    /// Send a generate content request to the Gemini API.
+    /// Returns proper error types that distinguish between retryable and non-retryable errors.
     pub fn generate_content(
         &self,
         model: &str,
         request: GenerateContentRequest,
-    ) -> Result<GenerateContentResponse> {
-        const MAX_RETRIES: u32 = 10;
-        const BASE_RETRY_DELAY: Duration = Duration::from_secs(120);
-        const MAX_JITTER: Duration = Duration::from_secs(30);
-
+    ) -> Result<GenerateContentResponse, LlmError> {
         // Serialize request body to a string once
-        let body = serde_json::to_string(&request).context("Failed to serialize request")?;
+        let body = serde_json::to_string(&request)
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
 
         // Build cache key using URL without credentials + body
         // Use only content-type header for cache key (not auth headers)
@@ -206,8 +204,8 @@ impl Client {
             let cache_key = cache.compute_key(&cache_url, &cache_headers, &body);
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response = GenerateContentResponse::from_response_json(&cached_response)
-                    .with_context(|| {
-                        format!("Failed to parse cached response: {cached_response}")
+                    .map_err(|e| {
+                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {}", e))
                     })?;
                 return Ok(response);
             }
@@ -220,148 +218,95 @@ impl Client {
         };
         if !has_credentials {
             if self.offline_test_mode {
-                anyhow::bail!(
+                return Err(LlmError::Other(anyhow::anyhow!(
                     "LLM Cache miss in test offline mode.\n\
                      See llm-cache/README.md for details.\n\
                      To populate the cache, rerun the test with SANDBOX_TEST_LLM_OFFLINE=0 set in the environment."
-                );
+                )));
             }
-            anyhow::bail!("Cache miss and no credentials set - cannot make API request");
+            return Err(LlmError::Other(anyhow::anyhow!(
+                "Cache miss and no credentials set - cannot make API request"
+            )));
         }
 
         let url = self.build_url(model);
 
-        let mut attempt = 0;
-        let mut did_refresh_token = false;
+        // Build headers (may fetch/refresh OAuth token for Vertex AI)
+        let request_headers = self.build_headers().map_err(LlmError::Other)?;
 
-        loop {
-            // Build headers (may fetch/refresh OAuth token for Vertex AI)
-            let request_headers = if did_refresh_token {
-                // After a 401, we already refreshed, so use normal headers
-                self.build_headers()?
-            } else {
-                self.build_headers()?
-            };
+        debug!("Sending Gemini API request");
+        let mut req = self.client.post(&url).body(body.clone());
 
-            debug!("Sending Gemini API request (attempt {})", attempt + 1);
-            let mut req = self.client.post(&url).body(body.clone());
-
-            for (name, value) in &request_headers {
-                req = req.header(*name, value);
-            }
-
-            let response = match req.send() {
-                Ok(response) => {
-                    debug!("Gemini API response received");
-                    response
-                }
-                Err(e) => {
-                    warn!(
-                        "Gemini API request failed: {} (timeout={})",
-                        e,
-                        e.is_timeout()
-                    );
-                    // Only retry on timeout errors, fail immediately on other errors
-                    if e.is_timeout() && attempt < MAX_RETRIES {
-                        attempt += 1;
-
-                        let delay = if attempt == 1 {
-                            Duration::ZERO
-                        } else {
-                            let jitter = rand::rng().random_range(Duration::ZERO..MAX_JITTER);
-                            BASE_RETRY_DELAY + jitter
-                        };
-
-                        warn!("Retrying after {:?}", delay);
-                        if !delay.is_zero() {
-                            std::thread::sleep(delay);
-                        }
-                        continue;
-                    }
-                    return Err(e).context("Failed to send request to Gemini API");
-                }
-            };
-
-            let status = response.status();
-            debug!("Gemini API response status: {}", status);
-
-            if status.is_success() {
-                let response_text = response.text().context("Failed to read response body")?;
-
-                if let Some(ref cache) = self.cache {
-                    let cache_key = cache.compute_key(&cache_url, &cache_headers, &body);
-                    cache.put(&cache_key, &response_text)?;
-                }
-
-                let response = GenerateContentResponse::from_response_json(&response_text)
-                    .with_context(|| {
-                        format!("Failed to parse Gemini API response: {response_text}")
-                    })?;
-
-                if let Some(ref usage) = response.usage_metadata {
-                    debug!(
-                        "Gemini API request successful: {:?} prompt tokens, {:?} completion tokens",
-                        usage.prompt_token_count, usage.candidates_token_count
-                    );
-                }
-                return Ok(response);
-            }
-
-            // Handle 401 Unauthorized - refresh token once for Vertex AI
-            if status.as_u16() == 401 && self.backend == Backend::VertexAi && !did_refresh_token {
-                warn!("Received 401 Unauthorized, refreshing OAuth token and retrying");
-                // Force token refresh
-                if let Some(ref auth) = self.vertex_auth {
-                    auth.clear_cached_token();
-                    match auth.refresh_token() {
-                        Ok(_) => {
-                            did_refresh_token = true;
-                            // Don't increment attempt counter for token refresh
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!("Failed to refresh OAuth token: {}", e);
-                            // Fall through to return the 401 error
-                        }
-                    }
-                }
-            }
-
-            let is_rate_limited = status.as_u16() == 429;
-            let should_retry = matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504);
-
-            if should_retry && attempt < MAX_RETRIES {
-                attempt += 1;
-
-                let retry_after = response
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(Duration::from_secs);
-
-                let delay = if let Some(retry_after) = retry_after {
-                    retry_after
-                } else if attempt == 1 && !is_rate_limited {
-                    Duration::ZERO
-                } else {
-                    let jitter = rand::rng().random_range(Duration::ZERO..MAX_JITTER);
-                    BASE_RETRY_DELAY + jitter
-                };
-
-                warn!(
-                    "Gemini API error (status {}), retrying after {:?} (attempt {})",
-                    status, delay, attempt
-                );
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
-                }
-                continue;
-            }
-
-            let error_text = response.text().unwrap_or_default();
-            warn!("Gemini API error (status {}): {}", status, error_text);
-            anyhow::bail!("Gemini API error (status {}): {}", status, error_text);
+        for (name, value) in &request_headers {
+            req = req.header(*name, value);
         }
+
+        let response = req.send()?;
+
+        let status = response.status();
+        debug!("Gemini API response status: {}", status);
+
+        // Check for rate limiting before consuming response body
+        if status.as_u16() == 429 {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Duration::from_secs);
+
+            return Err(LlmError::RateLimited { retry_after });
+        }
+
+        // Handle 401 Unauthorized for Vertex AI - token refresh needed
+        if status.as_u16() == 401 && self.backend == Backend::VertexAi {
+            if let Some(ref auth) = self.vertex_auth {
+                auth.clear_cached_token();
+            }
+            return Err(LlmError::Other(anyhow::anyhow!(
+                "Unauthorized (401). OAuth token may need refresh."
+            )));
+        }
+
+        // Convert retryable server errors (500, 502, 503, 504) to reqwest::Error
+        // so they can be retried by the agent. Other errors (4xx, 501, etc.) will be
+        // returned as non-retryable errors.
+        let response = if matches!(status.as_u16(), 500 | 502 | 503 | 504) {
+            // error_for_status will convert this to a reqwest::Error
+            response.error_for_status()?
+        } else {
+            // For non-retryable errors, convert to LlmError::Other
+            match response.error_for_status() {
+                Ok(r) => r,
+                Err(e) => return Err(LlmError::Other(anyhow::anyhow!("Gemini API error: {}", e))),
+            }
+        };
+
+        let response_text = response
+            .text()
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {}", e)))?;
+
+        if let Some(ref cache) = self.cache {
+            let cache_key = cache.compute_key(&cache_url, &cache_headers, &body);
+            cache
+                .put(&cache_key, &response_text)
+                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {}", e)))?;
+        }
+
+        let response =
+            GenerateContentResponse::from_response_json(&response_text).map_err(|e| {
+                LlmError::Other(anyhow::anyhow!(
+                    "Failed to parse Gemini API response: {}",
+                    e
+                ))
+            })?;
+
+        if let Some(ref usage) = response.usage_metadata {
+            debug!(
+                "Gemini API request successful: {:?} prompt tokens, {:?} completion tokens",
+                usage.prompt_token_count, usage.candidates_token_count
+            );
+        }
+        Ok(response)
     }
 }
