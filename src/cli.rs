@@ -117,6 +117,11 @@ pub struct EnterCommand {
     #[arg(help = "Name for this sandbox instance (e.g., 'dev', 'test')")]
     pub name: String,
 
+    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Overrides .sandbox.toml setting.
+    #[arg(long)]
+    pub host: Option<String>,
+
     /// Command to run inside the sandbox (default: interactive shell)
     #[arg(last = true, value_name = "COMMAND")]
     pub command: Vec<String>,
@@ -141,6 +146,11 @@ pub struct AgentCommand {
     /// Name of the sandbox to use
     #[arg(help = "Name of the sandbox to use")]
     pub name: String,
+
+    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Overrides .sandbox.toml setting.
+    #[arg(long)]
+    pub host: Option<String>,
 
     /// Model to use (overrides config file)
     #[arg(short, long, value_enum, conflicts_with_all = ["custom_anthropic_model", "custom_gemini_model", "custom_xai_model"])]

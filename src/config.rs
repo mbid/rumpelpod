@@ -245,6 +245,26 @@ mod tests {
         assert_eq!(network, None);
         assert_eq!(runtime, None);
     }
+
+    #[test]
+    fn test_toml_remote_unknown_field() {
+        let toml_str = r#"
+            image = "alpine"
+            remote = "user@host:22"
+        "#;
+        let result: Result<super::TomlConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_toml_host_option() {
+        let toml_str = r#"
+            image = "alpine"
+            host = "user@host:22"
+        "#;
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.host, Some("user@host:22".to_string()));
+    }
 }
 
 /// Network configuration.
@@ -333,7 +353,7 @@ struct TomlConfig {
     agent: AgentConfig,
 
     /// Remote Docker host specification (e.g., "user@host:port").
-    remote: Option<String>,
+    host: Option<String>,
 }
 
 /// Merged configuration from `.sandbox.toml` and `devcontainer.json`.
@@ -362,7 +382,7 @@ pub struct SandboxConfig {
 
     /// Remote Docker host specification (e.g., "user@host:port").
     /// If not set, uses local Docker.
-    pub remote: Option<String>,
+    pub host: Option<String>,
 }
 
 impl SandboxConfig {
@@ -449,7 +469,7 @@ impl SandboxConfig {
             user,
             repo_path,
             agent: toml_config.agent,
-            remote: toml_config.remote,
+            host: toml_config.host,
         })
     }
 }

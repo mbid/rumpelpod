@@ -189,7 +189,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     )?;
 
     // Launch the sandbox container
-    let launch_result = enter::launch_sandbox(&cmd.name)?;
+    let launch_result = enter::launch_sandbox(&cmd.name, cmd.host.as_deref())?;
 
     // Set up LLM cache if specified
     // We need a provider string for the cache.

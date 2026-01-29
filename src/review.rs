@@ -277,7 +277,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let container_repo_path = config.repo_path.to_string_lossy().to_string();
 
     // Launch the sandbox (or ensure it's running)
-    let launch_result = launch_sandbox(&cmd.name)?;
+    let launch_result = launch_sandbox(&cmd.name, None)?;
     let container_id = &launch_result.container_id.0;
     let user = &launch_result.user;
 

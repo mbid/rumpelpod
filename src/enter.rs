@@ -19,7 +19,7 @@ fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
 
 /// Launch a sandbox and return the container ID and user.
 /// This is shared logic between `enter` and `agent` commands.
-pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
+pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
     let repo_root = get_repo_root()?;
     let config = SandboxConfig::load(&repo_root)?;
 
@@ -33,9 +33,8 @@ pub fn launch_sandbox(sandbox_name: &str) -> Result<LaunchResult> {
     let host_branch = get_current_branch(&repo_root);
 
     // Parse remote Docker specification if provided
-    let remote = config
-        .remote
-        .as_ref()
+    let host_str = host_override.or(config.host.as_deref());
+    let remote = host_str
         .map(|s| RemoteDocker::parse(s))
         .transpose()
         .context("Invalid remote Docker specification")?;
@@ -62,7 +61,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         container_id,
         user,
         docker_socket,
-    } = launch_sandbox(&cmd.name)?;
+    } = launch_sandbox(&cmd.name, cmd.host.as_deref())?;
 
     let mut command = cmd.command.clone();
     if command.is_empty() {

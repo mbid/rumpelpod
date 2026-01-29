@@ -408,7 +408,7 @@ pub fn write_remote_sandbox_config(repo: &TestRepo, image_id: &ImageId, remote_s
         runtime = "runc"
         image = "{image_id}"
         repo-path = "{TEST_REPO_PATH}"
-        remote = "{remote_spec}"
+        host = "{remote_spec}"
     "#};
     std::fs::write(repo.path().join(".sandbox.toml"), config)
         .expect("Failed to write .sandbox.toml");
