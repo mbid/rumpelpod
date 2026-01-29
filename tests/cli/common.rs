@@ -165,6 +165,51 @@ impl TestRepo {
     }
 }
 
+impl Drop for TestRepo {
+    fn drop(&mut self) {
+        // Skip cleanup if requested (useful for debugging).
+        if std::env::var("SANDBOX_TEST_NO_CLEANUP").is_ok() {
+            return;
+        }
+
+        // Try to clean up any Docker containers created for this repo.
+        if let Some(name) = self.dir.path().file_name().and_then(|n| n.to_str()) {
+            // Find containers associated with this repo.
+            // Container names start with the repo directory name.
+            let output = Command::new("docker")
+                .args([
+                    "ps",
+                    "-a",
+                    "--filter",
+                    &format!("name={}", name),
+                    "--format",
+                    "{{.Names}}",
+                ])
+                .output();
+
+            if let Ok(output) = output {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let containers: Vec<&str> = stdout
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|line| line.starts_with(name))
+                    .collect();
+
+                if !containers.is_empty() {
+                    // Best effort cleanup, ignore errors
+                    let _ = Command::new("docker")
+                        .arg("rm")
+                        .arg("-f")
+                        .args(&containers)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            }
+        }
+    }
+}
+
 /// Create a commit with a fixed timestamp to ensure deterministic directory hashes.
 pub fn create_commit(repo_path: &Path, message: &str) {
     Command::new("git")
