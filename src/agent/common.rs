@@ -454,7 +454,10 @@ pub fn confirm_exit() -> Result<bool> {
 ///
 /// The editor can be overridden via the `EDITOR` environment variable,
 /// defaulting to `vim`.
-pub fn get_input_via_editor(chat_history: &str) -> Result<String> {
+///
+/// If `editable_suffix` is provided, it will be appended to the chat history as editable
+/// content (useful when continuing a conversation and allowing the user to edit the last message).
+pub fn get_input_via_editor(chat_history: &str, editable_suffix: Option<&str>) -> Result<String> {
     use std::fs;
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
@@ -464,7 +467,13 @@ pub fn get_input_via_editor(chat_history: &str) -> Result<String> {
         let pid = std::process::id();
         let temp_file = temp_dir.join(format!("sandbox-chat-{pid}.txt"));
 
-        fs::write(&temp_file, chat_history).context("Failed to write temp file for editor")?;
+        let initial_content = if let Some(suffix) = editable_suffix {
+            format!("{}{}", chat_history, suffix)
+        } else {
+            chat_history.to_string()
+        };
+
+        fs::write(&temp_file, initial_content).context("Failed to write temp file for editor")?;
 
         let status = Command::new(&editor)
             .arg(&temp_file)
@@ -484,6 +493,9 @@ pub fn get_input_via_editor(chat_history: &str) -> Result<String> {
         // Prevent accidental editing of history
         if !edited_content.starts_with(chat_history) {
             eprintln!("Error: The chat history prefix was modified. Please keep it intact.");
+            if editable_suffix.is_some() {
+                eprintln!("You can only edit the last user message (after the history prefix).");
+            }
             eprint!("Press Enter to try again...");
             std::io::stderr().flush()?;
 

@@ -118,6 +118,28 @@ pub fn run_gemini_agent(
     // Track if we've processed the initial prompt (for non-TTY mode)
     let mut processed_initial = false;
 
+    // When continuing a conversation in TTY mode, allow editing the last user message
+    let mut editable_last_message: Option<String> = None;
+    if is_tty && !contents.is_empty() {
+        if let Some(last_content) = contents.last() {
+            if last_content.role == Role::User {
+                // Extract the text from the last user message
+                for part in &last_content.parts {
+                    if let PartContent::Text(text) = &part.content {
+                        if !text.is_empty() {
+                            editable_last_message = Some(format!("> {}\n", text));
+                            break;
+                        }
+                    }
+                }
+                // Pop the last user message so it can be edited
+                if editable_last_message.is_some() {
+                    contents.pop();
+                }
+            }
+        }
+    }
+
     // Build the tools list - function declarations only.
     // Multi-tool use (combining google_search with function_declarations) is only
     // supported by the Live API, not the generateContent API we use here.
@@ -142,7 +164,8 @@ pub fn run_gemini_agent(
             prompt.clone()
         } else {
             let chat_history = format_gemini_history(&contents);
-            let input = get_input_via_editor(&chat_history)?;
+            let editable = editable_last_message.take();
+            let input = get_input_via_editor(&chat_history, editable.as_deref())?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;

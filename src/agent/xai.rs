@@ -110,6 +110,26 @@ pub fn run_grok_agent(
     // Track if we've processed the initial prompt (for non-TTY mode)
     let mut processed_initial = false;
 
+    // When continuing a conversation in TTY mode, allow editing the last user message
+    let mut editable_last_message: Option<String> = None;
+    if is_tty && state.messages.len() > 1 {
+        // Check if last message is a user message (skip the system message at index 0)
+        if let Some(last_msg) = state.messages.last() {
+            if last_msg.role == Role::User {
+                // Extract the text from the last user message
+                if let Some(MessageContent::Text(text)) = &last_msg.content {
+                    if !text.is_empty() {
+                        editable_last_message = Some(format!("> {}\n", text));
+                    }
+                }
+                // Pop the last user message so it can be edited
+                if editable_last_message.is_some() {
+                    state.messages.pop();
+                }
+            }
+        }
+    }
+
     loop {
         // 1. Get User Input
         let user_input = if let Some(ref prompt) = initial_prompt {
@@ -120,7 +140,8 @@ pub fn run_grok_agent(
             prompt.clone()
         } else {
             let chat_history = format_xai_history(&state.messages);
-            let input = get_input_via_editor(&chat_history)?;
+            let editable = editable_last_message.take();
+            let input = get_input_via_editor(&chat_history, editable.as_deref())?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;

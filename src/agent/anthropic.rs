@@ -122,6 +122,26 @@ pub fn run_claude_agent(
     // Track whether we've processed the initial prompt (for non-TTY mode)
     let mut processed_initial = false;
 
+    // When continuing a conversation in TTY mode, allow editing the last user message
+    let mut editable_last_message: Option<String> = None;
+    if is_tty && !messages.is_empty() {
+        if let Some(last_msg) = messages.last() {
+            if last_msg.role == Role::User {
+                // Extract the text from the last user message
+                for block in &last_msg.content {
+                    if let ContentBlock::Text { text, .. } = block {
+                        editable_last_message = Some(format!("> {}\n", text));
+                        break;
+                    }
+                }
+                // Pop the last user message so it can be edited
+                if editable_last_message.is_some() {
+                    messages.pop();
+                }
+            }
+        }
+    }
+
     loop {
         let user_input = if let Some(ref prompt) = initial_prompt {
             if processed_initial {
@@ -131,7 +151,8 @@ pub fn run_claude_agent(
             prompt.clone()
         } else {
             let chat_history = format_anthropic_history(&messages);
-            let input = get_input_via_editor(&chat_history)?;
+            let editable = editable_last_message.take();
+            let input = get_input_via_editor(&chat_history, editable.as_deref())?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;
