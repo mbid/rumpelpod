@@ -3,11 +3,15 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::str::FromStr;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use retry::delay::jitter;
 
 use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
+use crate::llm::error::LlmError;
 use crate::llm::types::anthropic::{
     CacheControl, ContentBlock, CustomTool, Effort, FetchToolType, Message, MessagesRequest, Model,
     OutputConfig, Role, ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool,
@@ -269,7 +273,49 @@ pub fn run_claude_agent(
                 top_k: None,
             };
 
-            let response = client.messages(request)?;
+            // Retry logic: up to 3 retries with 60s, 600s, 3600s delays with full jitter.
+            let mut delays = [
+                Duration::from_secs(60),
+                Duration::from_secs(600),
+                Duration::from_secs(3600),
+            ]
+            .into_iter()
+            .map(jitter);
+
+            let response = loop {
+                let err = match client.messages(request.clone()) {
+                    Ok(response) => break response,
+                    Err(err) => err,
+                };
+
+                let delay = match &err {
+                    LlmError::RateLimited { retry_after } => {
+                        let delay = match delays.next() {
+                            Some(delay) => delay,
+                            None => {
+                                return Err(err.into());
+                            }
+                        };
+                        // This might look wrong: Why not max(delay, retry_after)? But with that
+                        // formula we'd lose the jitter we apply to retry_after in case retry_after
+                        // < delay.
+                        delay + retry_after.unwrap_or(Duration::ZERO)
+                    }
+                    LlmError::RequestError(_) => match delays.next() {
+                        Some(delay) => delay,
+                        None => {
+                            return Err(err.into());
+                        }
+                    },
+                    LlmError::Other(_) => {
+                        return Err(err.into());
+                    }
+                };
+
+                eprintln!("{err}");
+                eprintln!("Retrying in {delay} seconds", delay = delay.as_secs());
+                thread::sleep(delay);
+            };
 
             let mut has_tool_use = false;
             let mut tool_results: Vec<ContentBlock> = Vec::new();

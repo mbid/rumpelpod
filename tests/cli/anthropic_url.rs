@@ -38,6 +38,11 @@ fn test_anthropic_base_url_garbage_errors() {
     writeln!(stdin, "Hello").expect("Failed to write to stdin");
     drop(child.stdin.take());
 
+    // Wait up to 5 seconds for the agent to print an error message, then kill it.
+    // The agent will print an error and start retrying, but we don't want to wait
+    // for the full 60+ second retry delay.
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let _ = child.kill();
     let output = child.wait_with_output().expect("Failed to wait for agent");
     let stderr = String::from_utf8_lossy(&output.stderr);
 

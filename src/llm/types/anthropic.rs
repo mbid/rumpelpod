@@ -314,7 +314,7 @@ pub struct OutputConfig {
     pub effort: Effort,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct MessagesRequest {
     pub model: String,
     pub max_tokens: u32,

@@ -2068,6 +2068,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "retry"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1e211f878258887b3e65dd3c8ff9f530fe109f441a117ee0cdc27f341355032"
+dependencies = [
+ "rand 0.9.2",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2242,6 +2251,7 @@ dependencies = [
  "rand 0.9.2",
  "reflink-copy",
  "reqwest",
+ "retry",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2249,6 +2259,7 @@ dependencies = [
  "socket2",
  "strum",
  "tempfile",
+ "thiserror 2.0.17",
  "tokio",
  "tokio-stream",
  "toml",

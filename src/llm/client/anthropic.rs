@@ -1,9 +1,8 @@
-use anyhow::{Context, Result};
-use log::{debug, warn};
-use rand::Rng;
+use log::debug;
 use std::time::Duration;
 
 use crate::llm::cache::LlmCache;
+use crate::llm::error::LlmError;
 use crate::llm::types::anthropic::{MessagesRequest, MessagesResponse, ServerTool, Tool};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -22,7 +21,10 @@ impl Client {
     /// If cache is provided and no API key is set, only cached responses will work.
     ///
     /// See [`llm-cache/README.md`](../../../llm-cache/README.md) for cache documentation.
-    pub fn new_with_cache(cache: Option<LlmCache>, base_url: Option<String>) -> Result<Self> {
+    pub fn new_with_cache(
+        cache: Option<LlmCache>,
+        base_url: Option<String>,
+    ) -> Result<Self, LlmError> {
         // If SANDBOX_TEST_LLM_OFFLINE is set, ignore API key to ensure strict caching in tests
         let offline_test_mode = std::env::var("SANDBOX_TEST_LLM_OFFLINE")
             .map(|s| s == "1" || s.to_lowercase() == "true")
@@ -37,7 +39,9 @@ impl Client {
         };
 
         if api_key.is_none() && cache.is_none() && !offline_test_mode {
-            anyhow::bail!("ANTHROPIC_API_KEY not set and no cache provided");
+            return Err(LlmError::Other(anyhow::anyhow!(
+                "ANTHROPIC_API_KEY not set and no cache provided"
+            )));
         }
 
         let base_url = base_url.unwrap_or_else(|| ANTHROPIC_API_URL.to_string());
@@ -47,7 +51,7 @@ impl Client {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .context("Failed to build HTTP client")?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
 
         Ok(Self {
             api_key,
@@ -94,13 +98,9 @@ impl Client {
         headers
     }
 
-    /// Retry logic follows claude code's behavior: up to 10 retries, first retry instant
-    /// (unless rate-limited), then 2 minute delays with jitter.
-    pub fn messages(&self, request: MessagesRequest) -> Result<MessagesResponse> {
-        const MAX_RETRIES: u32 = 10;
-        const BASE_RETRY_DELAY: Duration = Duration::from_secs(120);
-        const MAX_JITTER: Duration = Duration::from_secs(30);
-
+    /// Send a messages request to the Anthropic API.
+    /// Returns proper error types that distinguish between retryable and non-retryable errors.
+    pub fn messages(&self, request: MessagesRequest) -> Result<MessagesResponse, LlmError> {
         let enable_thinking = request.thinking.is_some();
         let enable_effort = request.output_config.is_some();
         let enable_web_fetch = request.tools.as_ref().is_some_and(|tools| {
@@ -110,7 +110,8 @@ impl Client {
         });
 
         // Serialize request body to a string once
-        let body = serde_json::to_string(&request).context("Failed to serialize request")?;
+        let body = serde_json::to_string(&request)
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
         let cache_headers =
@@ -125,9 +126,9 @@ impl Client {
             // Include base URL in cache key to ensure different URLs don't share cache entries
             let cache_key = cache.compute_key(&self.base_url, &cache_header_refs, &body);
             if let Some(cached_response) = cache.get(&cache_key) {
-                let response: MessagesResponse = serde_json::from_str(&cached_response)
-                    .with_context(|| {
-                        format!("Failed to parse cached response: {cached_response}")
+                let response: MessagesResponse =
+                    serde_json::from_str(&cached_response).map_err(|e| {
+                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {}", e))
                     })?;
                 return Ok(response);
             }
@@ -136,115 +137,86 @@ impl Client {
         // No cache hit - need API key to make the request
         if self.api_key.is_none() {
             if self.offline_test_mode {
-                anyhow::bail!(
+                return Err(LlmError::Other(anyhow::anyhow!(
                     "LLM Cache miss in test offline mode.\n\
                      See llm-cache/README.md for details.\n\
                      To populate the cache, rerun the test with SANDBOX_TEST_LLM_OFFLINE=0 set in the environment."
-                );
+                )));
             }
-            anyhow::bail!("Cache miss and no ANTHROPIC_API_KEY set - cannot make API request");
+            return Err(LlmError::Other(anyhow::anyhow!(
+                "Cache miss and no ANTHROPIC_API_KEY set - cannot make API request"
+            )));
         }
 
         // Build headers including API key for actual requests
         let request_headers =
             self.build_headers(false, enable_web_fetch, enable_thinking, enable_effort);
 
-        let mut attempt = 0;
+        debug!("Sending API request");
+        let mut req = self.client.post(&self.base_url).body(body.clone());
 
-        loop {
-            debug!("Sending API request (attempt {})", attempt + 1);
-            let mut req = self.client.post(&self.base_url).body(body.clone());
-
-            for (name, value) in &request_headers {
-                req = req.header(*name, value);
-            }
-
-            let response = match req.send() {
-                Ok(response) => {
-                    debug!("API response received");
-                    response
-                }
-                Err(e) => {
-                    warn!("API request failed: {} (timeout={})", e, e.is_timeout());
-                    // Only retry on timeout errors, fail immediately on other errors
-                    if e.is_timeout() && attempt < MAX_RETRIES {
-                        attempt += 1;
-
-                        let delay = if attempt == 1 {
-                            Duration::ZERO
-                        } else {
-                            let jitter = rand::rng().random_range(Duration::ZERO..MAX_JITTER);
-                            BASE_RETRY_DELAY + jitter
-                        };
-
-                        warn!("Retrying after {:?}", delay);
-                        if !delay.is_zero() {
-                            std::thread::sleep(delay);
-                        }
-                        continue;
-                    }
-                    return Err(e).context("Failed to send request to Anthropic API");
-                }
-            };
-
-            let status = response.status();
-            debug!("API response status: {}", status);
-
-            if status.is_success() {
-                let response_text = response.text().context("Failed to read response body")?;
-
-                if let Some(ref cache) = self.cache {
-                    // Include base URL in cache key (same as cache lookup)
-                    let cache_key = cache.compute_key(&self.base_url, &cache_header_refs, &body);
-                    cache.put(&cache_key, &response_text)?;
-                }
-
-                let response: MessagesResponse = serde_json::from_str(&response_text)
-                    .with_context(|| {
-                        format!("Failed to parse Anthropic API response: {response_text}")
-                    })?;
-                debug!(
-                    "API request successful: {} input tokens, {} output tokens",
-                    response.usage.input_tokens, response.usage.output_tokens
-                );
-                return Ok(response);
-            }
-
-            let is_rate_limited = status.as_u16() == 429;
-            let should_retry = matches!(status.as_u16(), 429 | 500 | 504 | 529);
-
-            if should_retry && attempt < MAX_RETRIES {
-                attempt += 1;
-
-                let retry_after = response
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .map(Duration::from_secs);
-
-                let delay = if let Some(retry_after) = retry_after {
-                    retry_after
-                } else if attempt == 1 && !is_rate_limited {
-                    Duration::ZERO
-                } else {
-                    let jitter = rand::rng().random_range(Duration::ZERO..MAX_JITTER);
-                    BASE_RETRY_DELAY + jitter
-                };
-
-                warn!(
-                    "API error (status {}), retrying after {:?} (attempt {})",
-                    status, delay, attempt
-                );
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
-                }
-                continue;
-            }
-
-            let error_text = response.text().unwrap_or_default();
-            warn!("API error (status {}): {}", status, error_text);
-            anyhow::bail!("Anthropic API error (status {}): {}", status, error_text);
+        for (name, value) in &request_headers {
+            req = req.header(*name, value);
         }
+
+        let response = req.send()?;
+
+        let status = response.status();
+        debug!("API response status: {}", status);
+
+        // Check for rate limiting before consuming response body
+        if status.as_u16() == 429 {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(Duration::from_secs);
+
+            return Err(LlmError::RateLimited { retry_after });
+        }
+
+        // Convert retryable server errors (500, 502, 503, 504, 511) to reqwest::Error
+        // so they can be retried by the agent. Other errors (4xx, 501, etc.) will be
+        // returned as non-retryable errors.
+        let response = if matches!(status.as_u16(), 500 | 502 | 503 | 504 | 511) {
+            // error_for_status will convert this to a reqwest::Error
+            response.error_for_status()?
+        } else {
+            // For non-retryable errors, convert to LlmError::Other
+            match response.error_for_status() {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(LlmError::Other(anyhow::anyhow!(
+                        "Anthropic API error: {}",
+                        e
+                    )))
+                }
+            }
+        };
+
+        let response_text = response
+            .text()
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {}", e)))?;
+
+        if let Some(ref cache) = self.cache {
+            // Include base URL in cache key (same as cache lookup)
+            let cache_key = cache.compute_key(&self.base_url, &cache_header_refs, &body);
+            cache
+                .put(&cache_key, &response_text)
+                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {}", e)))?;
+        }
+
+        let response: MessagesResponse = serde_json::from_str(&response_text).map_err(|e| {
+            LlmError::Other(anyhow::anyhow!(
+                "Failed to parse Anthropic API response: {}",
+                e
+            ))
+        })?;
+        debug!(
+            "API request successful: {} input tokens, {} output tokens",
+            response.usage.input_tokens, response.usage.output_tokens
+        );
+        Ok(response)
     }
 }
