@@ -18,6 +18,68 @@ use crate::common::{
 use super::common::run_agent_with_prompt;
 
 #[test]
+fn agent_bash_timeout() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Create a script that sleeps for 5 seconds and prints something
+    let script_name = "sleepy.sh";
+    let script_content = r#"#!/bin/bash
+echo "Start sleeping"
+sleep 5
+echo "Done sleeping"
+"#;
+    fs::write(repo.path().join(script_name), script_content).expect("Failed to write script");
+
+    // Make executable
+    let mut perms = fs::metadata(repo.path().join(script_name))
+        .unwrap()
+        .permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(repo.path().join(script_name), perms).unwrap();
+
+    Command::new("git")
+        .args(["add", script_name])
+        .current_dir(repo.path())
+        .success()
+        .expect("git add failed");
+    create_commit(repo.path(), "Add sleepy script");
+
+    // Run agent with 2s timeout
+    let output = super::common::run_agent_interactive_model_args_env(
+        &repo,
+        &daemon,
+        &[formatdoc! {r#"
+            Run `./{script_name}`.
+            Tell me what happens.
+        "#}
+        .as_str()],
+        super::common::DEFAULT_MODEL,
+        &[],
+        &[("AGENT_BASH_TIMEOUT", "2")],
+    );
+
+    assert!(
+        output.stdout.contains("Command timed out after 2 seconds"),
+        "Agent should report timeout.\nstdout: {}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("Process is still running with PID"),
+        "Agent should report PID.\nstdout: {}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("Start sleeping"),
+        "Agent should report partial output.\nstdout: {}",
+        output.stdout
+    );
+}
+
+#[test]
 fn agent_handles_command_with_empty_output_and_nonzero_exit() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -65,7 +127,7 @@ fn agent_large_file_output() {
     );
 
     assert!(
-        output.stdout.contains("/tmp/agent/bash-output-"),
+        output.stdout.contains("/tmp/agent/bash-"),
         "Agent should report that output was saved to a file.\nstdout: {}",
         output.stdout
     );

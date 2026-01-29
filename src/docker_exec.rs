@@ -138,25 +138,25 @@ pub struct ExecOutput {
     pub exit_code: i64,
 }
 
-impl ExecOutput {
-    pub fn success(&self) -> bool {
-        self.exit_code == 0
-    }
+/// Result of executing a command with timeout support
+pub enum ExecResult {
+    Completed(ExecOutput),
+    TimedOut { stdout: Vec<u8>, stderr: Vec<u8> },
 }
 
-/// Execute a command and capture output without failing on non-zero exit.
+/// Execute a command and capture output with a timeout.
 ///
-/// Unlike `exec_command`, this returns the output and exit code even if the
-/// command fails, which is useful for bash command execution where non-zero
-/// exits are normal.
-pub fn exec_capture(
+/// If the command completes within the timeout, returns `ExecResult::Completed`.
+/// If the command times out, returns `ExecResult::TimedOut` containing the partial output.
+pub fn exec_capture_with_timeout(
     docker: &Docker,
     container_id: &str,
     user: Option<&str>,
     workdir: Option<&str>,
     env: Option<Vec<&str>>,
     cmd: Vec<&str>,
-) -> Result<ExecOutput> {
+    timeout_duration: std::time::Duration,
+) -> Result<ExecResult> {
     let config = ExecConfig {
         attach_stdout: Some(true),
         attach_stderr: Some(true),
@@ -169,33 +169,47 @@ pub fn exec_capture(
 
     let exec = block_on(docker.create_exec(container_id, config)).context("creating exec")?;
 
-    let (stdout, stderr) = block_on(async {
+    let result = block_on(async {
         let start_result = docker.start_exec(&exec.id, None).await?;
 
         match start_result {
             StartExecResults::Attached { mut output, .. } => {
                 let mut stdout = Vec::new();
                 let mut stderr = Vec::new();
-                while let Some(chunk) = output.next().await {
-                    match chunk? {
-                        LogOutput::StdOut { message } => stdout.extend_from_slice(&message),
-                        LogOutput::StdErr { message } => stderr.extend_from_slice(&message),
-                        _ => {}
+
+                let res = tokio::time::timeout(timeout_duration, async {
+                    while let Some(chunk) = output.next().await {
+                        match chunk? {
+                            LogOutput::StdOut { message } => stdout.extend_from_slice(&message),
+                            LogOutput::StdErr { message } => stderr.extend_from_slice(&message),
+                            _ => {}
+                        }
                     }
+                    Ok::<_, bollard::errors::Error>(())
+                })
+                .await;
+
+                match res {
+                    Ok(Ok(())) => Ok(Ok((stdout, stderr))),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Ok(Err((stdout, stderr))), // Timeout
                 }
-                Ok::<_, bollard::errors::Error>((stdout, stderr))
             }
-            StartExecResults::Detached => Ok((Vec::new(), Vec::new())),
+            StartExecResults::Detached => Ok(Ok((Vec::new(), Vec::new()))),
         }
     })
     .context("executing command")?;
 
-    let inspect = block_on(docker.inspect_exec(&exec.id)).context("inspecting exec")?;
-    let exit_code = inspect.exit_code.unwrap_or(0);
-
-    Ok(ExecOutput {
-        stdout,
-        stderr,
-        exit_code,
-    })
+    match result {
+        Ok((stdout, stderr)) => {
+            let inspect = block_on(docker.inspect_exec(&exec.id)).context("inspecting exec")?;
+            let exit_code = inspect.exit_code.unwrap_or(0);
+            Ok(ExecResult::Completed(ExecOutput {
+                stdout,
+                stderr,
+                exit_code,
+            }))
+        }
+        Err((stdout, stderr)) => Ok(ExecResult::TimedOut { stdout, stderr }),
+    }
 }

@@ -12,10 +12,14 @@ use sha2::{Digest, Sha256};
 use strum::{Display, EnumString};
 
 use crate::config::Model;
-use crate::docker_exec::{exec_capture, exec_check, exec_command, exec_with_stdin};
+use crate::docker_exec::{
+    exec_capture_with_timeout, exec_check, exec_command, exec_with_stdin, ExecResult,
+};
+use rand::{distr::Alphanumeric, Rng};
 
 pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
+pub const DEFAULT_BASH_TIMEOUT: u64 = 120;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 #[strum(serialize_all = "lowercase")]
@@ -301,56 +305,6 @@ pub fn execute_write_in_sandbox(
     Ok((format!("Successfully wrote {file_path}"), true))
 }
 
-fn save_output_to_file(
-    docker: &Docker,
-    container_name: &str,
-    user: &str,
-    repo_path: &Path,
-    data: &[u8],
-) -> Result<String> {
-    // Generate deterministic ID from content hash for reproducible cache keys
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let hash = hasher.finalize();
-    let id = hex::encode(&hash[..6]);
-
-    let output_file = format!("/tmp/agent/bash-output-{id}");
-    debug!("Saving large output to file: {output_file}");
-
-    let workdir = repo_path.to_string_lossy().to_string();
-    let env = vec!["GIT_EDITOR=false"];
-
-    // Create /tmp/agent directory if it doesn't exist
-    debug!("Creating /tmp/agent directory");
-    exec_command(
-        docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        Some(env.clone()),
-        vec!["bash", "-c", "mkdir -p /tmp/agent"],
-    )
-    .context("Failed to create /tmp/agent directory")?;
-
-    // Write the output to file
-    let len = data.len();
-    debug!("Writing output data ({len} bytes)");
-    let write_cmd = format!("cat > {output_file}");
-    exec_with_stdin(
-        docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        Some(env),
-        vec!["bash", "-c", &write_cmd],
-        Some(data),
-    )
-    .context("Failed to write output to file")?;
-    debug!("Output saved to file");
-
-    Ok(output_file)
-}
-
 pub fn execute_bash_in_sandbox(
     container_name: &str,
     user: &str,
@@ -360,72 +314,151 @@ pub fn execute_bash_in_sandbox(
 ) -> Result<(String, bool)> {
     const MAX_OUTPUT_SIZE: usize = 30000;
 
+    // Get timeout from env or default to 120s
+    let timeout_secs = std::env::var("AGENT_BASH_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_BASH_TIMEOUT);
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+
     let docker = docker_connect(docker_socket)?;
     let workdir = repo_path.to_string_lossy().to_string();
     let env = vec!["GIT_EDITOR=false"];
 
+    // Generate ID for output file
+    let id: String = if std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok() {
+        let mut hasher = Sha256::new();
+        hasher.update(command.as_bytes());
+        hex::encode(hasher.finalize())[..8].to_string()
+    } else {
+        rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect()
+    };
+    let output_file = format!("/tmp/agent/bash-{id}.log");
+
     debug!("Executing bash in sandbox: {}", command);
-    let output = exec_capture(
+
+    // Wrapper to print PID and redirect to file + tee
+    // echo $$ prints the PID of the shell.
+    // We use a subshell or block for the command so we can redirect its output.
+    // We use `set -o pipefail` so if the command fails, the pipeline fails (and we get the exit code).
+    let wrapped_command = format!(
+        "mkdir -p /tmp/agent; echo $$; set -o pipefail; ( {command} ) 2>&1 | tee {output_file}"
+    );
+
+    let exec_result = exec_capture_with_timeout(
         &docker,
         container_name,
         Some(user),
         Some(&workdir),
         Some(env),
-        vec!["bash", "-c", command],
+        vec!["bash", "-c", &wrapped_command],
+        timeout,
     )
     .context("Failed to execute command in sandbox")?;
-    debug!(
-        "Bash command completed with exit code: {}",
-        output.exit_code
-    );
 
-    // Combine stdout and stderr as raw bytes
-    let combined_bytes = if output.stderr.is_empty() {
-        output.stdout.clone()
-    } else if output.stdout.is_empty() {
-        output.stderr.clone()
-    } else {
-        let mut combined = output.stdout.clone();
-        combined.push(b'\n');
-        combined.extend_from_slice(&output.stderr);
-        combined
-    };
+    match exec_result {
+        ExecResult::Completed(output) => {
+            debug!(
+                "Bash command completed with exit code: {}",
+                output.exit_code
+            );
 
-    // Check if output exceeds limit - save to file if so
-    if combined_bytes.len() > MAX_OUTPUT_SIZE {
-        let output_file =
-            save_output_to_file(&docker, container_name, user, repo_path, &combined_bytes)?;
-        let len = combined_bytes.len();
-        return Ok((
-            formatdoc! {r#"
-                Output is too large ({len} bytes). Full output available at {output_file}.
-                Use `tail -n 100 {output_file}` to see the end of the output, or `grep` to search.
-            "#},
-            false,
-        ));
-    }
+            let mut combined_bytes = output.stdout;
+            // Append any stderr just in case (though tee redirects to stdout)
+            if !output.stderr.is_empty() {
+                combined_bytes.push(b'\n');
+                combined_bytes.extend_from_slice(&output.stderr);
+            }
 
-    // Validate UTF-8 - save to file if invalid
-    let combined = match String::from_utf8(combined_bytes.clone()) {
-        Ok(s) => s,
-        Err(_) => {
-            let output_file =
-                save_output_to_file(&docker, container_name, user, repo_path, &combined_bytes)?;
-            return Ok((
-                format!("Output is not valid UTF-8. Full output available at {output_file}"),
-                false,
-            ));
+            // Remove PID line (first line)
+            if let Some(idx) = combined_bytes.iter().position(|&b| b == b'\n') {
+                combined_bytes = combined_bytes[idx + 1..].to_vec();
+            } else {
+                // Only PID or empty?
+                combined_bytes.clear();
+            }
+
+            // Check if output exceeds limit
+            let len = combined_bytes.len();
+            if len > MAX_OUTPUT_SIZE {
+                return Ok((
+                    formatdoc! {r#"
+                        Output is too large ({len} bytes). Full output available at {output_file}.
+                        Use `tail -n 100 {output_file}` to see the end of the output, or `grep` to search.
+                    "#},
+                    false,
+                ));
+            }
+
+            // Validate UTF-8
+            let combined = match String::from_utf8(combined_bytes) {
+                Ok(s) => s,
+                Err(_) => {
+                    return Ok((
+                        format!(
+                            "Output is not valid UTF-8. Full output available at {output_file}"
+                        ),
+                        false,
+                    ));
+                }
+            };
+
+            let success = output.exit_code == 0;
+
+            // If command failed with no output, report the exit status
+            if !success && combined.is_empty() {
+                return Ok((format!("exited with status {}", output.exit_code), false));
+            }
+
+            Ok((combined, success))
         }
-    };
+        ExecResult::TimedOut { stdout, stderr } => {
+            debug!("Bash command timed out");
 
-    let success = output.success();
+            let mut combined_bytes = stdout;
+            if !stderr.is_empty() {
+                combined_bytes.push(b'\n');
+                combined_bytes.extend_from_slice(&stderr);
+            }
 
-    // If command failed with no output, report the exit status
-    if !success && combined.is_empty() {
-        return Ok((format!("exited with status {}", output.exit_code), false));
+            // Extract PID
+            let pid = if let Some(idx) = combined_bytes.iter().position(|&b| b == b'\n') {
+                let pid_str = String::from_utf8_lossy(&combined_bytes[..idx]).to_string();
+                combined_bytes = combined_bytes[idx + 1..].to_vec();
+                pid_str
+            } else {
+                "unknown".to_string()
+            };
+
+            let len = combined_bytes.len();
+            if len > MAX_OUTPUT_SIZE {
+                return Ok((
+                    formatdoc! {r#"
+                        Command timed out after {timeout_secs} seconds.
+                        Process is still running with PID {pid}.
+                        Output so far is too large ({len} bytes). Full output available at {output_file}.
+                    "#},
+                    false,
+                ));
+            }
+
+            let combined = String::from_utf8_lossy(&combined_bytes).to_string();
+
+            Ok((
+                formatdoc! {r#"
+                    Command timed out after {timeout_secs} seconds.
+                    Process is still running with PID {pid}.
+                    Output so far (saved to {output_file}):
+                    {combined}
+                "#},
+                false,
+            ))
+        }
     }
-
-    Ok((combined, success))
 }
 
 /// Prompts user to confirm exit when they submit empty input.

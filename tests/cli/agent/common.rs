@@ -206,6 +206,18 @@ pub fn run_agent_interactive_model_and_args(
     model: &str,
     extra_args: &[&str],
 ) -> InteractiveOutput {
+    run_agent_interactive_model_args_env(repo, daemon, messages, model, extra_args, &[])
+}
+
+/// Run agent interactively with full configuration including environment variables.
+pub fn run_agent_interactive_model_args_env(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    messages: &[&str],
+    model: &str,
+    extra_args: &[&str],
+    env_vars: &[(&str, &str)],
+) -> InteractiveOutput {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let editor_path = create_mock_editor_with_messages(temp_dir.path(), messages);
 
@@ -230,6 +242,12 @@ pub fn run_agent_interactive_model_and_args(
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
+    // Ensure deterministic IDs for output files in tests
+    cmd.env("SANDBOX_TEST_DETERMINISTIC_IDS", "1");
+
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
     cmd.args([
         "agent",
         "test",
