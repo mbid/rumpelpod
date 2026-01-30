@@ -201,8 +201,14 @@ fn write_temp_file(dir: &std::path::Path, name: &str, content: Option<&[u8]>) ->
     Ok(path)
 }
 
+/// Check if a tool is a vimdiff variant (vimdiff, nvimdiff, gvimdiff).
+fn is_vimdiff_variant(tool: &str) -> bool {
+    tool.starts_with("vimdiff") || tool.starts_with("nvimdiff") || tool.starts_with("gvimdiff")
+}
+
 /// Invoke the difftool for a pair of files.
 fn invoke_difftool(
+    tool: &str,
     tool_path: &str,
     cmd_template: Option<&str>,
     local_path: &PathBuf,
@@ -218,8 +224,20 @@ fn invoke_difftool(
             .args(["-c", &cmd])
             .status()
             .context("Failed to run difftool command")?;
+    } else if is_vimdiff_variant(tool) {
+        // vimdiff/nvimdiff/gvimdiff need special handling to enable diff mode.
+        // This mirrors git's diff_cmd() in mergetools/vimdiff:
+        //   "$merge_tool_path" -R -f -d -c 'wincmd l' "$LOCAL" "$REMOTE"
+        Command::new(tool_path)
+            .args(["-R", "-f", "-d"])
+            .arg("-c")
+            .arg("wincmd l")
+            .arg(local_path)
+            .arg(remote_path)
+            .status()
+            .context("Failed to run difftool")?;
     } else {
-        // Built-in tool - invoke the executable path directly with two file arguments
+        // Other built-in tools - invoke the executable path directly with two file arguments
         Command::new(tool_path)
             .arg(local_path)
             .arg(remote_path)
@@ -236,8 +254,22 @@ fn invoke_difftool(
 
 /// Prompt the user before opening a file in the difftool.
 /// Returns true if the user wants to view the file, false to skip.
-fn prompt_for_file(file_path: &str) -> Result<bool> {
-    print!("View diff for '{}' [y/n]? ", file_path);
+/// This matches git difftool's prompt format:
+///   Viewing (1/16): '.sandbox.toml'
+///   Launch 'nvimdiff' [Y/n]?
+fn prompt_for_file(
+    file_path: &str,
+    file_index: usize,
+    total_files: usize,
+    tool: &str,
+) -> Result<bool> {
+    println!(
+        "\nViewing ({}/{}): '{}'",
+        file_index + 1,
+        total_files,
+        file_path
+    );
+    print!("Launch '{}' [Y/n]? ", tool);
     io::stdout().flush().context("Failed to flush stdout")?;
 
     let mut input = String::new();
@@ -246,7 +278,8 @@ fn prompt_for_file(file_path: &str) -> Result<bool> {
         .context("Failed to read user input")?;
 
     let input = input.trim().to_lowercase();
-    Ok(input == "y" || input == "yes")
+    // Default is Yes (capital Y), so empty input or 'y'/'yes' means proceed
+    Ok(input.is_empty() || input == "y" || input == "yes")
 }
 
 pub fn review(cmd: &ReviewCommand) -> Result<()> {
@@ -332,9 +365,10 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     fs::create_dir_all(&remote_dir).context("Failed to create remote temp dir")?;
 
     // Process each changed file
-    for file_path in &changed_files {
+    let total_files = changed_files.len();
+    for (file_index, file_path) in changed_files.iter().enumerate() {
         // Prompt before opening each file (unless --yes flag is set)
-        if !cmd.yes && !prompt_for_file(file_path)? {
+        if !cmd.yes && !prompt_for_file(file_path, file_index, total_files, &tool)? {
             continue;
         }
 
@@ -350,6 +384,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
         // Invoke the difftool
         invoke_difftool(
+            &tool,
             &tool_path,
             cmd_template.as_deref(),
             &local_file,
