@@ -490,7 +490,14 @@ pub fn confirm_exit() -> Result<bool> {
 ///
 /// If `editable_suffix` is provided, it will be appended to the chat history as editable
 /// content (useful when continuing a conversation and allowing the user to edit the last message).
-pub fn get_input_via_editor(chat_history: &str, editable_suffix: Option<&str>) -> Result<String> {
+///
+/// The `sandbox_name` parameter is used in the temp file name to help identify which sandbox
+/// the chat session belongs to.
+pub fn get_input_via_editor(
+    chat_history: &str,
+    editable_suffix: Option<&str>,
+    sandbox_name: &str,
+) -> Result<String> {
     use std::fs;
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
@@ -498,7 +505,7 @@ pub fn get_input_via_editor(chat_history: &str, editable_suffix: Option<&str>) -
     loop {
         let temp_dir = std::env::temp_dir();
         let pid = std::process::id();
-        let temp_file = temp_dir.join(format!("sandbox-chat-{pid}.txt"));
+        let temp_file = temp_dir.join(format!("sandbox-chat-{sandbox_name}-{pid}.txt"));
 
         let initial_content = if let Some(suffix) = editable_suffix {
             format!("{}{}", chat_history, suffix)

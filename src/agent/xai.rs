@@ -42,6 +42,7 @@ struct AgentState {
 #[allow(clippy::too_many_arguments)]
 pub fn run_grok_agent(
     sandbox_handle: JoinHandle<Result<LaunchResult>>,
+    sandbox_name: &str,
     repo_path: &Path,
     model: Model,
     cache: Option<LlmCache>,
@@ -119,7 +120,11 @@ pub fn run_grok_agent(
     if is_tty {
         let chat_history = format_xai_history(&state.messages);
         loop {
-            let input = get_input_via_editor(&chat_history, editable_last_message.as_deref())?;
+            let input = get_input_via_editor(
+                &chat_history,
+                editable_last_message.as_deref(),
+                sandbox_name,
+            )?;
             if input.is_empty() {
                 if confirm_exit()? {
                     return Ok(());
@@ -172,7 +177,7 @@ pub fn run_grok_agent(
         } else {
             let chat_history = format_xai_history(&state.messages);
             let editable = editable_last_message.take();
-            let input = get_input_via_editor(&chat_history, editable.as_deref())?;
+            let input = get_input_via_editor(&chat_history, editable.as_deref(), sandbox_name)?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;

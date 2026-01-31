@@ -85,6 +85,7 @@ fn filter_invalid_content(Message { role, content }: Message) -> Option<Message>
 #[allow(clippy::too_many_arguments)]
 pub fn run_claude_agent(
     sandbox_handle: JoinHandle<Result<LaunchResult>>,
+    sandbox_name: &str,
     repo_path: &Path,
     model: Model,
     thinking_budget: Option<u32>,
@@ -147,7 +148,11 @@ pub fn run_claude_agent(
         let chat_history = format_anthropic_history(&messages);
         // Loop to handle empty input + confirm exit
         loop {
-            let input = get_input_via_editor(&chat_history, editable_last_message.as_deref())?;
+            let input = get_input_via_editor(
+                &chat_history,
+                editable_last_message.as_deref(),
+                sandbox_name,
+            )?;
             if input.is_empty() {
                 if confirm_exit()? {
                     return Ok(());
@@ -185,7 +190,7 @@ pub fn run_claude_agent(
         } else {
             let chat_history = format_anthropic_history(&messages);
             let editable = editable_last_message.take();
-            let input = get_input_via_editor(&chat_history, editable.as_deref())?;
+            let input = get_input_via_editor(&chat_history, editable.as_deref(), sandbox_name)?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;

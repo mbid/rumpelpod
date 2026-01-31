@@ -18,6 +18,7 @@ mod file_tools;
 mod history;
 mod smoke;
 mod startup;
+mod temp_file_path;
 mod web_tools;
 
 // Re-export for other test modules

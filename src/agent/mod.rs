@@ -227,6 +227,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
 
             run_claude_agent(
                 sandbox_handle,
+                &cmd.name,
                 repo_path,
                 m,
                 thinking_budget,
@@ -239,6 +240,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         }
         EffectiveModel::Xai(m) => run_grok_agent(
             sandbox_handle,
+            &cmd.name,
             repo_path,
             m,
             cache,
@@ -247,6 +249,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         ),
         EffectiveModel::Gemini(m) => run_gemini_agent(
             sandbox_handle,
+            &cmd.name,
             repo_path,
             m,
             cache,
