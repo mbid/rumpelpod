@@ -8,6 +8,7 @@ use crate::common::{
 };
 
 use super::agent::llm_cache_dir;
+use super::ssh::{create_ssh_config, write_remote_sandbox_config, SshRemoteHost};
 
 #[test]
 fn delete_smoke_test() {
@@ -198,5 +199,95 @@ fn delete_sandbox_clears_conversation_history() {
         "Agent should NOT remember the code after sandbox deletion.\n\
          This indicates conversation history was not deleted.\nstdout: {}",
         stdout2
+    );
+}
+
+#[test]
+fn ssh_remote_sandbox_delete() {
+    let repo = TestRepo::new();
+
+    // Build test image locally
+    let image_id =
+        crate::common::build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    // Start remote host and load the image
+    let remote = SshRemoteHost::start();
+    remote
+        .load_image(&image_id)
+        .expect("Failed to load image into remote Docker");
+
+    // Create SSH config and start daemon
+    let ssh_config = create_ssh_config(&[&remote]);
+    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
+
+    // Write sandbox config
+    write_remote_sandbox_config(&repo, &image_id, &remote.ssh_spec());
+
+    // Create a sandbox on the remote
+    let sandbox_name = "delete-test-remote";
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "true"])
+        .output()
+        .expect("sandbox enter failed to execute");
+    assert!(
+        output.status.success(),
+        "sandbox enter failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify it exists in list
+    let output = sandbox_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("sandbox list failed to execute");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(sandbox_name),
+        "sandbox should exist before delete"
+    );
+
+    // Delete the sandbox
+    let output = sandbox_command(&repo, &daemon)
+        .args(["delete", sandbox_name])
+        .output()
+        .expect("sandbox delete failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "sandbox delete failed: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+
+    // Verify it is gone from list
+    let output = sandbox_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("sandbox list failed to execute");
+
+    let stdout_list = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout_list.contains(sandbox_name),
+        "sandbox should not exist after delete in list output: {}",
+        stdout_list
+    );
+
+    // Verify container is gone on remote host
+    let remote_containers = remote
+        .ssh_command(
+            &ssh_config.path,
+            &["docker", "ps", "-a", "--format", "{{.Names}}"],
+        )
+        .expect("docker ps failed");
+    let remote_containers_str = String::from_utf8_lossy(&remote_containers);
+
+    // The container name usually contains the sandbox name.
+    assert!(
+        !remote_containers_str.contains(sandbox_name),
+        "remote container should be deleted: {}",
+        remote_containers_str
     );
 }

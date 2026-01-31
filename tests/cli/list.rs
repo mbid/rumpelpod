@@ -1,5 +1,6 @@
 //! Integration tests for the `sandbox list` subcommand.
 
+use super::ssh::{create_ssh_config, write_remote_sandbox_config, SshRemoteHost, SSH_USER};
 use crate::common::{
     build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
 };
@@ -292,5 +293,68 @@ fn list_does_not_show_other_repo_sandboxes() {
         !stdout.contains("repo1-sandbox"),
         "Should not see 'repo1-sandbox' from other repo in output: {}",
         stdout
+    );
+}
+
+#[test]
+fn ssh_remote_sandbox_list() {
+    let repo = TestRepo::new();
+
+    // Build test image locally
+    let image_id =
+        crate::common::build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    // Start remote host and load the image
+    let remote = SshRemoteHost::start();
+    remote
+        .load_image(&image_id)
+        .expect("Failed to load image into remote Docker");
+
+    // Create SSH config and start daemon
+    let ssh_config = create_ssh_config(&[&remote]);
+    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
+
+    // Write sandbox config
+    write_remote_sandbox_config(&repo, &image_id, &remote.ssh_spec());
+
+    // Create a sandbox on the remote
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", "list-test-remote", "--", "true"])
+        .output()
+        .expect("sandbox enter failed to execute");
+    assert!(
+        output.status.success(),
+        "sandbox enter failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // List should show the sandbox with the remote host
+    let output = sandbox_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("sandbox list failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "sandbox list failed: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("list-test-remote"),
+        "sandbox list should show the sandbox: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    // The remote host should be shown as "testuser@<ip>"
+    assert!(
+        stdout.contains(&format!("{}@", SSH_USER)),
+        "sandbox list should show the remote host: stdout={}, stderr={}",
+        stdout,
+        stderr
     );
 }
