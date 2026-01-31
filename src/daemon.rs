@@ -609,6 +609,7 @@ fn create_container(
     container_repo_path: &Path,
     runtime: Runtime,
     network_config: Network,
+    env: &std::collections::HashMap<String, String>,
 ) -> Result<ContainerId> {
     let network_mode = match network_config {
         Network::UnsafeHost => "host",
@@ -623,6 +624,16 @@ fn create_container(
     );
     labels.insert(SANDBOX_NAME_LABEL.to_string(), sandbox_name.0.clone());
 
+    let env_vec = if env.is_empty() {
+        None
+    } else {
+        Some(
+            env.iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>(),
+        )
+    };
+
     let host_config = HostConfig {
         runtime: Some(docker_runtime_flag(runtime).to_string()),
         network_mode: Some(network_mode.to_string()),
@@ -633,6 +644,7 @@ fn create_container(
         image: Some(image.0.clone()),
         hostname: Some(sandbox_name.0.clone()),
         labels: Some(labels),
+        env: env_vec,
         cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
         host_config: Some(host_config),
         ..Default::default()
@@ -758,6 +770,7 @@ impl Daemon for DaemonServer {
         network: Network,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
+        env: std::collections::HashMap<String, String>,
     ) -> Result<LaunchResult> {
         // Validate network configuration
         if network == Network::UnsafeHost && runtime != Runtime::Runc {
@@ -957,6 +970,7 @@ impl Daemon for DaemonServer {
             &container_repo_path,
             runtime,
             network,
+            &env,
         )
         .map_err(mark_error)?;
 

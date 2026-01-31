@@ -86,6 +86,9 @@ struct LaunchSandboxRequest {
     /// If not set, uses local Docker.
     #[serde(default)]
     remote: Option<RemoteDocker>,
+    /// Environment variables to set in the container.
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -227,6 +230,7 @@ pub trait Daemon: Send + Sync + 'static {
         network: Network,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
+        env: std::collections::HashMap<String, String>,
     ) -> Result<LaunchResult>;
 
     // POST /sandbox/recreate
@@ -321,6 +325,7 @@ impl Daemon for DaemonClient {
         network: Network,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
+        env: std::collections::HashMap<String, String>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -333,6 +338,7 @@ impl Daemon for DaemonClient {
             network,
             host_branch,
             remote,
+            env,
         };
 
         let response = self
@@ -569,6 +575,7 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.network,
             request.host_branch,
             request.remote,
+            request.env,
         )
     });
 
@@ -791,6 +798,7 @@ mod tests {
             _network: Network,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
+            _env: std::collections::HashMap<String, String>,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -918,6 +926,7 @@ mod tests {
             Network::Default,
             Some("main".to_string()),
             None, // No remote Docker
+            std::collections::HashMap::new(),
         );
 
         let launch_result = result.unwrap();
@@ -950,6 +959,7 @@ mod tests {
             _network: Network,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
+            _env: std::collections::HashMap<String, String>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }

@@ -386,6 +386,9 @@ pub struct SandboxConfig {
     /// `sandbox enter` will use this as the working directory base.
     pub repo_path: PathBuf,
 
+    /// Environment variables for the container.
+    pub container_env: std::collections::HashMap<String, String>,
+
     /// Agent configuration.
     pub agent: AgentConfig,
 
@@ -510,6 +513,11 @@ impl SandboxConfig {
 
         let network = toml_config.network.or(dc_network).unwrap_or_default();
 
+        let container_env = devcontainer
+            .as_ref()
+            .and_then(|dc| dc.container_env.clone())
+            .unwrap_or_default();
+
         // Validate required fields
         let image = provided_image.unwrap_or_else(String::new);
         if pending_build.is_none() && image.is_empty() {
@@ -543,6 +551,7 @@ impl SandboxConfig {
             pending_build,
             user,
             repo_path,
+            container_env,
             agent: toml_config.agent,
             host: toml_config.host,
         })

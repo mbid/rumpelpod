@@ -6,12 +6,12 @@ mod anthropic_url;
 mod common;
 #[path = "cli/delete.rs"]
 mod delete;
+#[path = "cli/devcontainer/mod.rs"]
+mod devcontainer;
 #[path = "cli/enter.rs"]
 mod enter;
 #[path = "cli/gateway.rs"]
 mod gateway;
-#[path = "cli/image.rs"]
-mod image;
 #[path = "cli/list.rs"]
 mod list;
 #[path = "cli/network.rs"]
