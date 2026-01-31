@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A devcontainer.json configuration.
 ///
@@ -431,7 +431,9 @@ impl DevContainer {
     /// Searches for:
     /// 1. `.devcontainer/devcontainer.json`
     /// 2. `.devcontainer.json`
-    pub fn find_and_load(repo_root: &Path) -> Result<Option<Self>> {
+    ///
+    /// Returns the DevContainer and the directory containing the devcontainer.json file.
+    pub fn find_and_load(repo_root: &Path) -> Result<Option<(Self, PathBuf)>> {
         let candidates = [
             repo_root.join(".devcontainer/devcontainer.json"),
             repo_root.join(".devcontainer.json"),
@@ -439,7 +441,12 @@ impl DevContainer {
 
         for candidate in &candidates {
             if candidate.exists() {
-                return Self::load(candidate).map(Some);
+                let dc = Self::load(candidate)?;
+                let dc_dir = candidate
+                    .parent()
+                    .expect("devcontainer.json must have a parent directory")
+                    .to_path_buf();
+                return Ok(Some((dc, dc_dir)));
             }
         }
 

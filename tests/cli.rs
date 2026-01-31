@@ -10,6 +10,8 @@ mod delete;
 mod enter;
 #[path = "cli/gateway.rs"]
 mod gateway;
+#[path = "cli/image.rs"]
+mod image;
 #[path = "cli/list.rs"]
 mod list;
 #[path = "cli/network.rs"]
