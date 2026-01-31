@@ -152,8 +152,22 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_docker_parse_fallback_scheme() {
+        let remote = RemoteDocker::parse("docker.example.com").unwrap();
+        assert_eq!(remote.destination, "docker.example.com");
+        assert_eq!(remote.port, 22);
+
+        let remote = RemoteDocker::parse("user@docker.example.com:2222").unwrap();
+        assert_eq!(remote.destination, "user@docker.example.com");
+        assert_eq!(remote.port, 2222);
+    }
+
+    #[test]
     fn test_remote_docker_parse_invalid_url() {
-        assert!(RemoteDocker::parse("not-a-url").is_err());
+        // "not-a-url" is treated as a host "not-a-url" with default port 22
+        let remote = RemoteDocker::parse("not-a-url").unwrap();
+        assert_eq!(remote.destination, "not-a-url");
+        assert_eq!(remote.port, 22);
     }
 
     #[test]
@@ -279,8 +293,16 @@ impl RemoteDocker {
     /// Parse a remote specification string.
     ///
     /// Expects a valid SSH URL, e.g. `ssh://user@host:port`.
+    /// Also accepts strings without scheme, assuming `ssh://`.
     pub fn parse(s: &str) -> Result<Self> {
-        let url = Url::parse(s).with_context(|| format!("Invalid URL: {}", s))?;
+        // If no scheme is present, assume ssh://
+        let url_str = if !s.contains("://") {
+            format!("ssh://{}", s)
+        } else {
+            s.to_string()
+        };
+
+        let url = Url::parse(&url_str).with_context(|| format!("Invalid URL: {}", s))?;
 
         if url.scheme() != "ssh" {
             bail!("URL scheme must be 'ssh'");

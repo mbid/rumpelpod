@@ -723,7 +723,7 @@ impl Daemon for DaemonServer {
         // Get the host specification string for the database
         let host_spec = remote
             .as_ref()
-            .map(|r| format!("{}:{}", r.destination, r.port))
+            .map(|r| format!("ssh://{}:{}", r.destination, r.port))
             .unwrap_or_else(|| db::LOCAL_HOST.to_string());
 
         // Check for name conflicts between local and remote sandboxes
