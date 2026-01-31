@@ -206,7 +206,10 @@ impl SshForwardManager {
         if let Some(session) = connections.get_mut(host) {
             if session.is_alive() {
                 session.last_check = Instant::now();
-                debug!("Reusing existing SSH connection to {}:{}", host_str, host.port);
+                debug!(
+                    "Reusing existing SSH connection to {}:{}",
+                    host_str, host.port
+                );
                 return Ok(session.docker_socket.clone());
             }
 
@@ -236,10 +239,7 @@ impl SshForwardManager {
         }
 
         // No existing connection, start a new one
-        info!(
-            "Establishing SSH connection to {}:{}",
-            host_str, host.port
-        );
+        info!("Establishing SSH connection to {}:{}", host_str, host.port);
         let session = self.start_forwarding(host, INITIAL_DELAY, 0)?;
         let socket = session.docker_socket.clone();
         connections.insert(host.clone(), session);
@@ -325,10 +325,7 @@ impl SshForwardManager {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| {
-                format!(
-                    "Failed to spawn SSH process for {}:{}",
-                    host_str, host.port
-                )
+                format!("Failed to spawn SSH process for {}:{}", host_str, host.port)
             })?;
 
         // Spawn threads to log stdout and stderr from the SSH process
@@ -502,10 +499,7 @@ impl SshForwardManager {
 
         // Check if forwards are already set up
         if session.remote_forwards.bridge_port.is_some() {
-            debug!(
-                "Remote forwards already configured for {}",
-                host_str
-            );
+            debug!("Remote forwards already configured for {}", host_str);
             return Ok(session.remote_forwards.clone());
         }
 
@@ -566,10 +560,7 @@ impl Drop for SshForwardManager {
             } else {
                 host.host.clone()
             };
-            debug!(
-                "Closing SSH connection to {}:{}",
-                host_str, host.port
-            );
+            debug!("Closing SSH connection to {}:{}", host_str, host.port);
             drop(session); // ForwardSession::drop will kill the process
         }
     }

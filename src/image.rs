@@ -63,10 +63,7 @@ fn build_devcontainer_image(
         } else {
             format!("ssh://{}:{}", remote.host, remote.port)
         };
-        cmd.args([
-            "-H",
-            &remote_uri,
-        ]);
+        cmd.args(["-H", &remote_uri]);
     }
 
     cmd.arg("build").arg("--rm");
