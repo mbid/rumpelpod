@@ -8,7 +8,7 @@ use std::fs::FileType;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context};
 use indoc::formatdoc;
@@ -259,10 +259,10 @@ impl std::fmt::Display for ImageId {
 const TEST_IMAGE_LABEL: &str = "dev.sandbox.test.dockerfile_hash";
 
 /// Global cache for built docker images, keyed by the hash of the DockerBuild configuration.
-/// The mutex ensures only one build happens at a time (avoiding parallel builds
-/// of the same image) and enables caching of results.
-/// Arc is needed because anyhow::Error is not Clone.
-type ImageCache = BTreeMap<[u8; 32], Arc<anyhow::Result<ImageId>>>;
+/// The mutex ensures that we can safely insert into the map.
+/// The OnceLock ensures that we only build each image once, even if multiple
+/// tests request it concurrently.
+type ImageCache = BTreeMap<[u8; 32], Arc<OnceLock<anyhow::Result<ImageId>>>>;
 #[allow(clippy::type_complexity)]
 static DOCKER_IMAGE_CACHE: Mutex<Option<ImageCache>> = Mutex::new(None);
 
@@ -503,34 +503,31 @@ pub fn write_test_sandbox_config_with_network(repo: &TestRepo, image_id: &ImageI
 pub fn build_docker_image(build: DockerBuild) -> anyhow::Result<ImageId> {
     let build_hash = hash_docker_build(&build)?;
 
-    let mut cache_guard = DOCKER_IMAGE_CACHE.lock().unwrap();
-    let cache = cache_guard.get_or_insert_with(BTreeMap::new);
+    let cell = {
+        let mut cache_guard = DOCKER_IMAGE_CACHE.lock().unwrap();
+        let cache = cache_guard.get_or_insert_with(BTreeMap::new);
+        cache
+            .entry(build_hash)
+            .or_insert_with(|| Arc::new(OnceLock::new()))
+            .clone()
+    };
 
-    // Check in-memory cache first.
-    if let Some(result) = cache.get(&build_hash) {
-        return match result.as_ref() {
-            Ok(id) => Ok(id.clone()),
-            Err(e) => bail!("{e}"),
-        };
-    }
+    let result = cell.get_or_init(|| {
+        let build_hash_hex = hex::encode(build_hash);
 
-    let build_hash_hex = hex::encode(build_hash);
+        // Check if an image with this hash already exists (from a previous test run).
+        if let Some(image_id) = find_existing_image(&build_hash_hex) {
+            return Ok(ImageId(image_id));
+        }
 
-    // Check if an image with this hash already exists (from a previous test run).
-    if let Some(image_id) = find_existing_image(&build_hash_hex) {
-        let image_id = ImageId(image_id);
-        cache.insert(build_hash, Arc::new(Ok(image_id.clone())));
-        return Ok(image_id);
-    }
-
-    // Need to build the image.
-    let result = do_build_docker_image(&build, &build_hash_hex);
-    let cached = Arc::new(match &result {
-        Ok(id) => Ok(id.clone()),
-        Err(e) => Err(anyhow::anyhow!("{e}")),
+        // Need to build the image.
+        do_build_docker_image(&build, &build_hash_hex)
     });
-    cache.insert(build_hash, cached);
-    result
+
+    match result {
+        Ok(id) => Ok(id.clone()),
+        Err(e) => bail!("{e}"),
+    }
 }
 
 /// Actually perform the docker build.
