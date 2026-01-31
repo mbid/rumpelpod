@@ -132,15 +132,14 @@ mod tests {
         let remote = RemoteDocker::parse("docker.example.com").unwrap();
         assert_eq!(remote.host, "docker.example.com");
         assert_eq!(remote.port, 22);
-        // User depends on environment, just check it's not empty
-        assert!(!remote.user.is_empty());
+        assert_eq!(remote.user, None);
     }
 
     #[test]
     fn test_remote_docker_parse_user_and_host() {
         let remote = RemoteDocker::parse("deploy@docker.example.com").unwrap();
         assert_eq!(remote.host, "docker.example.com");
-        assert_eq!(remote.user, "deploy");
+        assert_eq!(remote.user, Some("deploy".to_string()));
         assert_eq!(remote.port, 22);
     }
 
@@ -149,13 +148,14 @@ mod tests {
         let remote = RemoteDocker::parse("docker.example.com:2222").unwrap();
         assert_eq!(remote.host, "docker.example.com");
         assert_eq!(remote.port, 2222);
+        assert_eq!(remote.user, None);
     }
 
     #[test]
     fn test_remote_docker_parse_full() {
         let remote = RemoteDocker::parse("deploy@docker.example.com:2222").unwrap();
         assert_eq!(remote.host, "docker.example.com");
-        assert_eq!(remote.user, "deploy");
+        assert_eq!(remote.user, Some("deploy".to_string()));
         assert_eq!(remote.port, 2222);
     }
 
@@ -284,7 +284,7 @@ pub enum Network {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteDocker {
     /// SSH user for remote connection.
-    pub user: String,
+    pub user: Option<String>,
     /// Remote Docker host (hostname or IP).
     pub host: String,
     /// SSH port.
@@ -300,14 +300,13 @@ impl RemoteDocker {
     /// - `host:port` - host and port, default user
     /// - `user@host:port` - all three
     pub fn parse(s: &str) -> Result<Self> {
-        let default_user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
         const DEFAULT_PORT: u16 = 22;
 
         // Check for user@ prefix
         let (user, rest) = if let Some(idx) = s.find('@') {
-            (s[..idx].to_string(), &s[idx + 1..])
+            (Some(s[..idx].to_string()), &s[idx + 1..])
         } else {
-            (default_user, s)
+            (None, s)
         };
 
         // Check for :port suffix
