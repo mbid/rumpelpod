@@ -155,7 +155,6 @@ mod tests {
     fn test_remote_docker_parse_invalid_url() {
         assert!(RemoteDocker::parse("not-a-url").is_err());
     }
-}
 
     #[test]
     fn test_parse_run_args_network_equals() {

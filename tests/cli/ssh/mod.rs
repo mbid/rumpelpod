@@ -103,9 +103,9 @@ impl SshRemoteHost {
         host
     }
 
-    /// Get the SSH connection string for this remote host (user@host format).
+    /// Get the SSH connection string for this remote host (ssh://user@host format).
     pub fn ssh_spec(&self) -> String {
-        format!("{}@{}", SSH_USER, self.ip_address)
+        format!("ssh://{}@{}", SSH_USER, self.ip_address)
     }
 
     /// Get the IP address of this remote host.
