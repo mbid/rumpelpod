@@ -124,6 +124,9 @@ struct RecreateSandboxRequest {
     /// If not set, uses local Docker.
     #[serde(default)]
     remote: Option<RemoteDocker>,
+    /// Environment variables to set in the container.
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
 }
 
 /// Response body for recreate_sandbox endpoint.
@@ -246,6 +249,7 @@ pub trait Daemon: Send + Sync + 'static {
         network: Network,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
+        env: std::collections::HashMap<String, String>,
     ) -> Result<LaunchResult>;
 
     // DELETE /sandbox
@@ -376,6 +380,7 @@ impl Daemon for DaemonClient {
         network: Network,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
+        env: std::collections::HashMap<String, String>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox/recreate")?;
         let request = RecreateSandboxRequest {
@@ -388,6 +393,7 @@ impl Daemon for DaemonClient {
             network,
             host_branch,
             remote,
+            env,
         };
 
         let response = self
@@ -610,6 +616,7 @@ async fn recreate_sandbox_handler<D: Daemon>(
             request.network,
             request.host_branch,
             request.remote,
+            request.env,
         )
     });
 
@@ -819,6 +826,7 @@ mod tests {
             _network: Network,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
+            _env: std::collections::HashMap<String, String>,
         ) -> Result<LaunchResult> {
             Ok(LaunchResult {
                 container_id: ContainerId(format!("recreated:{}:{}", sandbox_name.0, image.0)),
@@ -975,6 +983,7 @@ mod tests {
             _network: Network,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
+            _env: std::collections::HashMap<String, String>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }

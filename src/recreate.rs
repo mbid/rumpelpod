@@ -33,6 +33,20 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         &repo_root,
     )?;
 
+    // Resolve environment variables from config
+    let mut env = std::collections::HashMap::new();
+    for (key, value) in &config.container_env {
+        let resolved_value = if let Some(var_name) = value
+            .strip_prefix("${localEnv:")
+            .and_then(|s| s.strip_suffix("}"))
+        {
+            std::env::var(var_name).unwrap_or_default()
+        } else {
+            value.clone()
+        };
+        env.insert(key.clone(), resolved_value);
+    }
+
     client.recreate_sandbox(
         SandboxName(cmd.name.clone()),
         image,
@@ -43,6 +57,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         config.network,
         host_branch,
         remote,
+        env,
     )?;
 
     println!("Sandbox '{}' recreated successfully.", cmd.name);

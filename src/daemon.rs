@@ -1012,6 +1012,7 @@ impl Daemon for DaemonServer {
         network: Network,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
+        env: std::collections::HashMap<String, String>,
     ) -> Result<LaunchResult> {
         let name = docker_name(&repo_path, &sandbox_name);
 
@@ -1084,6 +1085,7 @@ impl Daemon for DaemonServer {
             network,
             host_branch,
             remote,
+            env,
         )?;
 
         // 4. Apply patch if we have one

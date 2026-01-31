@@ -135,3 +135,37 @@ fn container_env_mixed() {
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "static dynamic");
 }
+
+#[test]
+fn container_env_recreate() {
+    let repo = TestRepo::new();
+
+    // Initial config
+    write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "value1" }"#);
+    write_minimal_sandbox_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    // First enter
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "recreate-env", "--", "printenv", "MY_VAR"])
+        .success()
+        .expect("sandbox enter failed");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "value1");
+
+    // Update config
+    write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "value2" }"#);
+
+    // Recreate
+    sandbox_command(&repo, &daemon)
+        .args(["recreate", "recreate-env"])
+        .success()
+        .expect("sandbox recreate failed");
+
+    // Verify new env var
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "recreate-env", "--", "printenv", "MY_VAR"])
+        .success()
+        .expect("sandbox enter failed");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "value2");
+}
