@@ -128,49 +128,34 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_docker_parse_host_only() {
-        let remote = RemoteDocker::parse("docker.example.com").unwrap();
-        assert_eq!(remote.host, "docker.example.com");
+    fn test_remote_docker_parse_ssh_url() {
+        let remote = RemoteDocker::parse("ssh://docker.example.com").unwrap();
+        assert_eq!(remote.destination, "docker.example.com");
         assert_eq!(remote.port, 22);
-        assert_eq!(remote.user, None);
-    }
 
-    #[test]
-    fn test_remote_docker_parse_user_and_host() {
-        let remote = RemoteDocker::parse("deploy@docker.example.com").unwrap();
-        assert_eq!(remote.host, "docker.example.com");
-        assert_eq!(remote.user, Some("deploy".to_string()));
+        let remote = RemoteDocker::parse("ssh://user@docker.example.com").unwrap();
+        assert_eq!(remote.destination, "user@docker.example.com");
         assert_eq!(remote.port, 22);
-    }
 
-    #[test]
-    fn test_remote_docker_parse_host_and_port() {
-        let remote = RemoteDocker::parse("docker.example.com:2222").unwrap();
-        assert_eq!(remote.host, "docker.example.com");
+        let remote = RemoteDocker::parse("ssh://docker.example.com:2222").unwrap();
+        assert_eq!(remote.destination, "docker.example.com");
         assert_eq!(remote.port, 2222);
-        assert_eq!(remote.user, None);
-    }
 
-    #[test]
-    fn test_remote_docker_parse_full() {
-        let remote = RemoteDocker::parse("deploy@docker.example.com:2222").unwrap();
-        assert_eq!(remote.host, "docker.example.com");
-        assert_eq!(remote.user, Some("deploy".to_string()));
+        let remote = RemoteDocker::parse("ssh://user@docker.example.com:2222").unwrap();
+        assert_eq!(remote.destination, "user@docker.example.com");
         assert_eq!(remote.port, 2222);
     }
 
     #[test]
-    fn test_remote_docker_parse_empty_host_fails() {
-        assert!(RemoteDocker::parse("").is_err());
-        assert!(RemoteDocker::parse("deploy@").is_err());
-        assert!(RemoteDocker::parse("deploy@:22").is_err());
+    fn test_remote_docker_parse_invalid_scheme() {
+        assert!(RemoteDocker::parse("http://example.com").is_err());
     }
 
     #[test]
-    fn test_remote_docker_parse_invalid_port_fails() {
-        assert!(RemoteDocker::parse("docker.example.com:notaport").is_err());
-        assert!(RemoteDocker::parse("docker.example.com:99999").is_err());
+    fn test_remote_docker_parse_invalid_url() {
+        assert!(RemoteDocker::parse("not-a-url").is_err());
     }
+}
 
     #[test]
     fn test_parse_run_args_network_equals() {
@@ -278,15 +263,15 @@ pub enum Network {
     UnsafeHost,
 }
 
+use url::Url;
+
 /// Parsed remote Docker host specification.
 ///
-/// Parsed from a string like `user@host:port`.
+/// Parsed from a URL like `ssh://user@host:port`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteDocker {
-    /// SSH user for remote connection.
-    pub user: Option<String>,
-    /// Remote Docker host (hostname or IP).
-    pub host: String,
+    /// The SSH destination (e.g. "user@host" or "host").
+    pub destination: String,
     /// SSH port.
     pub port: u16,
 }
@@ -294,37 +279,25 @@ pub struct RemoteDocker {
 impl RemoteDocker {
     /// Parse a remote specification string.
     ///
-    /// Supported formats:
-    /// - `host` - just hostname, default user and port
-    /// - `user@host` - user and host, default port
-    /// - `host:port` - host and port, default user
-    /// - `user@host:port` - all three
+    /// Expects a valid SSH URL, e.g. `ssh://user@host:port`.
     pub fn parse(s: &str) -> Result<Self> {
-        const DEFAULT_PORT: u16 = 22;
-
-        // Check for user@ prefix
-        let (user, rest) = if let Some(idx) = s.find('@') {
-            (Some(s[..idx].to_string()), &s[idx + 1..])
-        } else {
-            (None, s)
-        };
-
-        // Check for :port suffix
-        let (host, port) = if let Some(idx) = rest.rfind(':') {
-            let port_str = &rest[idx + 1..];
-            let port = port_str
-                .parse::<u16>()
-                .with_context(|| format!("Invalid port number: {}", port_str))?;
-            (rest[..idx].to_string(), port)
-        } else {
-            (rest.to_string(), DEFAULT_PORT)
-        };
-
-        if host.is_empty() {
-            bail!("Remote host cannot be empty");
+        let url = Url::parse(s).with_context(|| format!("Invalid URL: {}", s))?;
+        
+        if url.scheme() != "ssh" {
+            bail!("URL scheme must be 'ssh'");
         }
 
-        Ok(Self { user, host, port })
+        let host = url.host_str().ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
+        let port = url.port().unwrap_or(22);
+        let username = url.username();
+
+        let destination = if !username.is_empty() {
+            format!("{}@{}", username, host)
+        } else {
+            host.to_string()
+        };
+
+        Ok(Self { destination, port })
     }
 }
 

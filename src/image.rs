@@ -58,11 +58,7 @@ fn build_devcontainer_image(
 
     if let Some(remote_str) = remote_host {
         let remote = RemoteDocker::parse(remote_str)?;
-        let remote_uri = if let Some(user) = &remote.user {
-            format!("ssh://{}@{}:{}", user, remote.host, remote.port)
-        } else {
-            format!("ssh://{}:{}", remote.host, remote.port)
-        };
+        let remote_uri = format!("ssh://{}:{}", remote.destination, remote.port);
         cmd.args(["-H", &remote_uri]);
     }
 

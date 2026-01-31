@@ -42,28 +42,23 @@ const REMOTE_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 /// Key for identifying a unique remote host connection.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteHost {
-    host: String,
+    destination: String,
     port: u16,
-    user: Option<String>,
 }
 
 impl RemoteHost {
     fn from_remote_docker(remote: &RemoteDocker) -> Self {
         RemoteHost {
-            host: remote.host.clone(),
+            destination: remote.destination.clone(),
             port: remote.port,
-            user: remote.user.clone(),
         }
     }
 
-    /// Generate a hash prefix for unique naming based on host+port+user.
+    /// Generate a hash prefix for unique naming based on host+port.
     fn hash_prefix(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(self.host.as_bytes());
+        hasher.update(self.destination.as_bytes());
         hasher.update(self.port.to_le_bytes());
-        if let Some(user) = &self.user {
-            hasher.update(user.as_bytes());
-        }
         let hash = hex::encode(hasher.finalize());
         hash[..12].to_string()
     }
@@ -196,19 +191,13 @@ impl SshForwardManager {
     fn ensure_connection(&self, host: &RemoteHost) -> Result<PathBuf> {
         let mut connections = self.connections.lock().unwrap();
 
-        let host_str = if let Some(user) = &host.user {
-            format!("{}@{}", user, host.host)
-        } else {
-            host.host.clone()
-        };
-
         // Check if we have an existing connection
         if let Some(session) = connections.get_mut(host) {
             if session.is_alive() {
                 session.last_check = Instant::now();
                 debug!(
                     "Reusing existing SSH connection to {}:{}",
-                    host_str, host.port
+                    host.destination, host.port
                 );
                 return Ok(session.docker_socket.clone());
             }
@@ -216,7 +205,7 @@ impl SshForwardManager {
             // Connection died, remove it and reconnect with backoff
             warn!(
                 "SSH connection to {}:{} died, reconnecting...",
-                host_str, host.port
+                host.destination, host.port
             );
             let old_session = connections.remove(host).unwrap();
             let backoff = next_backoff(old_session.backoff);
@@ -239,7 +228,10 @@ impl SshForwardManager {
         }
 
         // No existing connection, start a new one
-        info!("Establishing SSH connection to {}:{}", host_str, host.port);
+        info!(
+            "Establishing SSH connection to {}:{}",
+            host.destination, host.port
+        );
         let session = self.start_forwarding(host, INITIAL_DELAY, 0)?;
         let socket = session.docker_socket.clone();
         connections.insert(host.clone(), session);
@@ -304,20 +296,10 @@ impl SshForwardManager {
         // SSH port
         cmd.args(["-p", &host.port.to_string()]);
 
-        // Target: user@host or host
-        if let Some(user) = &host.user {
-            cmd.arg(format!("{}@{}", user, host.host));
-        } else {
-            cmd.arg(&host.host);
-        }
+        // Target: destination (user@host or host)
+        cmd.arg(&host.destination);
 
         debug!("Starting SSH: {:?}", cmd);
-
-        let host_str = if let Some(user) = &host.user {
-            format!("{}@{}", user, host.host)
-        } else {
-            host.host.clone()
-        };
 
         let mut process = cmd
             .stdin(Stdio::null())
@@ -325,11 +307,14 @@ impl SshForwardManager {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| {
-                format!("Failed to spawn SSH process for {}:{}", host_str, host.port)
+                format!(
+                    "Failed to spawn SSH process for {}:{}",
+                    host.destination, host.port
+                )
             })?;
 
         // Spawn threads to log stdout and stderr from the SSH process
-        let ssh_target = format!("{}:{}", host_str, host.port);
+        let ssh_target = format!("{}:{}", host.destination, host.port);
 
         if let Some(stdout) = process.stdout.take() {
             let target = ssh_target.clone();
@@ -385,7 +370,7 @@ impl SshForwardManager {
             if docker_socket.exists() {
                 info!(
                     "SSH tunnel established to {}:{} -> {}",
-                    host_str,
+                    host.destination,
                     host.port,
                     docker_socket.display()
                 );
@@ -407,7 +392,7 @@ impl SshForwardManager {
 
         anyhow::bail!(
             "SSH tunnel to {}:{} failed to establish within {:?}. Check SSH configuration and connectivity. See logs above for SSH error details.",
-            host_str,
+            host.destination,
             host.port,
             timeout
         );
@@ -441,11 +426,7 @@ impl SshForwardManager {
         cmd.args(["-o", &format!("ControlPath={}", control_socket.display())]);
         cmd.args(["-O", "forward"]);
         cmd.args(["-R", &forward_spec]);
-        if let Some(user) = &host.user {
-            cmd.arg(format!("{}@{}", user, host.host));
-        } else {
-            cmd.arg(&host.host);
-        }
+        cmd.arg(&host.destination);
 
         let output = cmd
             .stdin(Stdio::null())
@@ -487,19 +468,16 @@ impl SshForwardManager {
         let host = RemoteHost::from_remote_docker(remote);
         let mut connections = self.connections.lock().unwrap();
 
-        let host_str = if let Some(user) = &host.user {
-            format!("{}@{}", user, host.host)
-        } else {
-            host.host.clone()
-        };
-
         let session = connections
             .get_mut(&host)
             .context("No SSH connection for this remote host")?;
 
         // Check if forwards are already set up
         if session.remote_forwards.bridge_port.is_some() {
-            debug!("Remote forwards already configured for {}", host_str);
+            debug!(
+                "Remote forwards already configured for {}",
+                host.destination
+            );
             return Ok(session.remote_forwards.clone());
         }
 
@@ -555,12 +533,7 @@ impl Drop for SshForwardManager {
         // Clean up all connections
         let mut connections = self.connections.lock().unwrap();
         for (host, session) in connections.drain() {
-            let host_str = if let Some(user) = &host.user {
-                format!("{}@{}", user, host.host)
-            } else {
-                host.host.clone()
-            };
-            debug!("Closing SSH connection to {}:{}", host_str, host.port);
+            debug!("Closing SSH connection to {}:{}", host.destination, host.port);
             drop(session); // ForwardSession::drop will kill the process
         }
     }
@@ -607,27 +580,23 @@ mod tests {
     #[test]
     fn test_remote_host_from_remote_docker() {
         let remote = RemoteDocker {
-            host: "docker.example.com".to_string(),
-            user: Some("deploy".to_string()),
+            destination: "deploy@docker.example.com".to_string(),
             port: 2222,
         };
         let host = RemoteHost::from_remote_docker(&remote);
-        assert_eq!(host.host, "docker.example.com");
-        assert_eq!(host.user, Some("deploy".to_string()));
+        assert_eq!(host.destination, "deploy@docker.example.com");
         assert_eq!(host.port, 2222);
     }
 
     #[test]
     fn test_socket_names() {
         let host1 = RemoteHost {
-            host: "docker1.example.com".to_string(),
+            destination: "deploy@docker1.example.com".to_string(),
             port: 22,
-            user: Some("deploy".to_string()),
         };
         let host2 = RemoteHost {
-            host: "docker2.example.com".to_string(),
+            destination: "deploy@docker2.example.com".to_string(),
             port: 22,
-            user: Some("deploy".to_string()),
         };
 
         // Different hosts should have different socket names
