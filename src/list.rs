@@ -1,4 +1,6 @@
 use anyhow::Result;
+use comfy_table::presets::NOTHING;
+use comfy_table::Table;
 
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, SandboxStatus};
@@ -12,14 +14,12 @@ pub fn list() -> Result<()> {
 
     let sandboxes = client.list_sandboxes(repo_path)?;
 
-    // Print header
-    println!(
-        "{:<20} {:<25} {:<15} {:<20} {:<20}",
-        "NAME", "GIT", "STATUS", "CREATED", "HOST"
-    );
-    println!("{}", "-".repeat(100));
+    let mut table = Table::new();
+    table
+        .load_preset(NOTHING)
+        .set_content_arrangement(comfy_table::ContentArrangement::Dynamic)
+        .set_header(vec!["NAME", "GIT", "STATUS", "CREATED", "HOST"]);
 
-    // Print sandboxes
     for sandbox in sandboxes {
         let status_str = match sandbox.status {
             SandboxStatus::Running => "running",
@@ -28,11 +28,17 @@ pub fn list() -> Result<()> {
             SandboxStatus::Disconnected => "disconnected",
         };
         let repo_state = sandbox.repo_state.as_deref().unwrap_or("");
-        println!(
-            "{:<20} {:<25} {:<15} {:<20} {:<20}",
-            sandbox.name, repo_state, status_str, sandbox.created, sandbox.host
-        );
+
+        table.add_row(vec![
+            sandbox.name,
+            repo_state.to_string(),
+            status_str.to_string(),
+            sandbox.created,
+            sandbox.host,
+        ]);
     }
+
+    println!("{table}");
 
     Ok(())
 }
