@@ -281,12 +281,14 @@ impl RemoteDocker {
     /// Expects a valid SSH URL, e.g. `ssh://user@host:port`.
     pub fn parse(s: &str) -> Result<Self> {
         let url = Url::parse(s).with_context(|| format!("Invalid URL: {}", s))?;
-        
+
         if url.scheme() != "ssh" {
             bail!("URL scheme must be 'ssh'");
         }
 
-        let host = url.host_str().ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
         let port = url.port().unwrap_or(22);
         let username = url.username();
 

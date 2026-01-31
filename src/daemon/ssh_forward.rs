@@ -533,7 +533,10 @@ impl Drop for SshForwardManager {
         // Clean up all connections
         let mut connections = self.connections.lock().unwrap();
         for (host, session) in connections.drain() {
-            debug!("Closing SSH connection to {}:{}", host.destination, host.port);
+            debug!(
+                "Closing SSH connection to {}:{}",
+                host.destination, host.port
+            );
             drop(session); // ForwardSession::drop will kill the process
         }
     }
