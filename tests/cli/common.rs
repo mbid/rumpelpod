@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{bail, Context};
+use anyhow::{bail, Context, Error};
 use indoc::formatdoc;
 use sandbox::CommandExt;
 use sha2::{Digest, Sha256};
@@ -526,7 +526,7 @@ pub fn build_docker_image(build: DockerBuild) -> anyhow::Result<ImageId> {
 
     match result {
         Ok(id) => Ok(id.clone()),
-        Err(e) => bail!("{e}"),
+        Err(e) => Err(Error::msg(e.to_string())),
     }
 }
 
