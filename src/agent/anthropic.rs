@@ -3,12 +3,13 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::str::FromStr;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use retry::delay::jitter;
 
+use crate::daemon::protocol::LaunchResult;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
 use crate::llm::error::LlmError;
@@ -83,10 +84,8 @@ fn filter_invalid_content(Message { role, content }: Message) -> Option<Message>
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_claude_agent(
-    container_name: &str,
-    user: &str,
+    sandbox_handle: JoinHandle<Result<LaunchResult>>,
     repo_path: &Path,
-    docker_socket: &Path,
     model: Model,
     thinking_budget: Option<u32>,
     cache: Option<LlmCache>,
@@ -105,10 +104,6 @@ pub fn run_claude_agent(
             .context("Failed to deserialize messages from JSON")?,
         None => Vec::new(),
     };
-
-    // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
-    let system_prompt = build_system_prompt(agents_md.as_deref());
 
     let is_tty = std::io::stdin().is_terminal();
 
@@ -146,8 +141,42 @@ pub fn run_claude_agent(
         }
     }
 
+    // Get the first user input immediately if interactive
+    let mut pending_user_input: Option<String> = None;
+    if is_tty {
+        let chat_history = format_anthropic_history(&messages);
+        // Loop to handle empty input + confirm exit
+        loop {
+            let input = get_input_via_editor(&chat_history, editable_last_message.as_deref())?;
+            if input.is_empty() {
+                if confirm_exit()? {
+                    return Ok(());
+                }
+                continue;
+            }
+            pending_user_input = Some(input);
+            // Clear editable message after first edit so it doesn't reappear
+            editable_last_message = None;
+            break;
+        }
+    }
+
+    // Now wait for sandbox
+    let launch_result = sandbox_handle
+        .join()
+        .map_err(|e| anyhow::anyhow!("Sandbox thread panicked: {:?}", e))??;
+    let container_name = &launch_result.container_id.0;
+    let user = &launch_result.user;
+    let docker_socket = &launch_result.docker_socket;
+
+    // Read AGENTS.md once at startup to include project-specific instructions
+    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
+    let system_prompt = build_system_prompt(agents_md.as_deref());
+
     loop {
-        let user_input = if let Some(ref prompt) = initial_prompt {
+        let user_input = if let Some(input) = pending_user_input.take() {
+            input
+        } else if let Some(ref prompt) = initial_prompt {
             if processed_initial {
                 break;
             }

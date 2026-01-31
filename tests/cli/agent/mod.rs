@@ -17,6 +17,7 @@ mod bash_tool;
 mod file_tools;
 mod history;
 mod smoke;
+mod startup;
 mod web_tools;
 
 // Re-export for other test modules

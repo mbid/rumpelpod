@@ -3,12 +3,13 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::Path;
 use std::str::FromStr;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use retry::delay::jitter;
 
+use crate::daemon::protocol::LaunchResult;
 use crate::llm::cache::LlmCache;
 use crate::llm::client::gemini::Client;
 use crate::llm::error::LlmError;
@@ -121,10 +122,8 @@ fn execute_web_search(client: &Client, model: &str, query: &str) -> Result<Strin
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_gemini_agent(
-    container_name: &str,
-    user: &str,
+    sandbox_handle: JoinHandle<Result<LaunchResult>>,
     repo_path: &Path,
-    docker_socket: &Path,
     model: Model,
     cache: Option<LlmCache>,
     initial_history: Option<serde_json::Value>,
@@ -133,10 +132,6 @@ pub fn run_gemini_agent(
     let client = Client::new_with_cache(cache)?;
 
     let mut stdout = std::io::stdout();
-
-    // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
-    let system_prompt = build_system_prompt(agents_md.as_deref());
 
     // Load initial history if resuming, otherwise start fresh
     let mut contents: Vec<Content> = match initial_history {
@@ -183,6 +178,36 @@ pub fn run_gemini_agent(
         }
     }
 
+    // Get the first user input immediately if interactive
+    let mut pending_user_input: Option<String> = None;
+    if is_tty {
+        let chat_history = format_gemini_history(&contents);
+        loop {
+            let input = get_input_via_editor(&chat_history, editable_last_message.as_deref())?;
+            if input.is_empty() {
+                if confirm_exit()? {
+                    return Ok(());
+                }
+                continue;
+            }
+            pending_user_input = Some(input);
+            editable_last_message = None;
+            break;
+        }
+    }
+
+    // Now wait for sandbox
+    let launch_result = sandbox_handle
+        .join()
+        .map_err(|e| anyhow::anyhow!("Sandbox thread panicked: {:?}", e))??;
+    let container_name = &launch_result.container_id.0;
+    let user = &launch_result.user;
+    let docker_socket = &launch_result.docker_socket;
+
+    // Read AGENTS.md once at startup to include project-specific instructions
+    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
+    let system_prompt = build_system_prompt(agents_md.as_deref());
+
     // Build the tools list - function declarations only.
     // Multi-tool use (combining google_search with function_declarations) is only
     // supported by the Live API, not the generateContent API we use here.
@@ -199,7 +224,9 @@ pub fn run_gemini_agent(
     }];
 
     loop {
-        let user_input = if let Some(ref prompt) = initial_prompt {
+        let user_input = if let Some(input) = pending_user_input.take() {
+            input
+        } else if let Some(ref prompt) = initial_prompt {
             if processed_initial {
                 break;
             }

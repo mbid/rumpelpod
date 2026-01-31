@@ -6,10 +6,13 @@ mod gemini;
 pub mod history;
 mod xai;
 
+use std::thread::{self, JoinHandle};
+
 use anyhow::Result;
 
 use crate::cli::AgentCommand;
 use crate::config::{Model as ConfigModel, SandboxConfig};
+use crate::daemon::protocol::LaunchResult;
 use crate::enter;
 use crate::git::get_repo_root;
 use crate::llm::cache::LlmCache;
@@ -188,8 +191,11 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         conversation_id,
     )?;
 
-    // Launch the sandbox container
-    let launch_result = enter::launch_sandbox(&cmd.name, cmd.host.as_deref())?;
+    // Launch the sandbox container in a background thread
+    let name = cmd.name.clone();
+    let host = cmd.host.clone();
+    let sandbox_handle: JoinHandle<Result<LaunchResult>> =
+        thread::spawn(move || enter::launch_sandbox(&name, host.as_deref()));
 
     // Set up LLM cache if specified
     // We need a provider string for the cache.
@@ -206,9 +212,6 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         .transpose()?;
 
     // Run the agent loop
-    let container_name = &launch_result.container_id.0;
-    let user = &launch_result.user;
-    let docker_socket = &launch_result.docker_socket;
     let repo_path = &sandbox_config.repo_path;
     let thinking_budget = cmd.thinking_budget.or(sandbox_config.agent.thinking_budget);
 
@@ -223,10 +226,8 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             };
 
             run_claude_agent(
-                container_name,
-                user,
+                sandbox_handle,
                 repo_path,
-                docker_socket,
                 m,
                 thinking_budget,
                 cache,
@@ -237,20 +238,16 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             )
         }
         EffectiveModel::Xai(m) => run_grok_agent(
-            container_name,
-            user,
+            sandbox_handle,
             repo_path,
-            docker_socket,
             m,
             cache,
             initial_history,
             tracker,
         ),
         EffectiveModel::Gemini(m) => run_gemini_agent(
-            container_name,
-            user,
+            sandbox_handle,
             repo_path,
-            docker_socket,
             m,
             cache,
             initial_history,
