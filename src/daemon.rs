@@ -42,6 +42,50 @@ fn default_docker_socket() -> PathBuf {
     PathBuf::from(DEFAULT_DOCKER_SOCKET)
 }
 
+fn get_created_files_from_patch(patch: &[u8]) -> Result<Vec<String>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("git")
+        .args(["apply", "--summary", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null()) // Ignore stderr
+        .spawn()
+        .context("spawning git apply")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(patch)
+            .context("writing patch to git apply")?;
+    }
+
+    let output = child.wait_with_output().context("waiting for git apply")?;
+    // Note: git apply might exit non-zero if it detects conflicts, but --summary might still output valid info?
+    // Actually --summary should just read headers.
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut files = Vec::new();
+    for line in stdout.lines() {
+        if let Some(rest) = line.trim().strip_prefix("create mode ") {
+            // format: "100644 filename"
+            let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+            if parts.len() == 2 {
+                let filename = parts[1].trim();
+                // Basic unquoting if needed
+                let clean_name = if filename.starts_with('"') && filename.ends_with('"') {
+                    // This is a rough unquote, ideally we unescape
+                    &filename[1..filename.len() - 1]
+                } else {
+                    filename
+                };
+                files.push(clean_name.to_string());
+            }
+        }
+    }
+    Ok(files)
+}
+
 /// Get the daemon socket path.
 /// Uses $SANDBOX_DAEMON_SOCKET if set, otherwise $XDG_RUNTIME_DIR/sandbox.sock.
 pub fn socket_path() -> Result<PathBuf> {
@@ -941,6 +985,130 @@ impl Daemon for DaemonServer {
             user,
             docker_socket,
         })
+    }
+
+    fn recreate_sandbox(
+        &self,
+        sandbox_name: SandboxName,
+        image: Image,
+        repo_path: PathBuf,
+        container_repo_path: PathBuf,
+        user: Option<String>,
+        runtime: Runtime,
+        network: Network,
+        host_branch: Option<String>,
+        remote: Option<RemoteDocker>,
+    ) -> Result<LaunchResult> {
+        let name = docker_name(&repo_path, &sandbox_name);
+
+        // Get the Docker socket to use (local or forwarded from remote)
+        let docker_socket = match &remote {
+            Some(r) => self.ssh_forward.get_socket(r)?,
+            None => default_docker_socket(),
+        };
+
+        let docker = Docker::connect_with_socket(
+            docker_socket.to_string_lossy().as_ref(),
+            120,
+            bollard::API_DEFAULT_VERSION,
+        )
+        .context("connecting to Docker daemon")?;
+
+        // 1. Snapshot dirty files if container exists
+        let mut patch: Option<Vec<u8>> = None;
+        let mut _old_user: Option<String> = None;
+
+        if let Some(state) = inspect_container(&docker, &name)? {
+            // Container exists
+            if state.status == "running" {
+                let resolved_user = resolve_user(&docker, user.clone(), &image.0)?;
+                _old_user = Some(resolved_user.clone());
+
+                // Snapshot dirty files
+                let repo_path_str = container_repo_path.to_string_lossy().to_string();
+
+                // Add all changes including untracked files
+                exec_command(
+                    &docker,
+                    &state.id,
+                    Some(&resolved_user),
+                    Some(&repo_path_str),
+                    None,
+                    vec!["git", "add", "-A"],
+                )
+                .context("snapshotting: git add -A failed")?;
+
+                // Diff staged changes
+                let diff_output = exec_command(
+                    &docker,
+                    &state.id,
+                    Some(&resolved_user),
+                    Some(&repo_path_str),
+                    None,
+                    vec!["git", "diff", "--binary", "--cached"],
+                )
+                .context("snapshotting: git diff failed")?;
+
+                if !diff_output.is_empty() {
+                    patch = Some(diff_output);
+                }
+            }
+
+            // 2. Delete the container
+            // We use the internal deletion logic
+            self.delete_sandbox(sandbox_name.clone(), repo_path.clone())?;
+        }
+
+        // 3. Create new sandbox
+        let launch_result = self.launch_sandbox(
+            sandbox_name,
+            image,
+            repo_path,
+            container_repo_path.clone(),
+            user,
+            runtime,
+            network,
+            host_branch,
+            remote,
+        )?;
+
+        // 4. Apply patch if we have one
+        if let Some(patch_content) = patch {
+            // We need the resolved user from launch_result
+            let repo_path_str = container_repo_path.to_string_lossy().to_string();
+
+            // Parse patch to identify files being created that might already exist (e.g. from image)
+            // We do this best-effort; if parsing fails, we proceed without deletion.
+            if let Ok(created_files) = get_created_files_from_patch(&patch_content) {
+                for file in created_files {
+                    // Ignore errors (e.g. if file doesn't exist)
+                    let _ = exec_command(
+                        &docker,
+                        &launch_result.container_id.0,
+                        Some(&launch_result.user),
+                        Some(&repo_path_str),
+                        None,
+                        vec!["rm", "-f", &file],
+                    );
+                }
+            }
+
+            use crate::docker_exec::exec_with_stdin;
+
+            // Apply the patch
+            exec_with_stdin(
+                &docker,
+                &launch_result.container_id.0,
+                Some(&launch_result.user),
+                Some(&repo_path_str),
+                None,
+                vec!["git", "apply", "-"],
+                Some(&patch_content),
+            )
+            .context("applying snapshot patch")?;
+        }
+
+        Ok(launch_result)
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {

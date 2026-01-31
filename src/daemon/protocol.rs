@@ -98,6 +98,41 @@ struct LaunchSandboxResponse {
     docker_socket: PathBuf,
 }
 
+/// Request body for recreate_sandbox endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct RecreateSandboxRequest {
+    sandbox_name: SandboxName,
+    image: Image,
+    repo_path: PathBuf,
+    /// Path where the repository is located inside the container.
+    /// Git remotes will be configured to point to the gateway HTTP server.
+    container_repo_path: PathBuf,
+    /// User to run as inside the container, if explicitly specified.
+    /// If None, the daemon will use the image's USER directive.
+    user: Option<String>,
+    /// Container runtime to use (runsc, runc, sysbox-runc).
+    runtime: Runtime,
+    /// Network configuration.
+    network: Network,
+    /// The branch currently checked out on the host, if any.
+    /// Used to set the upstream of the primary branch in the sandbox.
+    host_branch: Option<String>,
+    /// Remote Docker host specification (e.g., "user@host:port").
+    /// If not set, uses local Docker.
+    #[serde(default)]
+    remote: Option<RemoteDocker>,
+}
+
+/// Response body for recreate_sandbox endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct RecreateSandboxResponse {
+    container_id: ContainerId,
+    /// The resolved user for the sandbox.
+    user: String,
+    /// The Docker socket path to use for connecting to the Docker daemon.
+    docker_socket: PathBuf,
+}
+
 /// Request body for delete_sandbox endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct DeleteSandboxRequest {
@@ -182,6 +217,21 @@ pub trait Daemon: Send + Sync + 'static {
     // with JSON content type for request and response bodies.
     #[allow(clippy::too_many_arguments)]
     fn launch_sandbox(
+        &self,
+        sandbox_name: SandboxName,
+        image: Image,
+        repo_path: PathBuf,
+        container_repo_path: PathBuf,
+        user: Option<String>,
+        runtime: Runtime,
+        network: Network,
+        host_branch: Option<String>,
+        remote: Option<RemoteDocker>,
+    ) -> Result<LaunchResult>;
+
+    // POST /sandbox/recreate
+    #[allow(clippy::too_many_arguments)]
+    fn recreate_sandbox(
         &self,
         sandbox_name: SandboxName,
         image: Image,
@@ -294,6 +344,55 @@ impl Daemon for DaemonClient {
 
         if response.status().is_success() {
             let body: LaunchSandboxResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+            Ok(LaunchResult {
+                container_id: body.container_id,
+                user: body.user,
+                docker_socket: body.docker_socket,
+            })
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
+
+    fn recreate_sandbox(
+        &self,
+        sandbox_name: SandboxName,
+        image: Image,
+        repo_path: PathBuf,
+        container_repo_path: PathBuf,
+        user: Option<String>,
+        runtime: Runtime,
+        network: Network,
+        host_branch: Option<String>,
+        remote: Option<RemoteDocker>,
+    ) -> Result<LaunchResult> {
+        let url = self.url.join("/sandbox/recreate")?;
+        let request = RecreateSandboxRequest {
+            sandbox_name,
+            image,
+            repo_path,
+            container_repo_path,
+            user,
+            runtime,
+            network,
+            host_branch,
+            remote,
+        };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            let body: RecreateSandboxResponse = response
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
             Ok(LaunchResult {
@@ -488,6 +587,40 @@ async fn launch_sandbox_handler<D: Daemon>(
     }
 }
 
+/// Handler for POST /sandbox/recreate endpoint.
+async fn recreate_sandbox_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<RecreateSandboxRequest>,
+) -> Result<Json<RecreateSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| {
+        daemon.recreate_sandbox(
+            request.sandbox_name,
+            request.image,
+            request.repo_path,
+            request.container_repo_path,
+            request.user,
+            request.runtime,
+            request.network,
+            request.host_branch,
+            request.remote,
+        )
+    });
+
+    match result {
+        Ok(res) => Ok(Json(RecreateSandboxResponse {
+            container_id: res.container_id,
+            user: res.user,
+            docker_socket: res.docker_socket,
+        })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{:#}", e),
+            }),
+        )),
+    }
+}
+
 /// Handler for DELETE /sandbox endpoint.
 async fn delete_sandbox_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
@@ -621,6 +754,7 @@ where
 
     let app = Router::new()
         .route("/sandbox", put(launch_sandbox_handler::<D>))
+        .route("/sandbox/recreate", post(recreate_sandbox_handler::<D>))
         .route("/sandbox", delete(delete_sandbox_handler::<D>))
         .route("/sandbox", get(list_sandboxes_handler::<D>))
         .route("/conversation", post(save_conversation_handler::<D>))
@@ -661,6 +795,25 @@ mod tests {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
                 container_id: ContainerId(format!("{}:{}", sandbox_name.0, image.0)),
+                user: user.unwrap_or_else(|| "mockuser".to_string()),
+                docker_socket: PathBuf::from("/var/run/docker.sock"),
+            })
+        }
+
+        fn recreate_sandbox(
+            &self,
+            sandbox_name: SandboxName,
+            image: Image,
+            _repo_path: PathBuf,
+            _container_repo_path: PathBuf,
+            user: Option<String>,
+            _runtime: Runtime,
+            _network: Network,
+            _host_branch: Option<String>,
+            _remote: Option<RemoteDocker>,
+        ) -> Result<LaunchResult> {
+            Ok(LaunchResult {
+                container_id: ContainerId(format!("recreated:{}:{}", sandbox_name.0, image.0)),
                 user: user.unwrap_or_else(|| "mockuser".to_string()),
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
@@ -787,6 +940,21 @@ mod tests {
 
     impl Daemon for MockDaemonWithDb {
         fn launch_sandbox(
+            &self,
+            _sandbox_name: SandboxName,
+            _image: Image,
+            _repo_path: PathBuf,
+            _container_repo_path: PathBuf,
+            _user: Option<String>,
+            _runtime: Runtime,
+            _network: Network,
+            _host_branch: Option<String>,
+            _remote: Option<RemoteDocker>,
+        ) -> Result<LaunchResult> {
+            unimplemented!("not needed for conversation tests")
+        }
+
+        fn recreate_sandbox(
             &self,
             _sandbox_name: SandboxName,
             _image: Image,

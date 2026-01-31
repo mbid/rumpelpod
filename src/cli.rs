@@ -80,6 +80,13 @@ Examples:
 ")]
     Review(ReviewCommand),
 
+    /// Recreate a sandbox
+    #[command(long_about = "Recreate a sandbox.
+
+Takes a snapshot of dirty files (including untracked files), destroys the container, and creates a new one with the snapshot applied.
+")]
+    Recreate(RecreateCommand),
+
     /// Run an LLM agent inside a sandbox
     #[command(long_about = "Run an LLM agent inside a sandbox.
 
@@ -131,6 +138,18 @@ pub struct DeleteCommand {
     /// Name of the sandbox to delete
     #[arg(help = "Name of the sandbox to delete")]
     pub name: String,
+}
+
+#[derive(Args)]
+pub struct RecreateCommand {
+    /// Name of the sandbox to recreate
+    #[arg(help = "Name of the sandbox to recreate")]
+    pub name: String,
+
+    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Overrides .sandbox.toml setting.
+    #[arg(long)]
+    pub host: Option<String>,
 }
 
 #[derive(Args)]

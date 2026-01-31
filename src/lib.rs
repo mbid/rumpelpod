@@ -17,6 +17,7 @@ mod git_http_server;
 mod image;
 mod list;
 mod llm;
+mod recreate;
 mod review;
 mod systemd;
 
@@ -47,6 +48,9 @@ pub fn run() -> Result<()> {
         }
         Command::Delete(ref cmd) => {
             delete::delete(cmd)?;
+        }
+        Command::Recreate(ref cmd) => {
+            recreate::recreate(cmd)?;
         }
         Command::Review(ref cmd) => {
             review::review(cmd)?;
