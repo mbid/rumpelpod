@@ -1,4 +1,2 @@
-remote = "dev"
-
 [agent]
 model = "gemini-3-pro-preview"

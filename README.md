@@ -20,13 +20,23 @@ Requires Docker with gVisor runtime (`runsc`). Alternative runtimes: `runc`, `sy
 
 ## Quick Start
 
-Create a `.sandbox.toml` in your project root:
+Create a `.devcontainer/devcontainer.json` in your project root:
 
-```toml
-env = ["ANTHROPIC_API_KEY"]
+```json
+{
+    "image": "my-project-dev:latest",
+    "workspaceFolder": "/home/dev/my-project",
+    "containerUser": "dev",
+    "runArgs": ["--runtime=runsc"]
+}
 ```
 
-Create a `Dockerfile` for your project environment (must accept `USER_NAME`, `USER_ID`, `GROUP_ID` build args).
+And a `.sandbox.toml` for agent settings:
+
+```toml
+[agent]
+model = "claude-sonnet-4.5"
+```
 
 Run an agent:
 
@@ -47,50 +57,31 @@ sandbox enter my-shell
 | `sandbox agent <name>` | Run an LLM agent in a sandbox |
 | `sandbox enter <name>` | Enter a sandbox interactively (or run a command) |
 | `sandbox list` | List sandboxes for the current repository |
+| `sandbox review <name>` | Review changes in a sandbox using git difftool |
 | `sandbox delete <name>` | Delete a sandbox |
 | `sandbox system-install` | Install the systemd daemon |
 | `sandbox system-uninstall` | Uninstall the systemd daemon |
 
 ## Configuration
 
-The `.sandbox.toml` file configures sandbox behavior:
+Sandbox behavior is configured using a combination of `.devcontainer/devcontainer.json` (for container settings) and `.sandbox.toml` (for agent and other sandbox-specific settings).
 
-```toml
-# Environment variables passed to container (must be set on host)
-env = ["ANTHROPIC_API_KEY", "XAI_API_KEY"]
+### Dev Container Settings (`.devcontainer/devcontainer.json`)
 
-# Container runtime: runsc (default), runc, sysbox-runc
-runtime = "runsc"
+The following standard fields are supported:
 
-# Overlay strategy: overlayfs (default) or copy
-overlay-mode = "overlayfs"
+- **image**: Docker image to use for the sandbox.
+- **workspaceFolder**: Path where the repository will be mounted inside the container.
+- **containerUser** or **remoteUser**: User to run as inside the container.
+- **runArgs**: Additional Docker arguments. Used to set the runtime (e.g., `--runtime=runsc`) or network (e.g., `--network=host`).
 
-# Mounts
-[[mounts.readonly]]
-host = "~/.gitconfig"
+### Sandbox Settings (`.sandbox.toml`)
 
-[[mounts.overlay]]
-host = "~/.cargo/registry"
-container = "~/.cargo/registry"
-
-# Image configuration (defaults to ./Dockerfile)
-[image]
-tag = "my-image:latest"
-# Or build from Dockerfile:
-# [image.build]
-# dockerfile = "Dockerfile"
-# context = "."
-
-# Agent settings
-[agent]
-model = "sonnet"  # opus, sonnet, haiku, grok-3-mini, grok-4.1-fast
-```
-
-### Mount Types
-
-- **readonly**: Host files visible in container, no writes allowed
-- **overlay**: Copy-on-write; writes stay in container
-- **unsafe-write**: Writes propagate to host (use with caution)
+- **host**: Remote Docker host specification (e.g., `user@host:port`).
+- **agent**:
+  - **model**: Default model for `sandbox agent` (e.g., `claude-opus-4.5`, `claude-sonnet-4.5`, `gemini-3-pro-preview`, `grok-4.1-fast-reasoning`).
+  - **thinking-budget**: Thinking budget in tokens for supported models.
+  - **anthropic-websearch**: Enable/disable web search for Anthropic models.
 
 ## How It Works
 

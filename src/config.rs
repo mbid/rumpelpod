@@ -356,8 +356,19 @@ struct TomlConfig {
     host: Option<String>,
 }
 
+/// Image build recipe from devcontainer.json.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageRecipe {
+    pub dockerfile: String,
+    pub context: String,
+    pub args: Option<std::collections::HashMap<String, String>>,
+    pub target: Option<String>,
+    pub cache_from: Option<crate::devcontainer::StringOrArray>,
+    pub options: Option<Vec<String>>,
+}
+
 /// Merged configuration from `.sandbox.toml` and `devcontainer.json`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Container runtime (runsc, runc, sysbox-runc).
     pub runtime: Option<Runtime>,
@@ -367,6 +378,9 @@ pub struct SandboxConfig {
 
     /// Docker image to use.
     pub image: String,
+
+    /// Image build recipe from devcontainer.json (used if image is not provided).
+    pub pending_build: Option<ImageRecipe>,
 
     /// User to run as inside the sandbox container.
     /// If not specified, the image's USER directive is used.
@@ -395,7 +409,11 @@ impl SandboxConfig {
     /// At least one config source must provide `image` and `repo_path`.
     pub fn load(repo_root: &Path) -> Result<Self> {
         // Load devcontainer.json if present (lowest precedence)
-        let devcontainer = DevContainer::find_and_load(repo_root)?;
+        let devcontainer_info = DevContainer::find_and_load(repo_root)?;
+        let (devcontainer, devcontainer_dir) = match devcontainer_info {
+            Some((dc, dir)) => (Some(dc), Some(dir)),
+            None => (None, None),
+        };
 
         // Load .sandbox.toml if present (highest precedence)
         let config_path = repo_root.join(".sandbox.toml");
@@ -416,9 +434,69 @@ impl SandboxConfig {
             .unwrap_or((None, None));
 
         // Merge with toml taking precedence
-        let image = toml_config
+        let provided_image = toml_config
             .image
             .or_else(|| devcontainer.as_ref().and_then(|dc| dc.image.clone()));
+
+        let pending_build = if provided_image.is_none() {
+            if let Some(dc) = &devcontainer {
+                let dockerfile_opt = dc
+                    .dockerfile
+                    .as_ref()
+                    .or_else(|| dc.build.as_ref().and_then(|b| b.dockerfile.as_ref()));
+                if let Some(dockerfile) = dockerfile_opt {
+                    let context = dc
+                        .build
+                        .as_ref()
+                        .and_then(|b| b.context.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| ".".to_string());
+
+                    let (args, target, cache_from, options) = if let Some(build) = &dc.build {
+                        (
+                            build.args.clone(),
+                            build.target.clone(),
+                            build.cache_from.clone(),
+                            build.options.clone(),
+                        )
+                    } else {
+                        (None, None, None, None)
+                    };
+
+                    // Resolve paths relative to devcontainer.json directory
+                    let dc_dir = devcontainer_dir
+                        .as_ref()
+                        .expect("devcontainer_dir must be set if devcontainer is set");
+                    let resolved_dockerfile = dc_dir
+                        .join(dockerfile)
+                        .strip_prefix(repo_root)
+                        .expect("dockerfile must be under repo_root")
+                        .to_string_lossy()
+                        .to_string();
+                    let resolved_context = dc_dir
+                        .join(&context)
+                        .strip_prefix(repo_root)
+                        .expect("context must be under repo_root")
+                        .to_string_lossy()
+                        .to_string();
+
+                    Some(ImageRecipe {
+                        dockerfile: resolved_dockerfile,
+                        context: resolved_context,
+                        args,
+                        target,
+                        cache_from,
+                        options,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let repo_path = toml_config.repo_path.or_else(|| {
             devcontainer
@@ -438,12 +516,13 @@ impl SandboxConfig {
         let network = toml_config.network.or(dc_network).unwrap_or_default();
 
         // Validate required fields
-        let image = image.ok_or_else(|| {
-            anyhow::anyhow!(formatdoc! {"
-                No image specified.
-                Please set 'image' in .sandbox.toml or devcontainer.json.
-            "})
-        })?;
+        let image = provided_image.unwrap_or_else(String::new);
+        if pending_build.is_none() && image.is_empty() {
+            anyhow::bail!(formatdoc! {"
+                No image or build specified.
+                Please set image in .sandbox.toml or build.dockerfile/dockerfile in devcontainer.json.
+            "});
+        }
 
         let repo_path = repo_path.ok_or_else(|| {
             anyhow::anyhow!(formatdoc! {"
@@ -466,6 +545,7 @@ impl SandboxConfig {
             runtime,
             network,
             image,
+            pending_build,
             user,
             repo_path,
             agent: toml_config.agent,
@@ -522,7 +602,7 @@ fn parse_runtime_value(value: &str) -> Option<Runtime> {
 }
 
 /// Agent configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct AgentConfig {
     /// Default model.

@@ -14,6 +14,7 @@ mod enter;
 mod gateway;
 mod git;
 mod git_http_server;
+mod image;
 mod list;
 mod llm;
 mod review;

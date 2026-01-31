@@ -13,22 +13,21 @@ use crate::config::Model;
 Spawns isolated Docker containers with automatic git synchronization for running untrusted code safely. Each sandbox gets its own working copy of your repository where changes are isolated from the host filesystem.
 
 SETUP:
-  1. Create a .sandbox.toml config file in your repository root
-  2. Run 'sandbox system-install' to start the background daemon
-  3. Use 'sandbox enter <name>' to create and enter sandboxes
+  1. Create a .devcontainer/devcontainer.json for container settings
+  2. Create a .sandbox.toml for agent settings
+  3. Run 'sandbox system-install' to start the background daemon
+  4. Use 'sandbox enter <name>' to create and enter sandboxes
 
-CONFIGURATION (.sandbox.toml):
-  Required fields:
-    image      = \"myimage:tag\"   Docker image to use
-    repo-path  = \"/path/in/container\"   Where the repo is mounted
+CONFIGURATION:
+  .devcontainer/devcontainer.json:
+    image            Docker image to use
+    workspaceFolder  Where the repo is mounted inside the container
+    containerUser    User inside container (default: image's USER)
+    runArgs          Additional Docker arguments (e.g., --runtime)
 
-  Optional fields:
-    runtime    = \"runsc\"         Container runtime (runsc, runc, sysbox-runc)
-    user       = \"username\"      User inside container (default: image's USER)
-
-  Agent settings:
+  .sandbox.toml:
     [agent]
-    model      = \"sonnet\"        Default model for 'sandbox agent'
+    model            Default model for 'sandbox agent'
 
   See README.md for the full configuration reference.
 ")]

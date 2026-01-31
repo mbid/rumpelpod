@@ -7,8 +7,9 @@ use anyhow::{bail, Context, Result};
 use crate::cli::EnterCommand;
 use crate::config::{RemoteDocker, SandboxConfig};
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, Image, LaunchResult, SandboxName};
+use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, SandboxName};
 use crate::git::{get_current_branch, get_repo_root};
+use crate::image;
 
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
@@ -39,9 +40,16 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         .transpose()
         .context("Invalid remote Docker specification")?;
 
+    let image = image::resolve_image(
+        &config.image,
+        config.pending_build.as_ref(),
+        config.host.as_deref(),
+        &repo_root,
+    )?;
+
     client.launch_sandbox(
         SandboxName(sandbox_name.to_string()),
-        Image(config.image.clone()),
+        image,
         repo_root,
         config.repo_path,
         config.user,
