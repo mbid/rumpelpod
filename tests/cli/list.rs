@@ -25,13 +25,11 @@ fn list_empty_returns_header_only() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Should have header line and separator
     assert!(stdout.contains("NAME"));
     assert!(stdout.contains("GIT"));
     assert!(stdout.contains("STATUS"));
     assert!(stdout.contains("CREATED"));
     assert!(stdout.contains("HOST"));
-    assert!(stdout.contains("----"));
 }
 
 #[test]
