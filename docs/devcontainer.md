@@ -155,6 +155,8 @@ Security options for the container.
 
 Additional arguments to pass to `docker run`. Currently we only extract `--runtime` and `--network`.
 
+**Variables:** `${localEnv}`, `${localWorkspaceFolder}`, `${containerWorkspaceFolder}`, `${devcontainerId}`
+
 **Implementation:** Parse and forward all safe arguments. Some arguments may need to be blocked for security (e.g., `--pid=host`).
 
 **Example:**
@@ -175,6 +177,8 @@ Additional arguments to pass to `docker run`. Currently we only extract `--runti
 ### Priority 2: Lifecycle Commands
 
 These commands run at different points in the container lifecycle. The spec defines a specific execution order.
+
+**Variables:** All lifecycle commands support `${localEnv}`, `${localWorkspaceFolder}`, `${containerWorkspaceFolder}`, and `${devcontainerId}`. Note that `${containerEnv}` is NOT available in lifecycle commands (use `remoteEnv` to set up PATH modifications, etc.).
 
 #### Execution Order
 1. `initializeCommand` - On host, before container creation
@@ -420,6 +424,8 @@ Default attributes for ports not explicitly configured in `portsAttributes`.
 
 Environment variables for dev tools and processes (like terminals), but not the container itself.
 
+**Variables:** `${localEnv}`, `${localWorkspaceFolder}`, `${containerWorkspaceFolder}`, `${devcontainerId}`, **and `${containerEnv}`**. This is the **only property** that supports `${containerEnv}` since it's resolved after the container is running.
+
 **Key Difference from `containerEnv`:**
 - `containerEnv`: Set at container creation, static, available to all processes
 - `remoteEnv`: Set when tools attach, can be dynamic, can reference container variables
@@ -434,7 +440,7 @@ Environment variables for dev tools and processes (like terminals), but not the 
 }
 ```
 
-**Implementation:** Apply these variables when executing commands via `sandbox enter` and `sandbox agent`. Both commands run processes inside the container and should have access to these environment variables.
+**Implementation:** Apply these variables when executing commands via `sandbox enter` and `sandbox agent`. Both commands run processes inside the container and should have access to these environment variables. To resolve `${containerEnv:VAR}`, execute `printenv VAR` in the container first.
 
 ---
 
@@ -505,9 +511,11 @@ Additional mounts for the container. Accepts Docker `--mount` format strings or 
 }
 ```
 
+**Variables:** `${localEnv}`, `${localWorkspaceFolder}`, `${containerWorkspaceFolder}`, `${devcontainerId}` (see [Variable Availability](#variable-availability-by-property))
+
 **Implementation:**
 1. Parse both string and object formats
-2. Substitute variables (`${localWorkspaceFolder}`, `${localEnv:VAR}`)
+2. Substitute supported variables
 3. Add to `ContainerCreateBody.host_config.mounts`
 
 **Security Consideration:** Should validate mount sources to prevent escaping sandbox.
@@ -665,23 +673,78 @@ Minimum host requirements for the container.
 
 ## Variable Substitution
 
-The following variables can be used in string values:
+Variable substitution is a **foundational feature** that should be implemented early, as many other features depend on it.
 
-| Variable | Description |
-|----------|-------------|
-| `${localEnv:VAR}` | Host environment variable |
-| `${localEnv:VAR:default}` | Host env var with default |
-| `${containerEnv:VAR}` | Container environment variable (only in `remoteEnv`) |
-| `${containerEnv:VAR:default}` | Container env var with default |
-| `${localWorkspaceFolder}` | Absolute path to workspace on host |
-| `${containerWorkspaceFolder}` | Path to workspace in container |
-| `${localWorkspaceFolderBasename}` | Workspace folder name on host |
-| `${containerWorkspaceFolderBasename}` | Workspace folder name in container |
-| `${devcontainerId}` | Unique, stable identifier for the dev container |
+### Available Variables
 
-**Currently Implemented:** `${localEnv:VAR}` in `containerEnv`
+| Variable | Description | When Resolved |
+|----------|-------------|---------------|
+| `${localEnv:VAR}` | Host environment variable | Config load time |
+| `${localEnv:VAR:default}` | Host env var with default value | Config load time |
+| `${containerEnv:VAR}` | Container environment variable | After container start |
+| `${containerEnv:VAR:default}` | Container env var with default | After container start |
+| `${localWorkspaceFolder}` | Absolute path to workspace on host | Config load time |
+| `${containerWorkspaceFolder}` | Path to workspace in container | Config load time |
+| `${localWorkspaceFolderBasename}` | Workspace folder name on host | Config load time |
+| `${containerWorkspaceFolderBasename}` | Workspace folder name in container | Config load time |
+| `${devcontainerId}` | Unique, stable ID for the dev container | Config load time |
 
-**Needs Implementation:** All other variables and contexts.
+### Variable Availability by Property
+
+Not all variables are available in all properties. This is because some variables require the container to exist (like `${containerEnv}`), while others are resolved at config parse time.
+
+#### Legend
+- ✅ = Supported
+- ❌ = Not supported (resolved before this info is available)
+- 🏷️ = Property can be stored in image label
+
+| Property | `localEnv` | `localWorkspace*` | `containerWorkspace*` | `containerEnv` | `devcontainerId` |
+|----------|:----------:|:-----------------:|:---------------------:|:--------------:|:----------------:|
+| **Build-time** |
+| `build.args` | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `build.context` | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `build.dockerfile` | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **Container creation** |
+| `containerEnv` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `containerUser` 🏷️ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| `mounts` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `runArgs` | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `workspaceFolder` | ✅ | ✅ | ❌ | ❌ | ✅ |
+| **Runtime (container running)** |
+| `remoteEnv` 🏷️ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `remoteUser` 🏷️ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| **Lifecycle commands** |
+| `initializeCommand` | ✅ | ✅ | ❌ | ❌ | ✅ |
+| `onCreateCommand` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `updateContentCommand` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `postCreateCommand` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `postStartCommand` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `postAttachCommand` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+| **Other** |
+| `name` | ✅ | ✅ | ✅ | ❌ | ✅ |
+| `customizations` 🏷️ | ✅ | ✅ | ✅ | ❌ | ✅ |
+
+### Implementation Notes
+
+**Resolution Timing:**
+1. **Config load time:** `localEnv`, `localWorkspace*`, `devcontainerId` - resolved when parsing `devcontainer.json`
+2. **Container creation:** `containerWorkspace*` - resolved when we know the workspace folder
+3. **After container start:** `containerEnv` - requires running container to query env vars
+
+**`${devcontainerId}` Generation:**
+- Must be stable across container rebuilds for the same sandbox
+- Suggested: hash of `(repo_path, sandbox_name)`
+- Used by Features to store persistent data
+
+**`${containerEnv:VAR}` Implementation:**
+- Only available in `remoteEnv`
+- Requires executing a command in the container to read the variable
+- Example: `docker exec <container> printenv VAR`
+- Enables patterns like: `"PATH": "${containerEnv:PATH}:/custom/bin"`
+
+**Currently Implemented:** `${localEnv:VAR}` in `containerEnv` only
+
+**Testing:** `tests/cli/devcontainer/variables.rs`
 
 ---
 
@@ -693,11 +756,12 @@ Tests for devcontainer.json features are organized in `tests/cli/devcontainer/` 
 |------|-----------------|
 | `env.rs` | ✅ `containerEnv`, `${localEnv}` substitution |
 | `image.rs` | ✅ `build.*` options, image caching |
+| `variables.rs` | All variable substitution: `${localWorkspaceFolder}`, `${containerWorkspaceFolder}`, `${devcontainerId}`, defaults |
 | `unsupported.rs` | Warnings for `workspaceMount`, `appPort`, `dockerComposeFile`, etc. |
 | `runtime_options.rs` | `privileged`, `init`, `capAdd`, `securityOpt`, `runArgs` |
 | `lifecycle_commands.rs` | `onCreateCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand`, `waitFor` |
 | `ports.rs` | `forwardPorts`, `portsAttributes`, multi-sandbox port allocation |
-| `remote_env.rs` | `remoteEnv`, `userEnvProbe`, `updateRemoteUserUID` |
+| `remote_env.rs` | `remoteEnv`, `${containerEnv}`, `userEnvProbe`, `updateRemoteUserUID` |
 | `mounts.rs` | `mounts` (volumes, tmpfs; bind blocked for remote) |
 | `workspace.rs` | `workspaceFolder` defaults, repo initialization |
 
@@ -741,19 +805,24 @@ For features that behave differently with remote Docker hosts:
 
 ## Implementation Recommendations
 
-### Phase 0: Warnings for Unsupported Features
-Emit warnings when `devcontainer.json` contains unsupported properties:
-- `workspaceMount`, `appPort`, `dockerComposeFile`, `service`, `runServices`
+### Phase 0: Foundations
+1. **Variable substitution** - Many features depend on this; implement early
+   - `${localEnv:VAR}` with default value support
+   - `${localWorkspaceFolder}`, `${localWorkspaceFolderBasename}`
+   - `${containerWorkspaceFolder}`, `${containerWorkspaceFolderBasename}`
+   - `${devcontainerId}` generation (hash of repo + sandbox name)
+2. **Warnings for unsupported features** - `workspaceMount`, `appPort`, `dockerComposeFile`, etc.
 
 ### Phase 1: Security & Debugging
 1. `privileged`, `capAdd`, `securityOpt` - Essential for debugging
 2. `init` - Good practice for process management
-3. Full `runArgs` support
+3. Full `runArgs` support (with variable substitution)
 
 ### Phase 2: Developer Experience
-1. Lifecycle commands (`postCreateCommand`, etc.)
+1. Lifecycle commands (`postCreateCommand`, etc.) with variable substitution
 2. Port forwarding with multi-sandbox support
 3. `remoteEnv` for `sandbox enter` and `sandbox agent`
+   - Includes `${containerEnv:VAR}` support (requires running container)
 
 ### Phase 3: Advanced Features
 1. Dev Container Features
@@ -762,5 +831,4 @@ Emit warnings when `devcontainer.json` contains unsupported properties:
 
 ### Phase 4: Compatibility
 1. `customizations.sandbox` namespace
-2. Full variable substitution
-3. `userEnvProbe` for environment detection
+2. `userEnvProbe` for environment detection
