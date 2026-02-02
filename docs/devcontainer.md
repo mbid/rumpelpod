@@ -56,6 +56,26 @@ This optimization is deferred; the initial implementation will clone on each san
 
 ---
 
+## Unsupported Features (Will Not Implement)
+
+These features are intentionally not supported. When detected in `devcontainer.json`, we should **print a warning** and ignore them.
+
+| Property | Reason |
+|----------|--------|
+| `workspaceMount` | Defeats sandbox isolation; we use Git-based sync instead of bind mounts |
+| `appPort` | Use `forwardPorts` instead; publishing ports bypasses our port management |
+| `dockerComposeFile` | Out of scope; use dedicated Docker Compose tooling |
+| `service` | Docker Compose specific |
+| `runServices` | Docker Compose specific |
+
+**Implementation:** In `DevContainer::load()` or config merging, check for these fields and emit warnings:
+```
+warning: devcontainer.json contains 'workspaceMount' which is not supported by sandbox
+         (sandbox uses Git-based synchronization for isolation)
+```
+
+---
+
 ## Features Needing Implementation
 
 ### Priority 1: Container Runtime Options
@@ -152,77 +172,7 @@ Additional arguments to pass to `docker run`. Currently we only extract `--runti
 
 ---
 
-### Priority 2: Mounts and Volumes
-
-#### `mounts`
-**Type:** `string | object[]`  
-**Default:** `[]`
-
-Additional mounts for the container. Accepts Docker `--mount` format strings or structured objects.
-
-**String Format:**
-```json
-{
-  "mounts": [
-    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
-  ]
-}
-```
-
-**Object Format:**
-```json
-{
-  "mounts": [
-    {
-      "type": "bind",
-      "source": "/var/run/docker.sock",
-      "target": "/var/run/docker.sock"
-    },
-    {
-      "type": "volume",
-      "source": "my-data",
-      "target": "/data"
-    },
-    {
-      "type": "tmpfs",
-      "target": "/tmp"
-    }
-  ]
-}
-```
-
-**Implementation:**
-1. Parse both string and object formats
-2. Substitute variables (`${localWorkspaceFolder}`, `${localEnv:VAR}`)
-3. Add to `ContainerCreateBody.host_config.mounts`
-
-**Security Consideration:** Should validate mount sources to prevent escaping sandbox.
-
-**Remote Docker Hosts:** ❌ **NOT SUPPORTED** for `bind` mounts. When using a remote Docker host:
-- `bind` mounts would reference paths on the *remote* host, not the developer's machine
-- This is unlikely to be the intended behavior and could cause confusion
-- Only `volume` and `tmpfs` mounts are supported for remote hosts
-- Should error with a clear message if bind mounts are specified with remote Docker
-
-**Testing:** `tests/cli/devcontainer/mounts.rs`
-
----
-
-#### `workspaceMount`
-**Status:** ❌ **NOT SUPPORTED**
-
-This property allows overriding the default workspace mount with a bind mount from the host.
-
-**Why Not Supported:** The sandbox's core purpose is isolation. Bind-mounting host directories into the container defeats this purpose by giving the container direct access to host files. Our architecture uses Git-based synchronization instead, which:
-- Maintains isolation (container cannot access arbitrary host files)
-- Provides audit trail of changes
-- Enables safe review before accepting changes back to host
-
-Users who need this functionality should use standard `docker run` or the VS Code Dev Containers extension.
-
----
-
-### Priority 3: Lifecycle Commands
+### Priority 2: Lifecycle Commands
 
 These commands run at different points in the container lifecycle. The spec defines a specific execution order.
 
@@ -357,7 +307,7 @@ Which lifecycle command to wait for before considering the container ready.
 
 ---
 
-### Priority 4: Port Forwarding
+### Priority 3: Port Forwarding
 
 #### `forwardPorts`
 **Type:** `(number | string)[]`  
@@ -462,7 +412,7 @@ Default attributes for ports not explicitly configured in `portsAttributes`.
 
 ---
 
-### Priority 5: Environment Variables
+### Priority 4: Environment Variables
 
 #### `remoteEnv`
 **Type:** `object`  
@@ -484,7 +434,7 @@ Environment variables for dev tools and processes (like terminals), but not the 
 }
 ```
 
-**Implementation:** Apply these variables when executing commands via `sandbox enter`.
+**Implementation:** Apply these variables when executing commands via `sandbox enter` and `sandbox agent`. Both commands run processes inside the container and should have access to these environment variables.
 
 ---
 
@@ -513,6 +463,62 @@ How to probe for user environment variables.
 - `interactiveShell`: Source `~/.bashrc`, `/etc/bash.bashrc`
 - `loginShell`: Source `~/.profile`, `/etc/profile`
 - `loginInteractiveShell`: Source all of the above
+
+---
+
+### Priority 5: Mounts and Volumes
+
+#### `mounts`
+**Type:** `string | object[]`  
+**Default:** `[]`
+
+Additional mounts for the container. Accepts Docker `--mount` format strings or structured objects.
+
+**String Format:**
+```json
+{
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ]
+}
+```
+
+**Object Format:**
+```json
+{
+  "mounts": [
+    {
+      "type": "bind",
+      "source": "/var/run/docker.sock",
+      "target": "/var/run/docker.sock"
+    },
+    {
+      "type": "volume",
+      "source": "my-data",
+      "target": "/data"
+    },
+    {
+      "type": "tmpfs",
+      "target": "/tmp"
+    }
+  ]
+}
+```
+
+**Implementation:**
+1. Parse both string and object formats
+2. Substitute variables (`${localWorkspaceFolder}`, `${localEnv:VAR}`)
+3. Add to `ContainerCreateBody.host_config.mounts`
+
+**Security Consideration:** Should validate mount sources to prevent escaping sandbox.
+
+**Remote Docker Hosts:** ❌ **NOT SUPPORTED** for `bind` mounts. When using a remote Docker host:
+- `bind` mounts would reference paths on the *remote* host, not the developer's machine
+- This is unlikely to be the intended behavior and could cause confusion
+- Only `volume` and `tmpfs` mounts are supported for remote hosts
+- Should error with a clear message if bind mounts are specified with remote Docker
+
+**Testing:** `tests/cli/devcontainer/mounts.rs`
 
 ---
 
@@ -565,56 +571,7 @@ Override the automatic feature installation order.
 
 ---
 
-### Priority 7: Docker Compose Support
-
-#### `dockerComposeFile`
-**Type:** `string | string[]`
-
-Path(s) to Docker Compose file(s).
-
-**Example:**
-```json
-{
-  "dockerComposeFile": ["docker-compose.yml", "docker-compose.dev.yml"],
-  "service": "app",
-  "workspaceFolder": "/workspace"
-}
-```
-
-**Implementation:**
-1. Parse and merge compose files
-2. Start services using Docker Compose
-3. Attach to the specified service
-4. Support compose file variable substitution
-
----
-
-#### `service`
-**Type:** `string`  
-**Required when using Docker Compose**
-
-The service to connect to in Docker Compose.
-
----
-
-#### `runServices`
-**Type:** `string[]`  
-**Default:** All services
-
-Which services to start from the Docker Compose configuration.
-
-**Example:**
-```json
-{
-  "dockerComposeFile": "docker-compose.yml",
-  "service": "app",
-  "runServices": ["app", "db"]
-}
-```
-
----
-
-### Priority 8: Other Properties
+### Priority 7: Other Properties
 
 #### `overrideCommand`
 **Type:** `boolean`  
@@ -736,11 +693,12 @@ Tests for devcontainer.json features are organized in `tests/cli/devcontainer/` 
 |------|-----------------|
 | `env.rs` | ✅ `containerEnv`, `${localEnv}` substitution |
 | `image.rs` | ✅ `build.*` options, image caching |
+| `unsupported.rs` | Warnings for `workspaceMount`, `appPort`, `dockerComposeFile`, etc. |
 | `runtime_options.rs` | `privileged`, `init`, `capAdd`, `securityOpt`, `runArgs` |
-| `mounts.rs` | `mounts` (volumes, tmpfs; bind blocked for remote) |
 | `lifecycle_commands.rs` | `onCreateCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand`, `waitFor` |
 | `ports.rs` | `forwardPorts`, `portsAttributes`, multi-sandbox port allocation |
 | `remote_env.rs` | `remoteEnv`, `userEnvProbe`, `updateRemoteUserUID` |
+| `mounts.rs` | `mounts` (volumes, tmpfs; bind blocked for remote) |
 | `workspace.rs` | `workspaceFolder` defaults, repo initialization |
 
 ### Test Patterns
@@ -783,6 +741,10 @@ For features that behave differently with remote Docker hosts:
 
 ## Implementation Recommendations
 
+### Phase 0: Warnings for Unsupported Features
+Emit warnings when `devcontainer.json` contains unsupported properties:
+- `workspaceMount`, `appPort`, `dockerComposeFile`, `service`, `runServices`
+
 ### Phase 1: Security & Debugging
 1. `privileged`, `capAdd`, `securityOpt` - Essential for debugging
 2. `init` - Good practice for process management
@@ -790,15 +752,15 @@ For features that behave differently with remote Docker hosts:
 
 ### Phase 2: Developer Experience
 1. Lifecycle commands (`postCreateCommand`, etc.)
-2. `mounts` for persistent data
-3. Port forwarding
+2. Port forwarding with multi-sandbox support
+3. `remoteEnv` for `sandbox enter` and `sandbox agent`
 
 ### Phase 3: Advanced Features
 1. Dev Container Features
-2. Docker Compose support
+2. `mounts` (volume/tmpfs only; no bind mounts for remote)
 3. `hostRequirements` for cloud deployments
 
 ### Phase 4: Compatibility
 1. `customizations.sandbox` namespace
 2. Full variable substitution
-3. `remoteEnv` and environment probing
+3. `userEnvProbe` for environment detection
