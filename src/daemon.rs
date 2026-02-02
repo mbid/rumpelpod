@@ -634,19 +634,14 @@ fn create_container(
         )
     };
 
-    // In deterministic PID mode (for tests), we need CAP_SYS_ADMIN to write to
-    // /proc/sys/kernel/ns_last_pid. Only add this capability when needed.
+    // In deterministic PID mode (for tests), we need privileged mode to write to
+    // /proc/sys/kernel/ns_last_pid. With --privileged, /proc/sys is mounted rw.
     let deterministic_pids = std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok();
-    let cap_add = if deterministic_pids {
-        Some(vec!["SYS_ADMIN".to_string()])
-    } else {
-        None
-    };
 
     let host_config = HostConfig {
         runtime: Some(docker_runtime_flag(runtime).to_string()),
         network_mode: Some(network_mode.to_string()),
-        cap_add,
+        privileged: if deterministic_pids { Some(true) } else { None },
         ..Default::default()
     };
 
@@ -671,23 +666,6 @@ fn create_container(
 
     // Start the container (equivalent to docker run's behavior)
     block_on(docker.start_container(&response.id, None)).context("starting container")?;
-
-    // In deterministic PID mode, remount /proc/sys as read-write to allow setting
-    // ns_last_pid. This requires CAP_SYS_ADMIN which we added above.
-    // This may fail in some environments (e.g., nested containers), so we log a
-    // warning but continue - the ns_last_pid write will also fail gracefully.
-    if deterministic_pids {
-        if let Err(e) = exec_command(
-            docker,
-            &response.id,
-            Some("root"),
-            None,
-            None,
-            vec!["mount", "-o", "remount,rw", "/proc/sys"],
-        ) {
-            log::warn!("Failed to remount /proc/sys for deterministic PIDs: {e}");
-        }
-    }
 
     Ok(ContainerId(response.id))
 }
