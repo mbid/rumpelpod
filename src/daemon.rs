@@ -637,6 +637,9 @@ fn create_container(
     let host_config = HostConfig {
         runtime: Some(docker_runtime_flag(runtime).to_string()),
         network_mode: Some(network_mode.to_string()),
+        // CAP_SYS_ADMIN allows remounting /proc/sys as rw, which is needed for
+        // setting /proc/sys/kernel/ns_last_pid to get deterministic PIDs in tests.
+        cap_add: Some(vec!["SYS_ADMIN".to_string()]),
         ..Default::default()
     };
 
@@ -661,6 +664,18 @@ fn create_container(
 
     // Start the container (equivalent to docker run's behavior)
     block_on(docker.start_container(&response.id, None)).context("starting container")?;
+
+    // Remount /proc/sys as read-write to allow setting ns_last_pid for deterministic PIDs.
+    // This requires CAP_SYS_ADMIN which we added above. We ignore errors here since
+    // this is only needed for test determinism and may fail on some configurations.
+    let _ = exec_command(
+        docker,
+        &response.id,
+        Some("root"),
+        None,
+        None,
+        vec!["mount", "-o", "remount,rw", "/proc/sys"],
+    );
 
     Ok(ContainerId(response.id))
 }

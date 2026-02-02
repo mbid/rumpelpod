@@ -3,6 +3,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
 use bollard::Docker;
@@ -16,6 +17,11 @@ use crate::docker_exec::{
     exec_capture_with_timeout, exec_check, exec_command, exec_with_stdin, ExecResult,
 };
 use rand::{distr::Alphanumeric, Rng};
+
+/// Counter for deterministic PIDs in tests. Each bash command increments this,
+/// and we set /proc/sys/kernel/ns_last_pid to this value - 1 before exec.
+/// Starting at 1000 so PIDs are easy to recognize (1000, 1001, 1002, ...).
+static NEXT_DETERMINISTIC_PID: AtomicU32 = AtomicU32::new(1000);
 
 pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
@@ -340,6 +346,28 @@ pub fn execute_bash_in_sandbox(
     let output_file = format!("/tmp/agent/bash-{id}.log");
 
     debug!("Executing bash in sandbox: {}", command);
+
+    // In test mode, set ns_last_pid to get a deterministic PID for this command.
+    // This requires the container to have CAP_SYS_ADMIN and /proc/sys mounted rw.
+    if std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok() {
+        let next_pid = NEXT_DETERMINISTIC_PID.fetch_add(1, Ordering::SeqCst);
+        let ns_last_pid = next_pid - 1;
+        // Set ns_last_pid so the next process gets `next_pid`.
+        // We run this as root since writing to ns_last_pid requires CAP_SYS_ADMIN.
+        // Ignore errors - this is best-effort for test determinism.
+        let _ = exec_command(
+            &docker,
+            container_name,
+            Some("root"),
+            None,
+            None,
+            vec![
+                "sh",
+                "-c",
+                &format!("echo {ns_last_pid} > /proc/sys/kernel/ns_last_pid"),
+            ],
+        );
+    }
 
     // Wrapper to print PID and redirect to file + tee
     // echo $$ prints the PID of the shell.
