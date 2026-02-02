@@ -40,6 +40,39 @@ pub const SSH_CONFIG_FILE_ENV: &str = "SSH_CONFIG_FILE";
 /// Remote Docker socket path.
 const REMOTE_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 
+/// Ping the Docker daemon via Unix socket to verify connectivity.
+///
+/// Makes a simple HTTP request to the Docker API's `/_ping` endpoint.
+/// Returns true if the daemon responds, false otherwise.
+fn ping_docker_socket(socket_path: &Path) -> bool {
+    let mut stream = match UnixStream::connect(socket_path) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    // Set a short timeout for the ping
+    let timeout = Duration::from_secs(5);
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+
+    // Send HTTP request to Docker's ping endpoint
+    let request = "GET /_ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+
+    // Read response - we just need to see any valid HTTP response
+    let mut response = [0u8; 256];
+    match stream.read(&mut response) {
+        Ok(n) if n > 0 => {
+            let response_str = String::from_utf8_lossy(&response[..n]);
+            // Check for HTTP 200 OK response
+            response_str.starts_with("HTTP/1.1 200") || response_str.starts_with("HTTP/1.0 200")
+        }
+        _ => false,
+    }
+}
+
 /// Key for identifying a unique remote host connection.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteHost {
@@ -122,14 +155,10 @@ impl ForwardSession {
             return false;
         }
 
-        // Try to connect to the docker socket to ensure it's responsive.
-        // This handles cases where the process is running but the socket is broken/closing,
-        // or the file exists but isn't a socket anymore.
-        if UnixStream::connect(&self.docker_socket).is_err() {
-            return false;
-        }
-
-        true
+        // Verify the Docker daemon is actually responding through the tunnel.
+        // This catches cases where SSH is still running but the tunnel is broken
+        // (e.g., remote host restarted and SSH hasn't detected it yet).
+        ping_docker_socket(&self.docker_socket)
     }
 }
 
@@ -222,6 +251,11 @@ impl SshForwardManager {
             let old_session = connections.remove(host).unwrap();
             let backoff = next_backoff(old_session.backoff);
             let failures = old_session.failures + 1;
+
+            // Drop the old session BEFORE starting the new one.
+            // This is important because Drop cleans up socket files, and the new
+            // session will use the same socket paths (derived from host+port hash).
+            drop(old_session);
 
             // Apply backoff delay
             if failures > 1 {
@@ -333,14 +367,14 @@ impl SshForwardManager {
             }
 
             if docker_socket.exists() {
-                // Verify the socket is actually usable
-                if UnixStream::connect(&docker_socket).is_ok() {
-                    // Wait a bit to ensure the connection is stable and SSH doesn't exit immediately
-                    std::thread::sleep(Duration::from_millis(100));
-
+                // Verify the Docker daemon is actually responding through the tunnel.
+                // This is more robust than just checking socket connectivity - it ensures
+                // the full path works: SSH tunnel -> remote Docker socket -> Docker daemon.
+                if ping_docker_socket(&docker_socket) {
+                    // One final check that SSH hasn't exited
                     if let Ok(Some(status)) = process.try_wait() {
                         anyhow::bail!(
-                            "SSH process exited immediately after establishing socket (status: {})",
+                            "SSH process exited after establishing socket (status: {})",
                             status
                         );
                     }
