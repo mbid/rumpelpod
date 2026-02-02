@@ -36,10 +36,17 @@ fn get_next_deterministic_pid() -> Result<u32> {
 
     // Read the last PID from file, defaulting to START - 1 so first call returns START
     let last_pid = match std::fs::read_to_string(&pid_file) {
-        Ok(contents) => contents
-            .trim()
-            .parse::<u32>()
-            .context("failed to parse last PID file contents")?,
+        Ok(contents) => {
+            let trimmed = contents.trim();
+            // Treat empty file same as missing file
+            if trimmed.is_empty() {
+                DETERMINISTIC_PID_START - 1
+            } else {
+                trimmed
+                    .parse::<u32>()
+                    .context("failed to parse last PID file contents")?
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DETERMINISTIC_PID_START - 1,
         Err(e) => return Err(e).context("failed to read last PID file"),
     };
