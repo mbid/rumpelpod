@@ -22,11 +22,32 @@ The following properties from `devcontainer.json` are fully implemented:
 ### Container Configuration
 | Property | Status | Notes |
 |----------|--------|-------|
-| `workspaceFolder` | ✅ | Path inside container for workspace |
+| `workspaceFolder` | ⚠️ Partial | Path inside container for workspace (see notes below) |
 | `containerUser` | ✅ | User to run container as |
 | `remoteUser` | ✅ | User for dev tools (falls back to `containerUser`) |
 | `containerEnv` | ✅ | Environment variables with `${localEnv:VAR}` substitution |
 | `runArgs` | ⚠️ Partial | Only `--runtime` and `--network=host` are extracted |
+
+#### `workspaceFolder` Implementation Notes
+
+**Default Value:** The spec defines a default of `/workspaces/${localWorkspaceFolderBasename}` for image/Dockerfile scenarios. We should honor this default when `workspaceFolder` is not explicitly set.
+
+**Repo Initialization:** Unlike VS Code Dev Containers which bind-mount the host workspace, we use Git-based synchronization. This means:
+
+1. **Detection:** On sandbox creation, check if `workspaceFolder` already contains a Git repository
+2. **Initialization:** If no repo exists at `workspaceFolder`:
+   - Clone the repository from host via our git-http bridge
+   - This happens on first sandbox creation for that image
+3. **Updates:** On each `sandbox enter`, sync recent commits from host to container
+
+**Future Optimization (Image Pre-baking):**
+For faster sandbox startup, we could detect that an image doesn't have a repo at `workspaceFolder` and create a derived image with the repo pre-cloned:
+1. Start temporary container from base image
+2. Clone current repo state into `workspaceFolder`  
+3. Commit container as new image: `sandbox-<base-image-hash>-<repo-hash>`
+4. Use this pre-baked image for subsequent sandboxes
+
+This optimization is deferred; the initial implementation will clone on each sandbox creation.
 
 ### Metadata
 | Property | Status | Notes |
@@ -127,6 +148,8 @@ Additional arguments to pass to `docker run`. Currently we only extract `--runti
 }
 ```
 
+**Testing:** `tests/cli/devcontainer/runtime_options.rs`
+
 ---
 
 ### Priority 2: Mounts and Volumes
@@ -175,23 +198,27 @@ Additional mounts for the container. Accepts Docker `--mount` format strings or 
 
 **Security Consideration:** Should validate mount sources to prevent escaping sandbox.
 
+**Remote Docker Hosts:** ❌ **NOT SUPPORTED** for `bind` mounts. When using a remote Docker host:
+- `bind` mounts would reference paths on the *remote* host, not the developer's machine
+- This is unlikely to be the intended behavior and could cause confusion
+- Only `volume` and `tmpfs` mounts are supported for remote hosts
+- Should error with a clear message if bind mounts are specified with remote Docker
+
+**Testing:** `tests/cli/devcontainer/mounts.rs`
+
 ---
 
 #### `workspaceMount`
-**Type:** `string`  
-**Default:** Auto-generated
+**Status:** ❌ **NOT SUPPORTED**
 
-Override the default workspace mount. Must be used together with `workspaceFolder`.
+This property allows overriding the default workspace mount with a bind mount from the host.
 
-**Example:**
-```json
-{
-  "workspaceMount": "source=${localWorkspaceFolder}/sub-folder,target=/workspace,type=bind",
-  "workspaceFolder": "/workspace"
-}
-```
+**Why Not Supported:** The sandbox's core purpose is isolation. Bind-mounting host directories into the container defeats this purpose by giving the container direct access to host files. Our architecture uses Git-based synchronization instead, which:
+- Maintains isolation (container cannot access arbitrary host files)
+- Provides audit trail of changes
+- Enables safe review before accepting changes back to host
 
-**Implementation:** Replace our default workspace mount with the specified one.
+Users who need this functionality should use standard `docker run` or the VS Code Dev Containers extension.
 
 ---
 
@@ -326,6 +353,8 @@ Which lifecycle command to wait for before considering the container ready.
 
 **Implementation:** Block `sandbox enter` until the specified command completes.
 
+**Testing:** `tests/cli/devcontainer/lifecycle_commands.rs`
+
 ---
 
 ### Priority 4: Port Forwarding
@@ -343,10 +372,32 @@ Ports that should be forwarded from the container to the local machine.
 }
 ```
 
-**Implementation:**
-- For local Docker: Use `--publish` or SSH tunnel
-- For remote Docker: Set up SSH port forwarding
-- The `"db:5432"` syntax refers to other services in Docker Compose scenarios
+**Multi-Sandbox Port Allocation:**
+
+When multiple sandboxes are running for the same repository, port conflicts must be handled:
+
+1. **Port Registry:** The daemon maintains a registry of forwarded ports per sandbox
+2. **Automatic Allocation:** If the requested local port is in use by another sandbox:
+   - Allocate the next available port in a defined range (e.g., 10000-65535)
+   - Store the mapping: `sandbox-name -> {container_port: local_port}`
+3. **Port Query:** `sandbox ports <sandbox-name>` shows the port mappings:
+   ```
+   CONTAINER    LOCAL      LABEL
+   3000         3000       Application
+   5432         15432      Database (remapped: 5432 in use by sandbox-1)
+   ```
+4. **Sticky Allocation:** Once a port is allocated to a sandbox, prefer reusing it on restart
+
+**Implementation for Local Docker:**
+- Use `socat` or SSH local forwarding to forward from localhost to container
+- Don't use `--publish` (would conflict across sandboxes and bypass gVisor network isolation)
+
+**Implementation for Remote Docker:**
+- All port forwarding goes through SSH tunnel to the developer's machine
+- Chain: `localhost:local_port` → SSH tunnel → `remote_host` → container network → `container:container_port`
+- The daemon's SSH connection to the remote host sets up `-L local_port:container_ip:container_port` for each forwarded port
+
+**Testing:** `tests/cli/devcontainer/ports.rs`
 
 ---
 
@@ -356,7 +407,9 @@ Ports that should be forwarded from the container to the local machine.
 
 Publishes ports when container runs. Unlike `forwardPorts`, requires application to listen on `0.0.0.0`.
 
-**Implementation:** Add to `ContainerCreateBody.host_config.port_bindings`.
+**Status:** ⚠️ **DISCOURAGED** - Use `forwardPorts` instead.
+
+**Why:** Publishing ports (`--publish`) bypasses our port management and can cause conflicts between sandboxes. It also doesn't work well with gVisor's network isolation.
 
 ---
 
@@ -380,13 +433,13 @@ Port-specific configuration for forwarded ports.
 ```
 
 **Properties:**
-- `label` - Display name
-- `protocol` - `http` or `https`
+- `label` - Display name (shown in `sandbox ports` output)
+- `protocol` - `http` or `https` (for URL display)
 - `onAutoForward` - Action when port detected: `notify`, `openBrowser`, `openBrowserOnce`, `openPreview`, `silent`, `ignore`
-- `requireLocalPort` - Must use same port number locally
+- `requireLocalPort` - Must use same port number locally (error if unavailable)
 - `elevateIfNeeded` - Auto-elevate for low ports (< 1024)
 
-**Implementation:** Store attributes and apply when setting up port forwarding.
+**Implementation:** Store attributes in daemon database, apply when setting up forwarding.
 
 ---
 
@@ -404,6 +457,8 @@ Default attributes for ports not explicitly configured in `portsAttributes`.
   }
 }
 ```
+
+**Testing:** `tests/cli/devcontainer/ports.rs`
 
 ---
 
@@ -670,6 +725,59 @@ The following variables can be used in string values:
 **Currently Implemented:** `${localEnv:VAR}` in `containerEnv`
 
 **Needs Implementation:** All other variables and contexts.
+
+---
+
+## Testing Strategy
+
+Tests for devcontainer.json features are organized in `tests/cli/devcontainer/` with one file per feature group:
+
+| File | Features Tested |
+|------|-----------------|
+| `env.rs` | ✅ `containerEnv`, `${localEnv}` substitution |
+| `image.rs` | ✅ `build.*` options, image caching |
+| `runtime_options.rs` | `privileged`, `init`, `capAdd`, `securityOpt`, `runArgs` |
+| `mounts.rs` | `mounts` (volumes, tmpfs; bind blocked for remote) |
+| `lifecycle_commands.rs` | `onCreateCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand`, `waitFor` |
+| `ports.rs` | `forwardPorts`, `portsAttributes`, multi-sandbox port allocation |
+| `remote_env.rs` | `remoteEnv`, `userEnvProbe`, `updateRemoteUserUID` |
+| `workspace.rs` | `workspaceFolder` defaults, repo initialization |
+
+### Test Patterns
+
+Each test file should follow the pattern established in `env.rs` and `image.rs`:
+
+```rust
+// tests/cli/devcontainer/lifecycle_commands.rs
+
+use crate::common::{sandbox_command, TestDaemon, TestRepo};
+
+fn write_devcontainer_with_lifecycle(repo: &TestRepo, commands: &str) {
+    // Helper to create devcontainer.json with specific lifecycle commands
+}
+
+#[test]
+fn post_create_command_runs_once() {
+    // Verify postCreateCommand runs on first enter but not subsequent enters
+}
+
+#[test]
+fn post_start_command_runs_each_start() {
+    // Verify postStartCommand runs each time container starts
+}
+
+#[test]
+fn lifecycle_command_failure_stops_chain() {
+    // Verify that if onCreateCommand fails, postCreateCommand doesn't run
+}
+```
+
+### Testing Remote Docker
+
+For features that behave differently with remote Docker hosts:
+- Use `TestDaemon::start_with_remote()` (to be implemented)
+- Or mock the SSH tunnel behavior
+- Specifically test: port forwarding, mount restrictions
 
 ---
 
