@@ -75,7 +75,9 @@ impl TestDaemon {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
         cmd.env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
-            .env("XDG_RUNTIME_DIR", &runtime_dir);
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            // Enable deterministic PIDs for test reproducibility
+            .env("SANDBOX_TEST_DETERMINISTIC_IDS", "1");
 
         if let Some(config_path) = ssh_config {
             cmd.env(SSH_CONFIG_FILE_ENV, config_path);

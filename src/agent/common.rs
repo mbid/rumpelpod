@@ -3,25 +3,57 @@
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{Context, Result};
 use bollard::Docker;
 use indoc::formatdoc;
 use log::debug;
-use sha2::{Digest, Sha256};
 use strum::{Display, EnumString};
 
-use crate::config::Model;
+use crate::config::{get_runtime_dir, Model};
 use crate::docker_exec::{
     exec_capture_with_timeout, exec_check, exec_command, exec_with_stdin, ExecResult,
 };
 use rand::{distr::Alphanumeric, Rng};
 
-/// Counter for deterministic PIDs in tests. Each bash command increments this,
-/// and we set /proc/sys/kernel/ns_last_pid to this value - 1 before exec.
-/// Starting at 1000 so PIDs are easy to recognize (1000, 1001, 1002, ...).
-static NEXT_DETERMINISTIC_PID: AtomicU32 = AtomicU32::new(1000);
+/// Starting PID for deterministic mode. We start at 1000 so PIDs are easy to
+/// recognize (1000, 1001, 1002, ...).
+const DETERMINISTIC_PID_START: u32 = 1000;
+
+/// Get and increment the next deterministic PID from a file.
+///
+/// In deterministic mode, we store the last used PID in a file so that each
+/// test (which typically has its own XDG_RUNTIME_DIR) gets consistent PIDs.
+/// The file is stored in `$XDG_RUNTIME_DIR/sandbox/last_pid`.
+///
+/// NOTE: This is not thread-safe. If multiple processes try to spawn commands
+/// simultaneously in the same test environment, they may get the same PID.
+/// For now this is a known limitation since tests typically run sequentially.
+fn get_next_deterministic_pid() -> Result<u32> {
+    let pid_file = get_runtime_dir()
+        .context("failed to get runtime directory for deterministic PID file")?
+        .join("last_pid");
+
+    // Read the last PID from file, defaulting to START - 1 so first call returns START
+    let last_pid = match std::fs::read_to_string(&pid_file) {
+        Ok(contents) => contents
+            .trim()
+            .parse::<u32>()
+            .context("failed to parse last PID file contents")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DETERMINISTIC_PID_START - 1,
+        Err(e) => return Err(e).context("failed to read last PID file"),
+    };
+
+    let next_pid = last_pid + 1;
+
+    // Ensure the directory exists and write the new PID
+    if let Some(parent) = pid_file.parent() {
+        std::fs::create_dir_all(parent).context("failed to create runtime directory")?;
+    }
+    std::fs::write(&pid_file, next_pid.to_string()).context("failed to write last PID file")?;
+
+    Ok(next_pid)
+}
 
 pub const MAX_TOKENS: u32 = 4096;
 pub const AGENTS_MD_PATH: &str = "AGENTS.md";
@@ -331,17 +363,19 @@ pub fn execute_bash_in_sandbox(
     let workdir = repo_path.to_string_lossy().to_string();
     let env = vec!["GIT_EDITOR=false"];
 
-    // Generate ID for output file
-    let id: String = if std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok() {
-        let mut hasher = Sha256::new();
-        hasher.update(command.as_bytes());
-        hex::encode(hasher.finalize())[..8].to_string()
+    // Generate ID for output file. In deterministic mode, we use the PID we're
+    // about to assign to the command for a unique but predictable filename.
+    let deterministic_mode = std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok();
+    let (id, deterministic_pid) = if deterministic_mode {
+        let pid = get_next_deterministic_pid()?;
+        (pid.to_string(), Some(pid))
     } else {
-        rand::rng()
+        let random_id: String = rand::rng()
             .sample_iter(&Alphanumeric)
             .take(8)
             .map(char::from)
-            .collect()
+            .collect();
+        (random_id, None)
     };
     let output_file = format!("/tmp/agent/bash-{id}.log");
 
@@ -349,13 +383,13 @@ pub fn execute_bash_in_sandbox(
 
     // In test mode, set ns_last_pid to get a deterministic PID for this command.
     // This requires the container to have CAP_SYS_ADMIN and /proc/sys mounted rw.
-    if std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok() {
-        let next_pid = NEXT_DETERMINISTIC_PID.fetch_add(1, Ordering::SeqCst);
+    // This may fail in some environments (e.g., nested containers), so we log a
+    // warning but continue - the command will just get a non-deterministic PID.
+    if let Some(next_pid) = deterministic_pid {
         let ns_last_pid = next_pid - 1;
         // Set ns_last_pid so the next process gets `next_pid`.
         // We run this as root since writing to ns_last_pid requires CAP_SYS_ADMIN.
-        // Ignore errors - this is best-effort for test determinism.
-        let _ = exec_command(
+        if let Err(e) = exec_command(
             &docker,
             container_name,
             Some("root"),
@@ -366,7 +400,9 @@ pub fn execute_bash_in_sandbox(
                 "-c",
                 &format!("echo {ns_last_pid} > /proc/sys/kernel/ns_last_pid"),
             ],
-        );
+        ) {
+            log::warn!("Failed to set ns_last_pid for deterministic PIDs: {e}");
+        }
     }
 
     // Wrapper to print PID and redirect to file + tee
