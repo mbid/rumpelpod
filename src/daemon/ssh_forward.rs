@@ -9,6 +9,8 @@
 //! connection per remote host, allowing dynamic addition of forwards via `-O forward`.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -116,7 +118,18 @@ impl ForwardSession {
         // Also verify that the responsible sockets exist
         let sockets_exist = self.control_socket.exists() && self.docker_socket.exists();
 
-        process_alive && sockets_exist
+        if !process_alive || !sockets_exist {
+            return false;
+        }
+
+        // Try to connect to the docker socket to ensure it's responsive.
+        // This handles cases where the process is running but the socket is broken/closing,
+        // or the file exists but isn't a socket anymore.
+        if UnixStream::connect(&self.docker_socket).is_err() {
+            return false;
+        }
+
+        true
     }
 }
 
@@ -315,22 +328,39 @@ impl SshForwardManager {
         let timeout = Duration::from_secs(30);
 
         while start.elapsed() < timeout {
+            if let Ok(Some(status)) = process.try_wait() {
+                anyhow::bail!("SSH process exited prematurely with status: {}", status);
+            }
+
             if docker_socket.exists() {
-                info!(
-                    "SSH tunnel established to {}:{} -> {}",
-                    host.destination,
-                    host.port,
-                    docker_socket.display()
-                );
-                return Ok(ForwardSession {
-                    docker_socket,
-                    control_socket,
-                    process,
-                    last_check: Instant::now(),
-                    backoff,
-                    failures,
-                    remote_forwards: RemoteForwards::default(),
-                });
+                // Verify the socket is actually usable
+                if UnixStream::connect(&docker_socket).is_ok() {
+                    // Wait a bit to ensure the connection is stable and SSH doesn't exit immediately
+                    std::thread::sleep(Duration::from_millis(100));
+
+                    if let Ok(Some(status)) = process.try_wait() {
+                        anyhow::bail!(
+                            "SSH process exited immediately after establishing socket (status: {})",
+                            status
+                        );
+                    }
+
+                    info!(
+                        "SSH tunnel established to {}:{} -> {}",
+                        host.destination,
+                        host.port,
+                        docker_socket.display()
+                    );
+                    return Ok(ForwardSession {
+                        docker_socket,
+                        control_socket,
+                        process,
+                        last_check: Instant::now(),
+                        backoff,
+                        failures,
+                        remote_forwards: RemoteForwards::default(),
+                    });
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }

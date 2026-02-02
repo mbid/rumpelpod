@@ -22,7 +22,7 @@ use crate::common::{
 pub const SSH_USER: &str = "testuser";
 
 /// Timeout for waiting for services to become available.
-const SERVICE_TIMEOUT: Duration = Duration::from_secs(60);
+const SERVICE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A container simulating a remote Docker host with SSH access.
 ///
@@ -39,6 +39,8 @@ pub struct SshRemoteHost {
     _temp_dir: TempDir,
     /// Path to the private key file.
     private_key_path: PathBuf,
+    /// Docker network name.
+    network_name: String,
 }
 
 impl SshRemoteHost {
@@ -54,6 +56,19 @@ impl SshRemoteHost {
             TempDir::with_prefix("sandbox-ssh-test-").expect("Failed to create temp dir for SSH");
         let private_key_path = temp_dir.path().join("id_ed25519");
         let public_key_path = temp_dir.path().join("id_ed25519.pub");
+
+        // Create a dedicated network to ensure IP stability
+        let network_name = temp_dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let status = Command::new("docker")
+            .args(["network", "create", &network_name])
+            .status()
+            .expect("Failed to create docker network");
+        assert!(status.success(), "Failed to create docker network");
 
         // Generate SSH key pair
         let status = Command::new("ssh-keygen")
@@ -72,7 +87,14 @@ impl SshRemoteHost {
         // Start the container with privileged mode for nested Docker
         // No port publishing - we connect directly to the container IP
         let output = Command::new("docker")
-            .args(["run", "-d", "--privileged", &image_id.to_string()])
+            .args([
+                "run",
+                "-d",
+                "--privileged",
+                "--network",
+                &network_name,
+                &image_id.to_string(),
+            ])
             .output()
             .expect("Failed to start remote docker container");
 
@@ -92,6 +114,7 @@ impl SshRemoteHost {
             ip_address,
             _temp_dir: temp_dir,
             private_key_path,
+            network_name,
         };
 
         // Install the public key for the test user
@@ -101,6 +124,22 @@ impl SshRemoteHost {
         host.wait_for_services();
 
         host
+    }
+
+    /// Restart the remote host container.
+    pub fn restart(&mut self) {
+        let status = Command::new("docker")
+            .args(["restart", &self.container_id])
+            .status()
+            .expect("Failed to restart remote host container");
+
+        assert!(status.success(), "Failed to restart remote host container");
+
+        // Wait for services to come back up
+        self.wait_for_services();
+
+        // Update IP address in case it changed
+        self.ip_address = get_container_ip(&self.container_id).expect("Failed to get container IP");
     }
 
     /// Get the SSH connection string for this remote host (ssh://user@host format).
@@ -269,6 +308,9 @@ impl Drop for SshRemoteHost {
         let _ = Command::new("docker")
             .args(["rm", "-f", &self.container_id])
             .output();
+        let _ = Command::new("docker")
+            .args(["network", "rm", &self.network_name])
+            .output();
     }
 }
 
@@ -326,6 +368,7 @@ fn build_remote_docker_image() -> Result<ImageId> {
         # Startup script that runs both SSH and Docker
         RUN echo '#!/bin/bash\n\
             set -e\n\
+            rm -f /var/run/docker.pid\n\
             dockerd &\n\
             for i in $(seq 1 60); do\n\
                 if docker info >/dev/null 2>&1; then break; fi\n\
@@ -472,4 +515,70 @@ fn ssh_smoke_test() {
         "remote container should exist: {}",
         remote_containers_str
     );
+}
+
+#[test]
+fn ssh_reconnect_test() {
+    let repo = TestRepo::new();
+
+    // Build test image locally
+    let image_id =
+        crate::common::build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    // Start remote host and load the image
+    let mut remote = SshRemoteHost::start();
+    remote
+        .load_image(&image_id)
+        .expect("Failed to load image into remote Docker");
+
+    // Create SSH config and start daemon
+    let ssh_config = create_ssh_config(&[&remote]);
+    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
+
+    // Write sandbox config
+    write_remote_sandbox_config(&repo, &image_id, &remote.ssh_spec());
+
+    // Enter the sandbox on the remote Docker host
+    let sandbox_name = "reconnect-test";
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "hello from remote"])
+        .output()
+        .expect("sandbox enter failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "first sandbox enter failed: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    assert_eq!(stdout.trim(), "hello from remote");
+
+    // Restart the remote host
+    let old_ip = remote.ip_address().to_string();
+    remote.restart();
+    assert_eq!(
+        remote.ip_address(),
+        old_ip,
+        "IP address changed after restart, test cannot proceed"
+    );
+
+    // Try to enter again
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "echo", "hello again"])
+        .output()
+        .expect("sandbox enter failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "second sandbox enter failed: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    assert_eq!(stdout.trim(), "hello again");
 }
