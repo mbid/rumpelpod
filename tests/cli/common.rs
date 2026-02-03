@@ -84,9 +84,7 @@ impl TestDaemon {
         let process = cmd
             .arg("daemon")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
+            .spawn_with_logging("DAEMON")
             .expect("Failed to spawn daemon");
 
         // Wait for socket to exist

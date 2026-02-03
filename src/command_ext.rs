@@ -4,9 +4,11 @@
 //! interleaved string, preserving the order in which output was produced.
 
 use std::io::{self, pipe, BufRead, BufReader};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use log::{error, info};
 
 /// The output of a command with combined stdout and stderr.
 #[derive(Debug)]
@@ -30,6 +32,12 @@ pub trait CommandExt {
     ///
     /// On failure, returns an error with the command, combined output, and exit status.
     fn success(&mut self) -> Result<Vec<u8>>;
+
+    /// Spawns the command and logs its stdout/stderr to the provided callbacks.
+    ///
+    /// The callbacks are executed in separate threads.
+    #[doc(hidden)]
+    fn spawn_with_logging(&mut self, prefix: &str) -> Result<Child>;
 }
 
 impl CommandExt for Command {
@@ -80,5 +88,55 @@ impl CommandExt for Command {
             };
             Err(anyhow!("$ {:?}\n{}{}{}", self, stdout, stderr, exit_info))
         }
+    }
+
+    fn spawn_with_logging(&mut self, prefix: &str) -> Result<Child> {
+        self.stdout(Stdio::piped());
+        self.stderr(Stdio::piped());
+
+        let mut child = self.spawn().context("Failed to spawn process")?;
+
+        let prefix = prefix.to_string();
+
+        let stdout = child.stdout.take().expect("stdout not captured");
+        let thread_name = format!("{}-stdout", prefix);
+        let prefix_clone = prefix.clone();
+        thread::Builder::new()
+            .name(thread_name.clone())
+            .spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) => {
+                            if !line.trim().is_empty() {
+                                info!("{}: {}", prefix_clone, line);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .with_context(|| format!("Failed to spawn {} thread", thread_name))?;
+
+        let stderr = child.stderr.take().expect("stderr not captured");
+        let thread_name = format!("{}-stderr", prefix);
+        thread::Builder::new()
+            .name(thread_name.clone())
+            .spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(line) => {
+                            if !line.trim().is_empty() {
+                                error!("{}: {}", prefix, line);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .with_context(|| format!("Failed to spawn {} thread", thread_name))?;
+
+        Ok(child)
     }
 }

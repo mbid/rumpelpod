@@ -9,17 +9,16 @@
 //! connection per remote host, allowing dynamic addition of forwards via `-O forward`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use sha2::{Digest, Sha256};
 
+use crate::command_ext::CommandExt;
 use crate::config::{get_runtime_dir, RemoteDocker};
 
 /// Initial delay for exponential backoff on reconnection.
@@ -301,66 +300,15 @@ impl SshForwardManager {
 
         debug!("Starting SSH: {:?}", cmd);
 
-        let mut process = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "Failed to spawn SSH process for {}:{}",
-                    host.destination, host.port
-                )
-            })?;
+        cmd.stdin(Stdio::null());
 
-        // Spawn threads to log stdout and stderr from the SSH process
-        let ssh_target = format!("{}:{}", host.destination, host.port);
-
-        if let Some(stdout) = process.stdout.take() {
-            let target = ssh_target.clone();
-            thread::Builder::new()
-                .name(format!("ssh-stdout-{}", host.hash_prefix()))
-                .spawn(move || {
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines() {
-                        match line {
-                            Ok(line) => {
-                                if !line.trim().is_empty() {
-                                    info!("SSH {}: {}", target, line);
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Error reading SSH stdout for {}: {}", target, e);
-                                break;
-                            }
-                        }
-                    }
-                })
-                .context("Failed to spawn SSH stdout logging thread")?;
-        }
-
-        if let Some(stderr) = process.stderr.take() {
-            let target = ssh_target.clone();
-            thread::Builder::new()
-                .name(format!("ssh-stderr-{}", host.hash_prefix()))
-                .spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        match line {
-                            Ok(line) => {
-                                if !line.trim().is_empty() {
-                                    error!("SSH {}: {}", target, line);
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Error reading SSH stderr for {}: {}", target, e);
-                                break;
-                            }
-                        }
-                    }
-                })
-                .context("Failed to spawn SSH stderr logging thread")?;
-        }
+        let ssh_target = format!("SSH {}:{}", host.destination, host.port);
+        let mut process = cmd.spawn_with_logging(&ssh_target).with_context(|| {
+            format!(
+                "Failed to spawn SSH process for {}:{}",
+                host.destination, host.port
+            )
+        })?;
 
         // Wait for the docker socket to appear (SSH needs time to establish the tunnel)
         let start = Instant::now();
