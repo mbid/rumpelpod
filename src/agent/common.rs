@@ -10,7 +10,7 @@ use indoc::formatdoc;
 use log::debug;
 use strum::{Display, EnumString};
 
-use crate::config::{get_runtime_dir, Model};
+use crate::config::{get_runtime_dir, is_deterministic_test_mode, Model};
 use crate::docker_exec::{
     exec_capture_with_timeout, exec_check, exec_command, exec_with_stdin, ExecResult,
 };
@@ -372,8 +372,7 @@ pub fn execute_bash_in_sandbox(
 
     // Generate ID for output file. In deterministic mode, we use the PID we're
     // about to assign to the command for a unique but predictable filename.
-    let deterministic_mode = std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok();
-    let (id, deterministic_pid) = if deterministic_mode {
+    let (id, deterministic_pid) = if is_deterministic_test_mode()? {
         let pid = get_next_deterministic_pid()?;
         (pid.to_string(), Some(pid))
     } else {
@@ -389,14 +388,13 @@ pub fn execute_bash_in_sandbox(
     debug!("Executing bash in sandbox: {}", command);
 
     // In test mode, set ns_last_pid to get a deterministic PID for this command.
-    // This requires the container to have CAP_SYS_ADMIN and /proc/sys mounted rw.
-    // This may fail in some environments (e.g., nested containers), so we log a
-    // warning but continue - the command will just get a non-deterministic PID.
+    // This requires the container to run in privileged mode (set by daemon when
+    // SANDBOX_TEST_DETERMINISTIC_IDS is enabled), which makes /proc/sys writable.
     if let Some(next_pid) = deterministic_pid {
         let ns_last_pid = next_pid - 1;
         // Set ns_last_pid so the next process gets `next_pid`.
         // We run this as root since writing to ns_last_pid requires CAP_SYS_ADMIN.
-        if let Err(e) = exec_command(
+        exec_command(
             &docker,
             container_name,
             Some("root"),
@@ -407,9 +405,8 @@ pub fn execute_bash_in_sandbox(
                 "-c",
                 &format!("echo {ns_last_pid} > /proc/sys/kernel/ns_last_pid"),
             ],
-        ) {
-            log::warn!("Failed to set ns_last_pid for deterministic PIDs: {e}");
-        }
+        )
+        .context("failed to set ns_last_pid for deterministic PIDs")?;
     }
 
     // Wrapper to print PID and redirect to file + tee

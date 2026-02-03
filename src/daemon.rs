@@ -19,7 +19,7 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{Network, RemoteDocker, Runtime};
+use crate::config::{is_deterministic_test_mode, Network, RemoteDocker, Runtime};
 use crate::docker_exec::exec_command;
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
@@ -636,7 +636,7 @@ fn create_container(
 
     // In deterministic PID mode (for tests), we need privileged mode to write to
     // /proc/sys/kernel/ns_last_pid. With --privileged, /proc/sys is mounted rw.
-    let deterministic_pids = std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS").is_ok();
+    let deterministic_pids = is_deterministic_test_mode()?;
 
     let host_config = HostConfig {
         runtime: Some(docker_runtime_flag(runtime).to_string()),

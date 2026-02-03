@@ -654,3 +654,21 @@ pub fn get_runtime_dir() -> Result<PathBuf> {
 
     Ok(runtime_base.join("sandbox"))
 }
+
+/// Check if deterministic test mode is enabled via SANDBOX_TEST_DETERMINISTIC_IDS.
+///
+/// Returns:
+/// - `Ok(true)` if set to "1"
+/// - `Ok(false)` if not set
+/// - `Err(...)` if set to any other value
+pub fn is_deterministic_test_mode() -> Result<bool> {
+    match std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS") {
+        Ok(value) if value == "1" => Ok(true),
+        Ok(value) => bail!(
+            "SANDBOX_TEST_DETERMINISTIC_IDS must be '1' if set, got '{}'",
+            value
+        ),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(e) => Err(e).context("failed to read SANDBOX_TEST_DETERMINISTIC_IDS"),
+    }
+}
