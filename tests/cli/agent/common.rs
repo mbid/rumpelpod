@@ -245,6 +245,12 @@ pub fn run_agent_interactive_model_args_env(
     // Ensure deterministic IDs for output files in tests
     cmd.env("SANDBOX_TEST_DETERMINISTIC_IDS", "1");
 
+    // Default to offline mode for tests unless explicitly configured.
+    // This ensures tests don't accidentally depend on ambient API keys.
+    if std::env::var("SANDBOX_TEST_LLM_OFFLINE").is_err() {
+        cmd.env("SANDBOX_TEST_LLM_OFFLINE", "1");
+    }
+
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -383,6 +389,13 @@ pub fn run_agent_expecting_picker(
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
+
+    // Default to offline mode for tests unless explicitly configured.
+    // This ensures tests don't accidentally depend on ambient API keys.
+    if std::env::var("SANDBOX_TEST_LLM_OFFLINE").is_err() {
+        cmd.env("SANDBOX_TEST_LLM_OFFLINE", "1");
+    }
+
     cmd.args([
         "agent",
         "test",
