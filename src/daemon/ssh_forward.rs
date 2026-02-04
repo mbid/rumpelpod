@@ -52,8 +52,12 @@ fn ping_docker_socket(socket_path: &Path) -> bool {
 
     // Set a short timeout for the ping
     let timeout = Duration::from_secs(5);
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .set_read_timeout(Some(timeout))
+        .expect("set_read_timeout should always succeed on connected UnixStream");
+    stream
+        .set_write_timeout(Some(timeout))
+        .expect("set_write_timeout should always succeed on connected UnixStream");
 
     // Send HTTP request to Docker's ping endpoint
     let request = "GET /_ping HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
