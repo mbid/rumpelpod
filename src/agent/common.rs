@@ -1,7 +1,7 @@
 //! Common utilities shared between agent implementations.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -17,41 +17,51 @@ use crate::docker_exec::{
 use rand::{distr::Alphanumeric, Rng};
 
 /// Starting PID for deterministic mode. We start at 1000 so PIDs are easy to
-/// recognize (1000, 1001, 1002, ...).
+/// recognize (1000, 1050, 1100, ...).
 const DETERMINISTIC_PID_START: u32 = 1000;
+
+/// PID increment for deterministic mode. We increment by 50 to leave room for
+/// internal Docker processes that may be spawned for each command execution.
+const DETERMINISTIC_PID_INCREMENT: u32 = 50;
 
 /// Get and increment the next deterministic PID from a file.
 ///
-/// In deterministic mode, we store the last used PID in a file so that each
-/// test (which typically has its own XDG_RUNTIME_DIR) gets consistent PIDs.
-/// The file is stored in `$XDG_RUNTIME_DIR/sandbox/last_pid`.
+/// In deterministic mode, we store the last used PID in a per-sandbox file.
+/// The file is stored at `$DETERMINISTIC_PID_DIR/<sandbox_name>` if the env var
+/// is set, otherwise at `$XDG_RUNTIME_DIR/sandbox/deterministic-pids/<sandbox_name>`.
 ///
 /// NOTE: This is not thread-safe. If multiple processes try to spawn commands
 /// simultaneously in the same test environment, they may get the same PID.
 /// For now this is a known limitation since tests typically run sequentially.
-fn get_next_deterministic_pid() -> Result<u32> {
-    let pid_file = get_runtime_dir()
-        .context("failed to get runtime directory for deterministic PID file")?
-        .join("last_pid");
+fn get_next_deterministic_pid(sandbox_name: &str) -> Result<u32> {
+    let pid_dir = match std::env::var("DETERMINISTIC_PID_DIR") {
+        Ok(dir) => PathBuf::from(dir),
+        Err(_) => get_runtime_dir()
+            .context("failed to get runtime directory for deterministic PID file")?
+            .join("deterministic-pids"),
+    };
+    let pid_file = pid_dir.join(sandbox_name);
 
-    // Read the last PID from file, defaulting to START - 1 so first call returns START
+    // Read the last PID from file, defaulting to START - INCREMENT so first call returns START
     let last_pid = match std::fs::read_to_string(&pid_file) {
         Ok(contents) => {
             let trimmed = contents.trim();
             // Treat empty file same as missing file
             if trimmed.is_empty() {
-                DETERMINISTIC_PID_START - 1
+                DETERMINISTIC_PID_START - DETERMINISTIC_PID_INCREMENT
             } else {
                 trimmed
                     .parse::<u32>()
                     .context("failed to parse last PID file contents")?
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DETERMINISTIC_PID_START - 1,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            DETERMINISTIC_PID_START - DETERMINISTIC_PID_INCREMENT
+        }
         Err(e) => return Err(e).context("failed to read last PID file"),
     };
 
-    let next_pid = last_pid + 1;
+    let next_pid = last_pid + DETERMINISTIC_PID_INCREMENT;
 
     // Ensure the directory exists and write the new PID
     if let Some(parent) = pid_file.parent() {
@@ -373,7 +383,7 @@ pub fn execute_bash_in_sandbox(
     // Generate ID for output file. In deterministic mode, we use the PID we're
     // about to assign to the command for a unique but predictable filename.
     let (id, deterministic_pid) = if is_deterministic_test_mode()? {
-        let pid = get_next_deterministic_pid()?;
+        let pid = get_next_deterministic_pid(container_name)?;
         (pid.to_string(), Some(pid))
     } else {
         let random_id: String = rand::rng()

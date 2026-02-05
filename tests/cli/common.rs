@@ -109,6 +109,14 @@ impl TestDaemon {
             temp_dir,
         }
     }
+
+    /// Get the path to the daemon's temporary directory.
+    ///
+    /// Useful for creating isolated test resources that need to live alongside
+    /// the daemon (e.g., deterministic PID files).
+    pub fn temp_dir(&self) -> &Path {
+        self.temp_dir.path()
+    }
 }
 
 impl Drop for TestDaemon {
