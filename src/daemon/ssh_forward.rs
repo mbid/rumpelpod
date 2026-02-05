@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,9 @@ const INITIAL_DELAY: Duration = Duration::from_secs(1);
 /// Maximum delay for exponential backoff.
 const MAX_DELAY: Duration = Duration::from_secs(60);
 
+/// Timeout for the ping operation (hard limit via thread).
+const PING_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Environment variable to specify a custom SSH config file.
 ///
 /// When set, SSH commands will use `-F <path>` to read configuration from the
@@ -44,7 +48,34 @@ const REMOTE_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 ///
 /// Makes a simple HTTP request to the Docker API's `/_ping` endpoint.
 /// Returns true if the daemon responds, false otherwise.
+///
+/// This function uses a thread with hard timeout to ensure it never hangs,
+/// even if the SSH tunnel is in a broken state where socket operations block.
 fn ping_docker_socket(socket_path: &Path) -> bool {
+    let socket_path = socket_path.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+
+    // Spawn a thread to do the actual ping.
+    // If SSH is stuck, socket operations might block indefinitely despite timeouts.
+    std::thread::spawn(move || {
+        let result = ping_docker_socket_inner(&socket_path);
+        // Ignore send errors - the receiver might have timed out and been dropped
+        let _ = tx.send(result);
+    });
+
+    // Wait for result with a hard timeout
+    match rx.recv_timeout(PING_TIMEOUT) {
+        Ok(result) => result,
+        Err(_) => {
+            // Timeout or channel closed - assume the ping failed
+            debug!("ping_docker_socket timed out after {:?}", PING_TIMEOUT);
+            false
+        }
+    }
+}
+
+/// Inner implementation of ping_docker_socket that does the actual work.
+fn ping_docker_socket_inner(socket_path: &Path) -> bool {
     let mut stream = match UnixStream::connect(socket_path) {
         Ok(s) => s,
         Err(_) => return false,
@@ -170,7 +201,31 @@ impl Drop for ForwardSession {
     fn drop(&mut self) {
         // Kill the SSH process when the session is dropped
         let _ = self.process.kill();
-        let _ = self.process.wait();
+
+        // Wait for process to exit with a timeout to avoid hanging indefinitely.
+        // SIGKILL should terminate immediately, but we add a timeout just in case.
+        let start = Instant::now();
+        let timeout = Duration::from_secs(5);
+        loop {
+            match self.process.try_wait() {
+                Ok(Some(_)) => break, // Process exited
+                Ok(None) => {
+                    // Still running
+                    if start.elapsed() > timeout {
+                        warn!(
+                            "SSH process did not exit within {:?} after SIGKILL",
+                            timeout
+                        );
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    warn!("Error waiting for SSH process: {}", e);
+                    break;
+                }
+            }
+        }
 
         // Clean up socket files
         let _ = std::fs::remove_file(&self.docker_socket);
