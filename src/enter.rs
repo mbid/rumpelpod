@@ -7,7 +7,7 @@ use anyhow::{bail, Context, Result};
 use crate::cli::EnterCommand;
 use crate::config::{RemoteDocker, SandboxConfig};
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, SandboxName};
+use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, LifecycleCommands, SandboxName};
 use crate::git::{get_current_branch, get_repo_root};
 use crate::image;
 
@@ -61,6 +61,14 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         env.insert(key.clone(), resolved_value);
     }
 
+    let lifecycle = LifecycleCommands {
+        on_create_command: config.on_create_command,
+        post_create_command: config.post_create_command,
+        post_start_command: config.post_start_command,
+        post_attach_command: config.post_attach_command,
+        wait_for: config.wait_for,
+    };
+
     client.launch_sandbox(
         SandboxName(sandbox_name.to_string()),
         image,
@@ -72,6 +80,7 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         host_branch,
         remote,
         env,
+        lifecycle,
     )
 }
 

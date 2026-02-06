@@ -61,6 +61,13 @@ Shows sandbox name, status (running/stopped), and creation time.
 ")]
     List,
 
+    /// Stop a running sandbox
+    #[command(long_about = "Stop a sandbox container without removing it.
+
+The container is stopped but preserved. Use 'sandbox enter' to restart it.
+")]
+    Stop(StopCommand),
+
     /// Delete a sandbox
     #[command(long_about = "Delete a sandbox and its associated container.
 
@@ -131,6 +138,13 @@ pub struct EnterCommand {
     /// Command to run inside the sandbox (default: interactive shell)
     #[arg(last = true, value_name = "COMMAND")]
     pub command: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct StopCommand {
+    /// Name of the sandbox to stop
+    #[arg(help = "Name of the sandbox to stop")]
+    pub name: String,
 }
 
 #[derive(Args)]

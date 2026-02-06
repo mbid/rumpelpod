@@ -9,7 +9,7 @@
 //! 1. `.sandbox.toml` in the repository root
 //! 2. `devcontainer.json` (in `.devcontainer/` or root)
 
-use crate::devcontainer::DevContainer;
+use crate::devcontainer::{DevContainer, LifecycleCommand, WaitFor};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
@@ -400,6 +400,13 @@ pub struct SandboxConfig {
     /// Remote Docker host specification (e.g., "user@host:port").
     /// If not set, uses local Docker.
     pub host: Option<String>,
+
+    // Lifecycle commands from devcontainer.json
+    pub on_create_command: Option<LifecycleCommand>,
+    pub post_create_command: Option<LifecycleCommand>,
+    pub post_start_command: Option<LifecycleCommand>,
+    pub post_attach_command: Option<LifecycleCommand>,
+    pub wait_for: Option<WaitFor>,
 }
 
 impl SandboxConfig {
@@ -559,6 +566,19 @@ impl SandboxConfig {
             container_env,
             agent: toml_config.agent,
             host: toml_config.host,
+            on_create_command: devcontainer
+                .as_ref()
+                .and_then(|dc| dc.on_create_command.clone()),
+            post_create_command: devcontainer
+                .as_ref()
+                .and_then(|dc| dc.post_create_command.clone()),
+            post_start_command: devcontainer
+                .as_ref()
+                .and_then(|dc| dc.post_start_command.clone()),
+            post_attach_command: devcontainer
+                .as_ref()
+                .and_then(|dc| dc.post_attach_command.clone()),
+            wait_for: devcontainer.as_ref().and_then(|dc| dc.wait_for.clone()),
         })
     }
 }

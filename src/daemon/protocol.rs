@@ -15,6 +15,7 @@ use url::Url;
 
 use crate::async_runtime::block_on;
 use crate::config::{Network, RemoteDocker, Runtime};
+use crate::devcontainer::{LifecycleCommand, WaitFor};
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +64,22 @@ pub struct SandboxInfo {
     pub repo_state: Option<String>,
 }
 
+/// Lifecycle commands extracted from devcontainer.json, sent with the
+/// launch request so the daemon can run them at the right points.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LifecycleCommands {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_create_command: Option<LifecycleCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_create_command: Option<LifecycleCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_start_command: Option<LifecycleCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_attach_command: Option<LifecycleCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_for: Option<WaitFor>,
+}
+
 /// Request body for launch_sandbox endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct LaunchSandboxRequest {
@@ -89,6 +106,9 @@ struct LaunchSandboxRequest {
     /// Environment variables to set in the container.
     #[serde(default)]
     env: std::collections::HashMap<String, String>,
+    /// Lifecycle commands from devcontainer.json.
+    #[serde(default)]
+    lifecycle: LifecycleCommands,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -127,6 +147,9 @@ struct RecreateSandboxRequest {
     /// Environment variables to set in the container.
     #[serde(default)]
     env: std::collections::HashMap<String, String>,
+    /// Lifecycle commands from devcontainer.json.
+    #[serde(default)]
+    lifecycle: LifecycleCommands,
 }
 
 /// Response body for recreate_sandbox endpoint.
@@ -137,6 +160,19 @@ struct RecreateSandboxResponse {
     user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
     docker_socket: PathBuf,
+}
+
+/// Request body for stop_sandbox endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct StopSandboxRequest {
+    sandbox_name: SandboxName,
+    repo_path: PathBuf,
+}
+
+/// Response body for stop_sandbox endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct StopSandboxResponse {
+    stopped: bool,
 }
 
 /// Request body for delete_sandbox endpoint.
@@ -234,6 +270,7 @@ pub trait Daemon: Send + Sync + 'static {
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
+        lifecycle: LifecycleCommands,
     ) -> Result<LaunchResult>;
 
     // POST /sandbox/recreate
@@ -250,7 +287,12 @@ pub trait Daemon: Send + Sync + 'static {
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
+        lifecycle: LifecycleCommands,
     ) -> Result<LaunchResult>;
+
+    // POST /sandbox/stop
+    // Stops a sandbox container without removing it.
+    fn stop_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()>;
 
     // DELETE /sandbox
     // Stops and removes a sandbox container.
@@ -330,6 +372,7 @@ impl Daemon for DaemonClient {
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
+        lifecycle: LifecycleCommands,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -343,6 +386,7 @@ impl Daemon for DaemonClient {
             host_branch,
             remote,
             env,
+            lifecycle,
         };
 
         let response = self
@@ -381,6 +425,7 @@ impl Daemon for DaemonClient {
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
+        lifecycle: LifecycleCommands,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox/recreate")?;
         let request = RecreateSandboxRequest {
@@ -394,6 +439,7 @@ impl Daemon for DaemonClient {
             host_branch,
             remote,
             env,
+            lifecycle,
         };
 
         let response = self
@@ -412,6 +458,30 @@ impl Daemon for DaemonClient {
                 user: body.user,
                 docker_socket: body.docker_socket,
             })
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
+
+    fn stop_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
+        let url = self.url.join("/sandbox/stop")?;
+        let request = StopSandboxRequest {
+            sandbox_name,
+            repo_path,
+        };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
@@ -582,6 +652,7 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.host_branch,
             request.remote,
             request.env,
+            request.lifecycle,
         )
     });
 
@@ -617,6 +688,7 @@ async fn recreate_sandbox_handler<D: Daemon>(
             request.host_branch,
             request.remote,
             request.env,
+            request.lifecycle,
         )
     });
 
@@ -626,6 +698,24 @@ async fn recreate_sandbox_handler<D: Daemon>(
             user: res.user,
             docker_socket: res.docker_socket,
         })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{:#}", e),
+            }),
+        )),
+    }
+}
+
+/// Handler for POST /sandbox/stop endpoint.
+async fn stop_sandbox_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<StopSandboxRequest>,
+) -> Result<Json<StopSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.stop_sandbox(request.sandbox_name, request.repo_path));
+
+    match result {
+        Ok(()) => Ok(Json(StopSandboxResponse { stopped: true })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -769,6 +859,7 @@ where
     let app = Router::new()
         .route("/sandbox", put(launch_sandbox_handler::<D>))
         .route("/sandbox/recreate", post(recreate_sandbox_handler::<D>))
+        .route("/sandbox/stop", post(stop_sandbox_handler::<D>))
         .route("/sandbox", delete(delete_sandbox_handler::<D>))
         .route("/sandbox", get(list_sandboxes_handler::<D>))
         .route("/conversation", post(save_conversation_handler::<D>))
@@ -806,6 +897,7 @@ mod tests {
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
+            _lifecycle: LifecycleCommands,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -827,12 +919,17 @@ mod tests {
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
+            _lifecycle: LifecycleCommands,
         ) -> Result<LaunchResult> {
             Ok(LaunchResult {
                 container_id: ContainerId(format!("recreated:{}:{}", sandbox_name.0, image.0)),
                 user: user.unwrap_or_else(|| "mockuser".to_string()),
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
+        }
+
+        fn stop_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
+            Ok(())
         }
 
         fn delete_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
@@ -935,6 +1032,7 @@ mod tests {
             Some("main".to_string()),
             None, // No remote Docker
             std::collections::HashMap::new(),
+            LifecycleCommands::default(),
         );
 
         let launch_result = result.unwrap();
@@ -968,6 +1066,7 @@ mod tests {
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
+            _lifecycle: LifecycleCommands,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
@@ -984,7 +1083,12 @@ mod tests {
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
+            _lifecycle: LifecycleCommands,
         ) -> Result<LaunchResult> {
+            unimplemented!("not needed for conversation tests")
+        }
+
+        fn stop_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
             unimplemented!("not needed for conversation tests")
         }
 

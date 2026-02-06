@@ -3,9 +3,6 @@
 //! Tests verify the execution semantics of lifecycle commands as specified in
 //! the Dev Container spec: ordering, frequency, command formats, failure
 //! propagation, and the `waitFor` setting.
-//!
-//! All tests are `#[should_panic]` because lifecycle commands are not yet
-//! implemented.
 
 use indoc::formatdoc;
 use sandbox::CommandExt;
@@ -59,7 +56,6 @@ fn write_minimal_sandbox_toml(repo: &TestRepo) {
 /// onCreateCommand should run only on first container creation — not on
 /// subsequent enters that reuse the same container.
 #[test]
-#[should_panic]
 fn on_create_command_runs_once() {
     let repo = TestRepo::new();
 
@@ -106,7 +102,6 @@ fn on_create_command_runs_once() {
 /// postCreateCommand must run after onCreateCommand — verify via sequence
 /// numbers written to files.
 #[test]
-#[should_panic]
 fn post_create_command_runs_after_on_create() {
     let repo = TestRepo::new();
 
@@ -137,7 +132,6 @@ fn post_create_command_runs_after_on_create() {
 /// postStartCommand should execute every time the container starts — including
 /// after a stop/start cycle.
 #[test]
-#[should_panic]
 fn post_start_command_runs_each_start() {
     let repo = TestRepo::new();
 
@@ -191,7 +185,6 @@ fn post_start_command_runs_each_start() {
 
 /// postAttachCommand should run on every sandbox enter.
 #[test]
-#[should_panic]
 fn post_attach_command_runs_each_enter() {
     let repo = TestRepo::new();
 
@@ -239,7 +232,6 @@ fn post_attach_command_runs_each_enter() {
 
 /// A lifecycle command given as a plain string should be executed via a shell.
 #[test]
-#[should_panic]
 fn lifecycle_command_string_format() {
     let repo = TestRepo::new();
 
@@ -263,7 +255,6 @@ fn lifecycle_command_string_format() {
 
 /// A lifecycle command given as an array should be executed directly (no shell).
 #[test]
-#[should_panic]
 fn lifecycle_command_array_format() {
     let repo = TestRepo::new();
 
@@ -287,7 +278,6 @@ fn lifecycle_command_array_format() {
 /// A lifecycle command given as an object should run each value in parallel.
 /// Both commands must have completed by the time we inspect results.
 #[test]
-#[should_panic]
 fn lifecycle_command_object_parallel() {
     let repo = TestRepo::new();
 
@@ -325,7 +315,6 @@ fn lifecycle_command_object_parallel() {
 
 /// If onCreateCommand fails (non-zero exit), postCreateCommand should NOT run.
 #[test]
-#[should_panic(expected = "lifecycle command failure propagation not yet implemented")]
 fn lifecycle_command_failure_stops_chain() {
     let repo = TestRepo::new();
 
@@ -338,12 +327,13 @@ fn lifecycle_command_failure_stops_chain() {
 
     let daemon = TestDaemon::start();
 
-    // The enter itself may or may not fail depending on implementation, so we
-    // don't assert on its exit code — only on the side effect.
+    // The first enter should fail because onCreateCommand exits 1.
     let _ = sandbox_command(&repo, &daemon)
         .args(["enter", "lc-fail", "--", "echo", "ok"])
         .output();
 
+    // Second enter should succeed (failed lifecycle commands are marked as
+    // "ran" and not retried), and postCreateCommand should never have executed.
     let stdout = sandbox_command(&repo, &daemon)
         .args([
             "enter",
@@ -362,16 +352,11 @@ fn lifecycle_command_failure_stops_chain() {
         "missing",
         "postCreateCommand must not run when onCreateCommand fails"
     );
-
-    // Lifecycle commands are not yet implemented, so the above checks pass
-    // vacuously (no commands run at all). Panic to signal this is still pending.
-    panic!("lifecycle command failure propagation not yet implemented");
 }
 
 /// The `waitFor` property should block `sandbox enter` until the specified
 /// lifecycle command has completed.
 #[test]
-#[should_panic]
 fn wait_for_setting() {
     let repo = TestRepo::new();
 

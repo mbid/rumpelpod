@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use crate::cli::RecreateCommand;
 use crate::config::{RemoteDocker, SandboxConfig};
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, SandboxName};
+use crate::daemon::protocol::{Daemon, DaemonClient, LifecycleCommands, SandboxName};
 use crate::git::{get_current_branch, get_repo_root};
 use crate::image;
 
@@ -47,6 +47,14 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         env.insert(key.clone(), resolved_value);
     }
 
+    let lifecycle = LifecycleCommands {
+        on_create_command: config.on_create_command,
+        post_create_command: config.post_create_command,
+        post_start_command: config.post_start_command,
+        post_attach_command: config.post_attach_command,
+        wait_for: config.wait_for,
+    };
+
     client.recreate_sandbox(
         SandboxName(cmd.name.clone()),
         image,
@@ -58,6 +66,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         host_branch,
         remote,
         env,
+        lifecycle,
     )?;
 
     println!("Sandbox '{}' recreated successfully.", cmd.name);

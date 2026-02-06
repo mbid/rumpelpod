@@ -19,6 +19,7 @@ mod list;
 mod llm;
 mod recreate;
 mod review;
+mod stop;
 mod systemd;
 
 use anyhow::Result;
@@ -45,6 +46,9 @@ pub fn run() -> Result<()> {
         }
         Command::List => {
             list::list()?;
+        }
+        Command::Stop(ref cmd) => {
+            stop::stop(cmd)?;
         }
         Command::Delete(ref cmd) => {
             delete::delete(cmd)?;

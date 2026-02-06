@@ -111,6 +111,8 @@ const SCHEMA_SQL: &str = indoc! {"
         name TEXT NOT NULL,
         host TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'initializing',
+        on_create_ran INTEGER NOT NULL DEFAULT 0,
+        post_create_ran INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(repo_path, name)
@@ -394,6 +396,50 @@ pub fn delete_sandbox(conn: &Connection, repo_path: &Path, name: &str) -> Result
         )
         .context("Failed to delete sandbox")?;
     Ok(count > 0)
+}
+
+/// Check whether the on_create lifecycle command has already run for this sandbox.
+pub fn has_on_create_run(conn: &Connection, id: SandboxId) -> Result<bool> {
+    let ran: bool = conn
+        .query_row(
+            "SELECT on_create_ran FROM sandboxes WHERE id = ?",
+            rusqlite::params![i64::from(id)],
+            |row| row.get(0),
+        )
+        .context("Failed to query on_create_ran")?;
+    Ok(ran)
+}
+
+/// Check whether the post_create lifecycle command has already run for this sandbox.
+pub fn has_post_create_run(conn: &Connection, id: SandboxId) -> Result<bool> {
+    let ran: bool = conn
+        .query_row(
+            "SELECT post_create_ran FROM sandboxes WHERE id = ?",
+            rusqlite::params![i64::from(id)],
+            |row| row.get(0),
+        )
+        .context("Failed to query post_create_ran")?;
+    Ok(ran)
+}
+
+/// Mark the on_create lifecycle command as having been executed for this sandbox.
+pub fn mark_on_create_ran(conn: &Connection, id: SandboxId) -> Result<()> {
+    conn.execute(
+        "UPDATE sandboxes SET on_create_ran = 1 WHERE id = ?",
+        rusqlite::params![i64::from(id)],
+    )
+    .context("Failed to mark on_create_ran")?;
+    Ok(())
+}
+
+/// Mark the post_create lifecycle command as having been executed for this sandbox.
+pub fn mark_post_create_ran(conn: &Connection, id: SandboxId) -> Result<()> {
+    conn.execute(
+        "UPDATE sandboxes SET post_create_ran = 1 WHERE id = ?",
+        rusqlite::params![i64::from(id)],
+    )
+    .context("Failed to mark post_create_ran")?;
+    Ok(())
 }
 
 // --- Conversation functions ---

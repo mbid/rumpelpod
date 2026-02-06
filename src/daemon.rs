@@ -26,7 +26,7 @@ use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
 use protocol::{
     ContainerId, ConversationSummary, Daemon, GetConversationResponse, Image, LaunchResult,
-    SandboxInfo, SandboxName, SandboxStatus,
+    LifecycleCommands, SandboxInfo, SandboxName, SandboxStatus,
 };
 use ssh_forward::SshForwardManager;
 
@@ -764,6 +764,136 @@ fn get_container_status_via_socket(
     Ok(status_map)
 }
 
+/// Execute a single lifecycle command inside a container.
+///
+/// Supports the three devcontainer command formats:
+/// - String: run via shell (`sh -c "command"`)
+/// - Array: run directly without shell
+/// - Object: run each named command in parallel, wait for all to finish
+fn run_lifecycle_command(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    workdir: &Path,
+    command: &crate::devcontainer::LifecycleCommand,
+) -> Result<()> {
+    use crate::devcontainer::{LifecycleCommand, StringOrArray};
+
+    let workdir_str = workdir.to_string_lossy();
+
+    match command {
+        LifecycleCommand::String(s) => {
+            exec_command(
+                docker,
+                container_id,
+                Some(user),
+                Some(&workdir_str),
+                None,
+                vec!["sh", "-c", s],
+            )?;
+        }
+        LifecycleCommand::Array(args) => {
+            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            exec_command(
+                docker,
+                container_id,
+                Some(user),
+                Some(&workdir_str),
+                None,
+                args_ref,
+            )?;
+        }
+        LifecycleCommand::Object(map) => {
+            // Run all named commands in parallel using threads (we're already
+            // in a synchronous context). Collect results and fail if any fail.
+            let handles: Vec<_> = map
+                .iter()
+                .map(|(name, cmd_value)| {
+                    let cmd_args: Vec<String> = match cmd_value {
+                        StringOrArray::String(s) => {
+                            vec!["sh".into(), "-c".into(), s.clone()]
+                        }
+                        StringOrArray::Array(a) => a.clone(),
+                    };
+                    let docker = docker.clone();
+                    let cid = container_id.to_string();
+                    let u = user.to_string();
+                    let wd = workdir_str.to_string();
+                    let task_name = name.clone();
+
+                    std::thread::spawn(move || {
+                        let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+                        exec_command(&docker, &cid, Some(&u), Some(&wd), None, args_ref)
+                            .with_context(|| format!("lifecycle command '{}' failed", task_name))
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("lifecycle command thread panicked"))?;
+                result?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run onCreateCommand and postCreateCommand if they haven't been executed yet.
+///
+/// These commands run at most once per sandbox lifetime, tracked via the
+/// database. If onCreateCommand fails, postCreateCommand is skipped and both
+/// are marked as "ran" so they don't retry on subsequent enters.
+fn run_once_lifecycle_commands(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    workdir: &Path,
+    lifecycle: &LifecycleCommands,
+    sandbox_id: db::SandboxId,
+    db_mutex: &Mutex<rusqlite::Connection>,
+) -> Result<()> {
+    let on_create_ran = {
+        let conn = db_mutex.lock().unwrap();
+        db::has_on_create_run(&conn, sandbox_id)?
+    };
+
+    if !on_create_ran {
+        if let Some(cmd) = &lifecycle.on_create_command {
+            if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+                // Mark both as ran to prevent retries and skip postCreate
+                let conn = db_mutex.lock().unwrap();
+                db::mark_on_create_ran(&conn, sandbox_id)?;
+                db::mark_post_create_ran(&conn, sandbox_id)?;
+                return Err(e.context("onCreateCommand failed"));
+            }
+        }
+        let conn = db_mutex.lock().unwrap();
+        db::mark_on_create_ran(&conn, sandbox_id)?;
+    }
+
+    let post_create_ran = {
+        let conn = db_mutex.lock().unwrap();
+        db::has_post_create_run(&conn, sandbox_id)?
+    };
+
+    if !post_create_ran {
+        if let Some(cmd) = &lifecycle.post_create_command {
+            if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+                let conn = db_mutex.lock().unwrap();
+                db::mark_post_create_ran(&conn, sandbox_id)?;
+                return Err(e.context("postCreateCommand failed"));
+            }
+        }
+        let conn = db_mutex.lock().unwrap();
+        db::mark_post_create_ran(&conn, sandbox_id)?;
+    }
+
+    Ok(())
+}
+
 impl Daemon for DaemonServer {
     fn launch_sandbox(
         &self,
@@ -777,6 +907,7 @@ impl Daemon for DaemonServer {
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
+        lifecycle: LifecycleCommands,
     ) -> Result<LaunchResult> {
         // Validate network configuration
         if network == Network::UnsafeHost && runtime != Runtime::Runc {
@@ -890,22 +1021,19 @@ impl Daemon for DaemonServer {
                 );
             }
 
-            if state.status != "running" {
+            let was_stopped = state.status != "running";
+            if was_stopped {
                 // Container exists but is stopped - restart it
                 start_container(&docker, &name)?;
             }
 
-            // Ensure sandbox record exists in database (for re-entry or migration)
+            // Ensure sandbox record exists in database
             {
                 let conn = self.db.lock().unwrap();
                 let sandbox_id = match db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
                     Some(sandbox) => sandbox.id,
-                    None => {
-                        // Container exists but no DB record - create one (migration case)
-                        db::create_sandbox(&conn, &repo_path, &sandbox_name.0, &host_spec)?
-                    }
+                    None => db::create_sandbox(&conn, &repo_path, &sandbox_name.0, &host_spec)?,
                 };
-                // Mark as ready since the container exists
                 db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Ready)?;
             }
 
@@ -934,6 +1062,18 @@ impl Daemon for DaemonServer {
                 &user,
                 None,
             )?;
+
+            // Container was restarted from stopped state — run postStartCommand
+            if was_stopped {
+                if let Some(cmd) = &lifecycle.post_start_command {
+                    run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+                }
+            }
+
+            // postAttachCommand runs on every enter
+            if let Some(cmd) = &lifecycle.post_attach_command {
+                run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+            }
 
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
@@ -994,6 +1134,29 @@ impl Daemon for DaemonServer {
         )
         .map_err(mark_error)?;
 
+        // Run lifecycle commands for new container:
+        // onCreateCommand -> postCreateCommand -> postStartCommand -> postAttachCommand
+        run_once_lifecycle_commands(
+            &docker,
+            &container_id.0,
+            &user,
+            &container_repo_path,
+            &lifecycle,
+            sandbox_id,
+            &self.db,
+        )
+        .map_err(mark_error)?;
+
+        if let Some(cmd) = &lifecycle.post_start_command {
+            run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
+                .map_err(mark_error)?;
+        }
+
+        if let Some(cmd) = &lifecycle.post_attach_command {
+            run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
+                .map_err(mark_error)?;
+        }
+
         // Mark sandbox as ready
         {
             let conn = self.db.lock().unwrap();
@@ -1019,6 +1182,7 @@ impl Daemon for DaemonServer {
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
+        lifecycle: LifecycleCommands,
     ) -> Result<LaunchResult> {
         let name = docker_name(&repo_path, &sandbox_name);
 
@@ -1092,6 +1256,7 @@ impl Daemon for DaemonServer {
             host_branch,
             remote,
             env,
+            lifecycle,
         )?;
 
         // 4. Apply patch if we have one
@@ -1131,6 +1296,42 @@ impl Daemon for DaemonServer {
         }
 
         Ok(launch_result)
+    }
+
+    fn stop_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
+        let name = docker_name(&repo_path, &sandbox_name);
+
+        // Determine Docker socket from DB record
+        let docker_socket = {
+            let conn = self.db.lock().unwrap();
+            match db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
+                Some(record) => {
+                    if record.host == db::LOCAL_HOST {
+                        default_docker_socket()
+                    } else {
+                        let remote = RemoteDocker::parse(&record.host)?;
+                        self.ssh_forward.get_socket(&remote)?
+                    }
+                }
+                None => default_docker_socket(),
+            }
+        };
+
+        let docker = Docker::connect_with_socket(
+            docker_socket.to_string_lossy().as_ref(),
+            120,
+            bollard::API_DEFAULT_VERSION,
+        )
+        .context("connecting to Docker daemon")?;
+
+        let stop_options = bollard::query_parameters::StopContainerOptions {
+            t: Some(0),
+            ..Default::default()
+        };
+        block_on(docker.stop_container(&name, Some(stop_options)))
+            .with_context(|| format!("stopping container '{}'", name))?;
+
+        Ok(())
     }
 
     fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
