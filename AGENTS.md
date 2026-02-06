@@ -10,5 +10,4 @@ This is a rust project implementing a sandboxed LLM agent.
 - If you write code, you should commit your changes.
   DON'T STOP BEFORE YOU'RE DONE!
 - Run ./pipeline to ensure your commit doesn't break anything.
-- Always run tests and ./pipeline with a timeout, e.g. 90 seconds, to prevent getting stuck.
 - After committing, fetch and rebase on host/master to stay up to date.
