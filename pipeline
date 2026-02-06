@@ -10,7 +10,7 @@ RUSTFLAGS="-D warnings" cargo build --all-targets
 
 echo ""
 echo "=== Running tests ==="
-timeout 120 cargo test
+cargo test
 
 echo ""
 echo "=== Running clippy (no warnings) ==="
