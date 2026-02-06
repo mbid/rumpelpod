@@ -425,6 +425,17 @@ impl SandboxConfig {
     /// 2. `devcontainer.json` values (from `.devcontainer/` or root)
     ///
     /// At least one config source must provide `image` and `repo_path`.
+    /// Compute the default workspaceFolder from the repo root path.
+    /// Per the devcontainer spec, when not specified the default is
+    /// `/workspaces/${localWorkspaceFolderBasename}`.
+    fn default_workspace_folder(repo_root: &Path) -> PathBuf {
+        let basename = repo_root
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "workspace".to_string());
+        PathBuf::from(format!("/workspaces/{}", basename))
+    }
+
     pub fn load(repo_root: &Path) -> Result<Self> {
         // Load devcontainer.json if present (lowest precedence)
         let devcontainer_info = DevContainer::find_and_load(repo_root)?;
@@ -519,12 +530,15 @@ impl SandboxConfig {
             None
         };
 
-        let repo_path = toml_config.repo_path.or_else(|| {
-            devcontainer
-                .as_ref()
-                .and_then(|dc| dc.workspace_folder.as_ref())
-                .map(PathBuf::from)
-        });
+        let repo_path = toml_config
+            .repo_path
+            .or_else(|| {
+                devcontainer
+                    .as_ref()
+                    .and_then(|dc| dc.workspace_folder.as_ref())
+                    .map(PathBuf::from)
+            })
+            .unwrap_or_else(|| Self::default_workspace_folder(repo_root));
 
         let user = toml_config.user.or_else(|| {
             devcontainer
@@ -584,13 +598,6 @@ impl SandboxConfig {
                 Please set image in .sandbox.toml or build.dockerfile/dockerfile in devcontainer.json.
             "});
         }
-
-        let repo_path = repo_path.ok_or_else(|| {
-            anyhow::anyhow!(formatdoc! {"
-                No repo path specified.
-                Please set 'repo-path' in .sandbox.toml or 'workspaceFolder' in devcontainer.json.
-            "})
-        })?;
 
         // Validate agent model options
         let model_options_count = toml_config.agent.model.is_some() as usize

@@ -22,7 +22,7 @@ use tokio::net::UnixListener;
 use crate::async_runtime::block_on;
 use crate::config::{is_deterministic_test_mode, Network, RemoteDocker, Runtime};
 use crate::devcontainer;
-use crate::docker_exec::exec_command;
+use crate::docker_exec::{exec_check, exec_command};
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
 use protocol::{
@@ -319,6 +319,83 @@ fn check_git_directory_ownership(
             container_repo_path.display()
         );
     }
+
+    Ok(())
+}
+
+/// Ensure a git repository exists at `container_repo_path` inside the container.
+///
+/// If the directory doesn't contain a `.git`, we clone from the git-http bridge.
+/// This handles the devcontainer case where the image doesn't include the repo
+/// (unlike .sandbox.toml images which COPY the repo during the build).
+fn ensure_repo_initialized(
+    docker: &Docker,
+    container_id: &str,
+    git_http_url: &str,
+    token: &str,
+    container_repo_path: &Path,
+    user: &str,
+) -> Result<()> {
+    let git_dir = container_repo_path.join(".git");
+    let git_dir_str = git_dir.to_string_lossy().to_string();
+
+    // Check if .git already exists
+    let has_git = exec_check(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        vec!["test", "-d", &git_dir_str],
+    )?;
+    if has_git {
+        return Ok(());
+    }
+
+    // Ensure parent directories exist
+    let parent = container_repo_path.parent().unwrap_or(container_repo_path);
+    let parent_str = parent.to_string_lossy().to_string();
+
+    // Create the parent as root (it may be under /workspaces or another root-owned path),
+    // then chown the target directory to the sandbox user.
+    exec_command(
+        docker,
+        container_id,
+        Some("root"),
+        None,
+        None,
+        vec!["mkdir", "-p", &parent_str],
+    )
+    .context("creating parent directory for workspaceFolder")?;
+
+    exec_command(
+        docker,
+        container_id,
+        Some("root"),
+        None,
+        None,
+        vec!["chown", user, &parent_str],
+    )
+    .context("chowning parent directory for workspaceFolder")?;
+
+    // Clone from the git-http bridge with auth header
+    let repo_path_str = container_repo_path.to_string_lossy().to_string();
+    let auth_header = format!("Authorization: Bearer {}", token);
+    exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec![
+            "git",
+            "clone",
+            "--config",
+            &format!("http.extraHeader={}", auth_header),
+            git_http_url,
+            &repo_path_str,
+        ],
+    )
+    .context("cloning repository into workspaceFolder")?;
 
     Ok(())
 }
@@ -1093,6 +1170,16 @@ impl Daemon for DaemonServer {
 
             let url = git_http_server::git_http_url(&server_ip, server_port);
 
+            // Clone repo if not already present (e.g. devcontainer without COPY)
+            ensure_repo_initialized(
+                &docker,
+                &state.id,
+                &url,
+                &token,
+                &container_repo_path,
+                &user,
+            )?;
+
             // On re-entry, don't pass host_branch - we don't want to change
             // the upstream of an existing branch.
             setup_git_remotes(
@@ -1176,6 +1263,17 @@ impl Daemon for DaemonServer {
         }
 
         let url = git_http_server::git_http_url(&server_ip, server_port);
+
+        // Clone repo if not already present (e.g. devcontainer without COPY)
+        ensure_repo_initialized(
+            &docker,
+            &container_id.0,
+            &url,
+            &token,
+            &container_repo_path,
+            &user,
+        )
+        .map_err(mark_error)?;
 
         setup_git_remotes(
             &docker,
