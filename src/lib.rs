@@ -17,6 +17,7 @@ mod git_http_server;
 mod image;
 mod list;
 mod llm;
+mod ports;
 mod recreate;
 mod review;
 mod stop;
@@ -52,6 +53,9 @@ pub fn run() -> Result<()> {
         }
         Command::Delete(ref cmd) => {
             delete::delete(cmd)?;
+        }
+        Command::Ports(ref cmd) => {
+            ports::ports(cmd)?;
         }
         Command::Recreate(ref cmd) => {
             recreate::recreate(cmd)?;

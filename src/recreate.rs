@@ -69,6 +69,8 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         lifecycle,
         config.mounts,
         config.runtime_options,
+        config.forward_ports,
+        config.ports_attributes,
     )?;
 
     println!("Sandbox '{}' recreated successfully.", cmd.name);

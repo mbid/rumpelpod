@@ -13,6 +13,7 @@ use bollard::query_parameters::{
 };
 use bollard::secret::{
     ContainerCreateBody, DeviceMapping, HostConfig, Mount as BollardMount, MountTypeEnum,
+    PortBinding,
 };
 use bollard::Docker;
 use indoc::{formatdoc, indoc};
@@ -25,13 +26,13 @@ use crate::async_runtime::block_on;
 use crate::config::{
     is_deterministic_test_mode, ContainerRuntimeOptions, Network, RemoteDocker, Runtime,
 };
-use crate::devcontainer;
+use crate::devcontainer::{self, Port, PortAttributes};
 use crate::docker_exec::{exec_check, exec_command};
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
 use protocol::{
     ContainerId, ConversationSummary, Daemon, GetConversationResponse, Image, LaunchResult,
-    LifecycleCommands, SandboxInfo, SandboxName, SandboxStatus,
+    LifecycleCommands, PortInfo, SandboxInfo, SandboxName, SandboxStatus,
 };
 use ssh_forward::SshForwardManager;
 
@@ -682,6 +683,7 @@ fn create_container(
     env: &std::collections::HashMap<String, String>,
     mounts: &[devcontainer::MountObject],
     runtime_options: &ContainerRuntimeOptions,
+    publish_ports: &HashMap<u16, u16>,
 ) -> Result<ContainerId> {
     let network_mode = match network_config {
         Network::UnsafeHost => "host",
@@ -746,6 +748,18 @@ fn create_container(
         .as_ref()
         .map(|devs| devs.iter().map(|d| parse_device_mapping(d)).collect());
 
+    let port_bindings: HashMap<String, Option<Vec<PortBinding>>> = publish_ports
+        .iter()
+        .map(|(&container_port, &host_port)| {
+            let key = format!("{}/tcp", container_port);
+            let binding = PortBinding {
+                host_ip: Some("127.0.0.1".to_string()),
+                host_port: Some(host_port.to_string()),
+            };
+            (key, Some(vec![binding]))
+        })
+        .collect();
+
     let host_config = HostConfig {
         runtime: Some(docker_runtime_flag(runtime).to_string()),
         network_mode: Some(network_mode.to_string()),
@@ -755,7 +769,23 @@ fn create_container(
         security_opt: runtime_options.security_opt.clone(),
         devices,
         mounts: bollard_mounts,
+        port_bindings: if port_bindings.is_empty() {
+            None
+        } else {
+            Some(port_bindings)
+        },
         ..Default::default()
+    };
+
+    let exposed_ports: Option<Vec<String>> = if publish_ports.is_empty() {
+        None
+    } else {
+        Some(
+            publish_ports
+                .keys()
+                .map(|port| format!("{}/tcp", port))
+                .collect(),
+        )
     };
 
     let config = ContainerCreateBody {
@@ -765,6 +795,7 @@ fn create_container(
         env: env_vec,
         cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
         host_config: Some(host_config),
+        exposed_ports,
         ..Default::default()
     };
 
@@ -781,6 +812,204 @@ fn create_container(
     block_on(docker.start_container(&response.id, None)).context("starting container")?;
 
     Ok(ContainerId(response.id))
+}
+
+/// Parse a Port spec into the numeric container port.
+fn resolve_port_number(port: &Port) -> Option<u16> {
+    match port {
+        Port::Number(n) => Some(*n),
+        Port::String(s) => {
+            if let Some((_host, container)) = s.split_once(':') {
+                container.parse().ok()
+            } else {
+                s.parse().ok()
+            }
+        }
+    }
+}
+
+/// Decide which host port to request for each forwarded container port.
+///
+/// For local Docker, request the container port number as the host port when
+/// available and not allocated by another sandbox. When taken, let Docker
+/// auto-assign (port 0). For remote Docker, always auto-assign since the SSH
+/// forward manager handles local port allocation independently.
+fn compute_publish_ports(
+    conn: &Connection,
+    forward_ports: &[Port],
+    is_remote: bool,
+) -> Result<HashMap<u16, u16>> {
+    let all_allocated = db::get_all_allocated_local_ports(conn)?;
+    let allocated_set: std::collections::HashSet<u16> = all_allocated.into_iter().collect();
+
+    let mut result = HashMap::new();
+    for port_spec in forward_ports {
+        let container_port = match resolve_port_number(port_spec) {
+            Some(p) => p,
+            None => continue,
+        };
+        let host_port = if is_remote {
+            0
+        } else if !allocated_set.contains(&container_port) && is_port_available(container_port) {
+            container_port
+        } else {
+            0
+        };
+        result.insert(container_port, host_port);
+    }
+    Ok(result)
+}
+
+/// Read the host ports Docker assigned for published container ports.
+fn get_docker_published_ports(docker: &Docker, container_id: &str) -> Result<HashMap<u16, u16>> {
+    let inspect = block_on(docker.inspect_container(container_id, None))
+        .context("inspecting container for published ports")?;
+
+    let port_map = inspect
+        .network_settings
+        .and_then(|ns| ns.ports)
+        .unwrap_or_default();
+
+    let mut result = HashMap::new();
+    for (key, bindings) in &port_map {
+        let container_port: u16 = key
+            .split('/')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if container_port == 0 {
+            continue;
+        }
+        if let Some(bindings) = bindings {
+            for binding in bindings {
+                if let Some(host_port_str) = &binding.host_port {
+                    if let Ok(host_port) = host_port_str.parse::<u16>() {
+                        result.insert(container_port, host_port);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Set up port forwarding for a sandbox.
+///
+/// Reads the host ports Docker assigned via `-p` bindings, records them in the
+/// database, and for remote sandboxes establishes SSH local forwards.
+#[allow(clippy::too_many_arguments)]
+fn setup_port_forwarding(
+    conn: &Connection,
+    ssh_forward: &SshForwardManager,
+    docker: &Docker,
+    container_id: &str,
+    sandbox_id: db::SandboxId,
+    forward_ports: &[Port],
+    ports_attributes: &std::collections::HashMap<String, PortAttributes>,
+    remote: Option<&RemoteDocker>,
+) -> Result<()> {
+    if forward_ports.is_empty() {
+        return Ok(());
+    }
+
+    let published = get_docker_published_ports(docker, container_id)?;
+
+    let existing = db::list_forwarded_ports(conn, sandbox_id)?;
+    let existing_map: std::collections::HashMap<u16, u16> = existing
+        .iter()
+        .map(|p| (p.container_port, p.local_port))
+        .collect();
+
+    let all_allocated = db::get_all_allocated_local_ports(conn)?;
+    let mut allocated_set: std::collections::HashSet<u16> = all_allocated.into_iter().collect();
+
+    for port_spec in forward_ports {
+        let container_port = match resolve_port_number(port_spec) {
+            Some(p) => p,
+            None => {
+                log::warn!("skipping invalid port spec: {:?}", port_spec);
+                continue;
+            }
+        };
+
+        let docker_host_port = match published.get(&container_port) {
+            Some(&p) => p,
+            None => {
+                log::warn!(
+                    "container port {} not found in Docker published ports, skipping",
+                    container_port
+                );
+                continue;
+            }
+        };
+
+        let label = ports_attributes
+            .get(&container_port.to_string())
+            .and_then(|a| a.label.as_deref())
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(&existing_local) = existing_map.get(&container_port) {
+            if let Some(r) = remote {
+                if !is_port_in_use(existing_local) {
+                    ssh_forward
+                        .add_local_forward(r, existing_local, "127.0.0.1", docker_host_port)
+                        .with_context(|| {
+                            format!(
+                                "re-establishing SSH forward {}->127.0.0.1:{}",
+                                existing_local, docker_host_port
+                            )
+                        })?;
+                }
+            }
+            continue;
+        }
+
+        let local_port = match remote {
+            Some(r) => {
+                let local = if !allocated_set.contains(&container_port)
+                    && is_port_available(container_port)
+                {
+                    container_port
+                } else {
+                    find_available_port(&allocated_set)?
+                };
+                ssh_forward
+                    .add_local_forward(r, local, "127.0.0.1", docker_host_port)
+                    .with_context(|| {
+                        format!("SSH forward {}->127.0.0.1:{}", local, docker_host_port)
+                    })?;
+                local
+            }
+            None => docker_host_port,
+        };
+
+        allocated_set.insert(local_port);
+        db::insert_forwarded_port(conn, sandbox_id, container_port, local_port, &label)?;
+    }
+
+    Ok(())
+}
+
+/// Check if a local port is available for binding.
+fn is_port_available(port: u16) -> bool {
+    std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
+}
+
+/// Check if a local port is already in use.
+fn is_port_in_use(port: u16) -> bool {
+    !is_port_available(port)
+}
+
+/// Find an available port, avoiding already allocated ports.
+fn find_available_port(allocated: &std::collections::HashSet<u16>) -> Result<u16> {
+    for port in 10000..65000u16 {
+        if !allocated.contains(&port) && is_port_available(port) {
+            return Ok(port);
+        }
+    }
+    anyhow::bail!("no available ports in range 10000-65000")
 }
 
 #[derive(Clone)]
@@ -1022,6 +1251,8 @@ impl Daemon for DaemonServer {
         lifecycle: LifecycleCommands,
         mounts: Vec<devcontainer::MountObject>,
         runtime_options: ContainerRuntimeOptions,
+        forward_ports: Vec<Port>,
+        ports_attributes: std::collections::HashMap<String, PortAttributes>,
     ) -> Result<LaunchResult> {
         // Validate network configuration
         if network == Network::UnsafeHost && runtime != Runtime::Runc {
@@ -1157,14 +1388,15 @@ impl Daemon for DaemonServer {
             }
 
             // Ensure sandbox record exists in database
-            {
+            let sandbox_id = {
                 let conn = self.db.lock().unwrap();
                 let sandbox_id = match db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
                     Some(sandbox) => sandbox.id,
                     None => db::create_sandbox(&conn, &repo_path, &sandbox_name.0, &host_spec)?,
                 };
                 db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Ready)?;
-            }
+                sandbox_id
+            };
 
             // Register sandbox with the git HTTP server (may already be registered, that's OK)
             let token = self
@@ -1214,6 +1446,21 @@ impl Daemon for DaemonServer {
                 run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
             }
 
+            // Set up port forwarding for existing container on re-entry
+            if !forward_ports.is_empty() {
+                let conn = self.db.lock().unwrap();
+                setup_port_forwarding(
+                    &conn,
+                    &self.ssh_forward,
+                    &docker,
+                    &state.id,
+                    sandbox_id,
+                    &forward_ports,
+                    &ports_attributes,
+                    remote.as_ref(),
+                )?;
+            }
+
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
@@ -1246,6 +1493,11 @@ impl Daemon for DaemonServer {
             e
         };
 
+        let publish_ports = {
+            let conn = self.db.lock().unwrap();
+            compute_publish_ports(&conn, &forward_ports, remote.is_some())?
+        };
+
         let container_id = create_container(
             &docker,
             &name,
@@ -1258,6 +1510,7 @@ impl Daemon for DaemonServer {
             &env,
             &mounts,
             &runtime_options,
+            &publish_ports,
         )
         .map_err(mark_error)?;
 
@@ -1320,10 +1573,27 @@ impl Daemon for DaemonServer {
                 .map_err(mark_error)?;
         }
 
-        // Mark sandbox as ready
+        // Mark sandbox as ready and set up port forwarding
         {
             let conn = self.db.lock().unwrap();
             db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Ready)?;
+
+            if !forward_ports.is_empty() {
+                setup_port_forwarding(
+                    &conn,
+                    &self.ssh_forward,
+                    &docker,
+                    &container_id.0,
+                    sandbox_id,
+                    &forward_ports,
+                    &ports_attributes,
+                    remote.as_ref(),
+                )
+                .map_err(|e| {
+                    error!("port forwarding setup failed: {}", e);
+                    e
+                })?;
+            }
         }
 
         Ok(LaunchResult {
@@ -1348,6 +1618,8 @@ impl Daemon for DaemonServer {
         lifecycle: LifecycleCommands,
         mounts: Vec<devcontainer::MountObject>,
         runtime_options: ContainerRuntimeOptions,
+        forward_ports: Vec<Port>,
+        ports_attributes: std::collections::HashMap<String, PortAttributes>,
     ) -> Result<LaunchResult> {
         let name = docker_name(&repo_path, &sandbox_name);
 
@@ -1424,6 +1696,8 @@ impl Daemon for DaemonServer {
             lifecycle,
             mounts,
             runtime_options,
+            forward_ports,
+            ports_attributes,
         )?;
 
         // 4. Apply patch if we have one
@@ -1660,6 +1934,22 @@ impl Daemon for DaemonServer {
         }
 
         Ok(sandboxes)
+    }
+
+    fn list_ports(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<Vec<PortInfo>> {
+        let conn = self.db.lock().unwrap();
+        let sandbox =
+            db::get_sandbox(&conn, &repo_path, &sandbox_name.0)?.context("sandbox not found")?;
+
+        let ports = db::list_forwarded_ports(&conn, sandbox.id)?;
+        Ok(ports
+            .into_iter()
+            .map(|p| PortInfo {
+                container_port: p.container_port,
+                local_port: p.local_port,
+                label: p.label,
+            })
+            .collect())
     }
 
     fn save_conversation(

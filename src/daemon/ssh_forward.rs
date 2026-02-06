@@ -597,6 +597,66 @@ impl SshForwardManager {
             .map(|s| s.remote_forwards.clone())
             .filter(|f| f.bridge_port.is_some())
     }
+
+    /// Add a local port forward (`-L`) through an existing SSH connection.
+    pub fn add_local_forward(
+        &self,
+        remote: &RemoteDocker,
+        local_port: u16,
+        remote_addr: &str,
+        remote_port: u16,
+    ) -> Result<()> {
+        let host = RemoteHost::from_remote_docker(remote);
+        let connections = self.connections.lock().unwrap();
+
+        let session = connections
+            .get(&host)
+            .context("No SSH connection for this remote host")?;
+
+        let forward_spec = format!("127.0.0.1:{}:{}:{}", local_port, remote_addr, remote_port);
+
+        debug!(
+            "Adding local forward via control socket: -L {}",
+            forward_spec
+        );
+
+        let mut cmd = Command::new("ssh");
+
+        if let Ok(config_file) = std::env::var(SSH_CONFIG_FILE_ENV) {
+            cmd.args(["-F", &config_file]);
+        }
+
+        cmd.args([
+            "-o",
+            &format!("ControlPath={}", session.control_socket.display()),
+        ]);
+        cmd.args(["-O", "forward"]);
+        cmd.args(["-L", &forward_spec]);
+        cmd.arg(&host.destination);
+
+        let output = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("Failed to execute ssh -O forward")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "Failed to add local forward -L {}: {}",
+                forward_spec,
+                stderr.trim()
+            );
+        }
+
+        info!(
+            "SSH local forward active: -L {} via {}",
+            forward_spec, host.destination
+        );
+
+        Ok(())
+    }
 }
 
 impl Drop for SshForwardManager {

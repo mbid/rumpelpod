@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::async_runtime::block_on;
 use crate::config::{ContainerRuntimeOptions, Network, RemoteDocker, Runtime};
-use crate::devcontainer::{LifecycleCommand, MountObject, WaitFor};
+use crate::devcontainer::{LifecycleCommand, MountObject, Port, PortAttributes, WaitFor};
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +62,14 @@ pub struct SandboxInfo {
     pub host: String,
     /// State of the repository in the sandbox (e.g. "ahead 1, behind 2").
     pub repo_state: Option<String>,
+}
+
+/// Information about a forwarded port.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortInfo {
+    pub container_port: u16,
+    pub local_port: u16,
+    pub label: String,
 }
 
 /// Lifecycle commands extracted from devcontainer.json, sent with the
@@ -115,6 +123,12 @@ struct LaunchSandboxRequest {
     /// Container runtime options from devcontainer.json (privileged, init, etc.)
     #[serde(default)]
     runtime_options: ContainerRuntimeOptions,
+    /// Ports to forward from container to local machine.
+    #[serde(default)]
+    forward_ports: Vec<Port>,
+    /// Port-specific attributes (labels, etc.).
+    #[serde(default)]
+    ports_attributes: std::collections::HashMap<String, PortAttributes>,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -162,6 +176,12 @@ struct RecreateSandboxRequest {
     /// Container runtime options from devcontainer.json (privileged, init, etc.)
     #[serde(default)]
     runtime_options: ContainerRuntimeOptions,
+    /// Ports to forward from container to local machine.
+    #[serde(default)]
+    forward_ports: Vec<Port>,
+    /// Port-specific attributes (labels, etc.).
+    #[serde(default)]
+    ports_attributes: std::collections::HashMap<String, PortAttributes>,
 }
 
 /// Response body for recreate_sandbox endpoint.
@@ -210,6 +230,19 @@ struct ListSandboxesRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct ListSandboxesResponse {
     sandboxes: Vec<SandboxInfo>,
+}
+
+/// Request body for list_ports endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct ListPortsRequest {
+    sandbox_name: SandboxName,
+    repo_path: PathBuf,
+}
+
+/// Response body for list_ports endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct ListPortsResponse {
+    ports: Vec<PortInfo>,
 }
 
 /// Request body for save_conversation endpoint.
@@ -285,6 +318,8 @@ pub trait Daemon: Send + Sync + 'static {
         lifecycle: LifecycleCommands,
         mounts: Vec<MountObject>,
         runtime_options: ContainerRuntimeOptions,
+        forward_ports: Vec<Port>,
+        ports_attributes: std::collections::HashMap<String, PortAttributes>,
     ) -> Result<LaunchResult>;
 
     // POST /sandbox/recreate
@@ -304,6 +339,8 @@ pub trait Daemon: Send + Sync + 'static {
         lifecycle: LifecycleCommands,
         mounts: Vec<MountObject>,
         runtime_options: ContainerRuntimeOptions,
+        forward_ports: Vec<Port>,
+        ports_attributes: std::collections::HashMap<String, PortAttributes>,
     ) -> Result<LaunchResult>;
 
     // POST /sandbox/stop
@@ -317,6 +354,9 @@ pub trait Daemon: Send + Sync + 'static {
     // GET /sandbox
     // Lists all sandboxes for a given repository.
     fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>>;
+
+    // GET /sandbox/ports
+    fn list_ports(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<Vec<PortInfo>>;
 
     // POST /conversation
     // Save or update a conversation.
@@ -391,6 +431,8 @@ impl Daemon for DaemonClient {
         lifecycle: LifecycleCommands,
         mounts: Vec<MountObject>,
         runtime_options: ContainerRuntimeOptions,
+        forward_ports: Vec<Port>,
+        ports_attributes: std::collections::HashMap<String, PortAttributes>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -407,6 +449,8 @@ impl Daemon for DaemonClient {
             lifecycle,
             mounts,
             runtime_options,
+            forward_ports,
+            ports_attributes,
         };
 
         let response = self
@@ -448,6 +492,8 @@ impl Daemon for DaemonClient {
         lifecycle: LifecycleCommands,
         mounts: Vec<MountObject>,
         runtime_options: ContainerRuntimeOptions,
+        forward_ports: Vec<Port>,
+        ports_attributes: std::collections::HashMap<String, PortAttributes>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox/recreate")?;
         let request = RecreateSandboxRequest {
@@ -464,6 +510,8 @@ impl Daemon for DaemonClient {
             lifecycle,
             mounts,
             runtime_options,
+            forward_ports,
+            ports_attributes,
         };
 
         let response = self
@@ -554,6 +602,33 @@ impl Daemon for DaemonClient {
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
             Ok(body.sandboxes)
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
+
+    fn list_ports(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<Vec<PortInfo>> {
+        let url = self.url.join("/sandbox/ports")?;
+        let request = ListPortsRequest {
+            sandbox_name,
+            repo_path,
+        };
+
+        let response = self
+            .client
+            .get(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            let body: ListPortsResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+            Ok(body.ports)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
@@ -679,6 +754,8 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.lifecycle,
             request.mounts,
             request.runtime_options,
+            request.forward_ports,
+            request.ports_attributes,
         )
     });
 
@@ -717,6 +794,8 @@ async fn recreate_sandbox_handler<D: Daemon>(
             request.lifecycle,
             request.mounts,
             request.runtime_options,
+            request.forward_ports,
+            request.ports_attributes,
         )
     });
 
@@ -780,6 +859,24 @@ async fn list_sandboxes_handler<D: Daemon>(
 
     match result {
         Ok(sandboxes) => Ok(Json(ListSandboxesResponse { sandboxes })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{:#}", e),
+            }),
+        )),
+    }
+}
+
+/// Handler for GET /sandbox/ports endpoint.
+async fn list_ports_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ListPortsRequest>,
+) -> Result<Json<ListPortsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.list_ports(request.sandbox_name, request.repo_path));
+
+    match result {
+        Ok(ports) => Ok(Json(ListPortsResponse { ports })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -890,6 +987,7 @@ where
         .route("/sandbox/stop", post(stop_sandbox_handler::<D>))
         .route("/sandbox", delete(delete_sandbox_handler::<D>))
         .route("/sandbox", get(list_sandboxes_handler::<D>))
+        .route("/sandbox/ports", get(list_ports_handler::<D>))
         .route("/conversation", post(save_conversation_handler::<D>))
         .route("/conversations", get(list_conversations_handler::<D>))
         .route("/conversation/{id}", get(get_conversation_handler::<D>))
@@ -928,6 +1026,8 @@ mod tests {
             _lifecycle: LifecycleCommands,
             _mounts: Vec<MountObject>,
             _runtime_options: ContainerRuntimeOptions,
+            _forward_ports: Vec<Port>,
+            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -952,6 +1052,8 @@ mod tests {
             _lifecycle: LifecycleCommands,
             _mounts: Vec<MountObject>,
             _runtime_options: ContainerRuntimeOptions,
+            _forward_ports: Vec<Port>,
+            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
         ) -> Result<LaunchResult> {
             Ok(LaunchResult {
                 container_id: ContainerId(format!("recreated:{}:{}", sandbox_name.0, image.0)),
@@ -969,6 +1071,14 @@ mod tests {
         }
 
         fn list_sandboxes(&self, _repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+            Ok(vec![])
+        }
+
+        fn list_ports(
+            &self,
+            _sandbox_name: SandboxName,
+            _repo_path: PathBuf,
+        ) -> Result<Vec<PortInfo>> {
             Ok(vec![])
         }
 
@@ -1067,6 +1177,8 @@ mod tests {
             LifecycleCommands::default(),
             Vec::new(),
             ContainerRuntimeOptions::default(),
+            Vec::new(),
+            std::collections::HashMap::new(),
         );
 
         let launch_result = result.unwrap();
@@ -1103,6 +1215,8 @@ mod tests {
             _lifecycle: LifecycleCommands,
             _mounts: Vec<MountObject>,
             _runtime_options: ContainerRuntimeOptions,
+            _forward_ports: Vec<Port>,
+            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
@@ -1122,6 +1236,8 @@ mod tests {
             _lifecycle: LifecycleCommands,
             _mounts: Vec<MountObject>,
             _runtime_options: ContainerRuntimeOptions,
+            _forward_ports: Vec<Port>,
+            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
@@ -1135,6 +1251,14 @@ mod tests {
         }
 
         fn list_sandboxes(&self, _repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+            unimplemented!("not needed for conversation tests")
+        }
+
+        fn list_ports(
+            &self,
+            _sandbox_name: SandboxName,
+            _repo_path: PathBuf,
+        ) -> Result<Vec<PortInfo>> {
             unimplemented!("not needed for conversation tests")
         }
 

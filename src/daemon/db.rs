@@ -134,6 +134,20 @@ const SCHEMA_SQL: &str = indoc! {"
     CREATE INDEX idx_conversations_lookup
         ON conversations(sandbox_id, updated_at DESC);
 
+    CREATE TABLE forwarded_ports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sandbox_id INTEGER NOT NULL REFERENCES sandboxes(id) ON DELETE CASCADE,
+        container_port INTEGER NOT NULL,
+        local_port INTEGER NOT NULL,
+        label TEXT NOT NULL DEFAULT ''
+    );
+
+    CREATE INDEX idx_forwarded_ports_sandbox
+        ON forwarded_ports(sandbox_id);
+
+    CREATE UNIQUE INDEX idx_forwarded_ports_local
+        ON forwarded_ports(local_port);
+
     CREATE TABLE db_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -580,6 +594,69 @@ pub fn get_conversation(conn: &Connection, id: i64) -> Result<Option<Conversatio
         Some(row) => Ok(Some(row.context("Failed to read conversation")?)),
         None => Ok(None),
     }
+}
+
+pub struct ForwardedPort {
+    pub container_port: u16,
+    pub local_port: u16,
+    pub label: String,
+}
+
+pub fn insert_forwarded_port(
+    conn: &Connection,
+    sandbox_id: SandboxId,
+    container_port: u16,
+    local_port: u16,
+    label: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO forwarded_ports (sandbox_id, container_port, local_port, label)
+         VALUES (?, ?, ?, ?)",
+        rusqlite::params![sandbox_id.0, container_port, local_port, label],
+    )
+    .context("inserting forwarded port")?;
+    Ok(())
+}
+
+pub fn list_forwarded_ports(
+    conn: &Connection,
+    sandbox_id: SandboxId,
+) -> Result<Vec<ForwardedPort>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT container_port, local_port, label
+             FROM forwarded_ports WHERE sandbox_id = ?
+             ORDER BY container_port",
+        )
+        .context("preparing forwarded ports query")?;
+
+    let ports = stmt
+        .query_map(rusqlite::params![sandbox_id.0], |row| {
+            Ok(ForwardedPort {
+                container_port: row.get(0)?,
+                local_port: row.get(1)?,
+                label: row.get(2)?,
+            })
+        })
+        .context("querying forwarded ports")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("reading forwarded port rows")?;
+
+    Ok(ports)
+}
+
+pub fn get_all_allocated_local_ports(conn: &Connection) -> Result<Vec<u16>> {
+    let mut stmt = conn
+        .prepare("SELECT local_port FROM forwarded_ports")
+        .context("preparing allocated ports query")?;
+
+    let ports = stmt
+        .query_map([], |row| row.get(0))
+        .context("querying allocated ports")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("reading allocated port rows")?;
+
+    Ok(ports)
 }
 
 #[cfg(test)]

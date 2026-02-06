@@ -87,6 +87,9 @@ Examples:
 ")]
     Review(ReviewCommand),
 
+    /// Show forwarded ports for a sandbox
+    Ports(PortsCommand),
+
     /// Recreate a sandbox
     #[command(long_about = "Recreate a sandbox.
 
@@ -164,6 +167,12 @@ pub struct RecreateCommand {
     /// Overrides .sandbox.toml setting.
     #[arg(long)]
     pub host: Option<String>,
+}
+
+#[derive(Args)]
+pub struct PortsCommand {
+    /// Name of the sandbox
+    pub name: String,
 }
 
 #[derive(Args)]

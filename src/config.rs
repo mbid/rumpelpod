@@ -9,7 +9,9 @@
 //! 1. `.sandbox.toml` in the repository root
 //! 2. `devcontainer.json` (in `.devcontainer/` or root)
 
-use crate::devcontainer::{DevContainer, LifecycleCommand, MountObject, WaitFor};
+use crate::devcontainer::{
+    DevContainer, LifecycleCommand, MountObject, Port, PortAttributes, WaitFor,
+};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
@@ -430,6 +432,12 @@ pub struct SandboxConfig {
     #[serde(default)]
     pub runtime_options: ContainerRuntimeOptions,
 
+    /// Ports to forward from container to local machine.
+    pub forward_ports: Vec<Port>,
+
+    /// Port-specific attributes (labels, protocol, etc.).
+    pub ports_attributes: std::collections::HashMap<String, PortAttributes>,
+
     /// Agent configuration.
     pub agent: AgentConfig,
 
@@ -666,6 +674,14 @@ impl SandboxConfig {
             remote_env,
             mounts,
             runtime_options,
+            forward_ports: devcontainer
+                .as_ref()
+                .and_then(|dc| dc.forward_ports.clone())
+                .unwrap_or_default(),
+            ports_attributes: devcontainer
+                .as_ref()
+                .and_then(|dc| dc.ports_attributes.clone())
+                .unwrap_or_default(),
             agent: toml_config.agent,
             host: toml_config.host,
             on_create_command: devcontainer

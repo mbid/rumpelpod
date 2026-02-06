@@ -100,6 +100,8 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         lifecycle,
         config.mounts,
         config.runtime_options,
+        config.forward_ports,
+        config.ports_attributes,
     )
 }
 
