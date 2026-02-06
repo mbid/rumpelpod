@@ -218,10 +218,10 @@ impl SshRemoteHost {
         let mut ssh_args = vec!["-F", &config_path, &user_host];
         ssh_args.extend(command.iter().copied());
 
-        Ok(Command::new("ssh")
+        Command::new("ssh")
             .args(&ssh_args)
             .success()
-            .context("running SSH command")?)
+            .context("running SSH command")
     }
 
     /// Load a Docker image into this remote host's Docker daemon.
