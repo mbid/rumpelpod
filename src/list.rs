@@ -17,7 +17,6 @@ pub fn list() -> Result<()> {
     let mut table = Table::new();
     table
         .load_preset(NOTHING)
-        .set_content_arrangement(comfy_table::ContentArrangement::Dynamic)
         .set_header(vec!["NAME", "GIT", "STATUS", "CREATED", "HOST"]);
 
     for sandbox in sandboxes {
