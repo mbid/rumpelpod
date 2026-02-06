@@ -1,7 +1,4 @@
 //! Tests that unsupported devcontainer.json properties emit warnings.
-//!
-//! All tests are #[should_panic] because warnings for unsupported fields
-//! are not yet implemented (see docs/devcontainer.md "Unsupported Features").
 
 use std::fs;
 
@@ -52,7 +49,6 @@ fn write_minimal_sandbox_toml(repo: &TestRepo) {
 }
 
 #[test]
-#[should_panic(expected = "stderr should warn about unsupported workspaceMount")]
 fn warns_on_workspace_mount() {
     let repo = TestRepo::new();
 
@@ -78,7 +74,6 @@ fn warns_on_workspace_mount() {
 }
 
 #[test]
-#[should_panic(expected = "stderr should warn about unsupported appPort")]
 fn warns_on_app_port() {
     let repo = TestRepo::new();
 
@@ -104,7 +99,6 @@ fn warns_on_app_port() {
 }
 
 #[test]
-#[should_panic(expected = "stderr should warn about unsupported dockerComposeFile")]
 fn warns_on_docker_compose_file() {
     let repo = TestRepo::new();
 
@@ -130,7 +124,6 @@ fn warns_on_docker_compose_file() {
 }
 
 #[test]
-#[should_panic(expected = "stderr should warn about workspaceMount")]
 fn warns_on_multiple_unsupported() {
     let repo = TestRepo::new();
 

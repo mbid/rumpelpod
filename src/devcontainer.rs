@@ -512,6 +512,29 @@ impl DevContainer {
         Ok(None)
     }
 
+    /// Check for unsupported fields and emit warnings to stderr.
+    ///
+    /// These properties are intentionally not supported (see docs/devcontainer.md
+    /// "Unsupported Features") but may appear in devcontainer.json files shared
+    /// with other tools like VS Code.
+    pub fn warn_unsupported_fields(&self) {
+        let fields: &[(&str, bool)] = &[
+            ("workspaceMount", self.workspace_mount.is_some()),
+            ("appPort", self.app_port.is_some()),
+            ("dockerComposeFile", self.docker_compose_file.is_some()),
+            ("service", self.service.is_some()),
+            ("runServices", self.run_services.is_some()),
+        ];
+
+        for (name, present) in fields {
+            if *present {
+                eprintln!(
+                    "warning: devcontainer.json contains '{name}' which is not supported by sandbox"
+                );
+            }
+        }
+    }
+
     /// Get the user to run as (prefers remoteUser over containerUser).
     pub fn user(&self) -> Option<&str> {
         self.remote_user

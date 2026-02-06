@@ -424,7 +424,10 @@ impl SandboxConfig {
         // Load devcontainer.json if present (lowest precedence)
         let devcontainer_info = DevContainer::find_and_load(repo_root)?;
         let (devcontainer, devcontainer_dir) = match devcontainer_info {
-            Some((dc, dir)) => (Some(dc), Some(dir)),
+            Some((dc, dir)) => {
+                dc.warn_unsupported_fields();
+                (Some(dc), Some(dir))
+            }
             None => (None, None),
         };
 
