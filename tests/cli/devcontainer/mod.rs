@@ -6,3 +6,4 @@ mod remote_env;
 mod runtime_options;
 mod unsupported;
 mod variables;
+mod workspace;
