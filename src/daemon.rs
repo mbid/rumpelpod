@@ -14,6 +14,7 @@ use bollard::query_parameters::{
 use bollard::secret::{ContainerCreateBody, HostConfig};
 use bollard::Docker;
 use indoc::indoc;
+use listenfd::ListenFd;
 use log::error;
 use rusqlite::Connection;
 use tokio::net::UnixListener;
@@ -1344,13 +1345,6 @@ impl Daemon for DaemonServer {
 }
 
 pub fn run_daemon() -> Result<()> {
-    let socket = socket_path()?;
-
-    // Remove stale socket file if it exists
-    if socket.exists() {
-        std::fs::remove_file(&socket)?;
-    }
-
     // Initialize database
     let db_path = db::db_path()?;
     let db_conn = db::open_db(&db_path)?;
@@ -1385,8 +1379,23 @@ pub fn run_daemon() -> Result<()> {
     let unix_server = UnixGitHttpServer::start(&git_unix_socket, git_server_state.clone())
         .context("starting git HTTP server on Unix socket")?;
 
-    let listener = UnixListener::bind(&socket)
-        .with_context(|| format!("Failed to bind to {}", socket.display()))?;
+    let mut listenfd = ListenFd::from_env();
+    let listener = if let Some(listener) = listenfd
+        .take_unix_listener(0)
+        .context("Failed to take inherited unix listener")?
+    {
+        listener.set_nonblocking(true)?;
+        UnixListener::from_std(listener)?
+    } else {
+        let socket = socket_path()?;
+
+        // Remove stale socket file if it exists
+        if socket.exists() {
+            std::fs::remove_file(&socket)?;
+        }
+        UnixListener::bind(&socket)
+            .with_context(|| format!("Failed to bind to {}", socket.display()))?
+    };
 
     let daemon = DaemonServer {
         db: Mutex::new(db_conn),
