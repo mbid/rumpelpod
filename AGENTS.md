@@ -11,3 +11,5 @@ This is a rust project implementing a sandboxed LLM agent.
   DON'T STOP BEFORE YOU'RE DONE!
 - Run ./pipeline to ensure your commit doesn't break anything.
 - After committing, fetch and rebase on host/master to stay up to date.
+- Unless prompted otherwise, don't try to remain backwards compatible.
+  Assume all containers/files/databases were created with the current version.
