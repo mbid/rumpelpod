@@ -17,6 +17,7 @@ use crate::common::{
     build_docker_image, sandbox_command, DockerBuild, ImageId, TestDaemon, TestRepo,
     TEST_REPO_PATH, TEST_USER_UID,
 };
+use sandbox::CommandExt;
 
 /// Test user for SSH connections.
 pub const SSH_USER: &str = "testuser";
@@ -64,21 +65,19 @@ impl SshRemoteHost {
             .unwrap()
             .to_string_lossy()
             .to_string();
-        let status = Command::new("docker")
+        Command::new("docker")
             .args(["network", "create", &network_name])
-            .status()
+            .success()
             .expect("Failed to create docker network");
-        assert!(status.success(), "Failed to create docker network");
 
         // Generate SSH key pair
-        let status = Command::new("ssh-keygen")
+        Command::new("ssh-keygen")
             .args(["-t", "ed25519"])
             .args(["-f", &private_key_path.to_string_lossy()])
             .args(["-N", ""]) // Empty passphrase
             .args(["-q"]) // Quiet
-            .status()
+            .success()
             .expect("Failed to run ssh-keygen");
-        assert!(status.success(), "ssh-keygen failed");
 
         // Read the public key
         let public_key =
@@ -86,7 +85,7 @@ impl SshRemoteHost {
 
         // Start the container with privileged mode for nested Docker
         // No port publishing - we connect directly to the container IP
-        let output = Command::new("docker")
+        let stdout = Command::new("docker")
             .args([
                 "run",
                 "-d",
@@ -95,16 +94,10 @@ impl SshRemoteHost {
                 &network_name,
                 &image_id.to_string(),
             ])
-            .output()
+            .success()
             .expect("Failed to start remote docker container");
 
-        assert!(
-            output.status.success(),
-            "Failed to start remote docker container: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let container_id = String::from_utf8_lossy(&stdout).trim().to_string();
 
         // Get the container's IP address
         let ip_address = get_container_ip(&container_id).expect("Failed to get container IP");
@@ -128,12 +121,10 @@ impl SshRemoteHost {
 
     /// Restart the remote host container.
     pub fn restart(&mut self) {
-        let status = Command::new("docker")
+        Command::new("docker")
             .args(["restart", &self.container_id])
-            .status()
+            .success()
             .expect("Failed to restart remote host container");
-
-        assert!(status.success(), "Failed to restart remote host container");
 
         // Wait for services to come back up
         self.wait_for_services();
@@ -167,16 +158,10 @@ impl SshRemoteHost {
             chown -R {SSH_USER}:{SSH_USER} /home/{SSH_USER}/.ssh
         "#};
 
-        let output = Command::new("docker")
+        Command::new("docker")
             .args(["exec", &self.container_id, "sh", "-c", &setup_script])
-            .output()
+            .success()
             .expect("Failed to install SSH public key");
-
-        assert!(
-            output.status.success(),
-            "Failed to install SSH public key: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
     }
 
     /// Wait for SSH and Docker services to be ready.
@@ -233,52 +218,39 @@ impl SshRemoteHost {
         let mut ssh_args = vec!["-F", &config_path, &user_host];
         ssh_args.extend(command.iter().copied());
 
-        let output = Command::new("ssh")
+        Ok(Command::new("ssh")
             .args(&ssh_args)
-            .output()
-            .context("running SSH command")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("SSH command failed: {}", stderr);
-        }
-
-        Ok(output.stdout)
+            .success()
+            .context("running SSH command")?)
     }
 
     /// Load a Docker image into this remote host's Docker daemon.
     pub fn load_image(&self, image_id: &ImageId) -> Result<()> {
         // Save image to a tar file
         let tar_path = self._temp_dir.path().join("image.tar");
-        let status = Command::new("docker")
+        Command::new("docker")
             .args([
                 "save",
                 "-o",
                 &tar_path.to_string_lossy(),
                 &image_id.to_string(),
             ])
-            .status()
+            .success()
             .context("saving docker image")?;
-        if !status.success() {
-            anyhow::bail!("docker save failed");
-        }
 
         // Copy tar file to the remote container
         let remote_tar = "/tmp/image.tar";
-        let status = Command::new("docker")
+        Command::new("docker")
             .args([
                 "cp",
                 &tar_path.to_string_lossy(),
                 &format!("{}:{}", self.container_id, remote_tar),
             ])
-            .status()
+            .success()
             .context("copying image tar to remote")?;
-        if !status.success() {
-            anyhow::bail!("docker cp failed");
-        }
 
         // Load the image on the remote Docker daemon
-        let output = Command::new("docker")
+        Command::new("docker")
             .args([
                 "exec",
                 &self.container_id,
@@ -287,17 +259,13 @@ impl SshRemoteHost {
                 "-i",
                 remote_tar,
             ])
-            .output()
+            .success()
             .context("loading image on remote docker")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("docker load on remote failed: {}", stderr);
-        }
 
         // Clean up the tar file
         let _ = Command::new("docker")
             .args(["exec", &self.container_id, "rm", remote_tar])
-            .status();
+            .success();
 
         Ok(())
     }
@@ -316,22 +284,17 @@ impl Drop for SshRemoteHost {
 
 /// Get a container's IP address.
 fn get_container_ip(container_id: &str) -> Result<String> {
-    let output = Command::new("docker")
+    let stdout = Command::new("docker")
         .args([
             "inspect",
             "-f",
             "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
             container_id,
         ])
-        .output()
+        .success()
         .context("getting container IP")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("docker inspect failed: {}", stderr);
-    }
-
-    let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let ip = String::from_utf8_lossy(&stdout).trim().to_string();
     if ip.is_empty() {
         anyhow::bail!("container has no IP address");
     }
