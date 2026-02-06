@@ -15,7 +15,7 @@ use url::Url;
 
 use crate::async_runtime::block_on;
 use crate::config::{Network, RemoteDocker, Runtime};
-use crate::devcontainer::{LifecycleCommand, WaitFor};
+use crate::devcontainer::{LifecycleCommand, MountObject, WaitFor};
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +109,9 @@ struct LaunchSandboxRequest {
     /// Lifecycle commands from devcontainer.json.
     #[serde(default)]
     lifecycle: LifecycleCommands,
+    /// Additional mounts for the container.
+    #[serde(default)]
+    mounts: Vec<MountObject>,
 }
 
 /// Response body for launch_sandbox endpoint.
@@ -150,6 +153,9 @@ struct RecreateSandboxRequest {
     /// Lifecycle commands from devcontainer.json.
     #[serde(default)]
     lifecycle: LifecycleCommands,
+    /// Additional mounts for the container.
+    #[serde(default)]
+    mounts: Vec<MountObject>,
 }
 
 /// Response body for recreate_sandbox endpoint.
@@ -271,6 +277,7 @@ pub trait Daemon: Send + Sync + 'static {
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
+        mounts: Vec<MountObject>,
     ) -> Result<LaunchResult>;
 
     // POST /sandbox/recreate
@@ -288,6 +295,7 @@ pub trait Daemon: Send + Sync + 'static {
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
+        mounts: Vec<MountObject>,
     ) -> Result<LaunchResult>;
 
     // POST /sandbox/stop
@@ -373,6 +381,7 @@ impl Daemon for DaemonClient {
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
+        mounts: Vec<MountObject>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
         let request = LaunchSandboxRequest {
@@ -387,6 +396,7 @@ impl Daemon for DaemonClient {
             remote,
             env,
             lifecycle,
+            mounts,
         };
 
         let response = self
@@ -426,6 +436,7 @@ impl Daemon for DaemonClient {
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
+        mounts: Vec<MountObject>,
     ) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox/recreate")?;
         let request = RecreateSandboxRequest {
@@ -440,6 +451,7 @@ impl Daemon for DaemonClient {
             remote,
             env,
             lifecycle,
+            mounts,
         };
 
         let response = self
@@ -653,6 +665,7 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.remote,
             request.env,
             request.lifecycle,
+            request.mounts,
         )
     });
 
@@ -689,6 +702,7 @@ async fn recreate_sandbox_handler<D: Daemon>(
             request.remote,
             request.env,
             request.lifecycle,
+            request.mounts,
         )
     });
 
@@ -898,6 +912,7 @@ mod tests {
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
             _lifecycle: LifecycleCommands,
+            _mounts: Vec<MountObject>,
         ) -> Result<LaunchResult> {
             // Return a container ID that encodes the inputs for verification
             Ok(LaunchResult {
@@ -920,6 +935,7 @@ mod tests {
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
             _lifecycle: LifecycleCommands,
+            _mounts: Vec<MountObject>,
         ) -> Result<LaunchResult> {
             Ok(LaunchResult {
                 container_id: ContainerId(format!("recreated:{}:{}", sandbox_name.0, image.0)),
@@ -1033,6 +1049,7 @@ mod tests {
             None, // No remote Docker
             std::collections::HashMap::new(),
             LifecycleCommands::default(),
+            Vec::new(),
         );
 
         let launch_result = result.unwrap();
@@ -1067,6 +1084,7 @@ mod tests {
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
             _lifecycle: LifecycleCommands,
+            _mounts: Vec<MountObject>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
@@ -1084,6 +1102,7 @@ mod tests {
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
             _lifecycle: LifecycleCommands,
+            _mounts: Vec<MountObject>,
         ) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }

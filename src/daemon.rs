@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use bollard::query_parameters::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
 };
-use bollard::secret::{ContainerCreateBody, HostConfig};
+use bollard::secret::{ContainerCreateBody, HostConfig, Mount as BollardMount, MountTypeEnum};
 use bollard::Docker;
 use indoc::indoc;
 use listenfd::ListenFd;
@@ -21,6 +21,7 @@ use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
 use crate::config::{is_deterministic_test_mode, Network, RemoteDocker, Runtime};
+use crate::devcontainer;
 use crate::docker_exec::exec_command;
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
@@ -611,6 +612,7 @@ fn create_container(
     runtime: Runtime,
     network_config: Network,
     env: &std::collections::HashMap<String, String>,
+    mounts: &[devcontainer::MountObject],
 ) -> Result<ContainerId> {
     let network_mode = match network_config {
         Network::UnsafeHost => "host",
@@ -639,10 +641,35 @@ fn create_container(
     // /proc/sys/kernel/ns_last_pid. With --privileged, /proc/sys is mounted rw.
     let deterministic_pids = is_deterministic_test_mode()?;
 
+    let bollard_mounts = if mounts.is_empty() {
+        None
+    } else {
+        Some(
+            mounts
+                .iter()
+                .map(|m| {
+                    let typ = match m.mount_type {
+                        devcontainer::MountType::Bind => MountTypeEnum::BIND,
+                        devcontainer::MountType::Volume => MountTypeEnum::VOLUME,
+                        devcontainer::MountType::Tmpfs => MountTypeEnum::TMPFS,
+                    };
+                    BollardMount {
+                        target: Some(m.target.clone()),
+                        source: m.source.clone(),
+                        typ: Some(typ),
+                        read_only: m.read_only,
+                        ..Default::default()
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+
     let host_config = HostConfig {
         runtime: Some(docker_runtime_flag(runtime).to_string()),
         network_mode: Some(network_mode.to_string()),
         privileged: if deterministic_pids { Some(true) } else { None },
+        mounts: bollard_mounts,
         ..Default::default()
     };
 
@@ -908,10 +935,26 @@ impl Daemon for DaemonServer {
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
+        mounts: Vec<devcontainer::MountObject>,
     ) -> Result<LaunchResult> {
         // Validate network configuration
         if network == Network::UnsafeHost && runtime != Runtime::Runc {
             anyhow::bail!("network='unsafe-host' is only supported with runtime='runc'");
+        }
+
+        // Reject bind mounts on remote Docker hosts — the source paths would
+        // reference the remote filesystem, not the developer's machine.
+        if remote.is_some() {
+            for m in &mounts {
+                if m.mount_type == devcontainer::MountType::Bind {
+                    anyhow::bail!(
+                        "bind mounts are not supported with remote Docker hosts. \
+                         The source path '{}' would reference the remote filesystem, \
+                         not your local machine. Use volume or tmpfs mounts instead.",
+                        m.source.as_deref().unwrap_or("<none>")
+                    );
+                }
+            }
         }
 
         // Get the host specification string for the database
@@ -1117,8 +1160,20 @@ impl Daemon for DaemonServer {
             runtime,
             network,
             &env,
+            &mounts,
         )
         .map_err(mark_error)?;
+
+        // Fix ownership of mount targets so the container user can write to them.
+        // Docker creates volume/tmpfs mounts as root by default.
+        if !mounts.is_empty() {
+            let targets: Vec<&str> = mounts.iter().map(|m| m.target.as_str()).collect();
+            let mut args = vec!["chown", &user];
+            args.extend(targets);
+            exec_command(&docker, &container_id.0, Some("root"), None, None, args)
+                .context("chown mount targets for container user")
+                .map_err(mark_error)?;
+        }
 
         let url = git_http_server::git_http_url(&server_ip, server_port);
 
@@ -1183,6 +1238,7 @@ impl Daemon for DaemonServer {
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
+        mounts: Vec<devcontainer::MountObject>,
     ) -> Result<LaunchResult> {
         let name = docker_name(&repo_path, &sandbox_name);
 
@@ -1257,6 +1313,7 @@ impl Daemon for DaemonServer {
             remote,
             env,
             lifecycle,
+            mounts,
         )?;
 
         // 4. Apply patch if we have one

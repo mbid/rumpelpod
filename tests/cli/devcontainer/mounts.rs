@@ -10,6 +10,16 @@ use std::fs;
 use crate::common::{sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
+/// Extract a short unique ID from a TestRepo's temp directory name.
+/// The TempDir suffix is random, so this is safe for concurrent use.
+fn repo_id(repo: &TestRepo) -> String {
+    repo.path()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string()
+}
+
 fn write_devcontainer_with_mounts(repo: &TestRepo, mounts_config: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
@@ -52,14 +62,18 @@ fn write_minimal_sandbox_toml(repo: &TestRepo) {
 }
 
 /// Volume mount: the target directory should exist and be writable inside the container.
+///
+/// Docker named volumes are created implicitly when first referenced in a
+/// container mount.  We derive the volume name from the repo's temp-dir so
+/// that concurrent test runs never collide.
 #[test]
-#[should_panic(expected = "sandbox enter failed")]
 fn mount_volume() {
     let repo = TestRepo::new();
+    let vol = format!("vol-{}", repo_id(&repo));
 
     write_devcontainer_with_mounts(
         &repo,
-        r#"[{"type": "volume", "source": "testvol", "target": "/data"}]"#,
+        &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
     write_minimal_sandbox_toml(&repo);
 
@@ -84,7 +98,6 @@ fn mount_volume() {
 
 /// tmpfs mount: the target should appear as a tmpfs filesystem.
 #[test]
-#[should_panic(expected = "sandbox enter failed")]
 fn mount_tmpfs() {
     let repo = TestRepo::new();
 
@@ -116,11 +129,14 @@ fn mount_tmpfs() {
 /// String-format mount: Docker --mount style comma-separated key=value pairs
 /// should be parsed the same as the object format.
 #[test]
-#[should_panic(expected = "sandbox enter failed")]
 fn mount_string_format() {
     let repo = TestRepo::new();
+    let vol = format!("vol-{}", repo_id(&repo));
 
-    write_devcontainer_with_mounts(&repo, r#"["type=volume,source=vol,target=/mnt"]"#);
+    write_devcontainer_with_mounts(
+        &repo,
+        &format!(r#"["type=volume,source={vol},target=/mnt"]"#),
+    );
     write_minimal_sandbox_toml(&repo);
 
     let daemon = TestDaemon::start();
@@ -145,13 +161,13 @@ fn mount_string_format() {
 /// Volume data should survive a container restart because Docker volumes
 /// persist independently of the container lifecycle.
 #[test]
-#[should_panic(expected = "first sandbox enter failed")]
 fn mount_persists_across_restarts() {
     let repo = TestRepo::new();
+    let vol = format!("vol-{}", repo_id(&repo));
 
     write_devcontainer_with_mounts(
         &repo,
-        r#"[{"type": "volume", "source": "persist-vol", "target": "/data"}]"#,
+        &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
     write_minimal_sandbox_toml(&repo);
 
@@ -190,7 +206,6 @@ fn mount_persists_across_restarts() {
 /// the source path would reference the remote filesystem, not the developer's
 /// machine — almost certainly not the intended behavior.
 #[test]
-#[should_panic(expected = "error should mention bind mounts and remote Docker")]
 fn mount_bind_blocked_remote() {
     let repo = TestRepo::new();
 

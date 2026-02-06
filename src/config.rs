@@ -9,7 +9,7 @@
 //! 1. `.sandbox.toml` in the repository root
 //! 2. `devcontainer.json` (in `.devcontainer/` or root)
 
-use crate::devcontainer::{DevContainer, LifecycleCommand, WaitFor};
+use crate::devcontainer::{DevContainer, LifecycleCommand, MountObject, WaitFor};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use indoc::formatdoc;
@@ -394,6 +394,9 @@ pub struct SandboxConfig {
     /// Environment variables for the container.
     pub container_env: std::collections::HashMap<String, String>,
 
+    /// Additional mounts for the container.
+    pub mounts: Vec<MountObject>,
+
     /// Agent configuration.
     pub agent: AgentConfig,
 
@@ -530,6 +533,31 @@ impl SandboxConfig {
             .and_then(|dc| dc.container_env.clone())
             .unwrap_or_default();
 
+        // Parse mounts from devcontainer.json
+        let mounts =
+            if let Some(dc_mounts) = devcontainer.as_ref().and_then(|dc| dc.mounts.as_ref()) {
+                dc_mounts
+                    .iter()
+                    .map(|m| m.to_mount_object())
+                    .collect::<Result<Vec<_>>>()
+                    .context("parsing mounts from devcontainer.json")?
+            } else {
+                Vec::new()
+            };
+
+        // Reject unsubstituted variables in mounts — variable substitution
+        // (e.g. ${devcontainerId}) is not yet implemented.
+        for m in &mounts {
+            let fields = [m.source.as_deref(), Some(m.target.as_str())];
+            for field in fields.into_iter().flatten() {
+                if field.contains("${") {
+                    bail!(
+                        "mounts variable substitution not implemented: found '{field}' in mount spec"
+                    );
+                }
+            }
+        }
+
         // Validate required fields
         let image = provided_image.unwrap_or_else(String::new);
         if pending_build.is_none() && image.is_empty() {
@@ -564,6 +592,7 @@ impl SandboxConfig {
             user,
             repo_path,
             container_env,
+            mounts,
             agent: toml_config.agent,
             host: toml_config.host,
             on_create_command: devcontainer

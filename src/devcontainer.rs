@@ -318,13 +318,72 @@ pub struct MountObject {
 }
 
 /// Type of mount.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MountType {
     #[default]
     Bind,
     Volume,
     Tmpfs,
+}
+
+impl Mount {
+    /// Parse a string-format mount ("type=X,source=Y,target=Z") into a MountObject.
+    pub fn to_mount_object(&self) -> Result<MountObject> {
+        match self {
+            Mount::Object(obj) => Ok(obj.clone()),
+            Mount::String(s) => MountObject::parse_string(s),
+        }
+    }
+}
+
+impl MountObject {
+    /// Parse a Docker --mount style string: comma-separated key=value pairs.
+    ///
+    /// Supported keys: type, source, src, target, destination, dst, readonly, ro
+    fn parse_string(s: &str) -> Result<Self> {
+        let mut mount_type = None;
+        let mut source = None;
+        let mut target = None;
+        let mut read_only = None;
+
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            if let Some((key, value)) = part.split_once('=') {
+                match key {
+                    "type" => mount_type = Some(value.to_string()),
+                    "source" | "src" => source = Some(value.to_string()),
+                    "target" | "destination" | "dst" => target = Some(value.to_string()),
+                    "readonly" | "ro" => {
+                        read_only = Some(value == "true" || value == "1");
+                    }
+                    _ => {} // Ignore unknown keys for forward compat
+                }
+            } else if part == "readonly" || part == "ro" {
+                read_only = Some(true);
+            }
+        }
+
+        let target = target.ok_or_else(|| anyhow::anyhow!("mount string missing 'target': {s}"))?;
+
+        let mount_type = match mount_type.as_deref() {
+            Some("bind") => MountType::Bind,
+            Some("volume") => MountType::Volume,
+            Some("tmpfs") => MountType::Tmpfs,
+            Some(other) => anyhow::bail!("unsupported mount type: {other}"),
+            None => MountType::Bind, // Docker default
+        };
+
+        Ok(MountObject {
+            mount_type,
+            source,
+            target,
+            read_only,
+        })
+    }
 }
 
 /// A lifecycle command (can be string, array, or object for parallel execution).

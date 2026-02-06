@@ -8,6 +8,7 @@ use crate::cli::EnterCommand;
 use crate::config::{RemoteDocker, SandboxConfig};
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, LifecycleCommands, SandboxName};
+use crate::devcontainer::MountType;
 use crate::git::{get_current_branch, get_repo_root};
 use crate::image;
 
@@ -39,6 +40,21 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         .map(RemoteDocker::parse)
         .transpose()
         .context("Invalid remote Docker specification")?;
+
+    // Reject bind mounts early for remote Docker — the source paths would
+    // reference the remote filesystem, not the developer's machine.
+    if remote.is_some() {
+        for m in &config.mounts {
+            if m.mount_type == MountType::Bind {
+                bail!(
+                    "bind mounts are not supported with remote Docker hosts. \
+                     The source path '{}' would reference the remote filesystem, \
+                     not your local machine. Use volume or tmpfs mounts instead.",
+                    m.source.as_deref().unwrap_or("<none>")
+                );
+            }
+        }
+    }
 
     let image = image::resolve_image(
         &config.image,
@@ -81,6 +97,7 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         remote,
         env,
         lifecycle,
+        config.mounts,
     )
 }
 
