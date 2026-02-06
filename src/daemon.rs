@@ -13,7 +13,7 @@ use bollard::query_parameters::{
 };
 use bollard::secret::{ContainerCreateBody, HostConfig, Mount as BollardMount, MountTypeEnum};
 use bollard::Docker;
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use listenfd::ListenFd;
 use log::error;
 use rusqlite::Connection;
@@ -433,71 +433,43 @@ fn setup_git_remotes(
 
     let repo_path_str = container_repo_path.to_string_lossy().to_string();
 
+    // Configure remotes and fetch in a single shell invocation to avoid
+    // transient .git/config lock failures from many sequential docker exec
+    // calls (each running a separate `git config`).
+    let push_refspec = format!("+refs/heads/*:refs/heads/sandbox/*@{}", sandbox_name.0);
+    let setup_script = formatdoc! {r#"
+        set -e
+        cd "{repo_path_str}"
+
+        git config http.extraHeader "Authorization: Bearer {token}"
+
+        git remote add host "{git_http_url}" 2>/dev/null \
+            || git remote set-url host "{git_http_url}"
+        git config remote.host.fetch '+refs/heads/host/*:refs/remotes/host/*'
+        git config remote.host.pushurl PUSH_DISABLED
+
+        git remote add sandbox "{git_http_url}" 2>/dev/null \
+            || git remote set-url sandbox "{git_http_url}"
+        git config remote.sandbox.push '{push_refspec}'
+
+        git fetch host
+    "#};
+    exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["sh", "-c", &setup_script],
+    )
+    .context("configuring git remotes and fetching")?;
+
     // Helper to run a git command inside the container
     let run_git = |args: &[&str]| -> Result<Vec<u8>> {
         let mut cmd = vec!["git", "-C", &repo_path_str];
         cmd.extend(args);
         exec_command(docker, container_id, Some(user), None, None, cmd)
     };
-
-    // Configure Bearer authentication
-    run_git(&[
-        "config",
-        "http.extraHeader",
-        &format!("Authorization: Bearer {}", token),
-    ])
-    .context("configuring git http.extraHeader")?;
-
-    // Add "host" remote (or update if exists)
-    match run_git(&["remote", "add", "host", git_http_url]) {
-        Ok(_) => {}
-        Err(e) => {
-            let error_msg = e.to_string();
-            if error_msg.contains("already exists") {
-                run_git(&["remote", "set-url", "host", git_http_url])
-                    .context("updating host remote URL")?;
-            } else {
-                return Err(e).context("adding host remote");
-            }
-        }
-    }
-
-    // Configure fetch refspec: map gateway's host/* branches to host/* remote refs.
-    // This strips the "host/" prefix from the gateway branch names, so the host's
-    // "main" branch (stored as "host/main" in gateway) becomes "host/main" in sandbox.
-    run_git(&[
-        "config",
-        "remote.host.fetch",
-        "+refs/heads/host/*:refs/remotes/host/*",
-    ])
-    .context("configuring host remote fetch refspec")?;
-
-    // Disable pushing to the host remote - it's fetch-only.
-    run_git(&["config", "remote.host.pushurl", "PUSH_DISABLED"])
-        .context("disabling push for host remote")?;
-
-    // Add "sandbox" remote (same URL, for pushing sandbox commits to gateway)
-    match run_git(&["remote", "add", "sandbox", git_http_url]) {
-        Ok(_) => {}
-        Err(e) => {
-            let error_msg = e.to_string();
-            if error_msg.contains("already exists") {
-                run_git(&["remote", "set-url", "sandbox", git_http_url])
-                    .context("updating sandbox remote URL")?;
-            } else {
-                return Err(e).context("adding sandbox remote");
-            }
-        }
-    }
-
-    // Configure push refspec: map local branches to sandbox/<branch>@<sandbox_name>.
-    // This namespaces sandbox branches to avoid conflicts between different sandboxes.
-    let push_refspec = format!("+refs/heads/*:refs/heads/sandbox/*@{}", sandbox_name.0);
-    run_git(&["config", "remote.sandbox.push", &push_refspec])
-        .context("configuring sandbox remote push refspec")?;
-
-    // Fetch all refs from the host remote so sandboxes have access to host branches.
-    run_git(&["fetch", "host"]).context("fetching from host remote")?;
 
     // Install reference-transaction hook to auto-push to gateway on any ref update.
     // We install the hook first because we use its presence to detect whether this
