@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
@@ -101,6 +102,65 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
     )
 }
 
+/// Resolve `${containerEnv:VAR}` placeholders in `remote_env` by running
+/// `docker exec printenv VAR` in the container.  `${localEnv:VAR}` is already
+/// resolved at config load time, so only container references remain.
+pub fn resolve_remote_env(
+    remote_env: &HashMap<String, String>,
+    docker_socket: &Path,
+    container_id: &str,
+) -> Vec<(String, String)> {
+    remote_env
+        .iter()
+        .map(|(key, value)| {
+            let resolved = resolve_container_env_in_value(value, docker_socket, container_id);
+            (key.clone(), resolved)
+        })
+        .collect()
+}
+
+fn resolve_container_env_in_value(value: &str, docker_socket: &Path, container_id: &str) -> String {
+    let mut result = value.to_string();
+    while let Some(start) = result.find("${containerEnv:") {
+        let after = start + "${containerEnv:".len();
+        if let Some(end) = result[after..].find('}') {
+            let var_name = &result[after..after + end].to_string();
+            let replacement =
+                read_container_env_var(docker_socket, container_id, var_name).unwrap_or_default();
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                replacement,
+                &result[after + end + 1..]
+            );
+        } else {
+            break;
+        }
+    }
+    result
+}
+
+fn read_container_env_var(
+    docker_socket: &Path,
+    container_id: &str,
+    var_name: &str,
+) -> Option<String> {
+    let output = Command::new("docker")
+        .args(["-H", &format!("unix://{}", docker_socket.display())])
+        .args(["exec", container_id, "printenv", var_name])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
     let repo_root = get_repo_root()?;
@@ -126,6 +186,12 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     docker_cmd.arg("exec");
     docker_cmd.args(["--user", &user]);
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
+
+    // Inject remoteEnv variables, resolving ${containerEnv:VAR} lazily
+    let remote_env = resolve_remote_env(&config.remote_env, &docker_socket, &container_id.0);
+    for (key, value) in &remote_env {
+        docker_cmd.args(["-e", &format!("{}={}", key, value)]);
+    }
 
     if std::io::stdin().is_terminal() {
         docker_cmd.args(["-it"]);

@@ -47,7 +47,6 @@ fn write_minimal_sandbox_toml(repo: &TestRepo) {
 
 /// remoteEnv with a simple static value should be visible in `sandbox enter` commands.
 #[test]
-#[should_panic(expected = "sandbox enter failed")]
 fn remote_env_simple() {
     let repo = TestRepo::new();
 
@@ -69,7 +68,6 @@ fn remote_env_simple() {
 
 /// remoteEnv supports ${localEnv:VAR} substitution to forward host variables into the container.
 #[test]
-#[should_panic(expected = "sandbox enter failed")]
 fn remote_env_local_env_substitution() {
     let repo = TestRepo::new();
 
@@ -94,7 +92,6 @@ fn remote_env_local_env_substitution() {
 /// This is the only property where ${containerEnv} is available, since the container must be
 /// running to resolve it.
 #[test]
-#[should_panic(expected = ":/extra")]
 fn remote_env_container_env_substitution() {
     let repo = TestRepo::new();
 
@@ -130,7 +127,6 @@ fn remote_env_container_env_substitution() {
 /// and confirming the variable is present each time. This is the same code path that
 /// the agent's bash tool uses.
 #[test]
-#[should_panic(expected = "sandbox enter failed")]
 fn remote_env_available_in_agent() {
     let repo = TestRepo::new();
 
@@ -166,7 +162,6 @@ fn remote_env_available_in_agent() {
 /// one via remoteEnv (which should only be in exec sessions). Then check that
 /// PID 1's environment has the containerEnv var but not the remoteEnv var.
 #[test]
-#[should_panic(expected = "sandbox enter failed")]
 fn remote_env_not_in_container_processes() {
     let repo = TestRepo::new();
 

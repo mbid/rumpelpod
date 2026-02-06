@@ -215,6 +215,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
     // Run the agent loop
     let repo_path = &sandbox_config.repo_path;
     let thinking_budget = cmd.thinking_budget.or(sandbox_config.agent.thinking_budget);
+    let remote_env = sandbox_config.remote_env;
 
     match model {
         EffectiveModel::Anthropic(m) => {
@@ -230,6 +231,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
                 sandbox_handle,
                 &cmd.name,
                 repo_path,
+                remote_env,
                 m,
                 thinking_budget,
                 cache,
@@ -243,6 +245,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             sandbox_handle,
             &cmd.name,
             repo_path,
+            remote_env,
             m,
             cache,
             initial_history,
@@ -252,6 +255,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             sandbox_handle,
             &cmd.name,
             repo_path,
+            remote_env,
             m,
             cache,
             initial_history,

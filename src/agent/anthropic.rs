@@ -24,6 +24,7 @@ use super::common::{
     execute_write_in_sandbox, get_input_via_editor, read_agents_md, ToolName, MAX_TOKENS,
 };
 use super::history::ConversationTracker;
+use crate::enter::resolve_remote_env;
 
 fn make_tool(name: ToolName) -> Tool {
     Tool::Custom(CustomTool {
@@ -87,6 +88,7 @@ pub fn run_claude_agent(
     sandbox_handle: JoinHandle<Result<LaunchResult>>,
     sandbox_name: &str,
     repo_path: &Path,
+    remote_env: std::collections::HashMap<String, String>,
     model: Model,
     thinking_budget: Option<u32>,
     cache: Option<LlmCache>,
@@ -173,6 +175,9 @@ pub fn run_claude_agent(
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
     let docker_socket = &launch_result.docker_socket;
+
+    // Resolve ${containerEnv:VAR} now that the container is running
+    let remote_env = resolve_remote_env(&remote_env, docker_socket, container_name);
 
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
@@ -382,6 +387,7 @@ pub fn run_claude_agent(
                                     user,
                                     repo_path,
                                     docker_socket,
+                                    &remote_env,
                                     command,
                                 )?;
 
@@ -410,6 +416,7 @@ pub fn run_claude_agent(
                                     user,
                                     repo_path,
                                     docker_socket,
+                                    &remote_env,
                                     file_path,
                                     old_string,
                                     new_string,
@@ -436,6 +443,7 @@ pub fn run_claude_agent(
                                     user,
                                     repo_path,
                                     docker_socket,
+                                    &remote_env,
                                     file_path,
                                     content,
                                 )?;

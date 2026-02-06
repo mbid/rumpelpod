@@ -394,6 +394,11 @@ pub struct SandboxConfig {
     /// Environment variables for the container.
     pub container_env: std::collections::HashMap<String, String>,
 
+    /// Environment variables applied at exec time (e.g. `sandbox enter`), not
+    /// baked into the container itself.  Supports `${localEnv:VAR}` (resolved
+    /// eagerly) and `${containerEnv:VAR}` (resolved lazily at exec time).
+    pub remote_env: std::collections::HashMap<String, String>,
+
     /// Additional mounts for the container.
     pub mounts: Vec<MountObject>,
 
@@ -536,6 +541,16 @@ impl SandboxConfig {
             .and_then(|dc| dc.container_env.clone())
             .unwrap_or_default();
 
+        // Eagerly resolve ${localEnv:VAR} in remote_env; leave
+        // ${containerEnv:VAR} for lazy resolution at exec time.
+        let remote_env: std::collections::HashMap<String, String> = devcontainer
+            .as_ref()
+            .and_then(|dc| dc.remote_env.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k, resolve_local_env_vars(&v)))
+            .collect();
+
         // Parse mounts from devcontainer.json
         let mounts =
             if let Some(dc_mounts) = devcontainer.as_ref().and_then(|dc| dc.mounts.as_ref()) {
@@ -595,6 +610,7 @@ impl SandboxConfig {
             user,
             repo_path,
             container_env,
+            remote_env,
             mounts,
             agent: toml_config.agent,
             host: toml_config.host,
@@ -613,6 +629,29 @@ impl SandboxConfig {
             wait_for: devcontainer.as_ref().and_then(|dc| dc.wait_for.clone()),
         })
     }
+}
+
+/// Resolve all `${localEnv:VAR}` references in `value` using the host's
+/// environment, leaving any other substitution patterns (e.g.
+/// `${containerEnv:VAR}`) untouched.
+pub fn resolve_local_env_vars(value: &str) -> String {
+    let mut result = value.to_string();
+    while let Some(start) = result.find("${localEnv:") {
+        let after = start + "${localEnv:".len();
+        if let Some(end) = result[after..].find('}') {
+            let var_name = &result[after..after + end];
+            let replacement = std::env::var(var_name).unwrap_or_default();
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                replacement,
+                &result[after + end + 1..]
+            );
+        } else {
+            break;
+        }
+    }
+    result
 }
 
 /// Parse run_args to extract network and runtime settings.

@@ -230,18 +230,24 @@ pub fn build_system_prompt(agents_md: Option<&str>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_edit_in_sandbox(
     container_name: &str,
     user: &str,
     repo_path: &Path,
     docker_socket: &Path,
+    remote_env: &[(String, String)],
     file_path: &str,
     old_string: &str,
     new_string: &str,
 ) -> Result<(String, bool)> {
     let docker = docker_connect(docker_socket)?;
     let workdir = repo_path.to_string_lossy().to_string();
-    let env = vec!["GIT_EDITOR=false"];
+    let mut env: Vec<String> = vec!["GIT_EDITOR=false".to_string()];
+    for (k, v) in remote_env {
+        env.push(format!("{k}={v}"));
+    }
+    let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
 
     debug!("Reading file for edit: {}", file_path);
     let output = match exec_command(
@@ -305,12 +311,17 @@ pub fn execute_write_in_sandbox(
     user: &str,
     repo_path: &Path,
     docker_socket: &Path,
+    remote_env: &[(String, String)],
     file_path: &str,
     content: &str,
 ) -> Result<(String, bool)> {
     let docker = docker_connect(docker_socket)?;
     let workdir = repo_path.to_string_lossy().to_string();
-    let env = vec!["GIT_EDITOR=false"];
+    let mut env: Vec<String> = vec!["GIT_EDITOR=false".to_string()];
+    for (k, v) in remote_env {
+        env.push(format!("{k}={v}"));
+    }
+    let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
 
     debug!("Checking if file exists: {}", file_path);
     let exists = exec_check(
@@ -367,6 +378,7 @@ pub fn execute_bash_in_sandbox(
     user: &str,
     repo_path: &Path,
     docker_socket: &Path,
+    remote_env: &[(String, String)],
     command: &str,
 ) -> Result<(String, bool)> {
     const MAX_OUTPUT_SIZE: usize = 30000;
@@ -380,7 +392,11 @@ pub fn execute_bash_in_sandbox(
 
     let docker = docker_connect(docker_socket)?;
     let workdir = repo_path.to_string_lossy().to_string();
-    let env = vec!["GIT_EDITOR=false"];
+    let mut env: Vec<String> = vec!["GIT_EDITOR=false".to_string()];
+    for (k, v) in remote_env {
+        env.push(format!("{k}={v}"));
+    }
+    let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
 
     // Generate ID for output file. In deterministic mode, we use the PID we're
     // about to assign to the command for a unique but predictable filename.
