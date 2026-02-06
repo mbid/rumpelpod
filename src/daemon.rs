@@ -11,7 +11,9 @@ use anyhow::{Context, Result};
 use bollard::query_parameters::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
 };
-use bollard::secret::{ContainerCreateBody, HostConfig, Mount as BollardMount, MountTypeEnum};
+use bollard::secret::{
+    ContainerCreateBody, DeviceMapping, HostConfig, Mount as BollardMount, MountTypeEnum,
+};
 use bollard::Docker;
 use indoc::{formatdoc, indoc};
 use listenfd::ListenFd;
@@ -20,7 +22,9 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{is_deterministic_test_mode, Network, RemoteDocker, Runtime};
+use crate::config::{
+    is_deterministic_test_mode, ContainerRuntimeOptions, Network, RemoteDocker, Runtime,
+};
 use crate::devcontainer;
 use crate::docker_exec::{exec_check, exec_command};
 use crate::gateway;
@@ -649,6 +653,21 @@ fn docker_runtime_flag(runtime: Runtime) -> &'static str {
     }
 }
 
+/// Parse a `--device` spec like `/dev/null:/dev/mynull` or `/dev/fuse` into a DeviceMapping.
+fn parse_device_mapping(spec: &str) -> DeviceMapping {
+    let parts: Vec<&str> = spec.split(':').collect();
+    let (host, container, perms) = match parts.len() {
+        1 => (parts[0], parts[0], "rwm"),
+        2 => (parts[0], parts[1], "rwm"),
+        _ => (parts[0], parts[1], parts[2]),
+    };
+    DeviceMapping {
+        path_on_host: Some(host.to_string()),
+        path_in_container: Some(container.to_string()),
+        cgroup_permissions: Some(perms.to_string()),
+    }
+}
+
 /// Create a new container using the bollard Docker API.
 #[allow(clippy::too_many_arguments)]
 fn create_container(
@@ -662,6 +681,7 @@ fn create_container(
     network_config: Network,
     env: &std::collections::HashMap<String, String>,
     mounts: &[devcontainer::MountObject],
+    runtime_options: &ContainerRuntimeOptions,
 ) -> Result<ContainerId> {
     let network_mode = match network_config {
         Network::UnsafeHost => "host",
@@ -714,10 +734,26 @@ fn create_container(
         )
     };
 
+    // Merge privileged: test deterministic mode OR devcontainer setting
+    let privileged = if deterministic_pids || runtime_options.privileged == Some(true) {
+        Some(true)
+    } else {
+        None
+    };
+
+    let devices = runtime_options
+        .devices
+        .as_ref()
+        .map(|devs| devs.iter().map(|d| parse_device_mapping(d)).collect());
+
     let host_config = HostConfig {
         runtime: Some(docker_runtime_flag(runtime).to_string()),
         network_mode: Some(network_mode.to_string()),
-        privileged: if deterministic_pids { Some(true) } else { None },
+        privileged,
+        init: runtime_options.init,
+        cap_add: runtime_options.cap_add.clone(),
+        security_opt: runtime_options.security_opt.clone(),
+        devices,
         mounts: bollard_mounts,
         ..Default::default()
     };
@@ -985,6 +1021,7 @@ impl Daemon for DaemonServer {
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
         mounts: Vec<devcontainer::MountObject>,
+        runtime_options: ContainerRuntimeOptions,
     ) -> Result<LaunchResult> {
         // Validate network configuration
         if network == Network::UnsafeHost && runtime != Runtime::Runc {
@@ -1220,6 +1257,7 @@ impl Daemon for DaemonServer {
             network,
             &env,
             &mounts,
+            &runtime_options,
         )
         .map_err(mark_error)?;
 
@@ -1309,6 +1347,7 @@ impl Daemon for DaemonServer {
         env: std::collections::HashMap<String, String>,
         lifecycle: LifecycleCommands,
         mounts: Vec<devcontainer::MountObject>,
+        runtime_options: ContainerRuntimeOptions,
     ) -> Result<LaunchResult> {
         let name = docker_name(&repo_path, &sandbox_name);
 
@@ -1384,6 +1423,7 @@ impl Daemon for DaemonServer {
             env,
             lifecycle,
             mounts,
+            runtime_options,
         )?;
 
         // 4. Apply patch if we have one

@@ -68,6 +68,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         env,
         lifecycle,
         config.mounts,
+        config.runtime_options,
     )?;
 
     println!("Sandbox '{}' recreated successfully.", cmd.name);

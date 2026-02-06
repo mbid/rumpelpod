@@ -99,6 +99,7 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         env,
         lifecycle,
         config.mounts,
+        config.runtime_options,
     )
 }
 

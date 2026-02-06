@@ -178,33 +178,33 @@ mod tests {
     #[test]
     fn test_parse_run_args_network_equals() {
         let args = vec!["--network=host".to_string()];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, Some(Network::UnsafeHost));
-        assert_eq!(runtime, None);
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, Some(Network::UnsafeHost));
+        assert_eq!(parsed.runtime, None);
     }
 
     #[test]
     fn test_parse_run_args_network_separate() {
         let args = vec!["--network".to_string(), "host".to_string()];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, Some(Network::UnsafeHost));
-        assert_eq!(runtime, None);
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, Some(Network::UnsafeHost));
+        assert_eq!(parsed.runtime, None);
     }
 
     #[test]
     fn test_parse_run_args_runtime_equals() {
         let args = vec!["--runtime=sysbox-runc".to_string()];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, None);
-        assert_eq!(runtime, Some(Runtime::SysboxRunc));
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, None);
+        assert_eq!(parsed.runtime, Some(Runtime::SysboxRunc));
     }
 
     #[test]
     fn test_parse_run_args_runtime_separate() {
         let args = vec!["--runtime".to_string(), "runsc".to_string()];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, None);
-        assert_eq!(runtime, Some(Runtime::Runsc));
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, None);
+        assert_eq!(parsed.runtime, Some(Runtime::Runsc));
     }
 
     #[test]
@@ -213,9 +213,9 @@ mod tests {
             "--network=host".to_string(),
             "--runtime=sysbox-runc".to_string(),
         ];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, Some(Network::UnsafeHost));
-        assert_eq!(runtime, Some(Runtime::SysboxRunc));
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, Some(Network::UnsafeHost));
+        assert_eq!(parsed.runtime, Some(Runtime::SysboxRunc));
     }
 
     #[test]
@@ -228,25 +228,25 @@ mod tests {
             "/host:/container".to_string(),
             "--runtime=runc".to_string(),
         ];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, Some(Network::UnsafeHost));
-        assert_eq!(runtime, Some(Runtime::Runc));
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, Some(Network::UnsafeHost));
+        assert_eq!(parsed.runtime, Some(Runtime::Runc));
     }
 
     #[test]
     fn test_parse_run_args_unknown_runtime() {
         let args = vec!["--runtime=unknown-runtime".to_string()];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, None);
-        assert_eq!(runtime, None);
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, None);
+        assert_eq!(parsed.runtime, None);
     }
 
     #[test]
     fn test_parse_run_args_non_host_network() {
         let args = vec!["--network=bridge".to_string()];
-        let (network, runtime) = super::parse_run_args(&args);
-        assert_eq!(network, None);
-        assert_eq!(runtime, None);
+        let parsed = super::parse_run_args(&args);
+        assert_eq!(parsed.network, None);
+        assert_eq!(parsed.runtime, None);
     }
 
     #[test]
@@ -367,6 +367,30 @@ pub struct ImageRecipe {
     pub options: Option<Vec<String>>,
 }
 
+/// Container runtime options from devcontainer.json (privileged, init, capAdd, etc.)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContainerRuntimeOptions {
+    /// Run container in privileged mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<bool>,
+
+    /// Use tini as init process (PID 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub init: Option<bool>,
+
+    /// Linux capabilities to add.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap_add: Option<Vec<String>>,
+
+    /// Security options (e.g. seccomp=unconfined).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub security_opt: Option<Vec<String>>,
+
+    /// Device mappings parsed from runArgs --device flags.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<String>>,
+}
+
 /// Merged configuration from `.sandbox.toml` and `devcontainer.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
@@ -401,6 +425,10 @@ pub struct SandboxConfig {
 
     /// Additional mounts for the container.
     pub mounts: Vec<MountObject>,
+
+    /// Container runtime options from devcontainer.json.
+    #[serde(default)]
+    pub runtime_options: ContainerRuntimeOptions,
 
     /// Agent configuration.
     pub agent: AgentConfig,
@@ -458,12 +486,17 @@ impl SandboxConfig {
             TomlConfig::default()
         };
 
-        // Parse run_args from devcontainer.json for network and runtime
-        let (dc_network, dc_runtime) = devcontainer
+        // Parse run_args from devcontainer.json for network, runtime, and devices
+        let parsed_run_args = devcontainer
             .as_ref()
             .and_then(|dc| dc.run_args.as_ref())
-            .map(|args| parse_run_args(args))
-            .unwrap_or((None, None));
+            .map(|args| parse_run_args(args));
+        let dc_network = parsed_run_args.as_ref().and_then(|p| p.network);
+        let dc_runtime = parsed_run_args.as_ref().and_then(|p| p.runtime);
+        let dc_devices = parsed_run_args
+            .as_ref()
+            .map(|p| p.devices.clone())
+            .unwrap_or_default();
 
         // Merge with toml taking precedence
         let provided_image = toml_config
@@ -609,6 +642,19 @@ impl SandboxConfig {
             bail!("Configuration error: Only one of 'model', 'custom-anthropic-model', 'custom-gemini-model', or 'custom-xai-model' can be specified in [agent] section.");
         }
 
+        // Build container runtime options from devcontainer.json fields
+        let runtime_options = ContainerRuntimeOptions {
+            privileged: devcontainer.as_ref().and_then(|dc| dc.privileged),
+            init: devcontainer.as_ref().and_then(|dc| dc.init),
+            cap_add: devcontainer.as_ref().and_then(|dc| dc.cap_add.clone()),
+            security_opt: devcontainer.as_ref().and_then(|dc| dc.security_opt.clone()),
+            devices: if dc_devices.is_empty() {
+                None
+            } else {
+                Some(dc_devices)
+            },
+        };
+
         Ok(Self {
             runtime,
             network,
@@ -619,6 +665,7 @@ impl SandboxConfig {
             container_env,
             remote_env,
             mounts,
+            runtime_options,
             agent: toml_config.agent,
             host: toml_config.host,
             on_create_command: devcontainer
@@ -661,14 +708,23 @@ pub fn resolve_local_env_vars(value: &str) -> String {
     result
 }
 
-/// Parse run_args to extract network and runtime settings.
+/// Parsed results from devcontainer.json runArgs.
+struct ParsedRunArgs {
+    network: Option<Network>,
+    runtime: Option<Runtime>,
+    devices: Vec<String>,
+}
+
+/// Parse run_args to extract network, runtime, and device settings.
 ///
 /// Looks for:
 /// - `--network=host` or `--network host` -> Network::UnsafeHost
 /// - `--runtime=<runtime>` or `--runtime <runtime>` -> appropriate Runtime
-fn parse_run_args(args: &[String]) -> (Option<Network>, Option<Runtime>) {
+/// - `--device=<spec>` or `--device <spec>` -> device mappings
+fn parse_run_args(args: &[String]) -> ParsedRunArgs {
     let mut network = None;
     let mut runtime = None;
+    let mut devices = Vec::new();
     let mut iter = args.iter().peekable();
 
     while let Some(arg) = iter.next() {
@@ -693,9 +749,22 @@ fn parse_run_args(args: &[String]) -> (Option<Network>, Option<Runtime>) {
                 runtime = parse_runtime_value(value);
             }
         }
+
+        // Handle --device
+        if let Some(value) = arg.strip_prefix("--device=") {
+            devices.push(value.to_string());
+        } else if arg == "--device" {
+            if let Some(value) = iter.next() {
+                devices.push(value.to_string());
+            }
+        }
     }
 
-    (network, runtime)
+    ParsedRunArgs {
+        network,
+        runtime,
+        devices,
+    }
 }
 
 /// Parse a runtime string value into a Runtime enum.
