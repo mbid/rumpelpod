@@ -65,6 +65,8 @@ USER ${USER}
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
 
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
 RUN git clone https://github.com/mbid/sandbox /home/$USER/sandbox
 WORKDIR /home/$USER/sandbox
 
