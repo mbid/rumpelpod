@@ -6,6 +6,9 @@ pub enum Model {
     /// Claude Opus 4.5 - most capable model
     #[serde(rename = "claude-opus-4-5")]
     Opus,
+    /// Claude Opus 4.6
+    #[serde(rename = "claude-opus-4-6")]
+    Opus46,
     /// Claude Sonnet 4.5 - balanced performance and cost
     #[serde(rename = "claude-sonnet-4-5")]
     Sonnet,
@@ -21,6 +24,7 @@ impl std::fmt::Display for Model {
         // Use the serde rename as the string representation
         let s = match self {
             Model::Opus => "claude-opus-4-5",
+            Model::Opus46 => "claude-opus-4-6",
             Model::Sonnet => "claude-sonnet-4-5",
             Model::Haiku => "claude-haiku-4-5",
             Model::Custom(s) => s,

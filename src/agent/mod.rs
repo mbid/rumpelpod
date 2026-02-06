@@ -88,6 +88,7 @@ fn resolve_model(cmd: &AgentCommand, config: &SandboxConfig) -> EffectiveModel {
 fn convert_config_model(m: ConfigModel) -> EffectiveModel {
     match m {
         ConfigModel::ClaudeOpus => EffectiveModel::Anthropic(anthropic_types::Model::Opus),
+        ConfigModel::ClaudeOpus46 => EffectiveModel::Anthropic(anthropic_types::Model::Opus46),
         ConfigModel::ClaudeSonnet => EffectiveModel::Anthropic(anthropic_types::Model::Sonnet),
         ConfigModel::ClaudeHaiku => EffectiveModel::Anthropic(anthropic_types::Model::Haiku),
         ConfigModel::Gemini25Flash => EffectiveModel::Gemini(gemini_types::Model::Gemini25Flash),

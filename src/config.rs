@@ -38,6 +38,10 @@ pub enum Model {
     #[value(name = "claude-opus-4-5")]
     #[default]
     ClaudeOpus,
+    /// Claude Opus 4.6
+    #[serde(rename = "claude-opus-4-6")]
+    #[value(name = "claude-opus-4-6")]
+    ClaudeOpus46,
     /// Claude Sonnet 4.5 - balanced performance and cost
     #[serde(rename = "claude-sonnet-4-5")]
     #[value(name = "claude-sonnet-4-5")]
@@ -76,6 +80,7 @@ impl std::fmt::Display for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Model::ClaudeOpus => "claude-opus-4-5",
+            Model::ClaudeOpus46 => "claude-opus-4-6",
             Model::ClaudeSonnet => "claude-sonnet-4-5",
             Model::ClaudeHaiku => "claude-haiku-4-5",
             Model::Gemini25Flash => "gemini-2.5-flash",

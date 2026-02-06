@@ -263,7 +263,7 @@ pub fn run_claude_agent(
                 Some(0) => None,
                 Some(b) => Some(b),
                 None => {
-                    if let Model::Opus = model {
+                    if matches!(model, Model::Opus | Model::Opus46) {
                         // Claude Code uses ~32k tokens for reasoning.
                         // We adopt this default for Opus to match its capability profile.
                         Some(32_000)
@@ -284,7 +284,7 @@ pub fn run_claude_agent(
                 max_tokens = 64_000;
 
                 // For Opus, we also set high effort when thinking is enabled
-                if let Model::Opus = model {
+                if matches!(model, Model::Opus | Model::Opus46) {
                     output_config = Some(OutputConfig {
                         effort: Effort::High,
                     });
