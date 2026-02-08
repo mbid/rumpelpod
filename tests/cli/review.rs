@@ -471,3 +471,26 @@ fn review_no_changes() {
         log
     );
 }
+
+#[test]
+fn review_nonexistent_sandbox_fails() {
+    let repo = TestRepo::new();
+    let daemon = TestDaemon::start();
+
+    let output = sandbox_command(&repo, &daemon)
+        .args(["review", "does-not-exist", "--yes"])
+        .output()
+        .expect("Failed to run sandbox review command");
+
+    assert!(
+        !output.status.success(),
+        "sandbox review should fail for non-existent sandbox"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("does not exist"),
+        "Error should say sandbox does not exist, got: {}",
+        stderr
+    );
+}

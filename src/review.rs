@@ -12,7 +12,8 @@ use anyhow::{bail, Context, Result};
 use tempfile::TempDir;
 
 use crate::cli::ReviewCommand;
-use crate::enter::launch_sandbox;
+use crate::daemon;
+use crate::daemon::protocol::{Daemon, DaemonClient};
 use crate::git::get_repo_root;
 
 /// Translate a difftool name to its executable path.
@@ -285,8 +286,15 @@ fn prompt_for_file(
 pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
-    // Launch the sandbox (or ensure it's running)
-    let _launch_result = launch_sandbox(&cmd.name, None)?;
+    // Verify the sandbox exists in the daemon database before doing
+    // anything else -- gives a clear error instead of a confusing
+    // "ref not found" message for typos or deleted sandboxes.
+    let socket_path = daemon::socket_path()?;
+    let client = DaemonClient::new_unix(&socket_path);
+    let sandboxes = client.list_sandboxes(repo_root.clone())?;
+    if !sandboxes.iter().any(|s| s.name == cmd.name) {
+        bail!("Sandbox '{}' does not exist.", cmd.name);
+    }
 
     // Verify the sandbox remote-tracking ref exists on the host
     let sandbox_ref = format!("sandbox/{}", cmd.name);
