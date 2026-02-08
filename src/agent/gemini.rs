@@ -168,7 +168,7 @@ pub fn run_gemini_agent(
                 for part in &last_content.parts {
                     if let PartContent::Text(text) = &part.content {
                         if !text.is_empty() {
-                            editable_last_message = Some(format!("> {}\n", text));
+                            editable_last_message = Some(format!("{}\n", text));
                             break;
                         }
                     }

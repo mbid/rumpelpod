@@ -132,7 +132,7 @@ pub fn run_claude_agent(
                 // Extract the text from the last user message
                 for block in &last_msg.content {
                     if let ContentBlock::Text { text, .. } = block {
-                        editable_last_message = Some(format!("> {}\n", text));
+                        editable_last_message = Some(format!("{}\n", text));
                         break;
                     }
                 }

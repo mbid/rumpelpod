@@ -106,7 +106,7 @@ pub fn run_grok_agent(
                 // Extract the text from the last user message
                 if let Some(MessageContent::Text(text)) = &last_msg.content {
                     if !text.is_empty() {
-                        editable_last_message = Some(format!("> {}\n", text));
+                        editable_last_message = Some(format!("{}\n", text));
                     }
                 }
                 // Pop the last user message so it can be edited
