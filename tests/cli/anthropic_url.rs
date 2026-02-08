@@ -1,4 +1,6 @@
-use crate::common::{build_test_image, sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH};
+use crate::common::{
+    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
+};
 use indoc::formatdoc;
 use std::fs;
 use std::io::Write;
@@ -10,10 +12,9 @@ fn test_anthropic_base_url_garbage_errors() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
+    write_test_sandbox_config(&repo, &image_id);
+
     let config = formatdoc! {r#"
-        runtime = "runc"
-        image = "{image_id}"
-        repo-path = "{TEST_REPO_PATH}"
         [agent]
         model = "claude-sonnet-4-5"
         anthropic-base-url = "https://invalid.example.com/v1/messages"
@@ -68,11 +69,10 @@ fn test_anthropic_base_url_default_works() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
+    write_test_sandbox_config(&repo, &image_id);
+
     // Test with the default URL (explicitly set)
     let config = formatdoc! {r#"
-        runtime = "runc"
-        image = "{image_id}"
-        repo-path = "{TEST_REPO_PATH}"
         [agent]
         model = "claude-sonnet-4-5"
         anthropic-base-url = "https://api.anthropic.com/v1/messages"

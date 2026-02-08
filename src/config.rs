@@ -1,13 +1,13 @@
-//! Configuration types and `.sandbox.toml` parser.
+//! Configuration types for sandbox settings.
 //!
 //! This module provides:
 //! - Runtime and Model enums for CLI and config file parsing
-//! - SandboxConfig for parsing `.sandbox.toml` at the repository root
+//! - SandboxConfig for merging `devcontainer.json` and optional `.sandbox.toml`
 //! - Utility functions for state directory paths
 //!
-//! Configuration is loaded with the following precedence (highest to lowest):
-//! 1. `.sandbox.toml` in the repository root
-//! 2. `devcontainer.json` (in `.devcontainer/` or root)
+//! Container settings (image, user, workspace, mounts, etc.) come from
+//! `devcontainer.json`.  The optional `.sandbox.toml` provides sandbox-specific
+//! settings that have no devcontainer equivalent (runtime, network, host, agent).
 
 use crate::devcontainer::{
     DevContainer, LifecycleCommand, MountObject, Port, PortAttributes, WaitFor,
@@ -254,7 +254,6 @@ mod tests {
     #[test]
     fn test_toml_remote_unknown_field() {
         let toml_str = r#"
-            image = "alpine"
             remote = "user@host:22"
         "#;
         let result: Result<super::TomlConfig, _> = toml::from_str(toml_str);
@@ -264,11 +263,23 @@ mod tests {
     #[test]
     fn test_toml_host_option() {
         let toml_str = r#"
-            image = "alpine"
             host = "user@host:22"
         "#;
         let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.host, Some("user@host:22".to_string()));
+    }
+
+    #[test]
+    fn test_toml_rejects_removed_fields() {
+        // image, user, and repo-path were removed — they belong in devcontainer.json
+        for field in [
+            "image = \"alpine\"",
+            "user = \"bob\"",
+            "repo-path = \"/ws\"",
+        ] {
+            let result: Result<super::TomlConfig, _> = toml::from_str(field);
+            assert!(result.is_err(), "should reject: {field}");
+        }
     }
 }
 
@@ -333,6 +344,10 @@ impl RemoteDocker {
 
 /// Raw configuration structure parsed from `.sandbox.toml`.
 /// All fields are optional to allow merging with devcontainer.json.
+///
+/// Fields that have equivalents in devcontainer.json (image, user,
+/// workspaceFolder) are intentionally omitted — they should be set in
+/// devcontainer.json instead.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct TomlConfig {
@@ -341,15 +356,6 @@ struct TomlConfig {
 
     /// Network configuration.
     network: Option<Network>,
-
-    /// Docker image to use.
-    image: Option<String>,
-
-    /// User to run as inside the sandbox container.
-    user: Option<String>,
-
-    /// Path to the repo checkout inside the container.
-    repo_path: Option<PathBuf>,
 
     #[serde(default)]
     agent: AgentConfig,
@@ -393,7 +399,7 @@ pub struct ContainerRuntimeOptions {
     pub devices: Option<Vec<String>>,
 }
 
-/// Merged configuration from `.sandbox.toml` and `devcontainer.json`.
+/// Merged configuration from `devcontainer.json` and optional `.sandbox.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
     /// Container runtime (runsc, runc, sysbox-runc).
@@ -454,16 +460,12 @@ pub struct SandboxConfig {
 }
 
 impl SandboxConfig {
-    /// Load config from `.sandbox.toml` and/or `devcontainer.json`.
+    /// Load config from `devcontainer.json` and optional `.sandbox.toml`.
     ///
-    /// Precedence (highest to lowest):
-    /// 1. `.sandbox.toml` values
-    /// 2. `devcontainer.json` values (from `.devcontainer/` or root)
-    ///
-    /// At least one config source must provide `image` and `repo_path`.
-    /// Compute the default workspaceFolder from the repo root path.
-    /// Per the devcontainer spec, when not specified the default is
-    /// `/workspaces/${localWorkspaceFolderBasename}`.
+    /// Container settings (image, user, workspaceFolder, etc.) come
+    /// exclusively from `devcontainer.json`.  Sandbox-specific settings
+    /// (runtime, network, host, agent) come from `.sandbox.toml` when
+    /// present.
     fn default_workspace_folder(repo_root: &Path) -> PathBuf {
         let basename = repo_root
             .file_name()
@@ -506,10 +508,8 @@ impl SandboxConfig {
             .map(|p| p.devices.clone())
             .unwrap_or_default();
 
-        // Merge with toml taking precedence
-        let provided_image = toml_config
-            .image
-            .or_else(|| devcontainer.as_ref().and_then(|dc| dc.image.clone()));
+        // Image comes from devcontainer.json only
+        let provided_image = devcontainer.as_ref().and_then(|dc| dc.image.clone());
 
         let pending_build = if provided_image.is_none() {
             if let Some(dc) = &devcontainer {
@@ -571,21 +571,15 @@ impl SandboxConfig {
             None
         };
 
-        let repo_path = toml_config
-            .repo_path
-            .or_else(|| {
-                devcontainer
-                    .as_ref()
-                    .and_then(|dc| dc.workspace_folder.as_ref())
-                    .map(PathBuf::from)
-            })
+        let repo_path = devcontainer
+            .as_ref()
+            .and_then(|dc| dc.workspace_folder.as_ref())
+            .map(PathBuf::from)
             .unwrap_or_else(|| Self::default_workspace_folder(repo_root));
 
-        let user = toml_config.user.or_else(|| {
-            devcontainer
-                .as_ref()
-                .and_then(|dc| dc.user().map(String::from))
-        });
+        let user = devcontainer
+            .as_ref()
+            .and_then(|dc| dc.user().map(String::from));
 
         let runtime = toml_config.runtime.or(dc_runtime);
 
@@ -636,7 +630,7 @@ impl SandboxConfig {
         if pending_build.is_none() && image.is_empty() {
             anyhow::bail!(formatdoc! {"
                 No image or build specified.
-                Please set image in .sandbox.toml or build.dockerfile/dockerfile in devcontainer.json.
+                Please set image or build.dockerfile in devcontainer.json.
             "});
         }
 

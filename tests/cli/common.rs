@@ -456,45 +456,57 @@ pub fn build_test_image_without_user(
     })
 }
 
-/// Write a `.sandbox.toml` config file for a test repo using the standard test settings.
+/// Write test configuration files (devcontainer.json + .sandbox.toml).
 ///
-/// This configures:
-/// - The provided image ID
-/// - repo-path = TEST_REPO_PATH
-/// - runtime = "runc" (tests run inside sysbox where only runc works)
+/// devcontainer.json gets image, workspaceFolder, and runArgs (runtime=runc).
+/// .sandbox.toml gets only the runtime setting.
 ///
 /// The user is not specified, so the sandbox will use the image's USER directive.
 /// Use `write_test_sandbox_config_with_user` if you need to specify a user explicitly.
 pub fn write_test_sandbox_config(repo: &TestRepo, image_id: &ImageId) {
-    let config = formatdoc! {r#"
-        runtime = "runc"
-        image = "{image_id}"
-        repo-path = "{TEST_REPO_PATH}"
-    "#};
-    std::fs::write(repo.path().join(".sandbox.toml"), config)
-        .expect("Failed to write .sandbox.toml");
+    write_test_devcontainer_json(repo, image_id, "");
+    write_test_sandbox_toml(repo, "");
 }
 
-/// Write a `.sandbox.toml` config file with an explicit user.
+/// Write test configuration files with an explicit containerUser.
 pub fn write_test_sandbox_config_with_user(repo: &TestRepo, image_id: &ImageId, user: &str) {
-    let config = formatdoc! {r#"
-        runtime = "runc"
-        image = "{image_id}"
-        user = "{user}"
-        repo-path = "{TEST_REPO_PATH}"
-    "#};
-    std::fs::write(repo.path().join(".sandbox.toml"), config)
-        .expect("Failed to write .sandbox.toml");
+    let extra = format!(r#","containerUser": "{user}""#);
+    write_test_devcontainer_json(repo, image_id, &extra);
+    write_test_sandbox_toml(repo, "");
 }
 
-/// Write a `.sandbox.toml` config file with explicit network configuration.
+/// Write test configuration files with explicit network configuration.
 pub fn write_test_sandbox_config_with_network(repo: &TestRepo, image_id: &ImageId, network: &str) {
-    let config = formatdoc! {r#"
-        runtime = "runc"
-        image = "{image_id}"
-        repo-path = "{TEST_REPO_PATH}"
-        network = "{network}"
+    write_test_devcontainer_json(repo, image_id, "");
+    let extra = format!("network = \"{network}\"");
+    write_test_sandbox_toml(repo, &extra);
+}
+
+/// Write a devcontainer.json for tests. `extra_json` is spliced as additional
+/// top-level JSON fields (include a leading comma if non-empty).
+fn write_test_devcontainer_json(repo: &TestRepo, image_id: &ImageId, extra_json: &str) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "image": "{image_id}",
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "runArgs": ["--runtime=runc"]{extra_json}
+        }}
     "#};
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+}
+
+/// Write a .sandbox.toml for tests. `extra_toml` is appended after the
+/// default content (which is currently empty, since runtime comes from
+/// devcontainer.json's runArgs).
+fn write_test_sandbox_toml(repo: &TestRepo, extra_toml: &str) {
+    let config = format!("{extra_toml}\n");
     std::fs::write(repo.path().join(".sandbox.toml"), config)
         .expect("Failed to write .sandbox.toml");
 }

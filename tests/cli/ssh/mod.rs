@@ -408,12 +408,28 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
     }
 }
 
-/// Write a sandbox config that uses a remote Docker host.
+/// Write config files for a remote Docker host test.
+///
+/// Writes a devcontainer.json with the image/workspace/runtime settings,
+/// and a .sandbox.toml with only the host specification.
 pub fn write_remote_sandbox_config(repo: &TestRepo, image_id: &ImageId, remote_spec: &str) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "image": "{image_id}",
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "runArgs": ["--runtime=runc"]
+        }}
+    "#};
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+
     let config = formatdoc! {r#"
-        runtime = "runc"
-        image = "{image_id}"
-        repo-path = "{TEST_REPO_PATH}"
         host = "{remote_spec}"
     "#};
     std::fs::write(repo.path().join(".sandbox.toml"), config)

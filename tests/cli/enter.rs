@@ -108,16 +108,20 @@ fn enter_outside_git_repo_fails() {
 
     // Write a minimal config (command should fail before parsing completes
     // because we're not in a git repo)
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
     fs::write(
-        repo.path().join(".sandbox.toml"),
+        devcontainer_dir.join("devcontainer.json"),
         indoc! {r#"
-            runtime = "runc"
-            image = "debian:13"
-            user = "root"
-            repo-path = "/repo"
+            {
+                "image": "debian:13",
+                "containerUser": "root",
+                "workspaceFolder": "/repo",
+                "runArgs": ["--runtime=runc"]
+            }
         "#},
     )
-    .expect("Failed to write .sandbox.toml");
+    .expect("Failed to write devcontainer.json");
 
     let daemon = TestDaemon::start();
 

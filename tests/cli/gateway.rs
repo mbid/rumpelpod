@@ -7,12 +7,11 @@
 use std::path::Path;
 use std::process::Command;
 
-use indoc::formatdoc;
 use sandbox::CommandExt;
 
 use crate::common::{
     build_test_image, create_commit, sandbox_command, write_test_sandbox_config,
-    write_test_sandbox_config_with_network, TestDaemon, TestRepo, TEST_REPO_PATH,
+    write_test_sandbox_config_with_network, TestDaemon, TestRepo,
 };
 
 /// Get the list of branches in a repository.
@@ -2593,13 +2592,11 @@ fn sandbox_unsafe_host_network_mode_requires_runc() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
-    // Configure unsafe-host network with runsc (should fail)
-    let config = formatdoc! {r#"
-        runtime = "runsc"
-        image = "{}"
-        repo-path = "{}"
-        network = "unsafe-host"
-    "#, image_id, TEST_REPO_PATH};
+    // Configure unsafe-host network with runsc (should fail).
+    // Use write_test_sandbox_config to set up devcontainer.json with the image,
+    // then override .sandbox.toml with runsc + unsafe-host.
+    write_test_sandbox_config(&repo, &image_id);
+    let config = "runtime = \"runsc\"\nnetwork = \"unsafe-host\"\n";
     std::fs::write(repo.path().join(".sandbox.toml"), config)
         .expect("Failed to write .sandbox.toml");
 

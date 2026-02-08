@@ -14,18 +14,18 @@ Spawns isolated Docker containers with automatic git synchronization for running
 
 SETUP:
   1. Create a .devcontainer/devcontainer.json for container settings
-  2. Create a .sandbox.toml for agent settings
+  2. Optionally create a .sandbox.toml for agent settings
   3. Run 'sandbox system-install' to start the background daemon
   4. Use 'sandbox enter <name>' to create and enter sandboxes
 
 CONFIGURATION:
-  .devcontainer/devcontainer.json:
+  .devcontainer/devcontainer.json (required):
     image            Docker image to use
     workspaceFolder  Where the repo is mounted inside the container
     containerUser    User inside container (default: image's USER)
     runArgs          Additional Docker arguments (e.g., --runtime)
 
-  .sandbox.toml:
+  .sandbox.toml (optional):
     [agent]
     model            Default model for 'sandbox agent'
 

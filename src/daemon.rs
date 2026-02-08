@@ -192,7 +192,7 @@ fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<St
             anyhow::bail!(
                 "Image '{}' has USER set to '{}' (root). \
                  For security, sandboxes must run as a non-root user.\n\
-                 Either set 'user' in .sandbox.toml, or change the image's USER directive.",
+                 Either set 'containerUser' in devcontainer.json, or change the image's USER directive.",
                 image,
                 user
             );
@@ -201,7 +201,7 @@ fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<St
             anyhow::bail!(
                 "Image '{}' has no USER directive (defaults to root). \
                  For security, sandboxes must run as a non-root user.\n\
-                 Either set 'user' in .sandbox.toml, or add a USER directive to the Dockerfile.",
+                 Either set 'containerUser' in devcontainer.json, or add a USER directive to the Dockerfile.",
                 image
             );
         }
@@ -332,7 +332,7 @@ fn check_git_directory_ownership(
 ///
 /// If the directory doesn't contain a `.git`, we clone from the git-http bridge.
 /// This handles the devcontainer case where the image doesn't include the repo
-/// (unlike .sandbox.toml images which COPY the repo during the build).
+/// (unlike pre-built images which COPY the repo during the build).
 fn ensure_repo_initialized(
     docker: &Docker,
     container_id: &str,
