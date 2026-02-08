@@ -476,15 +476,31 @@ pub fn write_test_sandbox_config_with_user(repo: &TestRepo, image_id: &ImageId, 
 }
 
 /// Write test configuration files with explicit network configuration.
+///
+/// The network value ("unsafe-host") is passed via devcontainer.json runArgs
+/// (`--network=host`), matching the devcontainer spec.
 pub fn write_test_sandbox_config_with_network(repo: &TestRepo, image_id: &ImageId, network: &str) {
-    write_test_devcontainer_json(repo, image_id, "");
-    let extra = format!("network = \"{network}\"");
-    write_test_sandbox_toml(repo, &extra);
+    let run_args = match network {
+        "unsafe-host" => r#"["--runtime=runc", "--network=host"]"#,
+        _ => r#"["--runtime=runc"]"#,
+    };
+    write_test_devcontainer_json_with_run_args(repo, image_id, run_args, "");
+    write_test_sandbox_toml(repo, "");
 }
 
 /// Write a devcontainer.json for tests. `extra_json` is spliced as additional
 /// top-level JSON fields (include a leading comma if non-empty).
 fn write_test_devcontainer_json(repo: &TestRepo, image_id: &ImageId, extra_json: &str) {
+    write_test_devcontainer_json_with_run_args(repo, image_id, r#"["--runtime=runc"]"#, extra_json);
+}
+
+/// Write a devcontainer.json with custom runArgs and optional extra JSON fields.
+fn write_test_devcontainer_json_with_run_args(
+    repo: &TestRepo,
+    image_id: &ImageId,
+    run_args: &str,
+    extra_json: &str,
+) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
 
@@ -492,7 +508,7 @@ fn write_test_devcontainer_json(repo: &TestRepo, image_id: &ImageId, extra_json:
         {{
             "image": "{image_id}",
             "workspaceFolder": "{TEST_REPO_PATH}",
-            "runArgs": ["--runtime=runc"]{extra_json}
+            "runArgs": {run_args}{extra_json}
         }}
     "#};
     std::fs::write(

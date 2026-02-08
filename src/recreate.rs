@@ -14,8 +14,6 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    let runtime = config.runtime.unwrap_or_default();
-
     // Get the current branch on the host
     let host_branch = get_current_branch(&repo_root);
 
@@ -61,8 +59,8 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         repo_root,
         config.repo_path,
         config.user,
-        runtime,
-        config.network,
+        config.host_network,
+        config.run_args,
         host_branch,
         remote,
         env,

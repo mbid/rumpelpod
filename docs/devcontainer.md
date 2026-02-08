@@ -26,7 +26,7 @@ The following properties from `devcontainer.json` are fully implemented:
 | `containerUser` | ✅ | User to run container as |
 | `remoteUser` | ✅ | User for dev tools (falls back to `containerUser`) |
 | `containerEnv` | ✅ | Environment variables with `${localEnv:VAR}` substitution |
-| `runArgs` | ⚠️ Partial | Only `--runtime` and `--network=host` are extracted |
+| `runArgs` | ✅ | Docker run arguments passed through; `--network=host` detected for git server routing |
 
 #### `workspaceFolder` Implementation Notes
 

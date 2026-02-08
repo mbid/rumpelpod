@@ -2586,30 +2586,3 @@ fn sandbox_unsafe_host_network_mode() {
         remote_refs
     );
 }
-
-#[test]
-fn sandbox_unsafe_host_network_mode_requires_runc() {
-    let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    // Configure unsafe-host network with runsc (should fail).
-    // Use write_test_sandbox_config to set up devcontainer.json with the image,
-    // then override .sandbox.toml with runsc + unsafe-host.
-    write_test_sandbox_config(&repo, &image_id);
-    let config = "runtime = \"runsc\"\nnetwork = \"unsafe-host\"\n";
-    std::fs::write(repo.path().join(".sandbox.toml"), config)
-        .expect("Failed to write .sandbox.toml");
-
-    let daemon = TestDaemon::start();
-    let sandbox_name = "unsafe-host-fail-test";
-
-    // Enter sandbox and verify it fails with helpful message
-    let output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "hello"])
-        .output()
-        .expect("Failed to execute sandbox command");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("network='unsafe-host' is only supported with runtime='runc'"));
-}

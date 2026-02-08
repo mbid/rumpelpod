@@ -14,7 +14,7 @@ use tokio::task::block_in_place;
 use url::Url;
 
 use crate::async_runtime::block_on;
-use crate::config::{ContainerRuntimeOptions, Network, RemoteDocker, Runtime};
+use crate::config::{ContainerRuntimeOptions, RemoteDocker};
 use crate::devcontainer::{LifecycleCommand, MountObject, Port, PortAttributes, WaitFor};
 
 /// Opaque wrapper for docker image names.
@@ -100,10 +100,12 @@ struct LaunchSandboxRequest {
     /// User to run as inside the container, if explicitly specified.
     /// If None, the daemon will use the image's USER directive.
     user: Option<String>,
-    /// Container runtime to use (runsc, runc, sysbox-runc).
-    runtime: Runtime,
-    /// Network configuration.
-    network: Network,
+    /// Whether `--network=host` is in runArgs (affects git server routing).
+    #[serde(default)]
+    host_network: bool,
+    /// Raw `runArgs` from devcontainer.json, passed through to Docker.
+    #[serde(default)]
+    run_args: Vec<String>,
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the sandbox.
     host_branch: Option<String>,
@@ -153,10 +155,12 @@ struct RecreateSandboxRequest {
     /// User to run as inside the container, if explicitly specified.
     /// If None, the daemon will use the image's USER directive.
     user: Option<String>,
-    /// Container runtime to use (runsc, runc, sysbox-runc).
-    runtime: Runtime,
-    /// Network configuration.
-    network: Network,
+    /// Whether `--network=host` is in runArgs (affects git server routing).
+    #[serde(default)]
+    host_network: bool,
+    /// Raw `runArgs` from devcontainer.json, passed through to Docker.
+    #[serde(default)]
+    run_args: Vec<String>,
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the sandbox.
     host_branch: Option<String>,
@@ -310,8 +314,8 @@ pub trait Daemon: Send + Sync + 'static {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
-        runtime: Runtime,
-        network: Network,
+        host_network: bool,
+        run_args: Vec<String>,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
@@ -331,8 +335,8 @@ pub trait Daemon: Send + Sync + 'static {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
-        runtime: Runtime,
-        network: Network,
+        host_network: bool,
+        run_args: Vec<String>,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
@@ -423,8 +427,8 @@ impl Daemon for DaemonClient {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
-        runtime: Runtime,
-        network: Network,
+        host_network: bool,
+        run_args: Vec<String>,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
@@ -441,8 +445,8 @@ impl Daemon for DaemonClient {
             repo_path,
             container_repo_path,
             user,
-            runtime,
-            network,
+            host_network,
+            run_args,
             host_branch,
             remote,
             env,
@@ -484,8 +488,8 @@ impl Daemon for DaemonClient {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
-        runtime: Runtime,
-        network: Network,
+        host_network: bool,
+        run_args: Vec<String>,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
@@ -502,8 +506,8 @@ impl Daemon for DaemonClient {
             repo_path,
             container_repo_path,
             user,
-            runtime,
-            network,
+            host_network,
+            run_args,
             host_branch,
             remote,
             env,
@@ -746,8 +750,8 @@ async fn launch_sandbox_handler<D: Daemon>(
             request.repo_path,
             request.container_repo_path,
             request.user,
-            request.runtime,
-            request.network,
+            request.host_network,
+            request.run_args,
             request.host_branch,
             request.remote,
             request.env,
@@ -786,8 +790,8 @@ async fn recreate_sandbox_handler<D: Daemon>(
             request.repo_path,
             request.container_repo_path,
             request.user,
-            request.runtime,
-            request.network,
+            request.host_network,
+            request.run_args,
             request.host_branch,
             request.remote,
             request.env,
@@ -1018,8 +1022,8 @@ mod tests {
             _repo_path: PathBuf,
             _container_repo_path: PathBuf,
             user: Option<String>,
-            _runtime: Runtime,
-            _network: Network,
+            _host_network: bool,
+            _run_args: Vec<String>,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
@@ -1044,8 +1048,8 @@ mod tests {
             _repo_path: PathBuf,
             _container_repo_path: PathBuf,
             user: Option<String>,
-            _runtime: Runtime,
-            _network: Network,
+            _host_network: bool,
+            _run_args: Vec<String>,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
@@ -1169,8 +1173,8 @@ mod tests {
             PathBuf::from("/tmp/repo"),
             PathBuf::from("/workspace"),
             Some("testuser".to_string()),
-            Runtime::Runc,
-            Network::Default,
+            false,
+            vec!["--runtime=runc".to_string()],
             Some("main".to_string()),
             None, // No remote Docker
             std::collections::HashMap::new(),
@@ -1207,8 +1211,8 @@ mod tests {
             _repo_path: PathBuf,
             _container_repo_path: PathBuf,
             _user: Option<String>,
-            _runtime: Runtime,
-            _network: Network,
+            _host_network: bool,
+            _run_args: Vec<String>,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,
@@ -1228,8 +1232,8 @@ mod tests {
             _repo_path: PathBuf,
             _container_repo_path: PathBuf,
             _user: Option<String>,
-            _runtime: Runtime,
-            _network: Network,
+            _host_network: bool,
+            _run_args: Vec<String>,
             _host_branch: Option<String>,
             _remote: Option<RemoteDocker>,
             _env: std::collections::HashMap<String, String>,

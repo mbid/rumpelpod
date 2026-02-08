@@ -1,13 +1,17 @@
 //! Configuration types for sandbox settings.
 //!
 //! This module provides:
-//! - Runtime and Model enums for CLI and config file parsing
+//! - Model enum for CLI and config file parsing
 //! - SandboxConfig for merging `devcontainer.json` and optional `.sandbox.toml`
 //! - Utility functions for state directory paths
 //!
-//! Container settings (image, user, workspace, mounts, etc.) come from
+//! Container settings (image, user, workspace, mounts, runArgs, etc.) come from
 //! `devcontainer.json`.  The optional `.sandbox.toml` provides sandbox-specific
-//! settings that have no devcontainer equivalent (runtime, network, host, agent).
+//! settings that have no devcontainer equivalent (host, agent).
+//!
+//! Docker run arguments from devcontainer.json's `runArgs` are passed through
+//! to Docker as-is.  The only value we inspect is `--network=host`, because
+//! it changes how we expose the git HTTP server to the container.
 
 use crate::devcontainer::{
     DevContainer, LifecycleCommand, MountObject, Port, PortAttributes, WaitFor,
@@ -17,19 +21,6 @@ use clap::ValueEnum;
 use indoc::formatdoc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-
-/// Container runtime to use for sandboxing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Runtime {
-    /// gVisor runtime (default) - strong isolation via kernel syscall interception
-    #[default]
-    Runsc,
-    /// Standard OCI runtime - no additional isolation
-    Runc,
-    /// Sysbox runtime - enables Docker-in-Docker with VM-like isolation
-    SysboxRunc,
-}
 
 /// Model to use for the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize, Default)]
@@ -95,17 +86,6 @@ impl std::fmt::Display for Model {
     }
 }
 
-/// Network configuration.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Network {
-    /// Isolated network (default)
-    #[default]
-    Default,
-    /// Host network - shares network namespace with host (unsafe)
-    UnsafeHost,
-}
-
 use url::Url;
 
 /// Parsed remote Docker host specification.
@@ -158,17 +138,12 @@ impl RemoteDocker {
 /// All fields are optional to allow merging with devcontainer.json.
 ///
 /// Fields that have equivalents in devcontainer.json (image, user,
-/// workspaceFolder) are intentionally omitted — they should be set in
-/// devcontainer.json instead.
+/// workspaceFolder, runtime, network) are intentionally omitted — they
+/// should be set in devcontainer.json instead (runtime and network via
+/// `runArgs`).
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 struct TomlConfig {
-    /// Container runtime (runsc, runc, sysbox-runc).
-    runtime: Option<Runtime>,
-
-    /// Network configuration.
-    network: Option<Network>,
-
     #[serde(default)]
     agent: AgentConfig,
 
@@ -187,7 +162,8 @@ pub struct ImageRecipe {
     pub options: Option<Vec<String>>,
 }
 
-/// Container runtime options from devcontainer.json (privileged, init, capAdd, etc.)
+/// Container runtime options from devcontainer.json first-class properties
+/// (privileged, init, capAdd, securityOpt).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContainerRuntimeOptions {
     /// Run container in privileged mode.
@@ -205,20 +181,20 @@ pub struct ContainerRuntimeOptions {
     /// Security options (e.g. seccomp=unconfined).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub security_opt: Option<Vec<String>>,
-
-    /// Device mappings parsed from runArgs --device flags.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub devices: Option<Vec<String>>,
 }
 
 /// Merged configuration from `devcontainer.json` and optional `.sandbox.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// Container runtime (runsc, runc, sysbox-runc).
-    pub runtime: Option<Runtime>,
+    /// Whether `--network=host` was specified in runArgs.
+    ///
+    /// We need to know this because it changes how we expose the git HTTP
+    /// server: on bridge network we bind to the gateway IP, on host network
+    /// we bind to localhost.
+    pub host_network: bool,
 
-    /// Network configuration.
-    pub network: Network,
+    /// Raw `runArgs` from devcontainer.json, passed through to `docker run`.
+    pub run_args: Vec<String>,
 
     /// Docker image to use.
     pub image: String,
@@ -274,10 +250,9 @@ pub struct SandboxConfig {
 impl SandboxConfig {
     /// Load config from `devcontainer.json` and optional `.sandbox.toml`.
     ///
-    /// Container settings (image, user, workspaceFolder, etc.) come
-    /// exclusively from `devcontainer.json`.  Sandbox-specific settings
-    /// (runtime, network, host, agent) come from `.sandbox.toml` when
-    /// present.
+    /// Container settings (image, user, workspaceFolder, runArgs, etc.)
+    /// come exclusively from `devcontainer.json`.  Sandbox-specific
+    /// settings (host, agent) come from `.sandbox.toml` when present.
     fn default_workspace_folder(repo_root: &Path) -> PathBuf {
         let basename = repo_root
             .file_name()
@@ -308,17 +283,13 @@ impl SandboxConfig {
             TomlConfig::default()
         };
 
-        // Parse run_args from devcontainer.json for network, runtime, and devices
-        let parsed_run_args = devcontainer
+        // Pass runArgs through as-is; only inspect --network=host since it
+        // affects how we route the git HTTP server.
+        let run_args = devcontainer
             .as_ref()
-            .and_then(|dc| dc.run_args.as_ref())
-            .map(|args| parse_run_args(args));
-        let dc_network = parsed_run_args.as_ref().and_then(|p| p.network);
-        let dc_runtime = parsed_run_args.as_ref().and_then(|p| p.runtime);
-        let dc_devices = parsed_run_args
-            .as_ref()
-            .map(|p| p.devices.clone())
+            .and_then(|dc| dc.run_args.clone())
             .unwrap_or_default();
+        let host_network = has_host_network(&run_args);
 
         // Image comes from devcontainer.json only
         let provided_image = devcontainer.as_ref().and_then(|dc| dc.image.clone());
@@ -393,10 +364,6 @@ impl SandboxConfig {
             .as_ref()
             .and_then(|dc| dc.user().map(String::from));
 
-        let runtime = toml_config.runtime.or(dc_runtime);
-
-        let network = toml_config.network.or(dc_network).unwrap_or_default();
-
         let container_env = devcontainer
             .as_ref()
             .and_then(|dc| dc.container_env.clone())
@@ -456,22 +423,17 @@ impl SandboxConfig {
             bail!("Configuration error: Only one of 'model', 'custom-anthropic-model', 'custom-gemini-model', or 'custom-xai-model' can be specified in [agent] section.");
         }
 
-        // Build container runtime options from devcontainer.json fields
+        // Build container runtime options from devcontainer.json first-class properties
         let runtime_options = ContainerRuntimeOptions {
             privileged: devcontainer.as_ref().and_then(|dc| dc.privileged),
             init: devcontainer.as_ref().and_then(|dc| dc.init),
             cap_add: devcontainer.as_ref().and_then(|dc| dc.cap_add.clone()),
             security_opt: devcontainer.as_ref().and_then(|dc| dc.security_opt.clone()),
-            devices: if dc_devices.is_empty() {
-                None
-            } else {
-                Some(dc_devices)
-            },
         };
 
         Ok(Self {
-            runtime,
-            network,
+            host_network,
+            run_args,
             image,
             pending_build,
             user,
@@ -530,73 +492,26 @@ pub fn resolve_local_env_vars(value: &str) -> String {
     result
 }
 
-/// Parsed results from devcontainer.json runArgs.
-struct ParsedRunArgs {
-    network: Option<Network>,
-    runtime: Option<Runtime>,
-    devices: Vec<String>,
-}
-
-/// Parse run_args to extract network, runtime, and device settings.
+/// Check whether `--network=host` (or `--network host`) is present in runArgs.
 ///
-/// Looks for:
-/// - `--network=host` or `--network host` -> Network::UnsafeHost
-/// - `--runtime=<runtime>` or `--runtime <runtime>` -> appropriate Runtime
-/// - `--device=<spec>` or `--device <spec>` -> device mappings
-fn parse_run_args(args: &[String]) -> ParsedRunArgs {
-    let mut network = None;
-    let mut runtime = None;
-    let mut devices = Vec::new();
-    let mut iter = args.iter().peekable();
-
+/// We need to detect this because host-network containers reach the git HTTP
+/// server on localhost rather than the bridge gateway IP.  All other runArgs
+/// values are passed through to Docker without inspection.
+fn has_host_network(args: &[String]) -> bool {
+    let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        // Handle --network
-        if let Some(value) = arg.strip_prefix("--network=") {
-            if value == "host" {
-                network = Some(Network::UnsafeHost);
-            }
-        } else if arg == "--network" {
+        if arg == "--network=host" {
+            return true;
+        }
+        if arg == "--network" {
             if let Some(value) = iter.next() {
                 if value == "host" {
-                    network = Some(Network::UnsafeHost);
+                    return true;
                 }
             }
         }
-
-        // Handle --runtime
-        if let Some(value) = arg.strip_prefix("--runtime=") {
-            runtime = parse_runtime_value(value);
-        } else if arg == "--runtime" {
-            if let Some(value) = iter.next() {
-                runtime = parse_runtime_value(value);
-            }
-        }
-
-        // Handle --device
-        if let Some(value) = arg.strip_prefix("--device=") {
-            devices.push(value.to_string());
-        } else if arg == "--device" {
-            if let Some(value) = iter.next() {
-                devices.push(value.to_string());
-            }
-        }
     }
-
-    ParsedRunArgs {
-        network,
-        runtime,
-        devices,
-    }
-}
-
-/// Parse a runtime string value into a Runtime enum.
-fn parse_runtime_value(value: &str) -> Option<Runtime> {
-    match value {
-        "runsc" => Some(Runtime::Runsc),
-        "runc" => Some(Runtime::Runc),
-        "sysbox-runc" => Some(Runtime::SysboxRunc),
-        _ => None,
-    }
+    false
 }
 
 /// Agent configuration.

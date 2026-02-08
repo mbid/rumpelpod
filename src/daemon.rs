@@ -23,9 +23,7 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{
-    is_deterministic_test_mode, ContainerRuntimeOptions, Network, RemoteDocker, Runtime,
-};
+use crate::config::{is_deterministic_test_mode, ContainerRuntimeOptions, RemoteDocker};
 use crate::devcontainer::{self, Port, PortAttributes};
 use crate::docker_exec::{exec_check, exec_command};
 use crate::gateway;
@@ -645,12 +643,93 @@ fn install_sandbox_reference_transaction_hook(
     Ok(true)
 }
 
-/// Returns the docker runtime name to pass to `docker run --runtime`.
-fn docker_runtime_flag(runtime: Runtime) -> &'static str {
-    match runtime {
-        Runtime::Runsc => "runsc",
-        Runtime::Runc => "runc",
-        Runtime::SysboxRunc => "sysbox-runc",
+/// Parsed docker run arguments extracted from devcontainer.json `runArgs`.
+///
+/// These are mapped to the corresponding bollard `HostConfig` fields when
+/// creating the container.  Values we don't recognise are silently ignored
+/// (they likely belong to newer Docker versions or are unsupported).
+struct DockerRunArgs {
+    runtime: Option<String>,
+    network: Option<String>,
+    devices: Vec<String>,
+    cap_add: Vec<String>,
+    security_opt: Vec<String>,
+    privileged: bool,
+    init: bool,
+}
+
+/// Map devcontainer.json `runArgs` strings to bollard `HostConfig` fields.
+///
+/// Handles `--key=value` and `--key value` forms for all recognised flags.
+fn parse_run_args_for_docker(args: &[String]) -> DockerRunArgs {
+    let mut result = DockerRunArgs {
+        runtime: None,
+        network: None,
+        devices: Vec::new(),
+        cap_add: Vec::new(),
+        security_opt: Vec::new(),
+        privileged: false,
+        init: false,
+    };
+
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(val) = strip_flag(arg, "--runtime") {
+            result.runtime = Some(val.to_string());
+        } else if arg == "--runtime" {
+            if let Some(val) = iter.next() {
+                result.runtime = Some(val.to_string());
+            }
+        } else if let Some(val) = strip_flag(arg, "--network") {
+            result.network = Some(val.to_string());
+        } else if arg == "--network" {
+            if let Some(val) = iter.next() {
+                result.network = Some(val.to_string());
+            }
+        } else if let Some(val) = strip_flag(arg, "--device") {
+            result.devices.push(val.to_string());
+        } else if arg == "--device" {
+            if let Some(val) = iter.next() {
+                result.devices.push(val.to_string());
+            }
+        } else if let Some(val) = strip_flag(arg, "--cap-add") {
+            result.cap_add.push(val.to_string());
+        } else if arg == "--cap-add" {
+            if let Some(val) = iter.next() {
+                result.cap_add.push(val.to_string());
+            }
+        } else if let Some(val) = strip_flag(arg, "--security-opt") {
+            result.security_opt.push(val.to_string());
+        } else if arg == "--security-opt" {
+            if let Some(val) = iter.next() {
+                result.security_opt.push(val.to_string());
+            }
+        } else if arg == "--privileged" {
+            result.privileged = true;
+        } else if arg == "--init" {
+            result.init = true;
+        }
+    }
+
+    result
+}
+
+/// Strip `--flag=` prefix and return the value, or None if the arg doesn't
+/// start with `--flag=`.
+fn strip_flag<'a>(arg: &'a str, flag: &str) -> Option<&'a str> {
+    let prefix = format!("{}=", flag);
+    arg.strip_prefix(&prefix)
+}
+
+/// Merge an optional Vec from devcontainer.json first-class properties with
+/// additional values parsed from runArgs.
+fn merge_string_vecs(base: Option<&Vec<String>>, extra: &[String]) -> Option<Vec<String>> {
+    let mut result: Vec<String> = base.cloned().unwrap_or_default();
+    result.extend(extra.iter().cloned());
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
     }
 }
 
@@ -670,6 +749,9 @@ fn parse_device_mapping(spec: &str) -> DeviceMapping {
 }
 
 /// Create a new container using the bollard Docker API.
+///
+/// `run_args` are the raw docker run arguments from devcontainer.json,
+/// mapped to the corresponding bollard API fields.
 #[allow(clippy::too_many_arguments)]
 fn create_container(
     docker: &Docker,
@@ -678,17 +760,14 @@ fn create_container(
     image: &Image,
     repo_path: &Path,
     container_repo_path: &Path,
-    runtime: Runtime,
-    network_config: Network,
+    run_args: &[String],
     env: &std::collections::HashMap<String, String>,
     mounts: &[devcontainer::MountObject],
     runtime_options: &ContainerRuntimeOptions,
     publish_ports: &HashMap<u16, u16>,
 ) -> Result<ContainerId> {
-    let network_mode = match network_config {
-        Network::UnsafeHost => "host",
-        Network::Default => "bridge",
-    };
+    // Parse runArgs into bollard HostConfig fields
+    let run_args_config = parse_run_args_for_docker(run_args);
 
     let mut labels = HashMap::new();
     labels.insert(REPO_PATH_LABEL.to_string(), repo_path.display().to_string());
@@ -736,17 +815,35 @@ fn create_container(
         )
     };
 
-    // Merge privileged: test deterministic mode OR devcontainer setting
-    let privileged = if deterministic_pids || runtime_options.privileged == Some(true) {
+    // Merge privileged: test deterministic mode OR devcontainer setting OR runArgs
+    let privileged = if deterministic_pids
+        || runtime_options.privileged == Some(true)
+        || run_args_config.privileged
+    {
         Some(true)
     } else {
         None
     };
 
-    let devices = runtime_options
-        .devices
-        .as_ref()
-        .map(|devs| devs.iter().map(|d| parse_device_mapping(d)).collect());
+    let devices = if run_args_config.devices.is_empty() {
+        None
+    } else {
+        Some(
+            run_args_config
+                .devices
+                .iter()
+                .map(|d| parse_device_mapping(d))
+                .collect(),
+        )
+    };
+
+    // Merge cap_add from devcontainer.json properties and runArgs
+    let cap_add = merge_string_vecs(runtime_options.cap_add.as_ref(), &run_args_config.cap_add);
+    // Merge security_opt from devcontainer.json properties and runArgs
+    let security_opt = merge_string_vecs(
+        runtime_options.security_opt.as_ref(),
+        &run_args_config.security_opt,
+    );
 
     let port_bindings: HashMap<String, Option<Vec<PortBinding>>> = publish_ports
         .iter()
@@ -761,12 +858,20 @@ fn create_container(
         .collect();
 
     let host_config = HostConfig {
-        runtime: Some(docker_runtime_flag(runtime).to_string()),
-        network_mode: Some(network_mode.to_string()),
+        runtime: run_args_config.runtime,
+        network_mode: Some(
+            run_args_config
+                .network
+                .unwrap_or_else(|| "bridge".to_string()),
+        ),
         privileged,
-        init: runtime_options.init,
-        cap_add: runtime_options.cap_add.clone(),
-        security_opt: runtime_options.security_opt.clone(),
+        init: runtime_options.init.or(if run_args_config.init {
+            Some(true)
+        } else {
+            None
+        }),
+        cap_add,
+        security_opt,
         devices,
         mounts: bollard_mounts,
         port_bindings: if port_bindings.is_empty() {
@@ -1243,8 +1348,8 @@ impl Daemon for DaemonServer {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
-        runtime: Runtime,
-        network: Network,
+        host_network: bool,
+        run_args: Vec<String>,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
@@ -1254,11 +1359,6 @@ impl Daemon for DaemonServer {
         forward_ports: Vec<Port>,
         ports_attributes: std::collections::HashMap<String, PortAttributes>,
     ) -> Result<LaunchResult> {
-        // Validate network configuration
-        if network == Network::UnsafeHost && runtime != Runtime::Runc {
-            anyhow::bail!("network='unsafe-host' is only supported with runtime='runc'");
-        }
-
         // Reject bind mounts on remote Docker hosts — the source paths would
         // reference the remote filesystem, not the developer's machine.
         if remote.is_some() {
@@ -1340,27 +1440,27 @@ impl Daemon for DaemonServer {
                     }
                 };
 
-                match network {
-                    Network::UnsafeHost => (
+                if host_network {
+                    (
                         "127.0.0.1".to_string(),
                         forwards
                             .localhost_port
                             .context("localhost forward not set up")?,
-                    ),
-                    Network::Default => (
+                    )
+                } else {
+                    (
                         forwards.bridge_ip.context("bridge IP not set")?,
                         forwards.bridge_port.context("bridge forward not set up")?,
-                    ),
+                    )
                 }
             }
             None => {
                 // Local Docker: use the local git HTTP servers directly
-                match network {
-                    Network::UnsafeHost => ("127.0.0.1".to_string(), self.localhost_server_port),
-                    Network::Default => {
-                        let bridge_ip = git_http_server::get_network_gateway_ip("bridge")?;
-                        (bridge_ip, self.bridge_server_port)
-                    }
+                if host_network {
+                    ("127.0.0.1".to_string(), self.localhost_server_port)
+                } else {
+                    let bridge_ip = git_http_server::get_network_gateway_ip("bridge")?;
+                    (bridge_ip, self.bridge_server_port)
                 }
             }
         };
@@ -1505,8 +1605,7 @@ impl Daemon for DaemonServer {
             &image,
             &repo_path,
             &container_repo_path,
-            runtime,
-            network,
+            &run_args,
             &env,
             &mounts,
             &runtime_options,
@@ -1610,8 +1709,8 @@ impl Daemon for DaemonServer {
         repo_path: PathBuf,
         container_repo_path: PathBuf,
         user: Option<String>,
-        runtime: Runtime,
-        network: Network,
+        host_network: bool,
+        run_args: Vec<String>,
         host_branch: Option<String>,
         remote: Option<RemoteDocker>,
         env: std::collections::HashMap<String, String>,
@@ -1688,8 +1787,8 @@ impl Daemon for DaemonServer {
             repo_path,
             container_repo_path.clone(),
             user,
-            runtime,
-            network,
+            host_network,
+            run_args,
             host_branch,
             remote,
             env,
