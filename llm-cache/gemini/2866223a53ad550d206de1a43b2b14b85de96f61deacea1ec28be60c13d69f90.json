@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "ls -F"
+              }
+            },
+            "thoughtSignature": "EvIHCu8HAb4+9vt4ajIEUOBrpSdnPrB7RjJiuf3fnV+GZVQLZGGuoh8ypEr7HBmdyPzTwYLpqxTaiw3TuP5fHhjkyNk8KqZ94ROPEMz1pJhO/2zgxrD755hsRkqNrR5IiSeu7hC8WZftwk7m0RIpk52VENNXWCVBQX6+vK36xXhaShWLlkeOmH5PydDuq8g61zZf25uVFGSCniRaJWvdPtHXjuc2ujBA97ykif8sSeyIwYPN8Nca6j+xzvZLrDgmqW5ddXUAbOoshVfs892OQ9quyLDIpbxSF7auJ5ArUf1a1HJiKQoc/YhZ0QdUOUvZlJa7FYChHQZWU6Kko8O5WQoSqbg2cA1Dyh1yml9ADHFy70IAmsPh8lAvoX0z0sHFRsEsvlHYEpcWuhpHaamKDho0q6dYHMQz98oTMDNGsEKIex8bckFWLOCfA9ccoTGMuIaGG39ygdXyedhffDF3sUNCD9nUNIq1zx+AqIw5WfDQyembuBaXrFnyRWsDeUEHRNPhqHkaLBwhxQ4AyEse+C4hxYOArB4o4Q9N62OHoyIS+q7Pkz0LmpiwTBaHVXqRuOXj3mswJSKx0ZbqQ5hC1u78xqQE+01xvIjRO93A7gGPxYh6QhVeE2C6opiptywxDOp427GthCka5TLse9nRsRnU0zSGl8D3mKYtB+c+U+CuXe//JIPRIay5p5CoqaYIcBDc7VgSYJ5EsmdRBMIpOVvK7lM1DtLcFDZEuA4WSf0C+PaaYb/F6sCwMvozsH3lLj6Boi6gHt3aFYSFUmuIyI3Z2DN6Aj8bSGgcCj0ytmZAx/4w9ilLroR9e4EMSghtelZwkOTLQfquUveCLfgRVIxva3YhzmKDGbvpKWvzV3PPlDGnxHWPNxmlt9v0tDjr4fT/GmMdUOVWOerUZoCSugZAZrJYmiWiyhl9mIJN9710tiwisbyfA4y8j4bXgZMVXRxCRFa70tiw9F5XIG2zHIDCe+azGITjZTk75CUXr0kSxKPno3zB7iWIvvbOaSrSBq8L2zDWPHoQV3hvm4m4b2t3/q2Uucvlc74YcpIHDiUxS70Tj26eRiLdWXKNtCVseBggHAJyuApahZSYJcQM1Jl11y2VaM1WX3A7VaUrPOvjC6RG/2vempbC+EoUYKsHfE2LkhJIMaXBkNzwWnuYylcEnYSaa50o6m9Uxeg/xXebEpIplzNTTAA1uxAVeCSHVXzBEyazLpWvaHsOKKkt7EF0RRKEe7C8C0vcp6p5z+g1/sH7TwER2EWJiZEjElVGs1oBPwH9jze+vPSiHewYeUGKaHU+UM+5O3Ut5GGNDWpAXbEk0tIelVFzI+paYfAS3q59/QQ="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 440,
+    "candidatesTokenCount": 16,
+    "totalTokenCount": 690,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 440
+      }
+    ],
+    "thoughtsTokenCount": 234
+  },
+  "modelVersion": "gemini-3-pro-preview",
+  "responseId": "TRWJaYb0KaTBxN8PkOOS-Ag"
+}

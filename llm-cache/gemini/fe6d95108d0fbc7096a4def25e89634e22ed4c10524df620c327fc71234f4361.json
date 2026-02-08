@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The file `secret.txt` contains:\n\n```\nAGENT_SECRET_12345\n```",
+            "thoughtSignature": "Eo0CCooCAb4+9vtY7AtwT4O6Tb2XX/mRcQEmO+dOXKj8H6psneRwdvU4uvW4dTBqXHv7qhKD42hYnet1oP/8cbzd6Nu3Q6bwcA6UWzps5f3EPX1lNH1cQWMqNzI7m4VJ5MFxoZN6knQL7n9ODIiQqq3LiY6H7Psofr0C7hk/wSuWEeedpltZEuDU4/htaY0NDIMmHI9cxR8gihEp/HYq70Hx9MFp8R5rFPsJYYxaP1wu/1DIskboDRWNrWoAEpqwMp9KQyFqynbR20AME8RZeIvp0Zt5LgK30dk/I/r7cqxyDaa3t47uCxfvVP9TQfgrFKjxBaB2VjufsPhWepnGKWq0RNdXiLcy6B9LY2kfJV4="
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 556,
+    "candidatesTokenCount": 23,
+    "totalTokenCount": 651,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 556
+      }
+    ],
+    "thoughtsTokenCount": 72
+  },
+  "modelVersion": "gemini-3-flash-preview",
+  "responseId": "TRWJaZzrBtmPxN8PutKGwAo"
+}
