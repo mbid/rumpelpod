@@ -10,37 +10,50 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::{ImageRecipe, RemoteDocker};
-use crate::daemon::protocol::Image;
+use crate::config::RemoteDocker;
+use crate::devcontainer::{BuildOptions, DevContainer};
+
+// Re-export so callers can use image::Image
+pub use crate::daemon::protocol::Image;
 
 /// Resolve a Docker image, building from devcontainer.json 'build' if necessary.
 ///
-/// If an image recipe is specified, this will:
-/// 1. Hash the Dockerfile and build configuration to create a deterministic image tag
-/// 2. Build the Docker image using the specified build settings
-/// 3. Return the built image name
-///
-/// Otherwise, returns the pre-configured image name.
+/// `resolved_build` is the output of `DevContainer::resolve_build()` with paths
+/// already made relative to `repo_root`.
 pub fn resolve_image(
-    image: &str,
-    recipe: Option<&ImageRecipe>,
+    devcontainer: &DevContainer,
+    resolved_build: &Option<BuildOptions>,
     remote_host: Option<&str>,
     repo_root: &Path,
 ) -> Result<Image> {
-    if let Some(recipe) = recipe {
-        build_devcontainer_image(recipe, remote_host, repo_root)
+    if let Some(build) = resolved_build {
+        build_devcontainer_image(build, remote_host, repo_root)
     } else {
-        Ok(Image(image.to_string()))
+        Ok(Image(
+            devcontainer
+                .image
+                .clone()
+                .expect("either image or build must be set"),
+        ))
     }
 }
 
 /// Build a Docker image from devcontainer.json build configuration.
 fn build_devcontainer_image(
-    recipe: &ImageRecipe,
+    build: &BuildOptions,
     remote_host: Option<&str>,
     repo_root: &Path,
 ) -> Result<Image> {
-    let dockerfile_path = repo_root.join(&recipe.dockerfile);
+    let dockerfile = build
+        .dockerfile
+        .as_deref()
+        .expect("resolved build must have dockerfile");
+    let context = build
+        .context
+        .as_deref()
+        .expect("resolved build must have context");
+
+    let dockerfile_path = repo_root.join(dockerfile);
     if !dockerfile_path.exists() {
         bail!(
             "Devcontainer Dockerfile '{}' not found",
@@ -48,10 +61,10 @@ fn build_devcontainer_image(
         );
     }
 
-    let context_path = repo_root.join(&recipe.context);
+    let context_path = repo_root.join(context);
 
     // Compute a deterministic hash of the build configuration
-    let image_name = compute_image_tag(recipe, &dockerfile_path)?;
+    let image_name = compute_image_tag(build, &dockerfile_path)?;
 
     // Build the Docker image
     let mut cmd = Command::new("docker");
@@ -66,17 +79,17 @@ fn build_devcontainer_image(
     cmd.arg(format!("-t={}", image_name));
     cmd.arg(format!("-f={}", dockerfile_path.display()));
 
-    if let Some(args) = &recipe.args {
+    if let Some(args) = &build.args {
         for (k, v) in args {
             cmd.arg("--build-arg").arg(format!("{}={}", k, v));
         }
     }
 
-    if let Some(target) = &recipe.target {
+    if let Some(target) = &build.target {
         cmd.arg("--target").arg(target);
     }
 
-    if let Some(cache_from) = &recipe.cache_from {
+    if let Some(cache_from) = &build.cache_from {
         match cache_from {
             crate::devcontainer::StringOrArray::String(s) => {
                 cmd.arg("--cache-from").arg(s);
@@ -89,7 +102,7 @@ fn build_devcontainer_image(
         }
     }
 
-    if let Some(options) = &recipe.options {
+    if let Some(options) = &build.options {
         cmd.args(options);
     }
 
@@ -109,24 +122,21 @@ fn build_devcontainer_image(
 }
 
 /// Compute a deterministic image tag based on the build configuration.
-///
-/// The tag is created by hashing:
-/// - The Dockerfile content
-/// - The build context path
-/// - All build arguments (sorted by key)
-/// - The target stage (if specified)
-/// - Additional build options
-/// - Cache-from specifications
-fn compute_image_tag(recipe: &ImageRecipe, dockerfile_path: &Path) -> Result<String> {
+fn compute_image_tag(build: &BuildOptions, dockerfile_path: &Path) -> Result<String> {
     let mut f = File::open(dockerfile_path)?;
     let mut content = Vec::new();
     f.read_to_end(&mut content)?;
 
+    let context = build
+        .context
+        .as_deref()
+        .expect("resolved build must have context");
+
     let mut hasher = Sha256::new();
     hasher.update(&content);
-    hasher.update(recipe.context.as_bytes());
+    hasher.update(context.as_bytes());
 
-    if let Some(args) = &recipe.args {
+    if let Some(args) = &build.args {
         let mut keys: Vec<&String> = args.keys().collect();
         keys.sort();
         for k in keys {
@@ -135,17 +145,17 @@ fn compute_image_tag(recipe: &ImageRecipe, dockerfile_path: &Path) -> Result<Str
         }
     }
 
-    if let Some(target) = &recipe.target {
+    if let Some(target) = &build.target {
         hasher.update(target.as_bytes());
     }
 
-    if let Some(options) = &recipe.options {
+    if let Some(options) = &build.options {
         for opt in options {
             hasher.update(opt.as_bytes());
         }
     }
 
-    if let Some(cache_from) = &recipe.cache_from {
+    if let Some(cache_from) = &build.cache_from {
         match cache_from {
             crate::devcontainer::StringOrArray::String(s) => hasher.update(s.as_bytes()),
             crate::devcontainer::StringOrArray::Array(arr) => {

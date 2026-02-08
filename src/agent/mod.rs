@@ -11,8 +11,9 @@ use std::thread::{self, JoinHandle};
 use anyhow::Result;
 
 use crate::cli::AgentCommand;
-use crate::config::{Model as ConfigModel, SandboxConfig};
+use crate::config::{load_toml_config, Model as ConfigModel};
 use crate::daemon::protocol::LaunchResult;
+use crate::devcontainer::DevContainer;
 use crate::enter;
 use crate::git::get_repo_root;
 use crate::llm::cache::LlmCache;
@@ -48,7 +49,7 @@ impl EffectiveModel {
     }
 }
 
-fn resolve_model(cmd: &AgentCommand, config: &SandboxConfig) -> EffectiveModel {
+fn resolve_model(cmd: &AgentCommand, config: &crate::config::TomlConfig) -> EffectiveModel {
     // 1. CLI custom models
     if let Some(s) = &cmd.custom_anthropic_model {
         return EffectiveModel::Anthropic(anthropic_types::Model::Custom(s.clone()));
@@ -116,10 +117,14 @@ fn convert_config_model(m: ConfigModel) -> EffectiveModel {
 /// Entry point for the `sandbox agent` CLI subcommand.
 pub fn agent(cmd: &AgentCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
-    let sandbox_config = SandboxConfig::load(&repo_root)?;
+    let toml_config = load_toml_config(&repo_root)?;
+
+    // Load devcontainer for workspace path and remoteEnv
+    let (devcontainer, _dc_dir) = DevContainer::find_and_load(&repo_root)?
+        .unwrap_or_else(|| (DevContainer::default(), repo_root.clone()));
 
     // Determine the model to use
-    let model = resolve_model(cmd, &sandbox_config);
+    let model = resolve_model(cmd, &toml_config);
 
     // Resolve which conversation to use (new or resume)
     let choice = resolve_conversation(&repo_root, &cmd.name, cmd.new, cmd.r#continue)?;
@@ -213,9 +218,13 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         .transpose()?;
 
     // Run the agent loop
-    let repo_path = &sandbox_config.repo_path;
-    let thinking_budget = cmd.thinking_budget.or(sandbox_config.agent.thinking_budget);
-    let remote_env = sandbox_config.remote_env;
+    let repo_path = devcontainer.container_repo_path(&repo_root);
+    let mut remote_env = devcontainer.remote_env.unwrap_or_default();
+    // Eagerly resolve ${localEnv:...} in remote_env
+    for value in remote_env.values_mut() {
+        *value = crate::devcontainer::resolve_local_env_vars(value);
+    }
+    let thinking_budget = cmd.thinking_budget.or(toml_config.agent.thinking_budget);
 
     match model {
         EffectiveModel::Anthropic(m) => {
@@ -224,18 +233,18 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             } else if cmd.enable_anthropic_websearch {
                 true
             } else {
-                sandbox_config.agent.anthropic_websearch.unwrap_or(true)
+                toml_config.agent.anthropic_websearch.unwrap_or(true)
             };
 
             run_claude_agent(
                 sandbox_handle,
                 &cmd.name,
-                repo_path,
+                &repo_path,
                 remote_env,
                 m,
                 thinking_budget,
                 cache,
-                sandbox_config.agent.anthropic_base_url,
+                toml_config.agent.anthropic_base_url,
                 enable_websearch,
                 initial_history,
                 tracker,
@@ -244,7 +253,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         EffectiveModel::Xai(m) => run_grok_agent(
             sandbox_handle,
             &cmd.name,
-            repo_path,
+            &repo_path,
             remote_env,
             m,
             cache,
@@ -254,7 +263,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         EffectiveModel::Gemini(m) => run_gemini_agent(
             sandbox_handle,
             &cmd.name,
-            repo_path,
+            &repo_path,
             remote_env,
             m,
             cache,

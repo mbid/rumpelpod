@@ -541,4 +541,154 @@ impl DevContainer {
             .as_deref()
             .or(self.container_user.as_deref())
     }
+
+    /// Compute the container workspace path, defaulting to `/workspaces/<basename>`.
+    pub fn container_repo_path(&self, repo_root: &Path) -> PathBuf {
+        self.workspace_folder
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                let basename = repo_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "workspace".to_string());
+                PathBuf::from(format!("/workspaces/{}", basename))
+            })
+    }
+
+    /// Whether `--network=host` is present in `runArgs`.
+    pub fn has_host_network(&self) -> bool {
+        let args = match &self.run_args {
+            Some(args) => args,
+            None => return false,
+        };
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            if arg == "--network=host" {
+                return true;
+            }
+            if arg == "--network" {
+                if let Some(value) = iter.next() {
+                    if value == "host" {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Resolve all `${localEnv:VAR}` references using the host environment.
+    ///
+    /// This must be called on the client side before sending to the daemon,
+    /// since the daemon doesn't have access to the client's environment.
+    /// Other substitution patterns (e.g. `${containerEnv:VAR}`) are left
+    /// untouched.
+    pub fn resolve_local_env(&mut self) {
+        // containerEnv
+        if let Some(env) = &mut self.container_env {
+            for value in env.values_mut() {
+                *value = resolve_local_env_vars(value);
+            }
+        }
+        // remoteEnv
+        if let Some(env) = &mut self.remote_env {
+            for value in env.values_mut() {
+                *value = resolve_local_env_vars(value);
+            }
+        }
+        // build.args
+        if let Some(build) = &mut self.build {
+            if let Some(args) = &mut build.args {
+                for value in args.values_mut() {
+                    *value = resolve_local_env_vars(value);
+                }
+            }
+        }
+    }
+
+    /// Resolve the build configuration, merging legacy fields and making
+    /// paths relative to `repo_root`.
+    ///
+    /// Returns `None` if no build is configured (i.e. image-based container).
+    pub fn resolve_build(&self, devcontainer_dir: &Path, repo_root: &Path) -> Option<BuildOptions> {
+        let dockerfile = self
+            .dockerfile
+            .as_ref()
+            .or_else(|| self.build.as_ref().and_then(|b| b.dockerfile.as_ref()))?;
+
+        let context = self
+            .build
+            .as_ref()
+            .and_then(|b| b.context.as_ref())
+            .cloned()
+            .unwrap_or_else(|| ".".to_string());
+
+        let resolved_dockerfile = devcontainer_dir
+            .join(dockerfile)
+            .strip_prefix(repo_root)
+            .expect("dockerfile must be under repo_root")
+            .to_string_lossy()
+            .to_string();
+        let resolved_context = devcontainer_dir
+            .join(&context)
+            .strip_prefix(repo_root)
+            .expect("context must be under repo_root")
+            .to_string_lossy()
+            .to_string();
+
+        let (args, target, cache_from, options) = match &self.build {
+            Some(build) => (
+                build.args.clone(),
+                build.target.clone(),
+                build.cache_from.clone(),
+                build.options.clone(),
+            ),
+            None => (None, None, None, None),
+        };
+
+        Some(BuildOptions {
+            dockerfile: Some(resolved_dockerfile),
+            context: Some(resolved_context),
+            args,
+            target,
+            cache_from,
+            options,
+        })
+    }
+
+    /// Parse mounts into resolved `MountObject`s.
+    pub fn resolved_mounts(&self) -> Result<Vec<MountObject>> {
+        match &self.mounts {
+            Some(mounts) => mounts
+                .iter()
+                .map(|m| m.to_mount_object())
+                .collect::<Result<Vec<_>>>()
+                .context("parsing mounts from devcontainer.json"),
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// Resolve all `${localEnv:VAR}` references in `value` using the host's
+/// environment, leaving any other substitution patterns (e.g.
+/// `${containerEnv:VAR}`) untouched.
+pub fn resolve_local_env_vars(value: &str) -> String {
+    let mut result = value.to_string();
+    while let Some(start) = result.find("${localEnv:") {
+        let after = start + "${localEnv:".len();
+        if let Some(end) = result[after..].find('}') {
+            let var_name = &result[after..after + end];
+            let replacement = std::env::var(var_name).unwrap_or_default();
+            result = format!(
+                "{}{}{}",
+                &result[..start],
+                replacement,
+                &result[after + end + 1..]
+            );
+        } else {
+            break;
+        }
+    }
+    result
 }

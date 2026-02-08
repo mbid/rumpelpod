@@ -6,10 +6,12 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::cli::EnterCommand;
-use crate::config::{RemoteDocker, SandboxConfig};
+use crate::config::{load_toml_config, RemoteDocker};
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, LifecycleCommands, SandboxName};
-use crate::devcontainer::MountType;
+use crate::daemon::protocol::{
+    Daemon, DaemonClient, LaunchResult, SandboxLaunchParams, SandboxName,
+};
+use crate::devcontainer::{DevContainer, MountType};
 use crate::git::{get_current_branch, get_repo_root};
 use crate::image;
 
@@ -20,30 +22,61 @@ fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
         .with_context(|| format!("{} is not under {}", path.display(), base.display()))
 }
 
+/// Load devcontainer.json and resolve the image (building if needed).
+/// Returns the DevContainer (with localEnv resolved), devcontainer dir,
+/// the resolved Image, and the host string from .sandbox.toml.
+pub fn load_and_resolve(
+    repo_root: &Path,
+    host_override: Option<&str>,
+) -> Result<(DevContainer, image::Image, Option<String>)> {
+    let toml_config = load_toml_config(repo_root)?;
+    let host_str = host_override.map(String::from).or(toml_config.host.clone());
+
+    let (mut devcontainer, devcontainer_dir) = DevContainer::find_and_load(repo_root)?
+        .map(|(dc, dir)| {
+            dc.warn_unsupported_fields();
+            (dc, dir)
+        })
+        .unwrap_or_else(|| (DevContainer::default(), repo_root.to_path_buf()));
+
+    // Validate that we have an image or build config
+    let resolved_build = devcontainer.resolve_build(&devcontainer_dir, repo_root);
+    if devcontainer.image.is_none() && resolved_build.is_none() {
+        bail!(
+            "No image or build specified.\n\
+             Please set image or build.dockerfile in devcontainer.json."
+        );
+    }
+
+    // Resolve ${localEnv:...} before sending to daemon
+    devcontainer.resolve_local_env();
+
+    let img = image::resolve_image(
+        &devcontainer,
+        &resolved_build,
+        host_str.as_deref(),
+        repo_root,
+    )?;
+
+    Ok((devcontainer, img, host_str))
+}
+
 /// Launch a sandbox and return the container ID and user.
 /// This is shared logic between `enter` and `agent` commands.
 pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
     let repo_root = get_repo_root()?;
-    let config = SandboxConfig::load(&repo_root)?;
 
-    let socket_path = daemon::socket_path()?;
-    let client = DaemonClient::new_unix(&socket_path);
+    let (devcontainer, image, host_str) = load_and_resolve(&repo_root, host_override)?;
 
-    // Get the current branch on the host (if any) to set as upstream for the
-    // sandbox's primary branch.
-    let host_branch = get_current_branch(&repo_root);
-
-    // Parse remote Docker specification if provided
-    let host_str = host_override.or(config.host.as_deref());
+    // Reject bind mounts early for remote Docker
     let remote = host_str
+        .as_deref()
         .map(RemoteDocker::parse)
         .transpose()
         .context("Invalid remote Docker specification")?;
 
-    // Reject bind mounts early for remote Docker — the source paths would
-    // reference the remote filesystem, not the developer's machine.
     if remote.is_some() {
-        for m in &config.mounts {
+        for m in devcontainer.resolved_mounts()? {
             if m.mount_type == MountType::Bind {
                 bail!(
                     "bind mounts are not supported with remote Docker hosts. \
@@ -55,52 +88,19 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         }
     }
 
-    let image = image::resolve_image(
-        &config.image,
-        config.pending_build.as_ref(),
-        config.host.as_deref(),
-        &repo_root,
-    )?;
+    let host_branch = get_current_branch(&repo_root);
 
-    // Resolve environment variables from config
-    let mut env = std::collections::HashMap::new();
-    for (key, value) in &config.container_env {
-        let resolved_value = if let Some(var_name) = value
-            .strip_prefix("${localEnv:")
-            .and_then(|s| s.strip_suffix("}"))
-        {
-            std::env::var(var_name).unwrap_or_default()
-        } else {
-            value.clone()
-        };
-        env.insert(key.clone(), resolved_value);
-    }
+    let socket_path = daemon::socket_path()?;
+    let client = DaemonClient::new_unix(&socket_path);
 
-    let lifecycle = LifecycleCommands {
-        on_create_command: config.on_create_command,
-        post_create_command: config.post_create_command,
-        post_start_command: config.post_start_command,
-        post_attach_command: config.post_attach_command,
-        wait_for: config.wait_for,
-    };
-
-    client.launch_sandbox(
-        SandboxName(sandbox_name.to_string()),
+    client.launch_sandbox(SandboxLaunchParams {
+        sandbox_name: SandboxName(sandbox_name.to_string()),
         image,
-        repo_root,
-        config.repo_path,
-        config.user,
-        config.host_network,
-        config.run_args,
+        repo_path: repo_root,
         host_branch,
         remote,
-        env,
-        lifecycle,
-        config.mounts,
-        config.runtime_options,
-        config.forward_ports,
-        config.ports_attributes,
-    )
+        devcontainer,
+    })
 }
 
 /// Resolve `${containerEnv:VAR}` placeholders in `remote_env` by running
@@ -165,7 +165,10 @@ fn read_container_env_var(
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
     let repo_root = get_repo_root()?;
-    let config = SandboxConfig::load(&repo_root)?;
+
+    let (devcontainer, _, _) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let container_repo_path = devcontainer.container_repo_path(&repo_root);
+    let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
     let LaunchResult {
         container_id,
@@ -180,7 +183,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     }
 
     let relative = relative_path(&repo_root, &current_dir)?;
-    let workdir = config.repo_path.join(relative);
+    let workdir = container_repo_path.join(relative);
 
     let mut docker_cmd = Command::new("docker");
     docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
@@ -189,7 +192,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
     // Inject remoteEnv variables, resolving ${containerEnv:VAR} lazily
-    let remote_env = resolve_remote_env(&config.remote_env, &docker_socket, &container_id.0);
+    let remote_env = resolve_remote_env(&remote_env_map, &docker_socket, &container_id.0);
     for (key, value) in &remote_env {
         docker_cmd.args(["-e", &format!("{}={}", key, value)]);
     }

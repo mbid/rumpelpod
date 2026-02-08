@@ -14,8 +14,8 @@ use tokio::task::block_in_place;
 use url::Url;
 
 use crate::async_runtime::block_on;
-use crate::config::{ContainerRuntimeOptions, RemoteDocker};
-use crate::devcontainer::{LifecycleCommand, MountObject, Port, PortAttributes, WaitFor};
+use crate::config::RemoteDocker;
+use crate::devcontainer::DevContainer;
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,125 +72,30 @@ pub struct PortInfo {
     pub label: String,
 }
 
-/// Lifecycle commands extracted from devcontainer.json, sent with the
-/// launch request so the daemon can run them at the right points.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct LifecycleCommands {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub on_create_command: Option<LifecycleCommand>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_create_command: Option<LifecycleCommand>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_start_command: Option<LifecycleCommand>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub post_attach_command: Option<LifecycleCommand>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wait_for: Option<WaitFor>,
-}
-
-/// Request body for launch_sandbox endpoint.
+/// Everything the daemon needs to launch or recreate a sandbox.
+///
+/// Contains the devcontainer.json config (with `${localEnv:...}` already
+/// resolved by the client) plus a few fields that don't come from
+/// devcontainer.json.
 #[derive(Debug, Serialize, Deserialize)]
-struct LaunchSandboxRequest {
-    sandbox_name: SandboxName,
-    image: Image,
-    repo_path: PathBuf,
-    /// Path where the repository is located inside the container.
-    /// Git remotes will be configured to point to the gateway HTTP server.
-    container_repo_path: PathBuf,
-    /// User to run as inside the container, if explicitly specified.
-    /// If None, the daemon will use the image's USER directive.
-    user: Option<String>,
-    /// Whether `--network=host` is in runArgs (affects git server routing).
-    #[serde(default)]
-    host_network: bool,
-    /// Raw `runArgs` from devcontainer.json, passed through to Docker.
-    #[serde(default)]
-    run_args: Vec<String>,
+pub struct SandboxLaunchParams {
+    pub sandbox_name: SandboxName,
+    pub image: Image,
+    /// Host-side path to the git repository.
+    pub repo_path: PathBuf,
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the sandbox.
-    host_branch: Option<String>,
+    pub host_branch: Option<String>,
     /// Remote Docker host specification (e.g., "user@host:port").
     /// If not set, uses local Docker.
-    #[serde(default)]
-    remote: Option<RemoteDocker>,
-    /// Environment variables to set in the container.
-    #[serde(default)]
-    env: std::collections::HashMap<String, String>,
-    /// Lifecycle commands from devcontainer.json.
-    #[serde(default)]
-    lifecycle: LifecycleCommands,
-    /// Additional mounts for the container.
-    #[serde(default)]
-    mounts: Vec<MountObject>,
-    /// Container runtime options from devcontainer.json (privileged, init, etc.)
-    #[serde(default)]
-    runtime_options: ContainerRuntimeOptions,
-    /// Ports to forward from container to local machine.
-    #[serde(default)]
-    forward_ports: Vec<Port>,
-    /// Port-specific attributes (labels, etc.).
-    #[serde(default)]
-    ports_attributes: std::collections::HashMap<String, PortAttributes>,
+    pub remote: Option<RemoteDocker>,
+    /// The devcontainer.json config, with `${localEnv:...}` already resolved.
+    pub devcontainer: DevContainer,
 }
 
-/// Response body for launch_sandbox endpoint.
+/// Response body for launch/recreate sandbox endpoints.
 #[derive(Debug, Serialize, Deserialize)]
-struct LaunchSandboxResponse {
-    container_id: ContainerId,
-    /// The resolved user for the sandbox.
-    user: String,
-    /// The Docker socket path to use for connecting to the Docker daemon.
-    docker_socket: PathBuf,
-}
-
-/// Request body for recreate_sandbox endpoint.
-#[derive(Debug, Serialize, Deserialize)]
-struct RecreateSandboxRequest {
-    sandbox_name: SandboxName,
-    image: Image,
-    repo_path: PathBuf,
-    /// Path where the repository is located inside the container.
-    /// Git remotes will be configured to point to the gateway HTTP server.
-    container_repo_path: PathBuf,
-    /// User to run as inside the container, if explicitly specified.
-    /// If None, the daemon will use the image's USER directive.
-    user: Option<String>,
-    /// Whether `--network=host` is in runArgs (affects git server routing).
-    #[serde(default)]
-    host_network: bool,
-    /// Raw `runArgs` from devcontainer.json, passed through to Docker.
-    #[serde(default)]
-    run_args: Vec<String>,
-    /// The branch currently checked out on the host, if any.
-    /// Used to set the upstream of the primary branch in the sandbox.
-    host_branch: Option<String>,
-    /// Remote Docker host specification (e.g., "user@host:port").
-    /// If not set, uses local Docker.
-    #[serde(default)]
-    remote: Option<RemoteDocker>,
-    /// Environment variables to set in the container.
-    #[serde(default)]
-    env: std::collections::HashMap<String, String>,
-    /// Lifecycle commands from devcontainer.json.
-    #[serde(default)]
-    lifecycle: LifecycleCommands,
-    /// Additional mounts for the container.
-    #[serde(default)]
-    mounts: Vec<MountObject>,
-    /// Container runtime options from devcontainer.json (privileged, init, etc.)
-    #[serde(default)]
-    runtime_options: ContainerRuntimeOptions,
-    /// Ports to forward from container to local machine.
-    #[serde(default)]
-    forward_ports: Vec<Port>,
-    /// Port-specific attributes (labels, etc.).
-    #[serde(default)]
-    ports_attributes: std::collections::HashMap<String, PortAttributes>,
-}
-
-/// Response body for recreate_sandbox endpoint.
-#[derive(Debug, Serialize, Deserialize)]
-struct RecreateSandboxResponse {
+struct SandboxLaunchResponse {
     container_id: ContainerId,
     /// The resolved user for the sandbox.
     user: String,
@@ -305,47 +210,10 @@ struct ErrorResponse {
 
 pub trait Daemon: Send + Sync + 'static {
     // PUT /sandbox
-    // with JSON content type for request and response bodies.
-    #[allow(clippy::too_many_arguments)]
-    fn launch_sandbox(
-        &self,
-        sandbox_name: SandboxName,
-        image: Image,
-        repo_path: PathBuf,
-        container_repo_path: PathBuf,
-        user: Option<String>,
-        host_network: bool,
-        run_args: Vec<String>,
-        host_branch: Option<String>,
-        remote: Option<RemoteDocker>,
-        env: std::collections::HashMap<String, String>,
-        lifecycle: LifecycleCommands,
-        mounts: Vec<MountObject>,
-        runtime_options: ContainerRuntimeOptions,
-        forward_ports: Vec<Port>,
-        ports_attributes: std::collections::HashMap<String, PortAttributes>,
-    ) -> Result<LaunchResult>;
+    fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult>;
 
     // POST /sandbox/recreate
-    #[allow(clippy::too_many_arguments)]
-    fn recreate_sandbox(
-        &self,
-        sandbox_name: SandboxName,
-        image: Image,
-        repo_path: PathBuf,
-        container_repo_path: PathBuf,
-        user: Option<String>,
-        host_network: bool,
-        run_args: Vec<String>,
-        host_branch: Option<String>,
-        remote: Option<RemoteDocker>,
-        env: std::collections::HashMap<String, String>,
-        lifecycle: LifecycleCommands,
-        mounts: Vec<MountObject>,
-        runtime_options: ContainerRuntimeOptions,
-        forward_ports: Vec<Port>,
-        ports_attributes: std::collections::HashMap<String, PortAttributes>,
-    ) -> Result<LaunchResult>;
+    fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult>;
 
     // POST /sandbox/stop
     // Stops a sandbox container without removing it.
@@ -420,52 +288,18 @@ impl DaemonClient {
 }
 
 impl Daemon for DaemonClient {
-    fn launch_sandbox(
-        &self,
-        sandbox_name: SandboxName,
-        image: Image,
-        repo_path: PathBuf,
-        container_repo_path: PathBuf,
-        user: Option<String>,
-        host_network: bool,
-        run_args: Vec<String>,
-        host_branch: Option<String>,
-        remote: Option<RemoteDocker>,
-        env: std::collections::HashMap<String, String>,
-        lifecycle: LifecycleCommands,
-        mounts: Vec<MountObject>,
-        runtime_options: ContainerRuntimeOptions,
-        forward_ports: Vec<Port>,
-        ports_attributes: std::collections::HashMap<String, PortAttributes>,
-    ) -> Result<LaunchResult> {
+    fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox")?;
-        let request = LaunchSandboxRequest {
-            sandbox_name,
-            image,
-            repo_path,
-            container_repo_path,
-            user,
-            host_network,
-            run_args,
-            host_branch,
-            remote,
-            env,
-            lifecycle,
-            mounts,
-            runtime_options,
-            forward_ports,
-            ports_attributes,
-        };
 
         let response = self
             .client
             .put(url)
-            .json(&request)
+            .json(&params)
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
         if response.status().is_success() {
-            let body: LaunchSandboxResponse = response
+            let body: SandboxLaunchResponse = response
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
             Ok(LaunchResult {
@@ -481,52 +315,18 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn recreate_sandbox(
-        &self,
-        sandbox_name: SandboxName,
-        image: Image,
-        repo_path: PathBuf,
-        container_repo_path: PathBuf,
-        user: Option<String>,
-        host_network: bool,
-        run_args: Vec<String>,
-        host_branch: Option<String>,
-        remote: Option<RemoteDocker>,
-        env: std::collections::HashMap<String, String>,
-        lifecycle: LifecycleCommands,
-        mounts: Vec<MountObject>,
-        runtime_options: ContainerRuntimeOptions,
-        forward_ports: Vec<Port>,
-        ports_attributes: std::collections::HashMap<String, PortAttributes>,
-    ) -> Result<LaunchResult> {
+    fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
         let url = self.url.join("/sandbox/recreate")?;
-        let request = RecreateSandboxRequest {
-            sandbox_name,
-            image,
-            repo_path,
-            container_repo_path,
-            user,
-            host_network,
-            run_args,
-            host_branch,
-            remote,
-            env,
-            lifecycle,
-            mounts,
-            runtime_options,
-            forward_ports,
-            ports_attributes,
-        };
 
         let response = self
             .client
             .post(url)
-            .json(&request)
+            .json(&params)
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
         if response.status().is_success() {
-            let body: RecreateSandboxResponse = response
+            let body: SandboxLaunchResponse = response
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
             Ok(LaunchResult {
@@ -741,30 +541,12 @@ impl Daemon for DaemonClient {
 /// Handler for PUT /sandbox endpoint.
 async fn launch_sandbox_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(request): Json<LaunchSandboxRequest>,
-) -> Result<Json<LaunchSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| {
-        daemon.launch_sandbox(
-            request.sandbox_name,
-            request.image,
-            request.repo_path,
-            request.container_repo_path,
-            request.user,
-            request.host_network,
-            request.run_args,
-            request.host_branch,
-            request.remote,
-            request.env,
-            request.lifecycle,
-            request.mounts,
-            request.runtime_options,
-            request.forward_ports,
-            request.ports_attributes,
-        )
-    });
+    Json(params): Json<SandboxLaunchParams>,
+) -> Result<Json<SandboxLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.launch_sandbox(params));
 
     match result {
-        Ok(launch_result) => Ok(Json(LaunchSandboxResponse {
+        Ok(launch_result) => Ok(Json(SandboxLaunchResponse {
             container_id: launch_result.container_id,
             user: launch_result.user,
             docker_socket: launch_result.docker_socket,
@@ -781,30 +563,12 @@ async fn launch_sandbox_handler<D: Daemon>(
 /// Handler for POST /sandbox/recreate endpoint.
 async fn recreate_sandbox_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(request): Json<RecreateSandboxRequest>,
-) -> Result<Json<RecreateSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| {
-        daemon.recreate_sandbox(
-            request.sandbox_name,
-            request.image,
-            request.repo_path,
-            request.container_repo_path,
-            request.user,
-            request.host_network,
-            request.run_args,
-            request.host_branch,
-            request.remote,
-            request.env,
-            request.lifecycle,
-            request.mounts,
-            request.runtime_options,
-            request.forward_ports,
-            request.ports_attributes,
-        )
-    });
+    Json(params): Json<SandboxLaunchParams>,
+) -> Result<Json<SandboxLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.recreate_sandbox(params));
 
     match result {
-        Ok(res) => Ok(Json(RecreateSandboxResponse {
+        Ok(res) => Ok(Json(SandboxLaunchResponse {
             container_id: res.container_id,
             user: res.user,
             docker_socket: res.docker_socket,
@@ -1015,53 +779,31 @@ mod tests {
     struct MockDaemon;
 
     impl Daemon for MockDaemon {
-        fn launch_sandbox(
-            &self,
-            sandbox_name: SandboxName,
-            image: Image,
-            _repo_path: PathBuf,
-            _container_repo_path: PathBuf,
-            user: Option<String>,
-            _host_network: bool,
-            _run_args: Vec<String>,
-            _host_branch: Option<String>,
-            _remote: Option<RemoteDocker>,
-            _env: std::collections::HashMap<String, String>,
-            _lifecycle: LifecycleCommands,
-            _mounts: Vec<MountObject>,
-            _runtime_options: ContainerRuntimeOptions,
-            _forward_ports: Vec<Port>,
-            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
-        ) -> Result<LaunchResult> {
-            // Return a container ID that encodes the inputs for verification
+        fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
+            let user = params
+                .devcontainer
+                .user()
+                .map(String::from)
+                .unwrap_or_else(|| "mockuser".to_string());
             Ok(LaunchResult {
-                container_id: ContainerId(format!("{}:{}", sandbox_name.0, image.0)),
-                user: user.unwrap_or_else(|| "mockuser".to_string()),
+                container_id: ContainerId(format!("{}:{}", params.sandbox_name.0, params.image.0)),
+                user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
         }
 
-        fn recreate_sandbox(
-            &self,
-            sandbox_name: SandboxName,
-            image: Image,
-            _repo_path: PathBuf,
-            _container_repo_path: PathBuf,
-            user: Option<String>,
-            _host_network: bool,
-            _run_args: Vec<String>,
-            _host_branch: Option<String>,
-            _remote: Option<RemoteDocker>,
-            _env: std::collections::HashMap<String, String>,
-            _lifecycle: LifecycleCommands,
-            _mounts: Vec<MountObject>,
-            _runtime_options: ContainerRuntimeOptions,
-            _forward_ports: Vec<Port>,
-            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
-        ) -> Result<LaunchResult> {
+        fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
+            let user = params
+                .devcontainer
+                .user()
+                .map(String::from)
+                .unwrap_or_else(|| "mockuser".to_string());
             Ok(LaunchResult {
-                container_id: ContainerId(format!("recreated:{}:{}", sandbox_name.0, image.0)),
-                user: user.unwrap_or_else(|| "mockuser".to_string()),
+                container_id: ContainerId(format!(
+                    "recreated:{}:{}",
+                    params.sandbox_name.0, params.image.0
+                )),
+                user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
         }
@@ -1167,23 +909,20 @@ mod tests {
         let server = TestServer::start(MockDaemon);
         let client = server.client();
 
-        let result = client.launch_sandbox(
-            SandboxName("test-sandbox".to_string()),
-            Image("test-image".to_string()),
-            PathBuf::from("/tmp/repo"),
-            PathBuf::from("/workspace"),
-            Some("testuser".to_string()),
-            false,
-            vec!["--runtime=runc".to_string()],
-            Some("main".to_string()),
-            None, // No remote Docker
-            std::collections::HashMap::new(),
-            LifecycleCommands::default(),
-            Vec::new(),
-            ContainerRuntimeOptions::default(),
-            Vec::new(),
-            std::collections::HashMap::new(),
-        );
+        let dc = DevContainer {
+            remote_user: Some("testuser".to_string()),
+            run_args: Some(vec!["--runtime=runc".to_string()]),
+            ..Default::default()
+        };
+
+        let result = client.launch_sandbox(SandboxLaunchParams {
+            sandbox_name: SandboxName("test-sandbox".to_string()),
+            image: Image("test-image".to_string()),
+            repo_path: PathBuf::from("/tmp/repo"),
+            host_branch: Some("main".to_string()),
+            remote: None,
+            devcontainer: dc,
+        });
 
         let launch_result = result.unwrap();
         assert_eq!(launch_result.container_id.0, "test-sandbox:test-image");
@@ -1204,45 +943,11 @@ mod tests {
     }
 
     impl Daemon for MockDaemonWithDb {
-        fn launch_sandbox(
-            &self,
-            _sandbox_name: SandboxName,
-            _image: Image,
-            _repo_path: PathBuf,
-            _container_repo_path: PathBuf,
-            _user: Option<String>,
-            _host_network: bool,
-            _run_args: Vec<String>,
-            _host_branch: Option<String>,
-            _remote: Option<RemoteDocker>,
-            _env: std::collections::HashMap<String, String>,
-            _lifecycle: LifecycleCommands,
-            _mounts: Vec<MountObject>,
-            _runtime_options: ContainerRuntimeOptions,
-            _forward_ports: Vec<Port>,
-            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
-        ) -> Result<LaunchResult> {
+        fn launch_sandbox(&self, _params: SandboxLaunchParams) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn recreate_sandbox(
-            &self,
-            _sandbox_name: SandboxName,
-            _image: Image,
-            _repo_path: PathBuf,
-            _container_repo_path: PathBuf,
-            _user: Option<String>,
-            _host_network: bool,
-            _run_args: Vec<String>,
-            _host_branch: Option<String>,
-            _remote: Option<RemoteDocker>,
-            _env: std::collections::HashMap<String, String>,
-            _lifecycle: LifecycleCommands,
-            _mounts: Vec<MountObject>,
-            _runtime_options: ContainerRuntimeOptions,
-            _forward_ports: Vec<Port>,
-            _ports_attributes: std::collections::HashMap<String, PortAttributes>,
-        ) -> Result<LaunchResult> {
+        fn recreate_sandbox(&self, _params: SandboxLaunchParams) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
 

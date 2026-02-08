@@ -23,14 +23,14 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{is_deterministic_test_mode, ContainerRuntimeOptions, RemoteDocker};
-use crate::devcontainer::{self, Port, PortAttributes};
+use crate::config::{is_deterministic_test_mode, RemoteDocker};
+use crate::devcontainer::{self, DevContainer, Port, PortAttributes};
 use crate::docker_exec::{exec_check, exec_command};
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
 use protocol::{
     ContainerId, ConversationSummary, Daemon, GetConversationResponse, Image, LaunchResult,
-    LifecycleCommands, PortInfo, SandboxInfo, SandboxName, SandboxStatus,
+    PortInfo, SandboxInfo, SandboxLaunchParams, SandboxName, SandboxStatus,
 };
 use ssh_forward::SshForwardManager;
 
@@ -760,12 +760,13 @@ fn create_container(
     image: &Image,
     repo_path: &Path,
     container_repo_path: &Path,
-    run_args: &[String],
-    env: &std::collections::HashMap<String, String>,
+    dc: &DevContainer,
     mounts: &[devcontainer::MountObject],
-    runtime_options: &ContainerRuntimeOptions,
     publish_ports: &HashMap<u16, u16>,
 ) -> Result<ContainerId> {
+    let run_args = dc.run_args.as_deref().unwrap_or(&[]);
+    let env = dc.container_env.as_ref();
+
     // Parse runArgs into bollard HostConfig fields
     let run_args_config = parse_run_args_for_docker(run_args);
 
@@ -777,14 +778,13 @@ fn create_container(
     );
     labels.insert(SANDBOX_NAME_LABEL.to_string(), sandbox_name.0.clone());
 
-    let env_vec = if env.is_empty() {
-        None
-    } else {
-        Some(
-            env.iter()
+    let env_vec = match env {
+        Some(e) if !e.is_empty() => Some(
+            e.iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect::<Vec<_>>(),
-        )
+        ),
+        _ => None,
     };
 
     // In deterministic PID mode (for tests), we need privileged mode to write to
@@ -816,14 +816,12 @@ fn create_container(
     };
 
     // Merge privileged: test deterministic mode OR devcontainer setting OR runArgs
-    let privileged = if deterministic_pids
-        || runtime_options.privileged == Some(true)
-        || run_args_config.privileged
-    {
-        Some(true)
-    } else {
-        None
-    };
+    let privileged =
+        if deterministic_pids || dc.privileged == Some(true) || run_args_config.privileged {
+            Some(true)
+        } else {
+            None
+        };
 
     let devices = if run_args_config.devices.is_empty() {
         None
@@ -838,12 +836,9 @@ fn create_container(
     };
 
     // Merge cap_add from devcontainer.json properties and runArgs
-    let cap_add = merge_string_vecs(runtime_options.cap_add.as_ref(), &run_args_config.cap_add);
+    let cap_add = merge_string_vecs(dc.cap_add.as_ref(), &run_args_config.cap_add);
     // Merge security_opt from devcontainer.json properties and runArgs
-    let security_opt = merge_string_vecs(
-        runtime_options.security_opt.as_ref(),
-        &run_args_config.security_opt,
-    );
+    let security_opt = merge_string_vecs(dc.security_opt.as_ref(), &run_args_config.security_opt);
 
     let port_bindings: HashMap<String, Option<Vec<PortBinding>>> = publish_ports
         .iter()
@@ -865,7 +860,7 @@ fn create_container(
                 .unwrap_or_else(|| "bridge".to_string()),
         ),
         privileged,
-        init: runtime_options.init.or(if run_args_config.init {
+        init: dc.init.or(if run_args_config.init {
             Some(true)
         } else {
             None
@@ -1297,7 +1292,7 @@ fn run_once_lifecycle_commands(
     container_id: &str,
     user: &str,
     workdir: &Path,
-    lifecycle: &LifecycleCommands,
+    dc: &DevContainer,
     sandbox_id: db::SandboxId,
     db_mutex: &Mutex<rusqlite::Connection>,
 ) -> Result<()> {
@@ -1307,7 +1302,7 @@ fn run_once_lifecycle_commands(
     };
 
     if !on_create_ran {
-        if let Some(cmd) = &lifecycle.on_create_command {
+        if let Some(cmd) = &dc.on_create_command {
             if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
                 // Mark both as ran to prevent retries and skip postCreate
                 let conn = db_mutex.lock().unwrap();
@@ -1326,7 +1321,7 @@ fn run_once_lifecycle_commands(
     };
 
     if !post_create_ran {
-        if let Some(cmd) = &lifecycle.post_create_command {
+        if let Some(cmd) = &dc.post_create_command {
             if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
                 let conn = db_mutex.lock().unwrap();
                 db::mark_post_create_ran(&conn, sandbox_id)?;
@@ -1341,24 +1336,23 @@ fn run_once_lifecycle_commands(
 }
 
 impl Daemon for DaemonServer {
-    fn launch_sandbox(
-        &self,
-        sandbox_name: SandboxName,
-        image: Image,
-        repo_path: PathBuf,
-        container_repo_path: PathBuf,
-        user: Option<String>,
-        host_network: bool,
-        run_args: Vec<String>,
-        host_branch: Option<String>,
-        remote: Option<RemoteDocker>,
-        env: std::collections::HashMap<String, String>,
-        lifecycle: LifecycleCommands,
-        mounts: Vec<devcontainer::MountObject>,
-        runtime_options: ContainerRuntimeOptions,
-        forward_ports: Vec<Port>,
-        ports_attributes: std::collections::HashMap<String, PortAttributes>,
-    ) -> Result<LaunchResult> {
+    fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
+        let SandboxLaunchParams {
+            sandbox_name,
+            image,
+            repo_path,
+            host_branch,
+            remote,
+            ref devcontainer,
+        } = params;
+
+        let container_repo_path = devcontainer.container_repo_path(&repo_path);
+        let user = devcontainer.user().map(String::from);
+        let host_network = devcontainer.has_host_network();
+        let mounts = devcontainer.resolved_mounts()?;
+        let forward_ports = devcontainer.forward_ports.clone().unwrap_or_default();
+        let ports_attributes = devcontainer.ports_attributes.clone().unwrap_or_default();
+
         // Reject bind mounts on remote Docker hosts — the source paths would
         // reference the remote filesystem, not the developer's machine.
         if remote.is_some() {
@@ -1536,13 +1530,13 @@ impl Daemon for DaemonServer {
 
             // Container was restarted from stopped state — run postStartCommand
             if was_stopped {
-                if let Some(cmd) = &lifecycle.post_start_command {
+                if let Some(cmd) = &devcontainer.post_start_command {
                     run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
                 }
             }
 
             // postAttachCommand runs on every enter
-            if let Some(cmd) = &lifecycle.post_attach_command {
+            if let Some(cmd) = &devcontainer.post_attach_command {
                 run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
             }
 
@@ -1605,10 +1599,8 @@ impl Daemon for DaemonServer {
             &image,
             &repo_path,
             &container_repo_path,
-            &run_args,
-            &env,
+            devcontainer,
             &mounts,
-            &runtime_options,
             &publish_ports,
         )
         .map_err(mark_error)?;
@@ -1656,18 +1648,18 @@ impl Daemon for DaemonServer {
             &container_id.0,
             &user,
             &container_repo_path,
-            &lifecycle,
+            devcontainer,
             sandbox_id,
             &self.db,
         )
         .map_err(mark_error)?;
 
-        if let Some(cmd) = &lifecycle.post_start_command {
+        if let Some(cmd) = &devcontainer.post_start_command {
             run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
                 .map_err(mark_error)?;
         }
 
-        if let Some(cmd) = &lifecycle.post_attach_command {
+        if let Some(cmd) = &devcontainer.post_attach_command {
             run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
                 .map_err(mark_error)?;
         }
@@ -1702,28 +1694,18 @@ impl Daemon for DaemonServer {
         })
     }
 
-    fn recreate_sandbox(
-        &self,
-        sandbox_name: SandboxName,
-        image: Image,
-        repo_path: PathBuf,
-        container_repo_path: PathBuf,
-        user: Option<String>,
-        host_network: bool,
-        run_args: Vec<String>,
-        host_branch: Option<String>,
-        remote: Option<RemoteDocker>,
-        env: std::collections::HashMap<String, String>,
-        lifecycle: LifecycleCommands,
-        mounts: Vec<devcontainer::MountObject>,
-        runtime_options: ContainerRuntimeOptions,
-        forward_ports: Vec<Port>,
-        ports_attributes: std::collections::HashMap<String, PortAttributes>,
-    ) -> Result<LaunchResult> {
-        let name = docker_name(&repo_path, &sandbox_name);
+    fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
+        let sandbox_name = &params.sandbox_name;
+        let image = &params.image;
+        let repo_path = &params.repo_path;
+        let remote = &params.remote;
+        let container_repo_path = params.devcontainer.container_repo_path(repo_path);
+        let user = params.devcontainer.user().map(String::from);
+
+        let name = docker_name(repo_path, sandbox_name);
 
         // Get the Docker socket to use (local or forwarded from remote)
-        let docker_socket = match &remote {
+        let docker_socket = match remote {
             Some(r) => self.ssh_forward.get_socket(r)?,
             None => default_docker_socket(),
         };
@@ -1781,23 +1763,7 @@ impl Daemon for DaemonServer {
         }
 
         // 3. Create new sandbox
-        let launch_result = self.launch_sandbox(
-            sandbox_name,
-            image,
-            repo_path,
-            container_repo_path.clone(),
-            user,
-            host_network,
-            run_args,
-            host_branch,
-            remote,
-            env,
-            lifecycle,
-            mounts,
-            runtime_options,
-            forward_ports,
-            ports_attributes,
-        )?;
+        let launch_result = self.launch_sandbox(params)?;
 
         // 4. Apply patch if we have one
         if let Some(patch_content) = patch {
