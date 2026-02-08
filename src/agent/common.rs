@@ -124,7 +124,8 @@ impl ToolName {
         match self {
             ToolName::Bash => {
                 "Execute a bash command inside the sandbox and return the output.\n\
-                               The working directory is the project root."
+                               The working directory is the project root.\n\
+                               If a command times out, wait and get output: `tail --pid=<PID> -f <output_file>`."
             }
             ToolName::Edit => "Perform a search-and-replace edit on a file.",
             ToolName::Write => {
