@@ -13,3 +13,5 @@ This is a rust project implementing a sandboxed LLM agent.
 - After committing, fetch and rebase on host/master to stay up to date.
 - Unless prompted otherwise, don't try to remain backwards compatible.
   Assume all containers/files/databases were created with the current version.
+- No unicode (e.g. emojis, em dashes) in comments, code, commit messages etc.
+  Only if needed to test unicode support etc.
