@@ -75,12 +75,11 @@ pub struct PortInfo {
 /// Everything the daemon needs to launch or recreate a sandbox.
 ///
 /// Contains the devcontainer.json config (with `${localEnv:...}` already
-/// resolved by the client) plus a few fields that don't come from
-/// devcontainer.json.
+/// resolved and build paths normalized to repo-root-relative by the client)
+/// plus a few fields that don't come from devcontainer.json.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SandboxLaunchParams {
     pub sandbox_name: SandboxName,
-    pub image: Image,
     /// Host-side path to the git repository.
     pub repo_path: PathBuf,
     /// The branch currently checked out on the host, if any.
@@ -89,7 +88,8 @@ pub struct SandboxLaunchParams {
     /// Remote Docker host specification (e.g., "user@host:port").
     /// If not set, uses local Docker.
     pub remote: Option<RemoteDocker>,
-    /// The devcontainer.json config, with `${localEnv:...}` already resolved.
+    /// The devcontainer.json config, with `${localEnv:...}` already resolved
+    /// and build paths normalized to repo-root-relative.
     pub devcontainer: DevContainer,
 }
 
@@ -785,8 +785,9 @@ mod tests {
                 .user()
                 .map(String::from)
                 .unwrap_or_else(|| "mockuser".to_string());
+            let image = params.devcontainer.image.as_deref().unwrap_or("none");
             Ok(LaunchResult {
-                container_id: ContainerId(format!("{}:{}", params.sandbox_name.0, params.image.0)),
+                container_id: ContainerId(format!("{}:{}", params.sandbox_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
@@ -798,11 +799,9 @@ mod tests {
                 .user()
                 .map(String::from)
                 .unwrap_or_else(|| "mockuser".to_string());
+            let image = params.devcontainer.image.as_deref().unwrap_or("none");
             Ok(LaunchResult {
-                container_id: ContainerId(format!(
-                    "recreated:{}:{}",
-                    params.sandbox_name.0, params.image.0
-                )),
+                container_id: ContainerId(format!("recreated:{}:{}", params.sandbox_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
@@ -910,6 +909,7 @@ mod tests {
         let client = server.client();
 
         let dc = DevContainer {
+            image: Some("test-image".to_string()),
             remote_user: Some("testuser".to_string()),
             run_args: Some(vec!["--runtime=runc".to_string()]),
             ..Default::default()
@@ -917,7 +917,6 @@ mod tests {
 
         let result = client.launch_sandbox(SandboxLaunchParams {
             sandbox_name: SandboxName("test-sandbox".to_string()),
-            image: Image("test-image".to_string()),
             repo_path: PathBuf::from("/tmp/repo"),
             host_branch: Some("main".to_string()),
             remote: None,

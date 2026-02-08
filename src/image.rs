@@ -18,15 +18,14 @@ pub use crate::daemon::protocol::Image;
 
 /// Resolve a Docker image, building from devcontainer.json 'build' if necessary.
 ///
-/// `resolved_build` is the output of `DevContainer::resolve_build()` with paths
-/// already made relative to `repo_root`.
+/// The DevContainer's build paths must already be resolved to repo-root-relative
+/// paths (via `resolve_build_paths`) before calling this.
 pub fn resolve_image(
     devcontainer: &DevContainer,
-    resolved_build: &Option<BuildOptions>,
     remote_host: Option<&str>,
     repo_root: &Path,
 ) -> Result<Image> {
-    if let Some(build) = resolved_build {
+    if let Some(build) = &devcontainer.build {
         build_devcontainer_image(build, remote_host, repo_root)
     } else {
         Ok(Image(

@@ -607,25 +607,33 @@ impl DevContainer {
         }
     }
 
-    /// Resolve the build configuration, merging legacy fields and making
-    /// paths relative to `repo_root`.
+    /// Normalize build paths: merge legacy `dockerfile`/`context` into the
+    /// `build` struct and make all paths relative to `repo_root`.
     ///
-    /// Returns `None` if no build is configured (i.e. image-based container).
-    pub fn resolve_build(&self, devcontainer_dir: &Path, repo_root: &Path) -> Option<BuildOptions> {
+    /// Must be called on the client side before sending to the daemon, since
+    /// the daemon doesn't know the devcontainer.json directory.
+    /// No-op if no build is configured (image-based container).
+    pub fn resolve_build_paths(&mut self, devcontainer_dir: &Path, repo_root: &Path) {
+        // Merge legacy top-level dockerfile into build.dockerfile
         let dockerfile = self
             .dockerfile
-            .as_ref()
-            .or_else(|| self.build.as_ref().and_then(|b| b.dockerfile.as_ref()))?;
+            .take()
+            .or_else(|| self.build.as_ref().and_then(|b| b.dockerfile.clone()));
+
+        let dockerfile = match dockerfile {
+            Some(d) => d,
+            None => return, // No build configured
+        };
 
         let context = self
             .build
             .as_ref()
-            .and_then(|b| b.context.as_ref())
-            .cloned()
+            .and_then(|b| b.context.clone())
+            .or_else(|| self.context.take())
             .unwrap_or_else(|| ".".to_string());
 
         let resolved_dockerfile = devcontainer_dir
-            .join(dockerfile)
+            .join(&dockerfile)
             .strip_prefix(repo_root)
             .expect("dockerfile must be under repo_root")
             .to_string_lossy()
@@ -637,36 +645,47 @@ impl DevContainer {
             .to_string_lossy()
             .to_string();
 
-        let (args, target, cache_from, options) = match &self.build {
-            Some(build) => (
-                build.args.clone(),
-                build.target.clone(),
-                build.cache_from.clone(),
-                build.options.clone(),
-            ),
-            None => (None, None, None, None),
-        };
+        let build = self.build.get_or_insert_with(BuildOptions::default);
+        build.dockerfile = Some(resolved_dockerfile);
+        build.context = Some(resolved_context);
+    }
 
-        Some(BuildOptions {
-            dockerfile: Some(resolved_dockerfile),
-            context: Some(resolved_context),
-            args,
-            target,
-            cache_from,
-            options,
-        })
+    /// Whether this devcontainer uses a Dockerfile build (vs a pre-built image).
+    pub fn has_build(&self) -> bool {
+        self.dockerfile.is_some() || self.build.as_ref().is_some_and(|b| b.dockerfile.is_some())
     }
 
     /// Parse mounts into resolved `MountObject`s.
+    ///
+    /// Rejects mount specs that contain unresolved variable references like
+    /// `${devcontainerId}` -- Docker will reject these with a cryptic error,
+    /// so we fail early with a clear message.
     pub fn resolved_mounts(&self) -> Result<Vec<MountObject>> {
-        match &self.mounts {
+        let mounts = match &self.mounts {
             Some(mounts) => mounts
                 .iter()
                 .map(|m| m.to_mount_object())
                 .collect::<Result<Vec<_>>>()
-                .context("parsing mounts from devcontainer.json"),
-            None => Ok(Vec::new()),
+                .context("parsing mounts from devcontainer.json")?,
+            None => return Ok(Vec::new()),
+        };
+
+        for m in &mounts {
+            for field in [m.source.as_deref(), Some(m.target.as_str())]
+                .into_iter()
+                .flatten()
+            {
+                if field.contains("${") {
+                    anyhow::bail!(
+                        "unresolved variable in mount: '{field}'. \
+                         Variable substitution (e.g. ${{devcontainerId}}) in mounts \
+                         is not supported."
+                    );
+                }
+            }
         }
+
+        Ok(mounts)
     }
 }
 

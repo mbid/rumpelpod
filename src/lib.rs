@@ -14,7 +14,7 @@ mod enter;
 mod gateway;
 mod git;
 mod git_http_server;
-mod image;
+pub(crate) mod image;
 mod list;
 mod llm;
 mod ports;

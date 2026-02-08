@@ -1339,13 +1339,20 @@ impl Daemon for DaemonServer {
     fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
         let SandboxLaunchParams {
             sandbox_name,
-            image,
             repo_path,
             host_branch,
             remote,
             ref devcontainer,
         } = params;
 
+        let image = crate::image::resolve_image(
+            devcontainer,
+            remote
+                .as_ref()
+                .map(|r| format!("ssh://{}:{}", r.destination, r.port))
+                .as_deref(),
+            &repo_path,
+        )?;
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
         let user = devcontainer.user().map(String::from);
         let host_network = devcontainer.has_host_network();
@@ -1696,9 +1703,16 @@ impl Daemon for DaemonServer {
 
     fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
         let sandbox_name = &params.sandbox_name;
-        let image = &params.image;
         let repo_path = &params.repo_path;
         let remote = &params.remote;
+        let image = crate::image::resolve_image(
+            &params.devcontainer,
+            remote
+                .as_ref()
+                .map(|r| format!("ssh://{}:{}", r.destination, r.port))
+                .as_deref(),
+            repo_path,
+        )?;
         let container_repo_path = params.devcontainer.container_repo_path(repo_path);
         let user = params.devcontainer.user().map(String::from);
 

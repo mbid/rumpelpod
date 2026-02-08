@@ -13,7 +13,6 @@ use crate::daemon::protocol::{
 };
 use crate::devcontainer::{DevContainer, MountType};
 use crate::git::{get_current_branch, get_repo_root};
-use crate::image;
 
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
@@ -22,13 +21,14 @@ fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
         .with_context(|| format!("{} is not under {}", path.display(), base.display()))
 }
 
-/// Load devcontainer.json and resolve the image (building if needed).
-/// Returns the DevContainer (with localEnv resolved), devcontainer dir,
-/// the resolved Image, and the host string from .sandbox.toml.
+/// Load devcontainer.json, validate it, and prepare it for the daemon.
+///
+/// Resolves `${localEnv:...}` and normalizes build paths to repo-root-relative.
+/// Returns the DevContainer and the host string from .sandbox.toml.
 pub fn load_and_resolve(
     repo_root: &Path,
     host_override: Option<&str>,
-) -> Result<(DevContainer, image::Image, Option<String>)> {
+) -> Result<(DevContainer, Option<String>)> {
     let toml_config = load_toml_config(repo_root)?;
     let host_str = host_override.map(String::from).or(toml_config.host.clone());
 
@@ -39,26 +39,17 @@ pub fn load_and_resolve(
         })
         .unwrap_or_else(|| (DevContainer::default(), repo_root.to_path_buf()));
 
-    // Validate that we have an image or build config
-    let resolved_build = devcontainer.resolve_build(&devcontainer_dir, repo_root);
-    if devcontainer.image.is_none() && resolved_build.is_none() {
+    if devcontainer.image.is_none() && !devcontainer.has_build() {
         bail!(
             "No image or build specified.\n\
              Please set image or build.dockerfile in devcontainer.json."
         );
     }
 
-    // Resolve ${localEnv:...} before sending to daemon
+    devcontainer.resolve_build_paths(&devcontainer_dir, repo_root);
     devcontainer.resolve_local_env();
 
-    let img = image::resolve_image(
-        &devcontainer,
-        &resolved_build,
-        host_str.as_deref(),
-        repo_root,
-    )?;
-
-    Ok((devcontainer, img, host_str))
+    Ok((devcontainer, host_str))
 }
 
 /// Launch a sandbox and return the container ID and user.
@@ -66,7 +57,7 @@ pub fn load_and_resolve(
 pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
     let repo_root = get_repo_root()?;
 
-    let (devcontainer, image, host_str) = load_and_resolve(&repo_root, host_override)?;
+    let (devcontainer, host_str) = load_and_resolve(&repo_root, host_override)?;
 
     // Reject bind mounts early for remote Docker
     let remote = host_str
@@ -95,7 +86,6 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
 
     client.launch_sandbox(SandboxLaunchParams {
         sandbox_name: SandboxName(sandbox_name.to_string()),
-        image,
         repo_path: repo_root,
         host_branch,
         remote,
@@ -166,7 +156,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
     let repo_root = get_repo_root()?;
 
-    let (devcontainer, _, _) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let (devcontainer, _) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
     let container_repo_path = devcontainer.container_repo_path(&repo_root);
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
