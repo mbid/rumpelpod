@@ -8,7 +8,7 @@ pub mod devcontainer;
 mod docker_exec;
 
 pub use command_ext::CommandExt;
-mod daemon;
+pub mod daemon;
 mod delete;
 mod enter;
 mod gateway;

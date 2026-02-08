@@ -15,9 +15,12 @@ use tempfile::TempDir;
 
 use crate::common::TestDaemon;
 
+use sandbox::daemon::protocol::{Daemon, DaemonClient};
+
 use super::common::{
-    create_mock_editor_exit, llm_cache_dir, run_agent_expecting_picker, run_agent_with_prompt,
-    run_agent_with_prompt_and_args, setup_test_repo, PickerAction, DEFAULT_MODEL,
+    create_mock_editor_exit, llm_cache_dir, run_agent_expecting_picker,
+    run_agent_interactive_and_args, run_agent_with_prompt, run_agent_with_prompt_and_args,
+    setup_test_repo, PickerAction, DEFAULT_MODEL,
 };
 
 #[test]
@@ -296,6 +299,89 @@ fn agent_picker_default_selection_on_enter() {
     assert!(
         !output.stdout.contains("BLUE_99"),
         "Agent should NOT remember color from older conversation (BLUE_99).\nOutput:\n{}",
+        output.stdout
+    );
+}
+
+#[test]
+fn agent_resume_user_last_message_no_double_prefix() {
+    let repo = setup_test_repo();
+    let daemon = TestDaemon::start();
+
+    // 1. Run agent normally to create the sandbox and a conversation.
+    let output1 = run_agent_with_prompt(
+        &repo,
+        &daemon,
+        "Remember this secret code: ZEBRA_DELTA_9876. Just acknowledge you've memorized it.",
+    );
+    assert!(output1.success, "First agent run should succeed");
+
+    assert!(
+        output1.success,
+        "First run must succeed.\nOutput:\n{}",
+        output1.stdout
+    );
+
+    // 2. Overwrite the conversation with one that ends in a user message.
+    //    This simulates the agent being killed after saving the user message
+    //    but before receiving the LLM response.
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    // Resolve repo path the same way the agent does (via git)
+    let repo_path = {
+        let repo = git2::Repository::discover(repo.path()).expect("Failed to discover repo");
+        repo.workdir().expect("No workdir").to_path_buf()
+    };
+    let conversations = client
+        .list_conversations(repo_path.clone(), "test".to_string())
+        .expect("Failed to list conversations");
+    assert!(
+        !conversations.is_empty(),
+        "Should have a conversation for repo_path={}\nOutput1:\n{}",
+        repo_path.display(),
+        output1.stdout,
+    );
+    let conv_id = conversations[0].id;
+
+    let history = serde_json::json!([
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "Hello there"}]
+        },
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hi! How can I help?"}]
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "PENDING_USER_MSG_7777"}]
+        }
+    ]);
+
+    client
+        .save_conversation(
+            Some(conv_id),
+            repo_path.clone(),
+            "test".to_string(),
+            "claude-haiku-4-5".to_string(),
+            "anthropic".to_string(),
+            history,
+        )
+        .expect("Failed to save conversation");
+
+    // 3. Resume. The last message is from the user, so the agent offers it as
+    //    an editable suffix. The mock editor has no new messages, so the suffix
+    //    is submitted unchanged. The agent will fail (no cached LLM response),
+    //    but user messages are printed before the LLM call.
+    let output = run_agent_interactive_and_args(&repo, &daemon, &[], &["--continue=0"]);
+
+    assert!(
+        !output.stdout.contains("> >"),
+        "Resumed user message should not have double '> >' prefix.\nOutput:\n{}",
+        output.stdout
+    );
+    assert!(
+        output.stdout.contains("> PENDING_USER_MSG_7777"),
+        "Output should show the resumed user message with single '>' prefix.\nOutput:\n{}",
         output.stdout
     );
 }
