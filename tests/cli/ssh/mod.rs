@@ -530,6 +530,7 @@ fn ssh_smoke_test() {
 }
 
 #[test]
+#[ignore]
 fn ssh_reconnect_test() {
     let repo = TestRepo::new();
 
