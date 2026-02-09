@@ -115,7 +115,10 @@ pub fn system_install() -> Result<()> {
 
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", &format!("{SERVICE_NAME}.socket")])?;
-    systemctl(&["start", &format!("{SERVICE_NAME}.socket")])?;
+
+    // Use restart rather than start so that reinstalls pick up the new binary.
+    // Restarting the socket also stops the service (via Requires= dependency).
+    systemctl(&["restart", &format!("{SERVICE_NAME}.socket")])?;
 
     println!("Installed sandbox daemon.");
 
