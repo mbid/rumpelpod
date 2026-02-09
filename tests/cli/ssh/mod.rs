@@ -361,10 +361,15 @@ fn build_remote_docker_image() -> Result<ImageId> {
             && sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
             && echo 'GatewayPorts clientspecified' >> /etc/ssh/sshd_config
 
-        # Startup script that runs both SSH and Docker
+        # Startup script that runs both SSH and Docker.
+        # After a container restart, stale PID and socket files from the previous
+        # dockerd/containerd can prevent startup (dockerd sees the old containerd PID
+        # file, thinks it is "still running", and hangs). We clean those up first.
         RUN echo '#!/bin/bash\n\
             set -e\n\
             rm -f /var/run/docker.pid\n\
+            rm -f /var/run/docker/containerd/containerd.pid\n\
+            rm -f /var/run/docker/containerd/containerd.sock*\n\
             dockerd &\n\
             for i in $(seq 1 60); do\n\
                 if docker info >/dev/null 2>&1; then break; fi\n\
@@ -530,7 +535,6 @@ fn ssh_smoke_test() {
 }
 
 #[test]
-#[ignore]
 fn ssh_reconnect_test() {
     let repo = TestRepo::new();
 
