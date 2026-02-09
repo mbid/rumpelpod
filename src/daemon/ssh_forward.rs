@@ -31,7 +31,10 @@ const INITIAL_DELAY: Duration = Duration::from_secs(1);
 const MAX_DELAY: Duration = Duration::from_secs(60);
 
 /// Timeout for the ping operation (hard limit via thread).
-const PING_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// This is the ceiling for how long we wait to determine if a tunnel is broken.
+/// Must be longer than the inner socket timeouts to allow them to fire first.
+const PING_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Environment variable to specify a custom SSH config file.
 ///
@@ -81,8 +84,8 @@ fn ping_docker_socket_inner(socket_path: &Path) -> bool {
         Err(_) => return false,
     };
 
-    // Set a short timeout for the ping
-    let timeout = Duration::from_secs(5);
+    // Short timeout so broken tunnels are detected quickly.
+    let timeout = Duration::from_secs(3);
     stream
         .set_read_timeout(Some(timeout))
         .expect("set_read_timeout should always succeed on connected UnixStream");

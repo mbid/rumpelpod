@@ -23,7 +23,7 @@ use sandbox::CommandExt;
 pub const SSH_USER: &str = "testuser";
 
 /// Timeout for waiting for services to become available.
-const SERVICE_TIMEOUT: Duration = Duration::from_secs(120);
+const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A container simulating a remote Docker host with SSH access.
 ///
@@ -120,7 +120,11 @@ impl SshRemoteHost {
     }
 
     /// Restart the remote host container.
-    pub fn restart(&mut self) {
+    ///
+    /// If `ssh_config` is provided, also verifies that SSH is connectable from
+    /// outside (not just that sshd is listening internally). This catches cases
+    /// where sshd is up but not yet accepting connections.
+    pub fn restart(&mut self, ssh_config: Option<&Path>) {
         Command::new("docker")
             .args(["restart", &self.container_id])
             .success()
@@ -131,6 +135,30 @@ impl SshRemoteHost {
 
         // Update IP address in case it changed
         self.ip_address = get_container_ip(&self.container_id).expect("Failed to get container IP");
+
+        // Verify SSH is actually connectable from outside, not just listening
+        if let Some(config) = ssh_config {
+            self.wait_for_ssh_connectivity(config);
+        }
+    }
+
+    /// Wait until we can actually execute a command over SSH.
+    ///
+    /// This is stronger than checking that sshd is listening: it verifies the
+    /// full SSH handshake and command execution path works.
+    fn wait_for_ssh_connectivity(&self, ssh_config: &Path) {
+        let start = Instant::now();
+        while start.elapsed() < SERVICE_TIMEOUT {
+            let result = self.ssh_command(ssh_config, &["true"]);
+            if result.is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        panic!(
+            "SSH connectivity not established within {:?}",
+            SERVICE_TIMEOUT
+        );
     }
 
     /// Get the SSH connection string for this remote host (ssh://user@host format).
@@ -166,9 +194,12 @@ impl SshRemoteHost {
 
     /// Wait for SSH and Docker services to be ready.
     fn wait_for_services(&self) {
-        let start = Instant::now();
+        self.wait_for_docker();
+        self.wait_for_ssh();
+    }
 
-        // Wait for Docker first (it takes longer)
+    fn wait_for_docker(&self) {
+        let start = Instant::now();
         while start.elapsed() < SERVICE_TIMEOUT {
             let status = Command::new("docker")
                 .args(["exec", &self.container_id, "docker", "info"])
@@ -178,12 +209,18 @@ impl SshRemoteHost {
                 .status();
 
             if matches!(status, Ok(s) if s.success()) {
-                break;
+                return;
             }
             std::thread::sleep(Duration::from_millis(500));
         }
+        panic!(
+            "Docker did not become available within {:?}",
+            SERVICE_TIMEOUT
+        );
+    }
 
-        // Wait for SSH
+    fn wait_for_ssh(&self) {
+        let start = Instant::now();
         while start.elapsed() < SERVICE_TIMEOUT {
             let status = Command::new("docker")
                 .args([
@@ -203,11 +240,7 @@ impl SshRemoteHost {
             }
             std::thread::sleep(Duration::from_millis(500));
         }
-
-        panic!(
-            "Services did not become available within {:?}",
-            SERVICE_TIMEOUT
-        );
+        panic!("SSH did not become available within {:?}", SERVICE_TIMEOUT);
     }
 
     /// Run an SSH command on this remote host.
@@ -535,9 +568,11 @@ fn ssh_reconnect_test() {
     );
     assert_eq!(stdout.trim(), "hello from remote");
 
-    // Restart the remote host
+    // Restart the remote host, verifying SSH connectivity before proceeding.
+    // This ensures the daemon can reconnect immediately rather than racing
+    // against sshd startup.
     let old_ip = remote.ip_address().to_string();
-    remote.restart();
+    remote.restart(Some(&ssh_config.path));
     assert_eq!(
         remote.ip_address(),
         old_ip,
