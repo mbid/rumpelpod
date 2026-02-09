@@ -11,7 +11,9 @@ use crate::daemon;
 use crate::daemon::protocol::{
     Daemon, DaemonClient, LaunchResult, SandboxLaunchParams, SandboxName,
 };
-use crate::devcontainer::{DevContainer, MountType};
+use crate::devcontainer::{
+    substitute_vars, ContainerEnvSource, DevContainer, MountType, SubstitutionContext,
+};
 use crate::git::{get_current_branch, get_repo_root};
 
 /// Compute the path relative from `base` to `path`.
@@ -47,7 +49,13 @@ pub fn load_and_resolve(
     }
 
     devcontainer.resolve_build_paths(&devcontainer_dir, repo_root);
-    devcontainer.resolve_local_env();
+
+    // Resolve ${localEnv:...} before sending to the daemon, since the daemon
+    // does not have access to the calling user's environment variables.
+    devcontainer = devcontainer.substitute(&SubstitutionContext {
+        resolve_local_env: true,
+        ..Default::default()
+    });
 
     Ok((devcontainer, host_str))
 }
@@ -101,55 +109,21 @@ pub fn resolve_remote_env(
     docker_socket: &Path,
     container_id: &str,
 ) -> Vec<(String, String)> {
+    let ctx = SubstitutionContext {
+        container_env_source: Some(ContainerEnvSource {
+            docker_socket: docker_socket.to_path_buf(),
+            container_id: container_id.to_string(),
+        }),
+        ..Default::default()
+    };
+
     remote_env
         .iter()
         .map(|(key, value)| {
-            let resolved = resolve_container_env_in_value(value, docker_socket, container_id);
+            let resolved = substitute_vars(value, &ctx);
             (key.clone(), resolved)
         })
         .collect()
-}
-
-fn resolve_container_env_in_value(value: &str, docker_socket: &Path, container_id: &str) -> String {
-    let mut result = value.to_string();
-    while let Some(start) = result.find("${containerEnv:") {
-        let after = start + "${containerEnv:".len();
-        if let Some(end) = result[after..].find('}') {
-            let var_name = &result[after..after + end].to_string();
-            let replacement =
-                read_container_env_var(docker_socket, container_id, var_name).unwrap_or_default();
-            result = format!(
-                "{}{}{}",
-                &result[..start],
-                replacement,
-                &result[after + end + 1..]
-            );
-        } else {
-            break;
-        }
-    }
-    result
-}
-
-fn read_container_env_var(
-    docker_socket: &Path,
-    container_id: &str,
-    var_name: &str,
-) -> Option<String> {
-    let output = Command::new("docker")
-        .args(["-H", &format!("unix://{}", docker_socket.display())])
-        .args(["exec", container_id, "printenv", var_name])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(
-            String::from_utf8_lossy(&output.stdout)
-                .trim_end_matches('\n')
-                .to_string(),
-        )
-    } else {
-        None
-    }
 }
 
 pub fn enter(cmd: &EnterCommand) -> Result<()> {

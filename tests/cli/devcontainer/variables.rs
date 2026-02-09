@@ -48,7 +48,6 @@ fn write_minimal_sandbox_toml(repo: &TestRepo) {
 /// ${localEnv:MISSING:default_value} should fall back to the default when the
 /// environment variable is not set.
 #[test]
-#[should_panic(expected = "localEnv default substitution not implemented")]
 fn local_env_with_default() {
     let repo = TestRepo::new();
 
@@ -76,7 +75,6 @@ fn local_env_with_default() {
 /// ${localWorkspaceFolder} resolves to the absolute host path of the
 /// workspace. We expose it via containerEnv so we can read it back.
 #[test]
-#[should_panic(expected = "localWorkspaceFolder substitution not implemented")]
 fn local_workspace_folder() {
     let repo = TestRepo::new();
 
@@ -105,7 +103,6 @@ fn local_workspace_folder() {
 /// ${localWorkspaceFolderBasename} resolves to just the directory name
 /// (not the full path) of the host workspace folder.
 #[test]
-#[should_panic(expected = "localWorkspaceFolderBasename substitution not implemented")]
 fn local_workspace_folder_basename() {
     let repo = TestRepo::new();
 
@@ -138,7 +135,6 @@ fn local_workspace_folder_basename() {
 /// ${containerWorkspaceFolder} resolves to the workspace path inside the
 /// container, which should match the workspaceFolder setting.
 #[test]
-#[should_panic(expected = "containerWorkspaceFolder substitution not implemented")]
 fn container_workspace_folder() {
     let repo = TestRepo::new();
 
@@ -166,7 +162,6 @@ fn container_workspace_folder() {
 /// ${containerWorkspaceFolderBasename} resolves to just the directory name
 /// of the workspace folder inside the container.
 #[test]
-#[should_panic(expected = "containerWorkspaceFolderBasename substitution not implemented")]
 fn container_workspace_folder_basename() {
     let repo = TestRepo::new();
 
@@ -195,10 +190,9 @@ fn container_workspace_folder_basename() {
     );
 }
 
-/// ${devcontainerId} must be stable across sandbox rebuilds — destroying and
+/// ${devcontainerId} must be stable across sandbox rebuilds -- destroying and
 /// recreating a sandbox for the same repo+name should yield the same ID.
 #[test]
-#[should_panic(expected = "devcontainerId substitution not implemented")]
 fn devcontainer_id_stable() {
     let repo = TestRepo::new();
 
@@ -242,7 +236,6 @@ fn devcontainer_id_stable() {
 /// Different sandboxes (different names or repos) must receive distinct
 /// ${devcontainerId} values.
 #[test]
-#[should_panic(expected = "devcontainerId per-sandbox uniqueness not implemented")]
 fn devcontainer_id_unique_per_sandbox() {
     let repo = TestRepo::new();
 
@@ -271,11 +264,10 @@ fn devcontainer_id_unique_per_sandbox() {
     );
 }
 
-/// Variable substitution should work inside runArgs — here we use
+/// Variable substitution should work inside runArgs -- here we use
 /// ${localWorkspaceFolderBasename} in a --label flag and verify the
 /// container actually received it.
 #[test]
-#[should_panic(expected = "runArgs variable substitution not implemented")]
 fn variables_in_run_args() {
     let repo = TestRepo::new();
 
@@ -330,32 +322,49 @@ fn variables_in_run_args() {
         .to_string_lossy()
         .to_string();
 
+    // Find the container ID by name prefix since the full container name
+    // includes a hash suffix that we do not want to recompute in the test.
+    let name_prefix = format!(
+        "{}-run-args-var",
+        repo.path().file_name().unwrap().to_string_lossy()
+    );
+    let output = std::process::Command::new("docker")
+        .args([
+            "ps",
+            "-a",
+            "--filter",
+            &format!("name={}", name_prefix),
+            "--format",
+            "{{.ID}}",
+        ])
+        .output()
+        .expect("docker ps failed");
+    let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(
+        !container_id.is_empty(),
+        "container not found with name prefix '{}'",
+        name_prefix
+    );
+
     let output = std::process::Command::new("docker")
         .args([
             "inspect",
             "--format",
             "{{index .Config.Labels \"workspace\"}}",
+            &container_id,
         ])
-        // Container name format: <repo-dir-name>-<sandbox-name>
-        .arg(format!(
-            "{}-run-args-var",
-            repo.path().file_name().unwrap().to_string_lossy()
-        ))
         .output()
         .expect("docker inspect failed");
-
     let label_value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(
         label_value, expected_basename,
-        "runArgs variable substitution not implemented"
+        "runArgs variable substitution failed"
     );
 }
 
-/// Unresolved variable references in mounts (like ${devcontainerId}) are
-/// rejected with a clear error rather than letting Docker fail with a
-/// cryptic message about invalid volume names.
+/// ${devcontainerId} in mount sources should be resolved, allowing
+/// per-sandbox named volumes.
 #[test]
-#[should_panic(expected = "unresolved variable in mount")]
 fn variables_in_mounts() {
     let repo = TestRepo::new();
 
@@ -398,8 +407,9 @@ fn variables_in_mounts() {
 
     let daemon = TestDaemon::start();
 
+    // The mount should succeed now that ${devcontainerId} is resolved.
     sandbox_command(&repo, &daemon)
-        .args(["enter", "mnt-var", "--", "true"])
+        .args(["enter", "mnt-var", "--", "ls", "/data"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("sandbox enter with devcontainerId mount failed");
 }

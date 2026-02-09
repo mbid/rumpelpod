@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -578,32 +579,147 @@ impl DevContainer {
         false
     }
 
-    /// Resolve all `${localEnv:VAR}` references using the host environment.
+    /// Apply variable substitution to all properties that the spec says
+    /// support it.
     ///
-    /// This must be called on the client side before sending to the daemon,
-    /// since the daemon doesn't have access to the client's environment.
-    /// Other substitution patterns (e.g. `${containerEnv:VAR}`) are left
-    /// untouched.
-    pub fn resolve_local_env(&mut self) {
-        // containerEnv
-        if let Some(env) = &mut self.container_env {
-            for value in env.values_mut() {
-                *value = resolve_local_env_vars(value);
+    /// Callers choose which variables are available via the context.
+    /// Variables whose lookup is `None` are left as literal text for a
+    /// later phase to resolve.
+    ///
+    /// `build.args` only gets `${localEnv:...}` per spec -- all other
+    /// variable types are stripped from its context automatically.
+    /// Apply variable substitution to all properties that the spec says
+    /// support it.
+    ///
+    /// Uses exhaustive destructuring so that adding a new field to
+    /// DevContainer without handling it here is a compile error.
+    ///
+    /// `build.args` only gets `${localEnv:...}` per spec.
+    pub fn substitute(self, ctx: &SubstitutionContext) -> Self {
+        let sub = |s: String| substitute_vars(&s, ctx);
+        let sub_opt = |s: Option<String>| s.map(&sub);
+        let sub_env = |env: Option<HashMap<String, String>>| {
+            env.map(|m| m.into_iter().map(|(k, v)| (k, sub(v))).collect())
+        };
+        let sub_vec = |v: Option<Vec<String>>| v.map(|v| v.into_iter().map(&sub).collect());
+
+        let DevContainer {
+            name,
+            forward_ports,
+            ports_attributes,
+            other_ports_attributes,
+            container_env,
+            remote_env,
+            remote_user,
+            container_user,
+            update_remote_user_uid,
+            user_env_probe,
+            override_command,
+            shutdown_action,
+            init,
+            privileged,
+            cap_add,
+            security_opt,
+            mounts,
+            features,
+            override_feature_install_order,
+            customizations,
+            image,
+            build,
+            dockerfile,
+            context,
+            app_port,
+            workspace_mount,
+            workspace_folder,
+            run_args,
+            docker_compose_file,
+            service,
+            run_services,
+            initialize_command,
+            on_create_command,
+            update_content_command,
+            post_create_command,
+            post_start_command,
+            post_attach_command,
+            wait_for,
+            host_requirements,
+        } = self;
+
+        let build = build.map(|b| {
+            let restricted = SubstitutionContext {
+                resolve_local_env: ctx.resolve_local_env,
+                ..Default::default()
+            };
+            BuildOptions {
+                args: b.args.map(|m| {
+                    m.into_iter()
+                        .map(|(k, v)| (k, substitute_vars(&v, &restricted)))
+                        .collect()
+                }),
+                // Build-time properties do not support substitution
+                dockerfile: b.dockerfile,
+                context: b.context,
+                options: b.options,
+                target: b.target,
+                cache_from: b.cache_from,
             }
-        }
-        // remoteEnv
-        if let Some(env) = &mut self.remote_env {
-            for value in env.values_mut() {
-                *value = resolve_local_env_vars(value);
-            }
-        }
-        // build.args
-        if let Some(build) = &mut self.build {
-            if let Some(args) = &mut build.args {
-                for value in args.values_mut() {
-                    *value = resolve_local_env_vars(value);
-                }
-            }
+        });
+
+        let mounts = mounts.map(|v| {
+            v.into_iter()
+                .map(|m| match m {
+                    Mount::String(s) => Mount::String(sub(s)),
+                    Mount::Object(obj) => Mount::Object(MountObject {
+                        source: sub_opt(obj.source),
+                        target: sub(obj.target),
+                        mount_type: obj.mount_type,
+                        read_only: obj.read_only,
+                    }),
+                })
+                .collect()
+        });
+
+        DevContainer {
+            name: sub_opt(name),
+            run_args: sub_vec(run_args),
+            workspace_mount: sub_opt(workspace_mount),
+            workspace_folder: sub_opt(workspace_folder),
+            container_env: sub_env(container_env),
+            remote_env: sub_env(remote_env),
+            container_user: sub_opt(container_user),
+            remote_user: sub_opt(remote_user),
+            mounts,
+            initialize_command: substitute_lifecycle_command(initialize_command, ctx),
+            on_create_command: substitute_lifecycle_command(on_create_command, ctx),
+            update_content_command: substitute_lifecycle_command(update_content_command, ctx),
+            post_create_command: substitute_lifecycle_command(post_create_command, ctx),
+            post_start_command: substitute_lifecycle_command(post_start_command, ctx),
+            post_attach_command: substitute_lifecycle_command(post_attach_command, ctx),
+            build,
+            // These properties do not support variable substitution per spec
+            forward_ports,
+            ports_attributes,
+            other_ports_attributes,
+            update_remote_user_uid,
+            user_env_probe,
+            override_command,
+            shutdown_action,
+            init,
+            privileged,
+            cap_add,
+            security_opt,
+            features,
+            override_feature_install_order,
+            customizations,
+            image,
+            dockerfile,
+            context,
+            app_port,
+            docker_compose_file,
+            service,
+            run_services,
+            wait_for,
+            host_requirements,
         }
     }
 
@@ -657,9 +773,10 @@ impl DevContainer {
 
     /// Parse mounts into resolved `MountObject`s.
     ///
-    /// Rejects mount specs that contain unresolved variable references like
-    /// `${devcontainerId}` -- Docker will reject these with a cryptic error,
-    /// so we fail early with a clear message.
+    /// Should be called after variable substitution so that references like
+    /// `${devcontainerId}` have already been replaced.  Any remaining `${`
+    /// indicates a typo or unsupported variable and is rejected early with a
+    /// clear error (Docker would fail with a cryptic message otherwise).
     pub fn resolved_mounts(&self) -> Result<Vec<MountObject>> {
         let mounts = match &self.mounts {
             Some(mounts) => mounts
@@ -678,8 +795,7 @@ impl DevContainer {
                 if field.contains("${") {
                     anyhow::bail!(
                         "unresolved variable in mount: '{field}'. \
-                         Variable substitution (e.g. ${{devcontainerId}}) in mounts \
-                         is not supported."
+                         Check for typos in variable references."
                     );
                 }
             }
@@ -689,25 +805,420 @@ impl DevContainer {
     }
 }
 
-/// Resolve all `${localEnv:VAR}` references in `value` using the host's
-/// environment, leaving any other substitution patterns (e.g.
-/// `${containerEnv:VAR}`) untouched.
-pub fn resolve_local_env_vars(value: &str) -> String {
+/// Apply variable substitution to a lifecycle command.
+fn substitute_lifecycle_command(
+    cmd: Option<LifecycleCommand>,
+    ctx: &SubstitutionContext,
+) -> Option<LifecycleCommand> {
+    let sub = |s: String| substitute_vars(&s, ctx);
+    cmd.map(|c| match c {
+        LifecycleCommand::String(s) => LifecycleCommand::String(sub(s)),
+        LifecycleCommand::Array(arr) => {
+            LifecycleCommand::Array(arr.into_iter().map(&sub).collect())
+        }
+        LifecycleCommand::Object(map) => LifecycleCommand::Object(
+            map.into_iter()
+                .map(|(k, v)| {
+                    let v = match v {
+                        StringOrArray::String(s) => StringOrArray::String(sub(s)),
+                        StringOrArray::Array(arr) => {
+                            StringOrArray::Array(arr.into_iter().map(&sub).collect())
+                        }
+                    };
+                    (k, v)
+                })
+                .collect(),
+        ),
+    })
+}
+
+/// Context for variable substitution.
+///
+/// Each field is `Option` (or `false`) because different call sites have
+/// access to different variables. When a field is absent, references to
+/// that variable type are left as literal text so a later call can resolve
+/// them.
+#[derive(Default)]
+pub struct SubstitutionContext {
+    /// When true, `${localEnv:VAR}` is resolved via `std::env::var`.
+    pub resolve_local_env: bool,
+
+    /// `${localWorkspaceFolder}` value, if known.
+    pub local_workspace_folder: Option<String>,
+
+    /// `${localWorkspaceFolderBasename}` value, if known.
+    pub local_workspace_folder_basename: Option<String>,
+
+    /// `${containerWorkspaceFolder}` value, if known.
+    pub container_workspace_folder: Option<String>,
+
+    /// `${containerWorkspaceFolderBasename}` value, if known.
+    pub container_workspace_folder_basename: Option<String>,
+
+    /// `${devcontainerId}` value, if known.
+    pub devcontainer_id: Option<String>,
+
+    /// When set, `${containerEnv:VAR}` is resolved by running
+    /// `docker exec printenv` against this running container.
+    pub container_env_source: Option<ContainerEnvSource>,
+}
+
+/// Everything needed to read an environment variable from a running container
+/// via `docker exec printenv`.
+pub struct ContainerEnvSource {
+    pub docker_socket: PathBuf,
+    pub container_id: String,
+}
+
+/// Substitute all known variable patterns in a single string value.
+///
+/// Variables that cannot be resolved in the current context are left as-is
+/// so a later substitution call can resolve them.
+pub fn substitute_vars(value: &str, ctx: &SubstitutionContext) -> String {
     let mut result = value.to_string();
-    while let Some(start) = result.find("${localEnv:") {
-        let after = start + "${localEnv:".len();
-        if let Some(end) = result[after..].find('}') {
-            let var_name = &result[after..after + end];
-            let replacement = std::env::var(var_name).unwrap_or_default();
-            result = format!(
-                "{}{}{}",
-                &result[..start],
-                replacement,
-                &result[after + end + 1..]
-            );
-        } else {
+    let mut i = 0;
+    while i < result.len() {
+        if !result[i..].starts_with("${") {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let after_dollar_brace = start + 2;
+        let Some(close) = result[after_dollar_brace..].find('}') else {
             break;
+        };
+        let close = after_dollar_brace + close;
+        let inner = &result[after_dollar_brace..close];
+
+        let replacement = resolve_variable(inner, ctx);
+        match replacement {
+            Some(val) => {
+                result = format!("{}{}{}", &result[..start], val, &result[close + 1..]);
+                i = start + val.len();
+            }
+            None => {
+                // Leave unresolved -- skip past this reference
+                i = close + 1;
+            }
         }
     }
     result
+}
+
+/// Try to resolve a single variable reference (the text between `${` and `}`).
+///
+/// Returns `None` when the variable type is not available in the current
+/// context, meaning the literal `${...}` should be kept for a later call.
+fn resolve_variable(inner: &str, ctx: &SubstitutionContext) -> Option<String> {
+    if let Some(rest) = inner.strip_prefix("localEnv:") {
+        if !ctx.resolve_local_env {
+            return None;
+        }
+        let (var_name, default) = split_var_default(rest);
+        let val = std::env::var(var_name).ok();
+        return Some(val.unwrap_or_else(|| default.unwrap_or_default().to_string()));
+    }
+
+    if let Some(rest) = inner.strip_prefix("containerEnv:") {
+        let src = ctx.container_env_source.as_ref()?;
+        let (var_name, default) = split_var_default(rest);
+        let val = read_container_env_var(&src.docker_socket, &src.container_id, var_name);
+        return Some(val.unwrap_or_else(|| default.unwrap_or_default().to_string()));
+    }
+
+    match inner {
+        "localWorkspaceFolder" => ctx.local_workspace_folder.clone(),
+        "localWorkspaceFolderBasename" => ctx.local_workspace_folder_basename.clone(),
+        "containerWorkspaceFolder" => ctx.container_workspace_folder.clone(),
+        "containerWorkspaceFolderBasename" => ctx.container_workspace_folder_basename.clone(),
+        "devcontainerId" => ctx.devcontainer_id.clone(),
+        _ => None,
+    }
+}
+
+/// Read a single environment variable from a running container via
+/// `docker exec printenv`.
+fn read_container_env_var(
+    docker_socket: &Path,
+    container_id: &str,
+    var_name: &str,
+) -> Option<String> {
+    let output = std::process::Command::new("docker")
+        .args(["-H", &format!("unix://{}", docker_socket.display())])
+        .args(["exec", container_id, "printenv", var_name])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        Some(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Split `"VAR:default"` into `("VAR", Some("default"))`, or `"VAR"` into
+/// `("VAR", None)`.  The first colon is the separator.
+fn split_var_default(s: &str) -> (&str, Option<&str>) {
+    match s.split_once(':') {
+        Some((var, default)) => (var, Some(default)),
+        None => (s, None),
+    }
+}
+
+/// Compute a stable `${devcontainerId}` from the repo path and sandbox name.
+///
+/// Per the spec this should be a SHA-256 hash that is stable across rebuilds
+/// but unique per dev container instance.  We derive it from the two values
+/// that uniquely identify a sandbox on the Docker host.
+pub fn compute_devcontainer_id(repo_path: &Path, sandbox_name: &str) -> String {
+    let label_json = serde_json::json!({
+        "sandbox.name": sandbox_name,
+        "sandbox.repo_path": repo_path.to_string_lossy(),
+    });
+    // Deterministic serialization (serde_json sorts keys in json! maps)
+    let normalized = serde_json::to_string(&label_json).expect("JSON serialization cannot fail");
+    let hash = Sha256::digest(normalized.as_bytes());
+    hex::encode(hash)
+}
+
+/// Convenience wrapper: resolve `${localEnv:VAR}` using the real host
+/// environment.  Used by `agent/mod.rs` for eagerly resolving remote_env.
+pub fn resolve_local_env_vars(value: &str) -> String {
+    let ctx = SubstitutionContext {
+        resolve_local_env: true,
+        ..Default::default()
+    };
+    substitute_vars(value, &ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn full_ctx() -> SubstitutionContext {
+        SubstitutionContext {
+            resolve_local_env: true,
+            local_workspace_folder: Some("/home/user/project".to_string()),
+            local_workspace_folder_basename: Some("project".to_string()),
+            container_workspace_folder: Some("/workspaces/project".to_string()),
+            container_workspace_folder_basename: Some("project".to_string()),
+            devcontainer_id: Some("abc123def456".to_string()),
+            container_env_source: None,
+        }
+    }
+
+    #[test]
+    fn substitute_local_env_from_real_env() {
+        // PATH is always set in any reasonable environment
+        let ctx = SubstitutionContext {
+            resolve_local_env: true,
+            ..Default::default()
+        };
+        let result = substitute_vars("${localEnv:PATH}", &ctx);
+        assert!(!result.contains("${"), "should have resolved PATH");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn substitute_local_env_missing_uses_empty() {
+        let ctx = SubstitutionContext {
+            resolve_local_env: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            substitute_vars(
+                "pre-${localEnv:SANDBOX_TEST_DEFINITELY_UNSET_12345}-post",
+                &ctx
+            ),
+            "pre--post"
+        );
+    }
+
+    #[test]
+    fn substitute_local_env_with_default() {
+        let ctx = SubstitutionContext {
+            resolve_local_env: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            substitute_vars(
+                "${localEnv:SANDBOX_TEST_DEFINITELY_UNSET_12345:fallback}",
+                &ctx
+            ),
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn substitute_local_env_set_ignores_default() {
+        // PATH is always set
+        let ctx = SubstitutionContext {
+            resolve_local_env: true,
+            ..Default::default()
+        };
+        let result = substitute_vars("${localEnv:PATH:fallback}", &ctx);
+        assert_ne!(result, "fallback");
+        assert!(!result.contains("${"));
+    }
+
+    #[test]
+    fn substitute_workspace_vars() {
+        let ctx = full_ctx();
+        assert_eq!(
+            substitute_vars("${localWorkspaceFolder}", &ctx),
+            "/home/user/project"
+        );
+        assert_eq!(
+            substitute_vars("${localWorkspaceFolderBasename}", &ctx),
+            "project"
+        );
+        assert_eq!(
+            substitute_vars("${containerWorkspaceFolder}", &ctx),
+            "/workspaces/project"
+        );
+        assert_eq!(
+            substitute_vars("${containerWorkspaceFolderBasename}", &ctx),
+            "project"
+        );
+    }
+
+    #[test]
+    fn substitute_devcontainer_id() {
+        let ctx = full_ctx();
+        assert_eq!(
+            substitute_vars("vol-${devcontainerId}-data", &ctx),
+            "vol-abc123def456-data"
+        );
+    }
+
+    #[test]
+    fn substitute_leaves_unknown_vars_intact() {
+        let ctx = SubstitutionContext::default();
+        let input = "${unknownVar}";
+        assert_eq!(substitute_vars(input, &ctx), input);
+    }
+
+    #[test]
+    fn substitute_skips_unavailable_context() {
+        // resolve_local_env is false, so ${localEnv:...} should be preserved
+        let ctx = SubstitutionContext {
+            devcontainer_id: Some("id123".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            substitute_vars("${localEnv:FOO}-${devcontainerId}", &ctx),
+            "${localEnv:FOO}-id123"
+        );
+    }
+
+    #[test]
+    fn substitute_multiple_vars_in_one_string() {
+        let ctx = full_ctx();
+        assert_eq!(
+            substitute_vars("${localWorkspaceFolder}:${containerWorkspaceFolder}", &ctx),
+            "/home/user/project:/workspaces/project"
+        );
+    }
+
+    #[test]
+    fn substitute_no_vars() {
+        let ctx = full_ctx();
+        assert_eq!(substitute_vars("plain string", &ctx), "plain string");
+    }
+
+    #[test]
+    fn substitute_unclosed_brace() {
+        let ctx = full_ctx();
+        assert_eq!(
+            substitute_vars("${localWorkspaceFolder", &ctx),
+            "${localWorkspaceFolder"
+        );
+    }
+
+    #[test]
+    fn devcontainer_id_stable_across_calls() {
+        let id1 = compute_devcontainer_id(Path::new("/repo"), "sandbox1");
+        let id2 = compute_devcontainer_id(Path::new("/repo"), "sandbox1");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn devcontainer_id_differs_by_name() {
+        let id1 = compute_devcontainer_id(Path::new("/repo"), "a");
+        let id2 = compute_devcontainer_id(Path::new("/repo"), "b");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn devcontainer_id_differs_by_path() {
+        let id1 = compute_devcontainer_id(Path::new("/repo1"), "s");
+        let id2 = compute_devcontainer_id(Path::new("/repo2"), "s");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn devcontainer_id_is_hex_sha256() {
+        let id = compute_devcontainer_id(Path::new("/repo"), "name");
+        assert_eq!(id.len(), 64);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn substitute_method_covers_all_fields() {
+        let ctx = SubstitutionContext {
+            local_workspace_folder: Some("/host/project".to_string()),
+            ..Default::default()
+        };
+        let dc = DevContainer {
+            name: Some("${localWorkspaceFolder}".to_string()),
+            run_args: Some(vec!["--label=${localWorkspaceFolder}".to_string()]),
+            container_env: Some(HashMap::from([(
+                "K".to_string(),
+                "${localWorkspaceFolder}".to_string(),
+            )])),
+            remote_env: Some(HashMap::from([(
+                "R".to_string(),
+                "${localWorkspaceFolder}".to_string(),
+            )])),
+            container_user: Some("${localWorkspaceFolder}".to_string()),
+            remote_user: Some("${localWorkspaceFolder}".to_string()),
+            ..Default::default()
+        };
+        let dc = dc.substitute(&ctx);
+        assert_eq!(dc.name.unwrap(), "/host/project");
+        assert_eq!(dc.run_args.unwrap()[0], "--label=/host/project");
+        assert_eq!(dc.container_env.unwrap()["K"], "/host/project");
+        assert_eq!(dc.remote_env.unwrap()["R"], "/host/project");
+        assert_eq!(dc.container_user.unwrap(), "/host/project");
+        assert_eq!(dc.remote_user.unwrap(), "/host/project");
+    }
+
+    #[test]
+    fn substitute_build_args_only_gets_local_env() {
+        let ctx = SubstitutionContext {
+            resolve_local_env: true,
+            devcontainer_id: Some("id123".to_string()),
+            ..Default::default()
+        };
+        let dc = DevContainer {
+            build: Some(BuildOptions {
+                args: Some(HashMap::from([
+                    // Use PATH which is always set
+                    ("PATH_VAL".to_string(), "${localEnv:PATH}".to_string()),
+                    // devcontainerId should NOT be resolved in build.args
+                    ("ID".to_string(), "${devcontainerId}".to_string()),
+                ])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let dc = dc.substitute(&ctx);
+        let args = dc.build.unwrap().args.unwrap();
+        assert!(!args["PATH_VAL"].contains("${"));
+        assert_eq!(args["ID"], "${devcontainerId}");
+    }
 }

@@ -24,7 +24,10 @@ use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
 use crate::config::{is_deterministic_test_mode, RemoteDocker};
-use crate::devcontainer::{self, DevContainer, Port, PortAttributes};
+use crate::devcontainer::{
+    self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
+    PortAttributes, StringOrArray, SubstitutionContext,
+};
 use crate::docker_exec::{exec_check, exec_command};
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
@@ -148,6 +151,60 @@ fn docker_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
     let hash_prefix = &hash[..12];
 
     format!("{}-{}-{}", repo_dir, sandbox_name.0, hash_prefix)
+}
+
+/// Resolve daemon-side variables: `${containerWorkspaceFolder}`,
+/// `${containerWorkspaceFolderBasename}`, and `${devcontainerId}`.
+///
+/// `workspace_folder` is resolved first since `containerWorkspaceFolder`
+/// is derived from its resolved value.
+fn resolve_daemon_vars(dc: DevContainer, repo_path: &Path, sandbox_name: &str) -> DevContainer {
+    let devcontainer_id = compute_devcontainer_id(repo_path, sandbox_name);
+
+    // Strip trailing path separators that libgit2 may add to workdir paths.
+    let local_ws = repo_path
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let local_ws_basename = repo_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    // workspace_folder may itself contain ${devcontainerId} or
+    // ${localWorkspaceFolderBasename}, so resolve it before deriving
+    // containerWorkspaceFolder from it.
+    let workspace_folder = dc.workspace_folder.as_ref().map(|wf| {
+        substitute_vars(
+            wf,
+            &SubstitutionContext {
+                local_workspace_folder: Some(local_ws.clone()),
+                local_workspace_folder_basename: Some(local_ws_basename.clone()),
+                devcontainer_id: Some(devcontainer_id.clone()),
+                ..Default::default()
+            },
+        )
+    });
+    let dc = DevContainer {
+        workspace_folder,
+        ..dc
+    };
+
+    let container_ws = dc.container_repo_path(repo_path);
+    let container_ws_str = container_ws.to_string_lossy().to_string();
+    let container_ws_basename = container_ws
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    dc.substitute(&SubstitutionContext {
+        local_workspace_folder: Some(local_ws),
+        local_workspace_folder_basename: Some(local_ws_basename),
+        container_workspace_folder: Some(container_ws_str),
+        container_workspace_folder_basename: Some(container_ws_basename),
+        devcontainer_id: Some(devcontainer_id),
+        ..Default::default()
+    })
 }
 
 /// Container state returned by docker inspect.
@@ -654,6 +711,7 @@ struct DockerRunArgs {
     devices: Vec<String>,
     cap_add: Vec<String>,
     security_opt: Vec<String>,
+    labels: Vec<(String, String)>,
     privileged: bool,
     init: bool,
 }
@@ -668,6 +726,7 @@ fn parse_run_args_for_docker(args: &[String]) -> DockerRunArgs {
         devices: Vec::new(),
         cap_add: Vec::new(),
         security_opt: Vec::new(),
+        labels: Vec::new(),
         privileged: false,
         init: false,
     };
@@ -703,6 +762,16 @@ fn parse_run_args_for_docker(args: &[String]) -> DockerRunArgs {
         } else if arg == "--security-opt" {
             if let Some(val) = iter.next() {
                 result.security_opt.push(val.to_string());
+            }
+        } else if let Some(val) = strip_flag(arg, "--label") {
+            if let Some((k, v)) = val.split_once('=') {
+                result.labels.push((k.to_string(), v.to_string()));
+            }
+        } else if arg == "--label" {
+            if let Some(val) = iter.next() {
+                if let Some((k, v)) = val.split_once('=') {
+                    result.labels.push((k.to_string(), v.to_string()));
+                }
             }
         } else if arg == "--privileged" {
             result.privileged = true;
@@ -777,6 +846,11 @@ fn create_container(
         container_repo_path.display().to_string(),
     );
     labels.insert(SANDBOX_NAME_LABEL.to_string(), sandbox_name.0.clone());
+
+    // Apply user-specified labels from runArgs
+    for (k, v) in &run_args_config.labels {
+        labels.insert(k.clone(), v.clone());
+    }
 
     let env_vec = match env {
         Some(e) if !e.is_empty() => Some(
@@ -1216,10 +1290,8 @@ fn run_lifecycle_command(
     container_id: &str,
     user: &str,
     workdir: &Path,
-    command: &crate::devcontainer::LifecycleCommand,
+    command: &LifecycleCommand,
 ) -> Result<()> {
-    use crate::devcontainer::{LifecycleCommand, StringOrArray};
-
     let workdir_str = workdir.to_string_lossy();
 
     match command {
@@ -1342,11 +1414,16 @@ impl Daemon for DaemonServer {
             repo_path,
             host_branch,
             remote,
-            ref devcontainer,
+            devcontainer,
         } = params;
 
+        // Resolve daemon-side variables (container workspace paths,
+        // devcontainerId).  Client-side variables were already resolved
+        // before the config was sent to us.
+        let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &sandbox_name.0);
+
         let image = crate::image::resolve_image(
-            devcontainer,
+            &devcontainer,
             remote
                 .as_ref()
                 .map(|r| format!("ssh://{}:{}", r.destination, r.port))
@@ -1606,7 +1683,7 @@ impl Daemon for DaemonServer {
             &image,
             &repo_path,
             &container_repo_path,
-            devcontainer,
+            &devcontainer,
             &mounts,
             &publish_ports,
         )
@@ -1655,7 +1732,7 @@ impl Daemon for DaemonServer {
             &container_id.0,
             &user,
             &container_repo_path,
-            devcontainer,
+            &devcontainer,
             sandbox_id,
             &self.db,
         )
@@ -1701,7 +1778,15 @@ impl Daemon for DaemonServer {
         })
     }
 
-    fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
+    fn recreate_sandbox(&self, mut params: SandboxLaunchParams) -> Result<LaunchResult> {
+        // Resolve daemon-side variables so container_repo_path and other
+        // fields are fully resolved before we use them for snapshotting.
+        params.devcontainer = resolve_daemon_vars(
+            params.devcontainer,
+            &params.repo_path,
+            &params.sandbox_name.0,
+        );
+
         let sandbox_name = &params.sandbox_name;
         let repo_path = &params.repo_path;
         let remote = &params.remote;
