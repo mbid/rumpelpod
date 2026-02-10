@@ -9,8 +9,18 @@ echo "=== Building (with tests, no warnings) ==="
 RUSTFLAGS="-D warnings" cargo build --all-targets
 
 echo ""
+echo "=== Checking for running docker containers ==="
+running_containers=$(docker ps -q 2>/dev/null)
+if [ -n "$running_containers" ]; then
+    echo "ERROR: Found running docker containers. Stop them before running the pipeline:"
+    docker ps --format "  {{.ID}}  {{.Image}}  {{.Names}}"
+    exit 1
+fi
+echo "✓ No running docker containers"
+
+echo ""
 echo "=== Running tests ==="
-cargo test
+cargo test -- --test-threads=8
 
 echo ""
 echo "=== Running clippy (no warnings) ==="
