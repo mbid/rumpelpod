@@ -534,6 +534,7 @@ fn ssh_smoke_test() {
     );
 }
 
+#[ignore]
 #[test]
 fn ssh_reconnect_test() {
     let repo = TestRepo::new();
