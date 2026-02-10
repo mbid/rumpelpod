@@ -125,7 +125,8 @@ impl ToolName {
             ToolName::Bash => {
                 "Execute a bash command inside the sandbox and return the output.\n\
                                The working directory is the project root.\n\
-                               If a command times out, wait and get output: `tail --pid=<PID> -f <output_file>`."
+                               If a command times out, wait and get output: `tail --pid=<PID> -f <output_file>`.\n\
+                               If some output was already printed, use `tail -n +<START_LINE> --pid=<PID> -f <output_file>` to skip it."
             }
             ToolName::Edit => "Perform a search-and-replace edit on a file.",
             ToolName::Write => {
@@ -442,8 +443,10 @@ pub fn execute_bash_in_sandbox(
     // echo $$ prints the PID of the shell.
     // We use a subshell or block for the command so we can redirect its output.
     // We use `set -o pipefail` so if the command fails, the pipeline fails (and we get the exit code).
+    // Use stdbuf to disable output buffering on tee, so the output file
+    // stays up to date even when tee's stdout is a pipe (not a TTY).
     let wrapped_command = format!(
-        "mkdir -p /tmp/agent; echo $$; set -o pipefail; ( {command} ) 2>&1 | tee {output_file}"
+        "mkdir -p /tmp/agent; echo $$; set -o pipefail; ( {command} ) 2>&1 | stdbuf -o0 tee {output_file}"
     );
 
     let exec_result = exec_capture_with_timeout(
@@ -532,12 +535,17 @@ pub fn execute_bash_in_sandbox(
             };
 
             let len = combined_bytes.len();
+            let lines_so_far = combined_bytes.iter().filter(|&&b| b == b'\n').count();
+            let next_line = lines_so_far + 1;
+            let tail_cmd = format!("tail -n +{next_line} --pid={pid} -f {output_file}");
+
             if len > MAX_OUTPUT_SIZE {
                 return Ok((
                     formatdoc! {r#"
                         Command timed out after {timeout_secs} seconds.
                         Process is still running with PID {pid}.
                         Output so far is too large ({len} bytes). Full output available at {output_file}.
+                        To get remaining output: `{tail_cmd}`
                     "#},
                     false,
                 ));
@@ -551,6 +559,7 @@ pub fn execute_bash_in_sandbox(
                     Process is still running with PID {pid}.
                     Output so far (saved to {output_file}):
                     {combined}
+                    To get remaining output: `{tail_cmd}`
                 "#},
                 false,
             ))

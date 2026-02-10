@@ -1,0 +1,29 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The file `secret.txt` contains `AGENT_SECRET_12345`."
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 450,
+    "candidatesTokenCount": 19,
+    "totalTokenCount": 469,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 450
+      }
+    ]
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "loOLafbOHe-E7M8PhrC7kAo"
+}

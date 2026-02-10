@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "websearch",
+              "args": {
+                "query": "when was the last US penny minted"
+              }
+            },
+            "thoughtSignature": "CogCAb4+9vuf5qnL+Ei82MrFmdFG+wHpyiry13kqxpr7KY2D8FIN7t5CSndHA0vIzaTd+EGjrLs7/+Heak88YdtHDOfFbUOboW9lSBaUPZQ5krVz890id3SSUz0ZpP6rwt/5mNvpsLv6pF15RqAS5NK2gbyXc3DHxkOXzxvBxdCwadvllHGYpS7/5K5e5/sWlft+ac7gK4jJy6XW/emhspK6PF9S6pyU7l6SVGGJs4H4FfZn7Jgq7l343oAlDgpGxlGSt4gMWMi6XRj/o429nVihfpOwW5ygSNoSWMCg/XexKLArNLqv5kl6FgRfctEU8ITKuCU+74z0DCaf10Tvn5VsjY/NtlEYhAAx"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 426,
+    "candidatesTokenCount": 20,
+    "totalTokenCount": 495,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 426
+      }
+    ],
+    "thoughtsTokenCount": 49
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "oYOLafKfC6C-xN8P44aKqAg"
+}

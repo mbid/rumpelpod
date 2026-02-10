@@ -1,0 +1,37 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "functionCall": {
+              "name": "bash",
+              "args": {
+                "command": "ls -F"
+              }
+            },
+            "thoughtSignature": "EpwHCpkHAb4+9vvhXuILGKBAy9e1PQEIo+lDLr63etpQa5t9ReD0xaAUfuNdO2uHrcXogzo1Q7bUU+5KAIDr/AaBHmaZGEN+EiI5uIGsJ3X7MvPHwTrn1Bv0Cqu54qNy44rlcXh2fFZ2LgdyQkG++NeZ9+BG4nrLxDxtnPP98yXGv92Xkhb/Z0A+wrY2vVAFKBCbQ4CpM9LFBpLB7aiyXgK78LEyxrrhtRJlqESoMFfmTVWorsg2vnH7Ha/NWTm2SEZc81DLa8k6OIsJ94Uwj50GCoO61vzxnBdpKoC8Y0ggzjTyPdPITy7TgeqmaF5M36XWcySEVBLfzBNwNgQl3Pe9GQx3ZM3CGbfuf5dMqLpFpmh8/DgggZ0oEAMjPD8Q3abCfCDcJzO3tnDOplkZNOnQROFVNoLCWDbjlMzGV/E3bMARlDuapehSCaOuO6VkgybfHYEAGT68IoV5u79yG/FVBdUwUYSd80Kp5WowEuL8y74enWraBFiuCaFVCKtBjlxEsifsifynO3+datP8/CZIl+LElCoDhg86lHK43xPih9PE1YbUAubVkDAsieGbTaHlOZWWCnNmNDYihNXXOkqNUs/hI4LTUJ8E5CmP6z+3vfmT0DaSppwDHWZ++9U6hOk6UGtXqrMs2wQqFWFtuSxOQfxYzpoNI38IFz4Ckdy9Q69LQKb3BJPrX7RLXYizIGoUynNcyqdYbnP4AC9ESYMZ8G2r35mbPzdFbU4920KO5av+OK0uYWefIKGfxb/WFs2EPHIkdmy8ZFw+ZfsdL3Fss+QbMUdElCH2Nc8hYFlzrQJPoryKBwJOzBDji6+s3bg9lD3qDRNsqkmQ6auOYy655X6ykbmWzHZYDzaapl8nk/szozIjWwpzYRohb5LII507J8qRLLQYghg6XpkrjFoZHthIWQ2mzr7O+V3Zp4gGE92PM8hUmaccgZoqZn4eaLqjX58LRMUBZ5NDCqlb6GbM2hTU3p/kdK+XSRtP/yQxbjqWiO+NEEB2jLXYkIGTCaLpRj2g49jVdvfoZPa0xabub/aykp3Nfve5rHOcab/1ZD8bZUYPo4FnyZ9TzKQQxJgD/pPJ9+3+tqVkO4FV4O6bdOQtHsLsm1Q7Aj69XtxvDjOq9FqqagSRizQYh0w1WD3OW97aoOoenUVRZgJgZoMCKj8SB3G4UCFRvkfNkGpSnRnCcIeHxt94k66KXAFMvU9zQxfIwkzwLGdyyMm0"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0,
+      "finishMessage": "Model generated function call(s)."
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 475,
+    "candidatesTokenCount": 16,
+    "totalTokenCount": 699,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 475
+      }
+    ],
+    "thoughtsTokenCount": 208
+  },
+  "modelVersion": "gemini-3-pro-preview",
+  "responseId": "oIOLaeyaHdmAkdUPjoSd2QU"
+}
