@@ -216,6 +216,28 @@ pub fn get_runtime_dir() -> Result<PathBuf> {
     Ok(runtime_base.join("sandbox"))
 }
 
+/// Check if direct git config writes are enabled via SANDBOX_TEST_DIRECT_GIT_CONFIG.
+///
+/// When set, git config entries and remotes are written directly to `.git/config`
+/// instead of invoking `git config` or `git remote add`. This avoids flaky lock
+/// failures on overlay2 under heavy parallelism in tests.
+///
+/// Returns:
+/// - `Ok(true)` if set to "1"
+/// - `Ok(false)` if not set
+/// - `Err(...)` if set to any other value
+pub fn is_direct_git_config_mode() -> Result<bool> {
+    match std::env::var("SANDBOX_TEST_DIRECT_GIT_CONFIG") {
+        Ok(value) if value == "1" => Ok(true),
+        Ok(value) => bail!(
+            "SANDBOX_TEST_DIRECT_GIT_CONFIG must be '1' if set, got '{}'",
+            value
+        ),
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(e) => Err(e).context("failed to read SANDBOX_TEST_DIRECT_GIT_CONFIG"),
+    }
+}
+
 /// Check if deterministic test mode is enabled via SANDBOX_TEST_DETERMINISTIC_IDS.
 ///
 /// Returns:

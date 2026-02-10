@@ -23,7 +23,7 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{is_deterministic_test_mode, RemoteDocker};
+use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, RemoteDocker};
 use crate::devcontainer::{
     self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
     PortAttributes, StringOrArray, SubstitutionContext,
@@ -493,27 +493,52 @@ fn setup_git_remotes(
 
     let repo_path_str = container_repo_path.to_string_lossy().to_string();
 
-    // Configure remotes and fetch in a single shell invocation to avoid
-    // transient .git/config lock failures from many sequential docker exec
-    // calls (each running a separate `git config`).
     let push_refspec = format!("+refs/heads/*:refs/heads/sandbox/*@{}", sandbox_name.0);
-    let setup_script = formatdoc! {r#"
-        set -e
-        cd "{repo_path_str}"
 
-        git config http.extraHeader "Authorization: Bearer {token}"
+    let setup_script = if is_direct_git_config_mode()? {
+        // Bypass `git config` / `git remote` and write directly to .git/config
+        // to avoid flaky lock failures on overlay2 under heavy test parallelism.
+        formatdoc! {r#"
+            set -e
+            cd "{repo_path_str}"
 
-        git remote add host "{git_http_url}" 2>/dev/null \
-            || git remote set-url host "{git_http_url}"
-        git config remote.host.fetch '+refs/heads/host/*:refs/remotes/host/*'
-        git config remote.host.pushurl PUSH_DISABLED
+            cat >> .git/config <<'GIT_CONFIG_EOF'
+            [http]
+            	extraHeader = Authorization: Bearer {token}
+            [remote "host"]
+            	url = {git_http_url}
+            	fetch = +refs/heads/host/*:refs/remotes/host/*
+            	pushurl = PUSH_DISABLED
+            [remote "sandbox"]
+            	url = {git_http_url}
+            	push = {push_refspec}
+            GIT_CONFIG_EOF
 
-        git remote add sandbox "{git_http_url}" 2>/dev/null \
-            || git remote set-url sandbox "{git_http_url}"
-        git config remote.sandbox.push '{push_refspec}'
+            git fetch host
+        "#}
+    } else {
+        // Configure remotes and fetch in a single shell invocation to avoid
+        // transient .git/config lock failures from many sequential docker exec
+        // calls (each running a separate `git config`).
+        formatdoc! {r#"
+            set -e
+            cd "{repo_path_str}"
 
-        git fetch host
-    "#};
+            git config http.extraHeader "Authorization: Bearer {token}"
+
+            git remote add host "{git_http_url}" 2>/dev/null \
+                || git remote set-url host "{git_http_url}"
+            git config remote.host.fetch '+refs/heads/host/*:refs/remotes/host/*'
+            git config remote.host.pushurl PUSH_DISABLED
+
+            git remote add sandbox "{git_http_url}" 2>/dev/null \
+                || git remote set-url sandbox "{git_http_url}"
+            git config remote.sandbox.push '{push_refspec}'
+
+            git fetch host
+        "#}
+    };
+
     exec_command(
         docker,
         container_id,

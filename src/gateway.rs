@@ -72,6 +72,7 @@
 //! environment variable which hooks can trust (the client cannot forge it).
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,7 +82,7 @@ use indoc::indoc;
 use sha2::{Digest, Sha256};
 
 use crate::command_ext::CommandExt;
-use crate::config::get_state_dir;
+use crate::config::{get_state_dir, is_direct_git_config_mode};
 
 /// Name of the remote added to the host repo pointing to the gateway.
 const SANDBOX_REMOTE: &str = "sandbox";
@@ -318,21 +319,44 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     // Configure gateway settings (idempotent - safe to run on every call).
     // Enable anonymous pushes via HTTP for sandboxes to push to gateway.
     // This is safe because the gateway is only accessible from our sandboxes.
-    Command::new("git")
-        .args(["config", "http.receivepack", "true"])
-        .current_dir(&gateway)
-        .success()
-        .context("enabling http.receivepack failed")?;
+    if is_direct_git_config_mode()? {
+        // Bypass `git config` / `git remote` and write directly to the config
+        // files to avoid flaky lock failures on overlay2 under heavy test
+        // parallelism.
+        append_git_config(
+            &gateway,
+            &format!(
+                "[http]\n\treceivepack = true\n\
+                 [remote \"{}\"]\n\turl = {}\n",
+                HOST_REMOTE,
+                repo_path.to_string_lossy(),
+            ),
+        )?;
+        append_git_config(
+            repo_path,
+            &format!(
+                "[remote \"{}\"]\n\turl = {}\n",
+                SANDBOX_REMOTE,
+                gateway.to_string_lossy(),
+            ),
+        )?;
+    } else {
+        Command::new("git")
+            .args(["config", "http.receivepack", "true"])
+            .current_dir(&gateway)
+            .success()
+            .context("enabling http.receivepack failed")?;
+
+        // Add "sandbox" remote to host repo (pointing to gateway)
+        ensure_remote(repo_path, SANDBOX_REMOTE, &gateway)?;
+
+        // Add "host" remote to gateway (pointing to host repo)
+        ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
+    }
 
     // Install gateway hooks (overwrites any existing hooks).
     install_gateway_pre_receive_hook(&gateway)?;
     install_gateway_post_receive_hook(&gateway)?;
-
-    // Add "sandbox" remote to host repo (pointing to gateway)
-    ensure_remote(repo_path, SANDBOX_REMOTE, &gateway)?;
-
-    // Add "host" remote to gateway (pointing to host repo)
-    ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
 
     // Install reference-transaction hook to sync branch updates
     install_reference_transaction_hook(repo_path)?;
@@ -376,6 +400,24 @@ fn ensure_remote(repo_path: &Path, remote_name: &str, remote_url: &Path) -> Resu
         }
     }
 
+    Ok(())
+}
+
+/// Append raw config text to a repo's `.git/config` (or `config` for bare repos).
+/// Used in test mode to avoid `git config` lock contention on overlay2.
+fn append_git_config(repo_path: &Path, content: &str) -> Result<()> {
+    // Bare repos store config at `<repo>/config`, non-bare at `<repo>/.git/config`.
+    let config_path = if repo_path.join("HEAD").exists() {
+        repo_path.join("config")
+    } else {
+        repo_path.join(".git/config")
+    };
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("failed to open {}", config_path.display()))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write to {}", config_path.display()))?;
     Ok(())
 }
 

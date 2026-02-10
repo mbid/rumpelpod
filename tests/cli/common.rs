@@ -77,7 +77,10 @@ impl TestDaemon {
             .env(XDG_STATE_HOME_ENV, &state_dir)
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             // Enable deterministic PIDs for test reproducibility
-            .env("SANDBOX_TEST_DETERMINISTIC_IDS", "1");
+            .env("SANDBOX_TEST_DETERMINISTIC_IDS", "1")
+            // Write directly to .git/config instead of invoking `git config`
+            // to avoid flaky lock failures on overlay2 under heavy parallelism
+            .env("SANDBOX_TEST_DIRECT_GIT_CONFIG", "1");
 
         if let Some(config_path) = ssh_config {
             cmd.env(SSH_CONFIG_FILE_ENV, config_path);
