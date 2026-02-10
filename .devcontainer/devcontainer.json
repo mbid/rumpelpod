@@ -11,6 +11,5 @@
     "runArgs": [
         "--runtime=sysbox-runc"
     ],
-    "containerUser": "dev",
-    "workspaceFolder": "/home/dev/sandbox"
+    "containerUser": "dev"
 }

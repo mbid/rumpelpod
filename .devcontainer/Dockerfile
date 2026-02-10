@@ -2,6 +2,8 @@ ARG BASE_IMAGE=debian:trixie
 
 FROM $BASE_IMAGE
 
+USER root
+
 RUN export DEBIAN_FRONTEND=noninteractive \
     && apt-get update \
     && apt-get install --yes \
@@ -72,6 +74,10 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
+
+USER root
+RUN mkdir /workspaces && chown -R ${USER}:${USER} /workspaces
+USER ${USER}
 
 RUN git clone https://github.com/mbid/sandbox /home/$USER/sandbox
 WORKDIR /home/$USER/sandbox
