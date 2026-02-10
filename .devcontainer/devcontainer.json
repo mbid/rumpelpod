@@ -1,6 +1,6 @@
 {
     "build": {
-        "dockerfile": "../Dockerfile",
+        "dockerfile": "Dockerfile",
         "args": {
             "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}",
             "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
