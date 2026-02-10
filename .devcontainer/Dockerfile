@@ -56,8 +56,16 @@ ENV USER=${USER}
 ENV USER_ID=${USER_ID}
 ENV GROUP_ID=${GROUP_ID}
 
-RUN groupadd -g ${GROUP_ID} ${USER} || groupadd ${USER} && \
-    useradd -m -u ${USER_ID} -g ${USER} -s /usr/bin/fish ${USER} && \
+# Ensure the user and group exist, handling the case where the base image
+# already provides them (possibly with a different uid/gid/shell).
+RUN if ! getent group ${USER} > /dev/null 2>&1; then \
+        groupadd -g ${GROUP_ID} ${USER} || groupadd ${USER}; \
+    fi && \
+    if ! id -u ${USER} > /dev/null 2>&1; then \
+        useradd -m -u ${USER_ID} -g ${USER} -s /usr/bin/fish ${USER}; \
+    else \
+        usermod -s /usr/bin/fish -g ${USER} ${USER}; \
+    fi && \
     echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     usermod -aG docker ${USER}
 
