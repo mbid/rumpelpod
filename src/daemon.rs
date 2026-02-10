@@ -210,7 +210,6 @@ fn resolve_daemon_vars(dc: DevContainer, repo_path: &Path, sandbox_name: &str) -
 /// Container state returned by docker inspect.
 struct ContainerState {
     status: String,
-    image: String,
     id: String,
 }
 
@@ -277,7 +276,6 @@ fn inspect_container(docker: &Docker, container_name: &str) -> Result<Option<Con
 
             Ok(Some(ContainerState {
                 status,
-                image: response.config.and_then(|c| c.image).unwrap_or_default(),
                 id: response.id.unwrap_or_default(),
             }))
         }
@@ -1649,16 +1647,6 @@ impl Daemon for DaemonServer {
         // but that adds complexity. For now, we accept this limitation.
 
         if let Some(state) = inspect_container(&docker, &name)? {
-            // Container exists - check if it has the expected image
-            if state.image != image.0 {
-                anyhow::bail!(
-                    "Container '{}' exists with image '{}', but requested image is '{}'",
-                    name,
-                    state.image,
-                    image.0
-                );
-            }
-
             let was_stopped = state.status != "running";
             if was_stopped {
                 // Container exists but is stopped - restart it
