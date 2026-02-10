@@ -21,7 +21,6 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         curl \
         wget \
         ca-certificates \
-        fish \
         sudo \
         locales \
         gnupg \
@@ -62,9 +61,7 @@ RUN if ! getent group ${USER} > /dev/null 2>&1; then \
         groupadd -g ${GROUP_ID} ${USER} || groupadd ${USER}; \
     fi && \
     if ! id -u ${USER} > /dev/null 2>&1; then \
-        useradd -m -u ${USER_ID} -g ${USER} -s /usr/bin/fish ${USER}; \
-    else \
-        usermod -s /usr/bin/fish -g ${USER} ${USER}; \
+        useradd -m -u ${USER_ID} -g ${USER} ${USER}; \
     fi && \
     echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     usermod -aG docker ${USER}
