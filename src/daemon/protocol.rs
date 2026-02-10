@@ -210,10 +210,6 @@ pub struct EnsureClaudeConfigRequest {
     pub container_id: ContainerId,
     pub user: String,
     pub docker_socket: PathBuf,
-    /// Contents of ~/.claude.json on the host, if it exists.
-    pub claude_json: Option<Vec<u8>>,
-    /// Contents of ~/.claude/settings.json on the host, if it exists.
-    pub claude_settings_json: Option<Vec<u8>>,
 }
 
 /// Error response body.

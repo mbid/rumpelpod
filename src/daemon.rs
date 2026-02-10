@@ -1377,19 +1377,14 @@ fn run_lifecycle_command(
     Ok(())
 }
 
-/// Run onCreateCommand and postCreateCommand if they haven't been executed yet.
-///
 /// Copy Claude Code config files into a container.
 ///
-/// Writes the file contents via `exec_with_stdin` (piping through `cat`),
-/// then fixes ownership so the container user can read them.
-fn copy_claude_config(
-    docker: &Docker,
-    container_id: &str,
-    user: &str,
-    claude_json: Option<&[u8]>,
-    claude_settings_json: Option<&[u8]>,
-) -> Result<()> {
+/// Reads ~/.claude.json and ~/.claude/ from the host (the daemon runs on the
+/// same machine as the CLI) and pipes them into the container. All commands
+/// run as `user` so files are created with the right ownership.
+fn copy_claude_config(docker: &Docker, container_id: &str, user: &str) -> Result<()> {
+    let host_home = dirs::home_dir().context("Could not determine home directory")?;
+
     // Determine the container user's home directory
     let home_output = exec_command(
         docker,
@@ -1402,27 +1397,36 @@ fn copy_claude_config(
     .context("determining container home directory")?;
     let container_home = String::from_utf8_lossy(&home_output).trim().to_string();
 
-    if let Some(data) = claude_json {
+    if let Ok(data) = std::fs::read(host_home.join(".claude.json")) {
         let dest = format!("{}/.claude.json", container_home);
-        write_file_via_stdin(docker, container_id, user, &dest, data)
+        write_file_via_stdin(docker, container_id, user, &dest, &data)
             .context("writing .claude.json")?;
     }
 
-    if let Some(data) = claude_settings_json {
-        let dir = format!("{}/.claude", container_home);
-        exec_command(
-            docker,
-            container_id,
-            Some(user),
-            None,
-            None,
-            vec!["mkdir", "-p", &dir],
-        )
-        .context("creating .claude directory")?;
-
-        let dest = format!("{}/.claude/settings.json", container_home);
-        write_file_via_stdin(docker, container_id, user, &dest, data)
-            .context("writing .claude/settings.json")?;
+    if host_home.join(".claude").is_dir() {
+        let output = Command::new("tar")
+            .args(["cf", "-", "-C"])
+            .arg(&host_home)
+            .arg(".claude")
+            .output()
+            .context("running tar to pack ~/.claude")?;
+        if output.status.success() {
+            exec_with_stdin(
+                docker,
+                container_id,
+                Some(user),
+                None,
+                None,
+                vec!["tar", "xf", "-", "-C", &container_home],
+                Some(&output.stdout),
+            )
+            .context("extracting .claude directory tar")?;
+        } else {
+            log::warn!(
+                "tar of ~/.claude failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     Ok(())
@@ -2271,13 +2275,7 @@ impl Daemon for DaemonServer {
         )
         .context("connecting to Docker daemon")?;
 
-        copy_claude_config(
-            &docker,
-            &request.container_id.0,
-            &request.user,
-            request.claude_json.as_deref(),
-            request.claude_settings_json.as_deref(),
-        )?;
+        copy_claude_config(&docker, &request.container_id.0, &request.user)?;
 
         // Mark as copied only after the full copy succeeds.
         // If this DB write fails, the next invocation will redo the copy,

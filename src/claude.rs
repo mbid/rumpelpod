@@ -72,11 +72,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         );
     }
 
-    // Read host config files to send to the daemon for copying
-    let home = dirs::home_dir().context("Could not determine home directory")?;
-    let claude_json = std::fs::read(home.join(".claude.json")).ok();
-    let claude_settings_json = std::fs::read(home.join(".claude/settings.json")).ok();
-
     // Ask the daemon to copy config files (idempotent -- skips if already done)
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
@@ -86,8 +81,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         container_id: ContainerId(container_id.0.clone()),
         user: user.clone(),
         docker_socket: docker_socket.clone(),
-        claude_json,
-        claude_settings_json,
     })?;
 
     // Build the docker exec command for the interactive screen session
