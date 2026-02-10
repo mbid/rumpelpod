@@ -27,7 +27,8 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         gnupg \
         docker.io \
         kubectl \
-        kind
+        kind \
+        screen
 
 RUN echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
     && systemctl mask \

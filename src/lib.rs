@@ -1,6 +1,7 @@
 #[macro_use]
 mod agent;
 mod async_runtime;
+mod claude;
 mod cli;
 mod command_ext;
 pub mod config;
@@ -65,6 +66,9 @@ pub fn run() -> Result<()> {
         }
         Command::Agent(ref cmd) => {
             agent::agent(cmd)?;
+        }
+        Command::Claude(ref cmd) => {
+            claude::claude(cmd)?;
         }
     }
 

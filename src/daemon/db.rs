@@ -113,6 +113,7 @@ const SCHEMA_SQL: &str = indoc! {"
         status TEXT NOT NULL DEFAULT 'initializing',
         on_create_ran INTEGER NOT NULL DEFAULT 0,
         post_create_ran INTEGER NOT NULL DEFAULT 0,
+        claude_config_copied INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE(repo_path, name)
@@ -453,6 +454,28 @@ pub fn mark_post_create_ran(conn: &Connection, id: SandboxId) -> Result<()> {
         rusqlite::params![i64::from(id)],
     )
     .context("Failed to mark post_create_ran")?;
+    Ok(())
+}
+
+/// Check whether Claude Code config files have been copied into this sandbox.
+pub fn has_claude_config_copied(conn: &Connection, id: SandboxId) -> Result<bool> {
+    let copied: bool = conn
+        .query_row(
+            "SELECT claude_config_copied FROM sandboxes WHERE id = ?",
+            rusqlite::params![i64::from(id)],
+            |row| row.get(0),
+        )
+        .context("Failed to query claude_config_copied")?;
+    Ok(copied)
+}
+
+/// Mark Claude Code config files as having been copied into this sandbox.
+pub fn mark_claude_config_copied(conn: &Connection, id: SandboxId) -> Result<()> {
+    conn.execute(
+        "UPDATE sandboxes SET claude_config_copied = 1 WHERE id = ?",
+        rusqlite::params![i64::from(id)],
+    )
+    .context("Failed to mark claude_config_copied")?;
     Ok(())
 }
 

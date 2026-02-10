@@ -202,6 +202,20 @@ pub struct GetConversationResponse {
     pub history: serde_json::Value,
 }
 
+/// Request body for ensure_claude_config endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnsureClaudeConfigRequest {
+    pub sandbox_name: SandboxName,
+    pub repo_path: PathBuf,
+    pub container_id: ContainerId,
+    pub user: String,
+    pub docker_socket: PathBuf,
+    /// Contents of ~/.claude.json on the host, if it exists.
+    pub claude_json: Option<Vec<u8>>,
+    /// Contents of ~/.claude/settings.json on the host, if it exists.
+    pub claude_settings_json: Option<Vec<u8>>,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -253,6 +267,11 @@ pub trait Daemon: Send + Sync + 'static {
     // GET /conversation/<id>
     // Get a conversation by ID.
     fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>>;
+
+    // PUT /sandbox/claude-config
+    // Ensure Claude Code config files are present in the container.
+    // Idempotent: skips the copy if it has already been done for this sandbox.
+    fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()>;
 }
 
 pub struct DaemonClient {
@@ -536,6 +555,26 @@ impl Daemon for DaemonClient {
             Err(anyhow::anyhow!("Server error: {}", error.error))
         }
     }
+
+    fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
+        let url = self.url.join("/sandbox/claude-config")?;
+
+        let response = self
+            .client
+            .put(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            Err(anyhow::anyhow!("Server error: {}", error.error))
+        }
+    }
 }
 
 /// Handler for PUT /sandbox endpoint.
@@ -724,6 +763,24 @@ async fn get_conversation_handler<D: Daemon>(
     }
 }
 
+/// Handler for PUT /sandbox/claude-config endpoint.
+async fn ensure_claude_config_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<EnsureClaudeConfigRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.ensure_claude_config(request));
+
+    match result {
+        Ok(()) => Ok(StatusCode::NO_CONTENT),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{:#}", e),
+            }),
+        )),
+    }
+}
+
 /// Serve the daemon using the provided listener.
 ///
 /// The listener can be a `tokio::net::TcpListener` or `tokio::net::UnixListener`.
@@ -759,6 +816,10 @@ where
         .route("/conversation", post(save_conversation_handler::<D>))
         .route("/conversations", get(list_conversations_handler::<D>))
         .route("/conversation/{id}", get(get_conversation_handler::<D>))
+        .route(
+            "/sandbox/claude-config",
+            put(ensure_claude_config_handler::<D>),
+        )
         .with_state(daemon);
 
     block_on(async move {
@@ -849,6 +910,10 @@ mod tests {
 
         fn get_conversation(&self, _id: i64) -> Result<Option<GetConversationResponse>> {
             Ok(None)
+        }
+
+        fn ensure_claude_config(&self, _request: EnsureClaudeConfigRequest) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -1018,6 +1083,10 @@ mod tests {
                 provider: c.provider,
                 history: c.history,
             }))
+        }
+
+        fn ensure_claude_config(&self, _request: EnsureClaudeConfigRequest) -> Result<()> {
+            Ok(())
         }
     }
 

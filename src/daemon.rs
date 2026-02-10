@@ -28,12 +28,12 @@ use crate::devcontainer::{
     self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
     PortAttributes, StringOrArray, SubstitutionContext,
 };
-use crate::docker_exec::{exec_check, exec_command};
+use crate::docker_exec::{exec_check, exec_command, exec_with_stdin};
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
 use protocol::{
-    ContainerId, ConversationSummary, Daemon, GetConversationResponse, Image, LaunchResult,
-    PortInfo, SandboxInfo, SandboxLaunchParams, SandboxName, SandboxStatus,
+    ContainerId, ConversationSummary, Daemon, EnsureClaudeConfigRequest, GetConversationResponse,
+    Image, LaunchResult, PortInfo, SandboxInfo, SandboxLaunchParams, SandboxName, SandboxStatus,
 };
 use ssh_forward::SshForwardManager;
 
@@ -1356,6 +1356,81 @@ fn run_lifecycle_command(
 
 /// Run onCreateCommand and postCreateCommand if they haven't been executed yet.
 ///
+/// Copy Claude Code config files into a container.
+///
+/// Writes the file contents via `exec_with_stdin` (piping through `cat`),
+/// then fixes ownership so the container user can read them.
+fn copy_claude_config(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    claude_json: Option<&[u8]>,
+    claude_settings_json: Option<&[u8]>,
+) -> Result<()> {
+    // Determine the container user's home directory
+    let home_output = exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["sh", "-c", "echo $HOME"],
+    )
+    .context("determining container home directory")?;
+    let container_home = String::from_utf8_lossy(&home_output).trim().to_string();
+
+    if let Some(data) = claude_json {
+        let dest = format!("{}/.claude.json", container_home);
+        write_file_via_stdin(docker, container_id, user, &dest, data)
+            .context("writing .claude.json")?;
+    }
+
+    if let Some(data) = claude_settings_json {
+        let dir = format!("{}/.claude", container_home);
+        exec_command(
+            docker,
+            container_id,
+            Some(user),
+            None,
+            None,
+            vec!["mkdir", "-p", &dir],
+        )
+        .context("creating .claude directory")?;
+
+        let dest = format!("{}/.claude/settings.json", container_home);
+        write_file_via_stdin(docker, container_id, user, &dest, data)
+            .context("writing .claude/settings.json")?;
+    }
+
+    Ok(())
+}
+
+/// Write file contents into a container by piping data through `cat`.
+fn write_file_via_stdin(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    dest_path: &str,
+    data: &[u8],
+) -> Result<()> {
+    let cmd = format!("cat > {}", shell_escape(dest_path));
+    exec_with_stdin(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["sh", "-c", &cmd],
+        Some(data),
+    )?;
+    Ok(())
+}
+
+/// Escape a path for use in a shell command.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// These commands run at most once per sandbox lifetime, tracked via the
 /// database. If onCreateCommand fails, postCreateCommand is skipped and both
 /// are marked as "ran" so they don't retry on subsequent enters.
@@ -2163,6 +2238,41 @@ impl Daemon for DaemonServer {
             provider: c.provider,
             history: c.history,
         }))
+    }
+
+    fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
+        let sandbox_id = {
+            let conn = self.db.lock().unwrap();
+            let sandbox = db::get_sandbox(&conn, &request.repo_path, &request.sandbox_name.0)?
+                .context("Sandbox not found")?;
+            if db::has_claude_config_copied(&conn, sandbox.id)? {
+                return Ok(());
+            }
+            sandbox.id
+        };
+
+        let docker = Docker::connect_with_socket(
+            request.docker_socket.to_string_lossy().as_ref(),
+            120,
+            bollard::API_DEFAULT_VERSION,
+        )
+        .context("connecting to Docker daemon")?;
+
+        copy_claude_config(
+            &docker,
+            &request.container_id.0,
+            &request.user,
+            request.claude_json.as_deref(),
+            request.claude_settings_json.as_deref(),
+        )?;
+
+        // Mark as copied only after the full copy succeeds.
+        // If this DB write fails, the next invocation will redo the copy,
+        // which is fine -- overwriting complete files is idempotent.
+        let conn = self.db.lock().unwrap();
+        db::mark_claude_config_copied(&conn, sandbox_id)?;
+
+        Ok(())
     }
 }
 

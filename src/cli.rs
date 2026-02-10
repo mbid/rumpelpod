@@ -106,6 +106,23 @@ Requires ANTHROPIC_API_KEY, XAI_API_KEY, or GEMINI_API_KEY environment variable 
 ")]
     Agent(AgentCommand),
 
+    /// Launch Claude Code in a persistent screen session inside a sandbox
+    #[command(
+        long_about = "Launch Claude Code CLI inside a persistent screen session in a sandbox.
+
+On first run, copies Claude Code config files (~/.claude.json, ~/.claude/settings.json) from the host into the container. Then attaches to or creates a GNU screen session running Claude Code.
+
+Detach with Ctrl-a d to leave Claude Code running in the background. Re-run the same command to reattach. If Claude Code exits (e.g. /exit), the screen session ends and the next invocation creates a fresh one.
+
+Requires 'screen' to be installed in the container image.
+
+Examples:
+  sandbox claude dev                    # Launch Claude Code in 'dev' sandbox
+  sandbox claude dev -- --model opus    # Pass args to claude CLI
+"
+    )]
+    Claude(ClaudeCommand),
+
     /// Run the sandbox daemon (internal)
     #[command(hide = true)]
     Daemon,
@@ -247,4 +264,20 @@ pub struct AgentCommand {
     /// Thinking budget in tokens (enables thinking mode)
     #[arg(long, value_name = "TOKENS")]
     pub thinking_budget: Option<u32>,
+}
+
+#[derive(Args)]
+pub struct ClaudeCommand {
+    /// Name for this sandbox instance
+    #[arg(help = "Name for this sandbox instance (e.g., 'dev', 'test')")]
+    pub name: String,
+
+    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Overrides .sandbox.toml setting.
+    #[arg(long)]
+    pub host: Option<String>,
+
+    /// Arguments forwarded to `claude` CLI
+    #[arg(last = true, value_name = "ARGS")]
+    pub args: Vec<String>,
 }
