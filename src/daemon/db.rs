@@ -8,6 +8,8 @@ use indoc::indoc;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
+use crate::config::DockerHost;
+
 /// Strongly-typed wrapper for sandbox database IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SandboxId(i64);
@@ -75,6 +77,14 @@ impl SandboxStatus {
 
 /// Host specification for local sandboxes stored in the database.
 pub const LOCALHOST_DB_STR: &str = "localhost";
+
+/// Normalize a host string from the database to the current canonical format.
+/// Handles format changes from older versions (e.g. explicit default SSH port).
+fn normalize_host(host: String) -> String {
+    DockerHost::from_db_string(&host)
+        .map(|h| h.to_db_string())
+        .unwrap_or(host)
+}
 
 /// Information about a sandbox from the database.
 #[derive(Debug, Clone)]
@@ -319,7 +329,7 @@ pub fn get_sandbox(
                 id: SandboxId(row.get(0)?),
                 repo_path: row.get(1)?,
                 name: row.get(2)?,
-                host: row.get(3)?,
+                host: normalize_host(row.get(3)?),
                 status,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
@@ -351,7 +361,7 @@ pub fn get_sandbox_by_id(conn: &Connection, id: SandboxId) -> Result<Option<Sand
                 id: SandboxId(row.get(0)?),
                 repo_path: row.get(1)?,
                 name: row.get(2)?,
-                host: row.get(3)?,
+                host: normalize_host(row.get(3)?),
                 status,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
@@ -385,7 +395,7 @@ pub fn list_sandboxes(conn: &Connection, repo_path: &Path) -> Result<Vec<Sandbox
                 id: SandboxId(row.get(0)?),
                 repo_path: row.get(1)?,
                 name: row.get(2)?,
-                host: row.get(3)?,
+                host: normalize_host(row.get(3)?),
                 status,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
@@ -726,6 +736,36 @@ mod tests {
         let sandbox = get_sandbox(&conn, &repo_path, "remote").unwrap().unwrap();
         assert_eq!(sandbox.id, id);
         assert_eq!(sandbox.host, "ssh://user@host");
+    }
+
+    #[test]
+    fn test_host_normalized_on_read() {
+        let (_temp_dir, conn) = test_db();
+
+        let repo_path = PathBuf::from("/home/user/project");
+
+        // Simulate a record written by an older version with explicit default port
+        create_sandbox(&conn, &repo_path, "old", "ssh://dev:22").unwrap();
+        create_sandbox(&conn, &repo_path, "old-user", "ssh://user@host:22").unwrap();
+
+        // Reading back should normalize away the default port
+        let s1 = get_sandbox(&conn, &repo_path, "old").unwrap().unwrap();
+        assert_eq!(s1.host, "ssh://dev");
+
+        let s2 = get_sandbox(&conn, &repo_path, "old-user").unwrap().unwrap();
+        assert_eq!(s2.host, "ssh://user@host");
+
+        // Non-default port should be preserved
+        create_sandbox(&conn, &repo_path, "custom-port", "ssh://dev:2222").unwrap();
+        let s3 = get_sandbox(&conn, &repo_path, "custom-port")
+            .unwrap()
+            .unwrap();
+        assert_eq!(s3.host, "ssh://dev:2222");
+
+        // list_sandboxes should also normalize
+        let all = list_sandboxes(&conn, &repo_path).unwrap();
+        let old = all.iter().find(|s| s.name == "old").unwrap();
+        assert_eq!(old.host, "ssh://dev");
     }
 
     #[test]
