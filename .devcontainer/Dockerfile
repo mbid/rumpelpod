@@ -20,6 +20,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         cmake \
         pkg-config \
         git \
+        git-lfs \
         curl \
         wget \
         ca-certificates \
