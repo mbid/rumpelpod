@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::RemoteDocker;
+use crate::config::DockerHost;
 use crate::devcontainer::{BuildOptions, DevContainer};
 
 // Re-export so callers can use image::Image
@@ -22,11 +22,11 @@ pub use crate::daemon::protocol::Image;
 /// paths (via `resolve_build_paths`) before calling this.
 pub fn resolve_image(
     devcontainer: &DevContainer,
-    remote_host: Option<&str>,
+    docker_host: &DockerHost,
     repo_root: &Path,
 ) -> Result<Image> {
     if let Some(build) = &devcontainer.build {
-        build_devcontainer_image(build, remote_host, repo_root)
+        build_devcontainer_image(build, docker_host, repo_root)
     } else {
         Ok(Image(
             devcontainer
@@ -40,7 +40,7 @@ pub fn resolve_image(
 /// Build a Docker image from devcontainer.json build configuration.
 fn build_devcontainer_image(
     build: &BuildOptions,
-    remote_host: Option<&str>,
+    docker_host: &DockerHost,
     repo_root: &Path,
 ) -> Result<Image> {
     let dockerfile = build
@@ -68,10 +68,8 @@ fn build_devcontainer_image(
     // Build the Docker image
     let mut cmd = Command::new("docker");
 
-    if let Some(remote_str) = remote_host {
-        let remote = RemoteDocker::parse(remote_str)?;
-        let remote_uri = format!("ssh://{}:{}", remote.destination, remote.port);
-        cmd.args(["-H", &remote_uri]);
+    if let Some(uri) = docker_host.docker_host_uri() {
+        cmd.args(["-H", &uri]);
     }
 
     cmd.arg("build").arg("--rm");

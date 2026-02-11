@@ -73,8 +73,8 @@ impl SandboxStatus {
     }
 }
 
-/// Host specification for local sandboxes.
-pub const LOCAL_HOST: &str = "localhost";
+/// Host specification for local sandboxes stored in the database.
+pub const LOCALHOST_DB_STR: &str = "localhost";
 
 /// Information about a sandbox from the database.
 #[derive(Debug, Clone)]
@@ -83,7 +83,7 @@ pub struct SandboxRecord {
     pub id: SandboxId,
     pub repo_path: String,
     pub name: String,
-    /// The host where the sandbox runs: "local" or an SSH URL like "user@host:port".
+    /// The host where the sandbox runs: "localhost" or "ssh://user@host".
     pub host: String,
     pub status: SandboxStatus,
     pub created_at: DateTime<Utc>,
@@ -703,14 +703,14 @@ mod tests {
         let repo_path = PathBuf::from("/home/user/project");
 
         // Create a local sandbox
-        let id = create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        let id = create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
         assert!(i64::from(id) > 0);
 
         // Get it back
         let sandbox = get_sandbox(&conn, &repo_path, "dev").unwrap().unwrap();
         assert_eq!(sandbox.id, id);
         assert_eq!(sandbox.name, "dev");
-        assert_eq!(sandbox.host, LOCAL_HOST);
+        assert_eq!(sandbox.host, LOCALHOST_DB_STR);
         assert_eq!(sandbox.status, SandboxStatus::Initializing);
     }
 
@@ -720,12 +720,12 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        // Create a remote sandbox
-        let id = create_sandbox(&conn, &repo_path, "remote", "user@host:22").unwrap();
+        // Create a remote sandbox (DB stores the ssh:// URL)
+        let id = create_sandbox(&conn, &repo_path, "remote", "ssh://user@host").unwrap();
 
         let sandbox = get_sandbox(&conn, &repo_path, "remote").unwrap().unwrap();
         assert_eq!(sandbox.id, id);
-        assert_eq!(sandbox.host, "user@host:22");
+        assert_eq!(sandbox.host, "ssh://user@host");
     }
 
     #[test]
@@ -735,10 +735,10 @@ mod tests {
         let repo_path = PathBuf::from("/home/user/project");
 
         // Create first sandbox
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
 
         // Creating another with same name should fail
-        let result = create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST);
+        let result = create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR);
         assert!(result.is_err());
     }
 
@@ -748,7 +748,7 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        let id = create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        let id = create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
 
         // Initial status is Initializing
         let sandbox = get_sandbox(&conn, &repo_path, "dev").unwrap().unwrap();
@@ -771,15 +771,15 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
-        create_sandbox(&conn, &repo_path, "test", "remote:22").unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_sandbox(&conn, &repo_path, "test", "ssh://remote").unwrap();
 
         let sandboxes = list_sandboxes(&conn, &repo_path).unwrap();
         assert_eq!(sandboxes.len(), 2);
         // Should be sorted by name
         assert_eq!(sandboxes[0].name, "dev");
         assert_eq!(sandboxes[1].name, "test");
-        assert_eq!(sandboxes[1].host, "remote:22");
+        assert_eq!(sandboxes[1].host, "ssh://remote");
     }
 
     #[test]
@@ -789,8 +789,8 @@ mod tests {
         let repo1 = PathBuf::from("/home/user/project1");
         let repo2 = PathBuf::from("/home/user/project2");
 
-        create_sandbox(&conn, &repo1, "dev", LOCAL_HOST).unwrap();
-        create_sandbox(&conn, &repo2, "dev", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo1, "dev", LOCALHOST_DB_STR).unwrap();
+        create_sandbox(&conn, &repo2, "dev", LOCALHOST_DB_STR).unwrap();
 
         let repo1_sandboxes = list_sandboxes(&conn, &repo1).unwrap();
         assert_eq!(repo1_sandboxes.len(), 1);
@@ -807,7 +807,7 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
 
         // Delete the sandbox
         let deleted = delete_sandbox(&conn, &repo_path, "dev").unwrap();
@@ -830,7 +830,7 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create sandbox and conversation
-        let sandbox_id = create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        let sandbox_id = create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
         let conv_id = save_conversation(
             &conn,
             None,
@@ -865,7 +865,7 @@ mod tests {
         let history = serde_json::json!([{"role": "user", "content": "hello"}]);
 
         // Create sandbox first
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
 
         // Save new conversation
         let id = save_conversation(
@@ -900,7 +900,7 @@ mod tests {
         ]);
 
         // Create sandbox first
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
 
         // Save initial
         let id = save_conversation(
@@ -942,7 +942,7 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create sandbox first
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
 
         // Save multiple conversations
         let id1 = save_conversation(
@@ -984,8 +984,8 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create sandboxes first
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
-        create_sandbox(&conn, &repo_path, "test", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_sandbox(&conn, &repo_path, "test", LOCALHOST_DB_STR).unwrap();
 
         // Save to different sandboxes
         save_conversation(
@@ -1028,8 +1028,8 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create sandboxes first
-        create_sandbox(&conn, &repo1, "dev", LOCAL_HOST).unwrap();
-        create_sandbox(&conn, &repo2, "dev", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo1, "dev", LOCALHOST_DB_STR).unwrap();
+        create_sandbox(&conn, &repo2, "dev", LOCALHOST_DB_STR).unwrap();
 
         // Save to different repos with same sandbox name
         save_conversation(
@@ -1079,8 +1079,8 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create sandboxes first
-        create_sandbox(&conn, &repo_path, "dev", LOCAL_HOST).unwrap();
-        create_sandbox(&conn, &repo_path, "test", LOCAL_HOST).unwrap();
+        create_sandbox(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_sandbox(&conn, &repo_path, "test", LOCALHOST_DB_STR).unwrap();
 
         // Save conversations in different sandboxes
         save_conversation(

@@ -150,7 +150,7 @@ pub struct EnterCommand {
     #[arg(help = "Name for this sandbox instance (e.g., 'dev', 'test')")]
     pub name: String,
 
-    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     /// Overrides .sandbox.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -180,7 +180,7 @@ pub struct RecreateCommand {
     #[arg(help = "Name of the sandbox to recreate")]
     pub name: String,
 
-    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     /// Overrides .sandbox.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -213,7 +213,7 @@ pub struct AgentCommand {
     #[arg(help = "Name of the sandbox to use")]
     pub name: String,
 
-    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     /// Overrides .sandbox.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -272,7 +272,7 @@ pub struct ClaudeCommand {
     #[arg(help = "Name for this sandbox instance (e.g., 'dev', 'test')")]
     pub name: String,
 
-    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     /// Overrides .sandbox.toml setting.
     #[arg(long)]
     pub host: Option<String>,

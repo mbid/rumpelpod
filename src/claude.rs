@@ -53,7 +53,7 @@ fn screen_session_exists(docker_host: &str, container_id: &str, user: &str) -> R
 pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
-    let (devcontainer, _) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
     let LaunchResult {

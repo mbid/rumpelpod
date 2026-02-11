@@ -23,7 +23,7 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, RemoteDocker};
+use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, DockerHost};
 use crate::devcontainer::{
     self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
     PortAttributes, StringOrArray, SubstitutionContext,
@@ -1104,7 +1104,7 @@ fn setup_port_forwarding(
     sandbox_id: db::SandboxId,
     forward_ports: &[Port],
     ports_attributes: &std::collections::HashMap<String, PortAttributes>,
-    remote: Option<&RemoteDocker>,
+    docker_host: &DockerHost,
 ) -> Result<()> {
     if forward_ports.is_empty() {
         return Ok(());
@@ -1148,38 +1148,34 @@ fn setup_port_forwarding(
             .to_string();
 
         if let Some(&existing_local) = existing_map.get(&container_port) {
-            if let Some(r) = remote {
-                if !is_port_in_use(existing_local) {
-                    ssh_forward
-                        .add_local_forward(r, existing_local, "127.0.0.1", docker_host_port)
-                        .with_context(|| {
-                            format!(
-                                "re-establishing SSH forward {}->127.0.0.1:{}",
-                                existing_local, docker_host_port
-                            )
-                        })?;
-                }
+            if docker_host.is_remote() && !is_port_in_use(existing_local) {
+                ssh_forward
+                    .add_local_forward(docker_host, existing_local, "127.0.0.1", docker_host_port)
+                    .with_context(|| {
+                        format!(
+                            "re-establishing SSH forward {}->127.0.0.1:{}",
+                            existing_local, docker_host_port
+                        )
+                    })?;
             }
             continue;
         }
 
-        let local_port = match remote {
-            Some(r) => {
-                let local = if !allocated_set.contains(&container_port)
-                    && is_port_available(container_port)
-                {
+        let local_port = if docker_host.is_remote() {
+            let local =
+                if !allocated_set.contains(&container_port) && is_port_available(container_port) {
                     container_port
                 } else {
                     find_available_port(&allocated_set)?
                 };
-                ssh_forward
-                    .add_local_forward(r, local, "127.0.0.1", docker_host_port)
-                    .with_context(|| {
-                        format!("SSH forward {}->127.0.0.1:{}", local, docker_host_port)
-                    })?;
-                local
-            }
-            None => docker_host_port,
+            ssh_forward
+                .add_local_forward(docker_host, local, "127.0.0.1", docker_host_port)
+                .with_context(|| {
+                    format!("SSH forward {}->127.0.0.1:{}", local, docker_host_port)
+                })?;
+            local
+        } else {
+            docker_host_port
         };
 
         allocated_set.insert(local_port);
@@ -1522,7 +1518,7 @@ impl Daemon for DaemonServer {
             sandbox_name,
             repo_path,
             host_branch,
-            remote,
+            docker_host,
             devcontainer,
         } = params;
 
@@ -1531,14 +1527,7 @@ impl Daemon for DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &sandbox_name.0);
 
-        let image = crate::image::resolve_image(
-            &devcontainer,
-            remote
-                .as_ref()
-                .map(|r| format!("ssh://{}:{}", r.destination, r.port))
-                .as_deref(),
-            &repo_path,
-        )?;
+        let image = crate::image::resolve_image(&devcontainer, &docker_host, &repo_path)?;
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
         let user = devcontainer.user().map(String::from);
         let host_network = devcontainer.has_host_network();
@@ -1546,9 +1535,9 @@ impl Daemon for DaemonServer {
         let forward_ports = devcontainer.forward_ports.clone().unwrap_or_default();
         let ports_attributes = devcontainer.ports_attributes.clone().unwrap_or_default();
 
-        // Reject bind mounts on remote Docker hosts — the source paths would
+        // Reject bind mounts on remote Docker hosts -- the source paths would
         // reference the remote filesystem, not the developer's machine.
-        if remote.is_some() {
+        if docker_host.is_remote() {
             for m in &mounts {
                 if m.mount_type == devcontainer::MountType::Bind {
                     anyhow::bail!(
@@ -1562,10 +1551,7 @@ impl Daemon for DaemonServer {
         }
 
         // Get the host specification string for the database
-        let host_spec = remote
-            .as_ref()
-            .map(|r| format!("ssh://{}:{}", r.destination, r.port))
-            .unwrap_or_else(|| db::LOCAL_HOST.to_string());
+        let host_spec = docker_host.to_db_string();
 
         // Check for name conflicts between local and remote sandboxes
         {
@@ -1586,9 +1572,9 @@ impl Daemon for DaemonServer {
         }
 
         // Get the Docker socket to use (local or forwarded from remote)
-        let docker_socket = match &remote {
-            Some(r) => self.ssh_forward.get_socket(r)?,
-            None => default_docker_socket(),
+        let docker_socket = match &docker_host {
+            DockerHost::Ssh { .. } => self.ssh_forward.get_socket(&docker_host)?,
+            DockerHost::Localhost => default_docker_socket(),
         };
 
         let docker = Docker::connect_with_socket(
@@ -1607,14 +1593,14 @@ impl Daemon for DaemonServer {
         let name = docker_name(&repo_path, &sandbox_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
 
-        // Determine the git HTTP server URL based on network config and whether remote
-        let (server_ip, server_port) = match &remote {
-            Some(r) => {
+        // Determine the git HTTP server URL based on network config and local/remote
+        let (server_ip, server_port) = match &docker_host {
+            DockerHost::Ssh { .. } => {
                 // Remote Docker: set up SSH remote port forwarding if not already done
-                let forwards = match self.ssh_forward.get_remote_forwards(r) {
+                let forwards = match self.ssh_forward.get_remote_forwards(&docker_host) {
                     Some(f) => f,
                     None => {
-                        // Need to set up forwards - first get the remote's bridge network IP
+                        // Need to set up forwards -- first get the remote's bridge network IP
                         let remote_bridge_ip = git_http_server::get_network_gateway_ip_via_socket(
                             &docker_socket,
                             "bridge",
@@ -1622,7 +1608,11 @@ impl Daemon for DaemonServer {
                         .context("getting remote bridge network gateway IP")?;
 
                         self.ssh_forward
-                            .setup_git_http_forwards(r, &self.git_unix_socket, &remote_bridge_ip)
+                            .setup_git_http_forwards(
+                                &docker_host,
+                                &self.git_unix_socket,
+                                &remote_bridge_ip,
+                            )
                             .context("setting up git HTTP remote forwards")?
                     }
                 };
@@ -1641,7 +1631,7 @@ impl Daemon for DaemonServer {
                     )
                 }
             }
-            None => {
+            DockerHost::Localhost => {
                 // Local Docker: use the local git HTTP servers directly
                 if host_network {
                     ("127.0.0.1".to_string(), self.localhost_server_port)
@@ -1734,7 +1724,7 @@ impl Daemon for DaemonServer {
                     sandbox_id,
                     &forward_ports,
                     &ports_attributes,
-                    remote.as_ref(),
+                    &docker_host,
                 )?;
             }
 
@@ -1772,7 +1762,7 @@ impl Daemon for DaemonServer {
 
         let publish_ports = {
             let conn = self.db.lock().unwrap();
-            compute_publish_ports(&conn, &forward_ports, remote.is_some())?
+            compute_publish_ports(&conn, &forward_ports, docker_host.is_remote())?
         };
 
         let container_id = create_container(
@@ -1861,7 +1851,7 @@ impl Daemon for DaemonServer {
                     sandbox_id,
                     &forward_ports,
                     &ports_attributes,
-                    remote.as_ref(),
+                    &docker_host,
                 )
                 .map_err(|e| {
                     error!("port forwarding setup failed: {}", e);
@@ -1888,24 +1878,17 @@ impl Daemon for DaemonServer {
 
         let sandbox_name = &params.sandbox_name;
         let repo_path = &params.repo_path;
-        let remote = &params.remote;
-        let image = crate::image::resolve_image(
-            &params.devcontainer,
-            remote
-                .as_ref()
-                .map(|r| format!("ssh://{}:{}", r.destination, r.port))
-                .as_deref(),
-            repo_path,
-        )?;
+        let docker_host = &params.docker_host;
+        let image = crate::image::resolve_image(&params.devcontainer, docker_host, repo_path)?;
         let container_repo_path = params.devcontainer.container_repo_path(repo_path);
         let user = params.devcontainer.user().map(String::from);
 
         let name = docker_name(repo_path, sandbox_name);
 
         // Get the Docker socket to use (local or forwarded from remote)
-        let docker_socket = match remote {
-            Some(r) => self.ssh_forward.get_socket(r)?,
-            None => default_docker_socket(),
+        let docker_socket = match docker_host {
+            DockerHost::Ssh { .. } => self.ssh_forward.get_socket(docker_host)?,
+            DockerHost::Localhost => default_docker_socket(),
         };
 
         let docker = Docker::connect_with_socket(
@@ -2010,11 +1993,10 @@ impl Daemon for DaemonServer {
             let conn = self.db.lock().unwrap();
             match db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
                 Some(record) => {
-                    if record.host == db::LOCAL_HOST {
-                        default_docker_socket()
-                    } else {
-                        let remote = RemoteDocker::parse(&record.host)?;
-                        self.ssh_forward.get_socket(&remote)?
+                    let host = DockerHost::from_db_string(&record.host)?;
+                    match &host {
+                        DockerHost::Ssh { .. } => self.ssh_forward.get_socket(&host)?,
+                        DockerHost::Localhost => default_docker_socket(),
                     }
                 }
                 None => default_docker_socket(),
@@ -2047,11 +2029,9 @@ impl Daemon for DaemonServer {
         drop(conn);
 
         let docker = if let Some(record) = sandbox_record {
-            if record.host != db::LOCAL_HOST {
-                // Remote sandbox
-                let remote =
-                    RemoteDocker::parse(&record.host).context("Invalid remote host spec")?;
-                let socket_path = self.ssh_forward.get_socket(&remote)?;
+            let host = DockerHost::from_db_string(&record.host)?;
+            if let DockerHost::Ssh { .. } = &host {
+                let socket_path = self.ssh_forward.get_socket(&host)?;
                 Docker::connect_with_socket(
                     socket_path.to_string_lossy().as_ref(),
                     120,
@@ -2131,11 +2111,13 @@ impl Daemon for DaemonServer {
         let mut remote_status_maps: HashMap<String, Option<HashMap<String, SandboxContainerInfo>>> =
             HashMap::new();
         for sandbox in &db_sandboxes {
-            if sandbox.host != db::LOCAL_HOST && !remote_status_maps.contains_key(&sandbox.host) {
+            let host = DockerHost::from_db_string(&sandbox.host).ok();
+            let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
+            if is_remote && !remote_status_maps.contains_key(&sandbox.host) {
                 // Try to get existing socket for this remote
-                let status_map = RemoteDocker::parse(&sandbox.host)
-                    .ok()
-                    .and_then(|remote| self.ssh_forward.try_get_socket(&remote))
+                let status_map = host
+                    .as_ref()
+                    .and_then(|h| self.ssh_forward.try_get_socket(h))
                     .and_then(|socket| get_container_status_via_socket(&socket, &repo_path).ok());
                 remote_status_maps.insert(sandbox.host.clone(), status_map);
             }
@@ -2144,7 +2126,10 @@ impl Daemon for DaemonServer {
         // Build combined list with status from Docker where available
         let mut sandboxes = Vec::new();
         for sandbox in db_sandboxes {
-            let container_info = if sandbox.host == db::LOCAL_HOST {
+            let host = DockerHost::from_db_string(&sandbox.host).ok();
+            let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
+
+            let container_info = if !is_remote {
                 local_container_status.get(&sandbox.name)
             } else {
                 remote_status_maps
@@ -2156,10 +2141,10 @@ impl Daemon for DaemonServer {
             let status = match container_info {
                 Some(info) => info.status.clone(),
                 None => {
-                    if sandbox.host != db::LOCAL_HOST
+                    if is_remote
                         && remote_status_maps
                             .get(&sandbox.host)
-                            .map_or(true, |m| m.is_none())
+                            .is_none_or(|m| m.is_none())
                     {
                         // No connection to remote -- we can't determine the actual status
                         SandboxStatus::Disconnected
@@ -2179,11 +2164,17 @@ impl Daemon for DaemonServer {
             // Compute git status on the host by comparing HEAD to sandbox/<sandbox_name>
             let repo_state = compute_git_status(&repo_path, &sandbox.name);
 
+            // Display using DockerHost::Display to normalize the format
+            // (e.g. strip default port 22 from old DB entries).
+            let display_host = host
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| sandbox.host.clone());
+
             sandboxes.push(SandboxInfo {
                 name: sandbox.name,
                 status,
                 created: sandbox.created_at.format("%Y-%m-%d %H:%M").to_string(),
-                host: sandbox.host,
+                host: display_host,
                 repo_state,
                 container_id,
             });

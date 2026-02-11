@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::cli::EnterCommand;
-use crate::config::{load_toml_config, RemoteDocker};
+use crate::config::{load_toml_config, DockerHost};
 use crate::daemon;
 use crate::daemon::protocol::{
     Daemon, DaemonClient, LaunchResult, SandboxLaunchParams, SandboxName,
@@ -26,13 +26,18 @@ fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
 /// Load devcontainer.json, validate it, and prepare it for the daemon.
 ///
 /// Resolves `${localEnv:...}` and normalizes build paths to repo-root-relative.
-/// Returns the DevContainer and the host string from .sandbox.toml.
+/// Returns the DevContainer and the parsed DockerHost.
 pub fn load_and_resolve(
     repo_root: &Path,
     host_override: Option<&str>,
-) -> Result<(DevContainer, Option<String>)> {
+) -> Result<(DevContainer, DockerHost)> {
     let toml_config = load_toml_config(repo_root)?;
-    let host_str = host_override.map(String::from).or(toml_config.host.clone());
+    let host_str = host_override.or(toml_config.host.as_deref());
+    let docker_host = host_str
+        .map(DockerHost::parse)
+        .transpose()
+        .context("Invalid host specification")?
+        .unwrap_or(DockerHost::Localhost);
 
     let (mut devcontainer, devcontainer_dir) = DevContainer::find_and_load(repo_root)?
         .map(|(dc, dir)| {
@@ -57,7 +62,7 @@ pub fn load_and_resolve(
         ..Default::default()
     });
 
-    Ok((devcontainer, host_str))
+    Ok((devcontainer, docker_host))
 }
 
 /// Launch a sandbox and return the container ID and user.
@@ -65,16 +70,10 @@ pub fn load_and_resolve(
 pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
     let repo_root = get_repo_root()?;
 
-    let (devcontainer, host_str) = load_and_resolve(&repo_root, host_override)?;
+    let (devcontainer, docker_host) = load_and_resolve(&repo_root, host_override)?;
 
     // Reject bind mounts early for remote Docker
-    let remote = host_str
-        .as_deref()
-        .map(RemoteDocker::parse)
-        .transpose()
-        .context("Invalid remote Docker specification")?;
-
-    if remote.is_some() {
+    if docker_host.is_remote() {
         for m in devcontainer.resolved_mounts()? {
             if m.mount_type == MountType::Bind {
                 bail!(
@@ -96,7 +95,7 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
         sandbox_name: SandboxName(sandbox_name.to_string()),
         repo_path: repo_root,
         host_branch,
-        remote,
+        docker_host,
         devcontainer,
     })
 }
@@ -130,7 +129,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
     let repo_root = get_repo_root()?;
 
-    let (devcontainer, _) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
     let container_repo_path = devcontainer.container_repo_path(&repo_root);
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 

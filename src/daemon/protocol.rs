@@ -14,7 +14,7 @@ use tokio::task::block_in_place;
 use url::Url;
 
 use crate::async_runtime::block_on;
-use crate::config::RemoteDocker;
+use crate::config::DockerHost;
 use crate::devcontainer::DevContainer;
 
 /// Opaque wrapper for docker image names.
@@ -87,9 +87,8 @@ pub struct SandboxLaunchParams {
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the sandbox.
     pub host_branch: Option<String>,
-    /// Remote Docker host specification (e.g., "user@host:port").
-    /// If not set, uses local Docker.
-    pub remote: Option<RemoteDocker>,
+    /// Where the Docker daemon lives: localhost or a remote SSH host.
+    pub docker_host: DockerHost,
     /// The devcontainer.json config, with `${localEnv:...}` already resolved
     /// and build paths normalized to repo-root-relative.
     pub devcontainer: DevContainer,
@@ -982,7 +981,7 @@ mod tests {
             sandbox_name: SandboxName("test-sandbox".to_string()),
             repo_path: PathBuf::from("/tmp/repo"),
             host_branch: Some("main".to_string()),
-            remote: None,
+            docker_host: DockerHost::Localhost,
             devcontainer: dc,
         });
 
@@ -1102,7 +1101,7 @@ mod tests {
                 &conn,
                 &repo_path,
                 "dev",
-                crate::daemon::db::LOCAL_HOST,
+                crate::daemon::db::LOCALHOST_DB_STR,
             )
             .unwrap();
         }
@@ -1155,7 +1154,7 @@ mod tests {
                 &conn,
                 &repo_path,
                 "dev",
-                crate::daemon::db::LOCAL_HOST,
+                crate::daemon::db::LOCALHOST_DB_STR,
             )
             .unwrap();
         }

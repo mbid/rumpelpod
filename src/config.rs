@@ -80,49 +80,151 @@ impl std::fmt::Display for Model {
 
 use url::Url;
 
-/// Parsed remote Docker host specification.
+/// Where a sandbox's Docker daemon lives.
 ///
-/// Parsed from a URL like `ssh://user@host:port`.
+/// Either the local machine or a remote host accessed via SSH.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RemoteDocker {
-    /// The SSH destination (e.g. "user@host" or "host").
-    pub destination: String,
-    /// SSH port.
-    pub port: u16,
+pub enum DockerHost {
+    /// The default Docker daemon on the local machine.
+    Localhost,
+    /// A remote Docker daemon accessed via SSH.
+    Ssh {
+        /// The SSH destination string (e.g. "user@host" or just "host").
+        /// Passed directly to the `ssh` command.
+        ssh_destination: String,
+        /// SSH port (default 22).
+        port: u16,
+    },
 }
 
-impl RemoteDocker {
-    /// Parse a remote specification string.
-    ///
-    /// Expects a valid SSH URL, e.g. `ssh://user@host:port`.
-    /// Also accepts strings without scheme, assuming `ssh://`.
-    pub fn parse(s: &str) -> Result<Self> {
-        // If no scheme is present, assume ssh://
-        let url_str = if !s.contains("://") {
-            format!("ssh://{}", s)
-        } else {
-            s.to_string()
-        };
+/// The string used in the database for localhost.
+const LOCALHOST_DB_STR: &str = "localhost";
 
-        let url = Url::parse(&url_str).with_context(|| format!("Invalid URL: {}", s))?;
+impl DockerHost {
+    /// Parse a host specification from CLI or config file.
+    ///
+    /// - `"localhost"` (no protocol, no port) means local Docker.
+    /// - `"ssh://user@host"` or `"ssh://host:port"` means remote Docker via SSH.
+    ///
+    /// Bare hostnames like `"dev"` are rejected -- use `"ssh://dev"` instead.
+    pub fn parse(s: &str) -> Result<Self> {
+        if s == LOCALHOST_DB_STR {
+            return Ok(DockerHost::Localhost);
+        }
+
+        let url = Url::parse(s).with_context(|| {
+            if !s.contains("://") {
+                format!(
+                    "Invalid host '{}'. Use 'localhost' for local Docker \
+                     or 'ssh://host' for remote Docker.",
+                    s
+                )
+            } else {
+                format!("Invalid URL: {}", s)
+            }
+        })?;
 
         if url.scheme() != "ssh" {
-            bail!("URL scheme must be 'ssh'");
+            bail!(
+                "Unsupported scheme '{}' in host '{}'. Only 'ssh://' is supported.",
+                url.scheme(),
+                s
+            );
         }
 
         let host = url
             .host_str()
-            .ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
+            .ok_or_else(|| anyhow::anyhow!("URL must have a host: {}", s))?;
         let port = url.port().unwrap_or(22);
         let username = url.username();
 
-        let destination = if !username.is_empty() {
+        let ssh_destination = if !username.is_empty() {
             format!("{}@{}", username, host)
         } else {
             host.to_string()
         };
 
-        Ok(Self { destination, port })
+        Ok(DockerHost::Ssh {
+            ssh_destination,
+            port,
+        })
+    }
+
+    /// Reconstruct from the string stored in the database.
+    ///
+    /// The DB stores `"localhost"` for local or an `ssh://` URL for remote.
+    pub fn from_db_string(s: &str) -> Result<Self> {
+        Self::parse(s)
+    }
+
+    /// Serialize to the string stored in the database.
+    ///
+    /// Produces `"localhost"` for local, or an `ssh://` URL (with port only
+    /// if non-default) for remote.
+    pub fn to_db_string(&self) -> String {
+        match self {
+            DockerHost::Localhost => LOCALHOST_DB_STR.to_string(),
+            DockerHost::Ssh {
+                ssh_destination,
+                port,
+            } => {
+                if *port == 22 {
+                    format!("ssh://{}", ssh_destination)
+                } else {
+                    // url crate puts port after host, but ssh_destination may
+                    // contain user@host so we split on '@' to build a proper URL.
+                    if let Some((user, host)) = ssh_destination.split_once('@') {
+                        format!("ssh://{}@{}:{}", user, host, port)
+                    } else {
+                        format!("ssh://{}:{}", ssh_destination, port)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The SSH destination string (e.g. "user@host" or "host").
+    /// Panics if called on `Localhost`.
+    pub fn ssh_destination(&self) -> &str {
+        match self {
+            DockerHost::Ssh {
+                ssh_destination, ..
+            } => ssh_destination,
+            DockerHost::Localhost => panic!("ssh_destination() called on Localhost"),
+        }
+    }
+
+    /// The SSH port. Panics if called on `Localhost`.
+    pub fn ssh_port(&self) -> u16 {
+        match self {
+            DockerHost::Ssh { port, .. } => *port,
+            DockerHost::Localhost => panic!("ssh_port() called on Localhost"),
+        }
+    }
+
+    /// Whether this is a remote (SSH) host.
+    pub fn is_remote(&self) -> bool {
+        matches!(self, DockerHost::Ssh { .. })
+    }
+
+    /// The docker host URI for `docker -H`, e.g. `"ssh://user@host:22"`.
+    /// Returns `None` for localhost (use the default socket instead).
+    pub fn docker_host_uri(&self) -> Option<String> {
+        match self {
+            DockerHost::Localhost => None,
+            DockerHost::Ssh {
+                ssh_destination,
+                port,
+            } => Some(format!("ssh://{}:{}", ssh_destination, port)),
+        }
+    }
+}
+
+impl std::fmt::Display for DockerHost {
+    /// Human-readable display, used in `sandbox list`.
+    /// Shows `"localhost"` or `"ssh://user@host"` (omitting default port 22).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.to_db_string())
     }
 }
 
@@ -138,7 +240,7 @@ pub struct TomlConfig {
     #[serde(default)]
     pub agent: AgentConfig,
 
-    /// Remote Docker host specification (e.g., "user@host:port").
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     pub host: Option<String>,
 }
 
@@ -253,5 +355,101 @@ pub fn is_deterministic_test_mode() -> Result<bool> {
         ),
         Err(std::env::VarError::NotPresent) => Ok(false),
         Err(e) => Err(e).context("failed to read SANDBOX_TEST_DETERMINISTIC_IDS"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_localhost() {
+        let host = DockerHost::parse("localhost").unwrap();
+        assert_eq!(host, DockerHost::Localhost);
+        assert_eq!(host.to_db_string(), "localhost");
+        assert_eq!(host.to_string(), "localhost");
+    }
+
+    #[test]
+    fn parse_ssh_url() {
+        let host = DockerHost::parse("ssh://dev").unwrap();
+        assert_eq!(host.ssh_destination(), "dev");
+        assert_eq!(host.ssh_port(), 22);
+        assert_eq!(host.to_db_string(), "ssh://dev");
+        assert_eq!(host.to_string(), "ssh://dev");
+    }
+
+    #[test]
+    fn parse_ssh_url_with_user() {
+        let host = DockerHost::parse("ssh://user@dev").unwrap();
+        assert_eq!(host.ssh_destination(), "user@dev");
+        assert_eq!(host.ssh_port(), 22);
+        assert_eq!(host.to_db_string(), "ssh://user@dev");
+    }
+
+    #[test]
+    fn parse_ssh_url_with_port() {
+        let host = DockerHost::parse("ssh://user@dev:2222").unwrap();
+        assert_eq!(host.ssh_destination(), "user@dev");
+        assert_eq!(host.ssh_port(), 2222);
+        assert_eq!(host.to_db_string(), "ssh://user@dev:2222");
+    }
+
+    #[test]
+    fn parse_ssh_default_port_not_shown() {
+        let host = DockerHost::parse("ssh://user@dev:22").unwrap();
+        assert_eq!(host.to_db_string(), "ssh://user@dev");
+        assert_eq!(host.to_string(), "ssh://user@dev");
+    }
+
+    #[test]
+    fn parse_bare_hostname_rejected() {
+        let err = DockerHost::parse("dev").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ssh://"),
+            "error should suggest ssh:// prefix: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parse_unsupported_scheme_rejected() {
+        let err = DockerHost::parse("http://dev").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Unsupported scheme"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn docker_host_uri_localhost() {
+        assert_eq!(DockerHost::Localhost.docker_host_uri(), None);
+    }
+
+    #[test]
+    fn docker_host_uri_ssh() {
+        let host = DockerHost::parse("ssh://user@dev:2222").unwrap();
+        assert_eq!(
+            host.docker_host_uri(),
+            Some("ssh://user@dev:2222".to_string())
+        );
+    }
+
+    #[test]
+    fn roundtrip_through_db_string() {
+        for input in &[
+            "localhost",
+            "ssh://dev",
+            "ssh://user@host",
+            "ssh://user@host:2222",
+        ] {
+            let host = DockerHost::parse(input).unwrap();
+            let db_str = host.to_db_string();
+            let roundtripped = DockerHost::from_db_string(&db_str).unwrap();
+            assert_eq!(host, roundtripped, "roundtrip failed for {}", input);
+        }
     }
 }

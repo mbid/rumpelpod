@@ -77,8 +77,8 @@ fn list_shows_created_sandbox() {
         stdout
     );
     assert!(
-        stdout.contains("local"),
-        "Expected 'local' host in output: {}",
+        stdout.contains("localhost"),
+        "Expected 'localhost' host in output: {}",
         stdout
     );
 
