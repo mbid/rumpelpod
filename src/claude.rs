@@ -1,6 +1,7 @@
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
+use log::warn;
 
 use crate::cli::ClaudeCommand;
 use crate::daemon;
@@ -50,6 +51,25 @@ fn screen_session_exists(docker_host: &str, container_id: &str, user: &str) -> R
     Ok(stdout.contains(".claude"))
 }
 
+const SCREENRC_PATH: &str = "/tmp/sandbox-screenrc";
+
+/// Write a screenrc to a well-known path so we can pass it via `screen -c`
+/// without clobbering the user's own ~/.screenrc.
+fn write_screenrc(docker_host: &str, container_id: &str, user: &str) {
+    let cmd = format!(
+        "printf 'termcapinfo xterm* ti@:te@\\ndefscrollback 50000\\n' > {}",
+        SCREENRC_PATH,
+    );
+    let result = Command::new("docker")
+        .args(["-H", docker_host])
+        .args(["exec", "--user", user, container_id])
+        .args(["sh", "-c", &cmd])
+        .output();
+    if let Err(e) = result {
+        warn!("Failed to write {}: {}", SCREENRC_PATH, e);
+    }
+}
+
 pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
@@ -83,6 +103,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         docker_socket: docker_socket.clone(),
     })?;
 
+    write_screenrc(&docker_host, &container_id.0, &user);
+
     // Build the docker exec command for the interactive screen session
     let mut docker_cmd = Command::new("docker");
     docker_cmd.args(["-H", &docker_host]);
@@ -100,11 +122,13 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     if screen_session_exists(&docker_host, &container_id.0, &user)? {
         // Reattach to existing session
-        docker_cmd.args(["screen", "-U", "-d", "-R", "claude"]);
+        docker_cmd.args(["screen", "-c", SCREENRC_PATH, "-U", "-d", "-R", "claude"]);
     } else {
         // Create new screen session running claude
         docker_cmd.args([
             "screen",
+            "-c",
+            SCREENRC_PATH,
             "-U",
             "-S",
             "claude",
