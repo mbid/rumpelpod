@@ -65,6 +65,13 @@ fn build_devcontainer_image(
     // Compute a deterministic hash of the build configuration
     let image_name = compute_image_tag(build, &dockerfile_path)?;
 
+    // Skip the build if the image already exists on the target host, avoiding
+    // the overhead of sending build context (potentially the whole repo) over
+    // the network to a remote Docker daemon.
+    if image_exists(&image_name, docker_host) {
+        return Ok(Image(image_name));
+    }
+
     // Build the Docker image
     let mut cmd = Command::new("docker");
 
@@ -116,6 +123,18 @@ fn build_devcontainer_image(
     }
 
     Ok(Image(image_name))
+}
+
+/// Check whether a Docker image already exists on the target host.
+fn image_exists(image_name: &str, docker_host: &DockerHost) -> bool {
+    let mut cmd = Command::new("docker");
+    if let Some(uri) = docker_host.docker_host_uri() {
+        cmd.args(["-H", &uri]);
+    }
+    cmd.args(["image", "inspect", image_name]);
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.status().is_ok_and(|s| s.success())
 }
 
 /// Compute a deterministic image tag based on the build configuration.

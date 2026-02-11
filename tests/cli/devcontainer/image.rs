@@ -267,3 +267,54 @@ fn devcontainer_build_with_context() {
         .expect("sandbox enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "build works");
 }
+
+#[test]
+fn devcontainer_build_skips_when_image_exists() {
+    let repo = TestRepo::new();
+
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u 1007 -s /bin/bash {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        USER {TEST_USER}
+    "#};
+
+    write_test_dockerfile(&repo, &dockerfile);
+    write_devcontainer_with_build(&repo, "Dockerfile");
+    write_minimal_sandbox_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    // First enter builds the image.
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "skip-test-1", "--", "echo", "built"])
+        .success()
+        .expect("first sandbox enter failed");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "built");
+
+    // Delete the build context so that `docker build` would fail if attempted.
+    // The Dockerfile stays so that compute_image_tag can still hash it.
+    let context_dir = repo.path();
+    for entry in fs::read_dir(context_dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name == ".devcontainer" || name == ".sandbox.toml" || name == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path).unwrap();
+        } else {
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    // Second enter should skip the build entirely because the image tag
+    // already exists, so the missing context directory doesn't matter.
+    let stdout = sandbox_command(&repo, &daemon)
+        .args(["enter", "skip-test-2", "--", "echo", "skipped"])
+        .success()
+        .expect("second sandbox enter should skip build");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "skipped");
+}
