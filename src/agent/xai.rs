@@ -19,8 +19,8 @@ use crate::llm::types::xai::{
 };
 
 use super::common::{
-    build_system_prompt, confirm_exit, execute_bash_in_sandbox, execute_edit_in_sandbox,
-    execute_write_in_sandbox, get_input_via_editor, read_agents_md, ToolName,
+    build_system_prompt, confirm_exit, execute_bash_in_pod, execute_edit_in_pod,
+    execute_write_in_pod, get_input_via_editor, read_agents_md, ToolName,
 };
 use super::history::ConversationTracker;
 use crate::enter::resolve_remote_env;
@@ -42,8 +42,8 @@ struct AgentState {
 /// Convert the internal messages to JSON for persistence.
 #[allow(clippy::too_many_arguments)]
 pub fn run_grok_agent(
-    sandbox_handle: JoinHandle<Result<LaunchResult>>,
-    sandbox_name: &str,
+    pod_handle: JoinHandle<Result<LaunchResult>>,
+    pod_name: &str,
     repo_path: &Path,
     remote_env: std::collections::HashMap<String, String>,
     model: Model,
@@ -122,11 +122,8 @@ pub fn run_grok_agent(
     if is_tty {
         let chat_history = format_xai_history(&state.messages);
         loop {
-            let input = get_input_via_editor(
-                &chat_history,
-                editable_last_message.as_deref(),
-                sandbox_name,
-            )?;
+            let input =
+                get_input_via_editor(&chat_history, editable_last_message.as_deref(), pod_name)?;
             if input.is_empty() {
                 if confirm_exit()? {
                     return Ok(());
@@ -139,10 +136,10 @@ pub fn run_grok_agent(
         }
     }
 
-    // Now wait for sandbox
-    let launch_result = sandbox_handle
+    // Now wait for pod
+    let launch_result = pod_handle
         .join()
-        .map_err(|e| anyhow::anyhow!("Sandbox thread panicked: {:?}", e))??;
+        .map_err(|e| anyhow::anyhow!("Pod thread panicked: {:?}", e))??;
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
     let docker_socket = &launch_result.docker_socket;
@@ -182,7 +179,7 @@ pub fn run_grok_agent(
         } else {
             let chat_history = format_xai_history(&state.messages);
             let editable = editable_last_message.take();
-            let input = get_input_via_editor(&chat_history, editable.as_deref(), sandbox_name)?;
+            let input = get_input_via_editor(&chat_history, editable.as_deref(), pod_name)?;
             if input.is_empty() {
                 if confirm_exit()? {
                     break;
@@ -319,7 +316,7 @@ pub fn run_grok_agent(
                                 let command =
                                     args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                                 println!("$ {command}");
-                                let (out, ok) = execute_bash_in_sandbox(
+                                let (out, ok) = execute_bash_in_pod(
                                     container_name,
                                     user,
                                     repo_path,
@@ -343,7 +340,7 @@ pub fn run_grok_agent(
                                     .get("new_string")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                let (out, ok) = execute_edit_in_sandbox(
+                                let (out, ok) = execute_edit_in_pod(
                                     container_name,
                                     user,
                                     repo_path,
@@ -366,7 +363,7 @@ pub fn run_grok_agent(
                                     args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
                                 let content =
                                     args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                                let (out, ok) = execute_write_in_sandbox(
+                                let (out, ok) = execute_write_in_pod(
                                     container_name,
                                     user,
                                     repo_path,

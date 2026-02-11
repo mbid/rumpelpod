@@ -11,7 +11,7 @@ use assert_cmd::cargo;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
+use crate::common::{build_test_image, write_test_pod_config, TestDaemon, TestRepo};
 
 /// Default model for tests that don't depend on provider-specific behavior.
 /// Using Haiku as it's the fastest and cheapest option.
@@ -59,11 +59,11 @@ pub fn run_agent_with_prompt_and_model(
     run_agent_interactive_model_and_args(repo, daemon, &[prompt], model, &[])
 }
 
-/// Set up a basic test repo with sandbox config.
+/// Set up a basic test repo with pod config.
 pub fn setup_test_repo() -> TestRepo {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
     repo
 }
 
@@ -233,17 +233,17 @@ pub fn run_agent_interactive_model_args_env(
         })
         .expect("Failed to create PTY");
 
-    let sandbox_bin = cargo::cargo_bin!("sandbox");
+    let rumpel_bin = cargo::cargo_bin!("rumpel");
 
-    let mut cmd = CommandBuilder::new(sandbox_bin);
+    let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());
     cmd.env(
-        "SANDBOX_DAEMON_SOCKET",
+        "RUMPELPOD_DAEMON_SOCKET",
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
     // Ensure deterministic IDs for output files in tests
-    cmd.env("SANDBOX_TEST_DETERMINISTIC_IDS", "1");
+    cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
     // Use a directory inside the daemon's temp dir for deterministic PID files.
     // This isolates PIDs per daemon (and thus per test).
     let pid_dir = daemon.temp_dir().join("deterministic-pids");
@@ -251,8 +251,8 @@ pub fn run_agent_interactive_model_args_env(
 
     // Default to offline mode for tests unless explicitly configured.
     // This ensures tests don't accidentally depend on ambient API keys.
-    if std::env::var("SANDBOX_TEST_LLM_OFFLINE").is_err() {
-        cmd.env("SANDBOX_TEST_LLM_OFFLINE", "1");
+    if std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").is_err() {
+        cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
     }
 
     for (k, v) in env_vars {
@@ -384,25 +384,25 @@ pub fn run_agent_expecting_picker(
         })
         .expect("Failed to create PTY");
 
-    let sandbox_bin = cargo::cargo_bin!("sandbox");
+    let rumpel_bin = cargo::cargo_bin!("rumpel");
 
-    let mut cmd = CommandBuilder::new(sandbox_bin);
+    let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());
     cmd.env(
-        "SANDBOX_DAEMON_SOCKET",
+        "RUMPELPOD_DAEMON_SOCKET",
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
     // Ensure deterministic IDs for output files in tests
-    cmd.env("SANDBOX_TEST_DETERMINISTIC_IDS", "1");
+    cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
     // Use a directory inside the daemon's temp dir for deterministic PID files.
     let pid_dir = daemon.temp_dir().join("deterministic-pids");
     cmd.env("DETERMINISTIC_PID_DIR", pid_dir.to_str().unwrap());
 
     // Default to offline mode for tests unless explicitly configured.
     // This ensures tests don't accidentally depend on ambient API keys.
-    if std::env::var("SANDBOX_TEST_LLM_OFFLINE").is_err() {
-        cmd.env("SANDBOX_TEST_LLM_OFFLINE", "1");
+    if std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").is_err() {
+        cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
     }
 
     cmd.args([

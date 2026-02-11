@@ -1,4 +1,4 @@
-//! Test that the sandbox name appears in the agent chat history file path.
+//! Test that the pod name appears in the agent chat history file path.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -11,16 +11,16 @@ use assert_cmd::cargo;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
+use crate::common::{build_test_image, write_test_pod_config, TestDaemon, TestRepo};
 
 use super::common::{llm_cache_dir, ANTHROPIC_MODEL};
 
 /// Test that verifies the temp file path by capturing it from the mock editor.
 #[test]
-fn temp_file_path_contains_sandbox_name() {
+fn temp_file_path_contains_pod_name() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -69,18 +69,18 @@ fi
         })
         .expect("Failed to create PTY");
 
-    let sandbox_bin = cargo::cargo_bin!("sandbox");
-    let mut cmd = CommandBuilder::new(sandbox_bin);
+    let rumpel_bin = cargo::cargo_bin!("rumpel");
+    let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());
     cmd.env(
-        "SANDBOX_DAEMON_SOCKET",
+        "RUMPELPOD_DAEMON_SOCKET",
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_script_path.to_str().unwrap());
-    cmd.env("SANDBOX_TEST_DETERMINISTIC_IDS", "1");
+    cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
     cmd.args([
         "agent",
-        "my-test-sandbox",
+        "my-test-pod",
         "--model",
         ANTHROPIC_MODEL,
         "--cache",
@@ -170,7 +170,7 @@ fi
         .trim()
         .to_string();
 
-    // Verify that the path contains the sandbox name
+    // Verify that the path contains the pod name
     let path = PathBuf::from(&captured_path);
     let filename = path
         .file_name()
@@ -178,15 +178,15 @@ fi
         .to_string_lossy();
 
     assert!(
-        filename.contains("my-test-sandbox"),
-        "Temp file name should contain the sandbox name 'my-test-sandbox', but got: {}",
+        filename.contains("my-test-pod"),
+        "Temp file name should contain the pod name 'my-test-pod', but got: {}",
         filename
     );
 
-    // Also verify the expected format: sandbox-chat-{sandbox_name}-{pid}.txt
+    // Also verify the expected format: rumpelpod-chat-{pod_name}-{pid}.txt
     assert!(
-        filename.starts_with("sandbox-chat-my-test-sandbox-"),
-        "Temp file name should start with 'sandbox-chat-my-test-sandbox-', but got: {}",
+        filename.starts_with("rumpelpod-chat-my-test-pod-"),
+        "Temp file name should start with 'rumpelpod-chat-my-test-pod-', but got: {}",
         filename
     );
 

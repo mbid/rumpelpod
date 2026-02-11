@@ -1,7 +1,7 @@
 use std::{env, process::ExitCode};
 
 fn main() -> ExitCode {
-    match sandbox::run() {
+    match rumpelpod::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {e:?}");

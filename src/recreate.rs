@@ -2,7 +2,7 @@ use anyhow::Result;
 
 use crate::cli::RecreateCommand;
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, SandboxLaunchParams, SandboxName};
+use crate::daemon::protocol::{Daemon, DaemonClient, PodLaunchParams, PodName};
 use crate::enter::load_and_resolve;
 use crate::git::{get_current_branch, get_repo_root};
 
@@ -16,15 +16,15 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    client.recreate_sandbox(SandboxLaunchParams {
-        sandbox_name: SandboxName(cmd.name.clone()),
+    client.recreate_pod(PodLaunchParams {
+        pod_name: PodName(cmd.name.clone()),
         repo_path: repo_root,
         host_branch,
         docker_host,
         devcontainer,
     })?;
 
-    println!("Sandbox '{}' recreated successfully.", cmd.name);
+    println!("Pod '{}' recreated successfully.", cmd.name);
 
     Ok(())
 }

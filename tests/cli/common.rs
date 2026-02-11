@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context, Error};
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use walkdir::WalkDir;
@@ -27,12 +27,12 @@ pub const TEST_USER_UID: u32 = 1007;
 pub const TEST_REPO_PATH: &str = "/home/testuser/workspace";
 
 /// Environment variable used to configure the daemon socket path.
-pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
+pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";
 
-/// Environment variable for XDG state directory (where sandbox data is stored).
+/// Environment variable for XDG state directory (where rumpelpod data is stored).
 const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
 
-/// A test daemon that manages sandboxes for integration tests.
+/// A test daemon that manages pods for integration tests.
 /// Each test gets its own daemon with an isolated socket and state directory
 /// to enable parallel execution without interference.
 /// On drop, the daemon process is terminated.
@@ -62,25 +62,26 @@ impl TestDaemon {
 
     fn start_internal(ssh_config: Option<&Path>) -> Self {
         let temp_dir =
-            TempDir::with_prefix("sandbox-test-").expect("Failed to create temp directory");
+            TempDir::with_prefix("rumpelpod-test-").expect("Failed to create temp directory");
 
-        let socket_path = temp_dir.path().join("sandbox.sock");
+        let socket_path = temp_dir.path().join("rumpelpod.sock");
         let state_dir = temp_dir.path().join("state");
         let runtime_dir = temp_dir.path().join("runtime");
 
-        // Ensure runtime directory exists, including the 'sandbox' subdirectory that
+        // Ensure runtime directory exists, including the 'rumpelpod' subdirectory that
         // the daemon expects for the git socket.
-        std::fs::create_dir_all(runtime_dir.join("sandbox")).expect("Failed to create runtime dir");
+        std::fs::create_dir_all(runtime_dir.join("rumpelpod"))
+            .expect("Failed to create runtime dir");
 
-        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rumpel"));
         cmd.env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
             .env("XDG_RUNTIME_DIR", &runtime_dir)
             // Enable deterministic PIDs for test reproducibility
-            .env("SANDBOX_TEST_DETERMINISTIC_IDS", "1")
+            .env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1")
             // Write directly to .git/config instead of invoking `git config`
             // to avoid flaky lock failures on overlay2 under heavy parallelism
-            .env("SANDBOX_TEST_DIRECT_GIT_CONFIG", "1");
+            .env("RUMPELPOD_TEST_DIRECT_GIT_CONFIG", "1");
 
         if let Some(config_path) = ssh_config {
             cmd.env(SSH_CONFIG_FILE_ENV, config_path);
@@ -137,7 +138,7 @@ pub struct TestRepo {
 impl TestRepo {
     pub fn new() -> Self {
         let dir =
-            TempDir::with_prefix("sandbox-test-repo-").expect("Failed to create temp directory");
+            TempDir::with_prefix("rumpelpod-test-repo-").expect("Failed to create temp directory");
 
         // Initialize as a git repository with an initial commit
         Command::new("git")
@@ -167,7 +168,7 @@ impl TestRepo {
     /// Useful for testing behavior outside of a git repository.
     pub fn new_without_git() -> Self {
         let dir =
-            TempDir::with_prefix("sandbox-test-repo-").expect("Failed to create temp directory");
+            TempDir::with_prefix("rumpelpod-test-repo-").expect("Failed to create temp directory");
         TestRepo { dir }
     }
 
@@ -179,7 +180,7 @@ impl TestRepo {
 impl Drop for TestRepo {
     fn drop(&mut self) {
         // Skip cleanup if requested (useful for debugging).
-        if std::env::var("SANDBOX_TEST_NO_CLEANUP").is_ok() {
+        if std::env::var("RUMPELPOD_TEST_NO_CLEANUP").is_ok() {
             return;
         }
 
@@ -232,16 +233,16 @@ pub fn create_commit(repo_path: &Path, message: &str) {
         .expect("git commit failed");
 }
 
-/// Create a Command for the sandbox binary, pre-configured for testing.
-pub fn sandbox_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("sandbox"));
+/// Create a Command for the rumpel binary, pre-configured for testing.
+pub fn pod_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rumpel"));
     cmd.current_dir(repo.path())
         .env(SOCKET_PATH_ENV, &daemon.socket_path);
 
     // Default to offline mode for tests unless explicitly configured.
     // This ensures tests don't accidentally depend on ambient API keys.
-    if std::env::var("SANDBOX_TEST_LLM_OFFLINE").is_err() {
-        cmd.env("SANDBOX_TEST_LLM_OFFLINE", "1");
+    if std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").is_err() {
+        cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
     }
 
     cmd
@@ -267,7 +268,7 @@ impl std::fmt::Display for ImageId {
 }
 
 /// Label key used to identify images built by this test infrastructure.
-const TEST_IMAGE_LABEL: &str = "dev.sandbox.test.dockerfile_hash";
+const TEST_IMAGE_LABEL: &str = "dev.rumpelpod.test.dockerfile_hash";
 
 /// Global cache for built docker images, keyed by the hash of the DockerBuild configuration.
 /// The mutex ensures that we can safely insert into the map.
@@ -459,36 +460,36 @@ pub fn build_test_image_without_user(
     })
 }
 
-/// Write test configuration files (devcontainer.json + .sandbox.toml).
+/// Write test configuration files (devcontainer.json + .rumpelpod.toml).
 ///
 /// devcontainer.json gets image, workspaceFolder, and runArgs (runtime=runc).
-/// .sandbox.toml gets only the runtime setting.
+/// .rumpelpod.toml gets only the runtime setting.
 ///
-/// The user is not specified, so the sandbox will use the image's USER directive.
-/// Use `write_test_sandbox_config_with_user` if you need to specify a user explicitly.
-pub fn write_test_sandbox_config(repo: &TestRepo, image_id: &ImageId) {
+/// The user is not specified, so the pod will use the image's USER directive.
+/// Use `write_test_pod_config_with_user` if you need to specify a user explicitly.
+pub fn write_test_pod_config(repo: &TestRepo, image_id: &ImageId) {
     write_test_devcontainer_json(repo, image_id, "");
-    write_test_sandbox_toml(repo, "");
+    write_test_pod_toml(repo, "");
 }
 
 /// Write test configuration files with an explicit containerUser.
-pub fn write_test_sandbox_config_with_user(repo: &TestRepo, image_id: &ImageId, user: &str) {
+pub fn write_test_pod_config_with_user(repo: &TestRepo, image_id: &ImageId, user: &str) {
     let extra = format!(r#","containerUser": "{user}""#);
     write_test_devcontainer_json(repo, image_id, &extra);
-    write_test_sandbox_toml(repo, "");
+    write_test_pod_toml(repo, "");
 }
 
 /// Write test configuration files with explicit network configuration.
 ///
 /// The network value ("unsafe-host") is passed via devcontainer.json runArgs
 /// (`--network=host`), matching the devcontainer spec.
-pub fn write_test_sandbox_config_with_network(repo: &TestRepo, image_id: &ImageId, network: &str) {
+pub fn write_test_pod_config_with_network(repo: &TestRepo, image_id: &ImageId, network: &str) {
     let run_args = match network {
         "unsafe-host" => r#"["--runtime=runc", "--network=host"]"#,
         _ => r#"["--runtime=runc"]"#,
     };
     write_test_devcontainer_json_with_run_args(repo, image_id, run_args, "");
-    write_test_sandbox_toml(repo, "");
+    write_test_pod_toml(repo, "");
 }
 
 /// Write a devcontainer.json for tests. `extra_json` is spliced as additional
@@ -521,13 +522,13 @@ fn write_test_devcontainer_json_with_run_args(
     .expect("Failed to write devcontainer.json");
 }
 
-/// Write a .sandbox.toml for tests. `extra_toml` is appended after the
+/// Write a .rumpelpod.toml for tests. `extra_toml` is appended after the
 /// default content (which is currently empty, since runtime comes from
 /// devcontainer.json's runArgs).
-fn write_test_sandbox_toml(repo: &TestRepo, extra_toml: &str) {
+fn write_test_pod_toml(repo: &TestRepo, extra_toml: &str) {
     let config = format!("{extra_toml}\n");
-    std::fs::write(repo.path().join(".sandbox.toml"), config)
-        .expect("Failed to write .sandbox.toml");
+    std::fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 /// Build a Docker image from the given DockerBuild configuration.
@@ -576,7 +577,7 @@ fn do_build_docker_image(build: &DockerBuild, dockerfile_hash: &str) -> anyhow::
     let context_path: &Path = if let Some(ref path) = build.build_context {
         path.as_path()
     } else {
-        temp_context = Some(TempDir::with_prefix("sandbox-docker-build-")?);
+        temp_context = Some(TempDir::with_prefix("rumpelpod-docker-build-")?);
         temp_context.as_ref().unwrap().path()
     };
 

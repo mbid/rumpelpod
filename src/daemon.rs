@@ -33,12 +33,12 @@ use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
 use protocol::{
     ContainerId, ConversationSummary, Daemon, EnsureClaudeConfigRequest, GetConversationResponse,
-    Image, LaunchResult, PortInfo, SandboxInfo, SandboxLaunchParams, SandboxName, SandboxStatus,
+    Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
 };
 use ssh_forward::SshForwardManager;
 
 /// Environment variable to override the daemon socket path for testing.
-pub const SOCKET_PATH_ENV: &str = "SANDBOX_DAEMON_SOCKET";
+pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";
 
 /// The default Docker socket path.
 const DEFAULT_DOCKER_SOCKET: &str = "/var/run/docker.sock";
@@ -95,7 +95,7 @@ fn get_created_files_from_patch(patch: &[u8]) -> Result<Vec<String>> {
 }
 
 /// Get the daemon socket path.
-/// Uses $SANDBOX_DAEMON_SOCKET if set, otherwise $XDG_RUNTIME_DIR/sandbox.sock.
+/// Uses $RUMPELPOD_DAEMON_SOCKET if set, otherwise $XDG_RUNTIME_DIR/rumpelpod.sock.
 pub fn socket_path() -> Result<PathBuf> {
     if let Ok(path) = std::env::var(SOCKET_PATH_ENV) {
         return Ok(PathBuf::from(path));
@@ -103,22 +103,22 @@ pub fn socket_path() -> Result<PathBuf> {
 
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context(indoc! {"
         XDG_RUNTIME_DIR not set. This usually means you're not running in a
-        systemd user session. The sandbox daemon requires systemd for socket activation.
+        systemd user session. The rumpelpod daemon requires systemd for socket activation.
     "})?;
-    Ok(PathBuf::from(runtime_dir).join("sandbox.sock"))
+    Ok(PathBuf::from(runtime_dir).join("rumpelpod.sock"))
 }
 
 struct DaemonServer {
     /// SQLite connection for conversation history.
     db: Mutex<Connection>,
-    /// Shared state for the git HTTP server (maps tokens to sandbox info).
+    /// Shared state for the git HTTP server (maps tokens to pod info).
     git_server_state: SharedGitServerState,
     /// Port the bridge network git HTTP server is listening on.
     bridge_server_port: u16,
     /// Port the localhost git HTTP server is listening on.
     localhost_server_port: u16,
-    /// Active tokens for each sandbox: (repo_path, sandbox_name) -> token
-    /// Used to clean up tokens when sandboxes are deleted.
+    /// Active tokens for each pod: (repo_path, pod_name) -> token
+    /// Used to clean up tokens when pods are deleted.
     active_tokens: Mutex<BTreeMap<(PathBuf, String), String>>,
     /// SSH forward manager for remote Docker hosts.
     ssh_forward: SshForwardManager,
@@ -127,16 +127,16 @@ struct DaemonServer {
 }
 
 /// Label key used to store the repository path on containers.
-const REPO_PATH_LABEL: &str = "dev.sandbox.repo_path";
-const CONTAINER_REPO_PATH_LABEL: &str = "dev.sandbox.container_repo_path";
+const REPO_PATH_LABEL: &str = "dev.rumpelpod.repo_path";
+const CONTAINER_REPO_PATH_LABEL: &str = "dev.rumpelpod.container_repo_path";
 
-/// Label key used to store the sandbox name on containers.
-const SANDBOX_NAME_LABEL: &str = "dev.sandbox.name";
+/// Label key used to store the pod name on containers.
+const POD_NAME_LABEL: &str = "dev.rumpelpod.name";
 
-/// Generate a unique docker container name from repo path and sandbox name.
-/// Format: "<repo_dir>-<sandbox_name>-<hash_prefix>"
-/// where hash is sha256(repo_path + sandbox_name) truncated to 12 hex chars.
-fn docker_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
+/// Generate a unique docker container name from repo path and pod name.
+/// Format: "<repo_dir>-<pod_name>-<hash_prefix>"
+/// where hash is sha256(repo_path + pod_name) truncated to 12 hex chars.
+fn docker_name(repo_path: &Path, pod_name: &PodName) -> String {
     use sha2::{Digest, Sha256};
 
     let repo_dir = repo_path
@@ -146,11 +146,11 @@ fn docker_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
 
     let mut hasher = Sha256::new();
     hasher.update(repo_path.as_os_str().as_encoded_bytes());
-    hasher.update(sandbox_name.0.as_bytes());
+    hasher.update(pod_name.0.as_bytes());
     let hash = hex::encode(hasher.finalize());
     let hash_prefix = &hash[..12];
 
-    format!("{}-{}-{}", repo_dir, sandbox_name.0, hash_prefix)
+    format!("{}-{}-{}", repo_dir, pod_name.0, hash_prefix)
 }
 
 /// Resolve daemon-side variables: `${containerWorkspaceFolder}`,
@@ -158,8 +158,8 @@ fn docker_name(repo_path: &Path, sandbox_name: &SandboxName) -> String {
 ///
 /// `workspace_folder` is resolved first since `containerWorkspaceFolder`
 /// is derived from its resolved value.
-fn resolve_daemon_vars(dc: DevContainer, repo_path: &Path, sandbox_name: &str) -> DevContainer {
-    let devcontainer_id = compute_devcontainer_id(repo_path, sandbox_name);
+fn resolve_daemon_vars(dc: DevContainer, repo_path: &Path, pod_name: &str) -> DevContainer {
+    let devcontainer_id = compute_devcontainer_id(repo_path, pod_name);
 
     // Strip trailing path separators that libgit2 may add to workdir paths.
     let local_ws = repo_path
@@ -228,7 +228,7 @@ fn get_image_user(docker: &Docker, image: &str) -> Result<Option<String>> {
     }
 }
 
-/// Resolve the user for a sandbox.
+/// Resolve the user for a pod.
 ///
 /// If `user` is provided, it is used directly.
 /// Otherwise, the image's USER directive is used.
@@ -245,7 +245,7 @@ fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<St
         Some(user) => {
             anyhow::bail!(
                 "Image '{}' has USER set to '{}' (root). \
-                 For security, sandboxes must run as a non-root user.\n\
+                 For security, pods must run as a non-root user.\n\
                  Either set 'containerUser' in devcontainer.json, or change the image's USER directive.",
                 image,
                 user
@@ -254,7 +254,7 @@ fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<St
         None => {
             anyhow::bail!(
                 "Image '{}' has no USER directive (defaults to root). \
-                 For security, sandboxes must run as a non-root user.\n\
+                 For security, pods must run as a non-root user.\n\
                  Either set 'containerUser' in devcontainer.json, or add a USER directive to the Dockerfile.",
                 image
             );
@@ -292,13 +292,13 @@ fn start_container(docker: &Docker, container_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clean up gateway refs for a deleted sandbox.
+/// Clean up gateway refs for a deleted pod.
 ///
-/// Removes all refs matching `sandbox/*@<sandbox_name>` from both the gateway
-/// and host repos, including the alias symref `sandbox/<sandbox_name>`.
-fn cleanup_sandbox_refs(gateway_path: &Path, repo_path: &Path, sandbox_name: &SandboxName) {
-    // Find all refs matching sandbox/*@<sandbox_name> in gateway
-    let pattern = format!("refs/heads/sandbox/*@{}", sandbox_name.0);
+/// Removes all refs matching `pod/*@<pod_name>` from both the gateway
+/// and host repos, including the alias symref `pod/<pod_name>`.
+fn cleanup_pod_refs(gateway_path: &Path, repo_path: &Path, pod_name: &PodName) {
+    // Find all refs matching pod/*@<pod_name> in gateway
+    let pattern = format!("refs/heads/pod/*@{}", pod_name.0);
     if let Ok(output) = Command::new("git")
         .args(["for-each-ref", "--format=%(refname)", &pattern])
         .current_dir(gateway_path)
@@ -323,15 +323,15 @@ fn cleanup_sandbox_refs(gateway_path: &Path, repo_path: &Path, sandbox_name: &Sa
         }
     }
 
-    // Delete the alias symref (sandbox/<name> -> sandbox/<name>@<name>)
-    let alias_ref = format!("refs/heads/sandbox/{}", sandbox_name.0);
+    // Delete the alias symref (pod/<name> -> pod/<name>@<name>)
+    let alias_ref = format!("refs/heads/pod/{}", pod_name.0);
     let _ = Command::new("git")
         .args(["symbolic-ref", "--delete", &alias_ref])
         .current_dir(gateway_path)
         .output();
 
     // Delete the alias remote-tracking ref from host
-    let alias_remote_ref = format!("refs/remotes/sandbox/{}", sandbox_name.0);
+    let alias_remote_ref = format!("refs/remotes/pod/{}", pod_name.0);
     let _ = Command::new("git")
         .args(["update-ref", "-d", &alias_remote_ref])
         .current_dir(repo_path)
@@ -367,7 +367,7 @@ fn check_git_directory_ownership(
 
     if owner != expected_user {
         anyhow::bail!(
-            "Git directory {} is owned by '{}', but sandbox is configured to run as '{}'.\n\
+            "Git directory {} is owned by '{}', but pod is configured to run as '{}'.\n\
              Please ensure the repository inside the container is owned by the configured user.\n\
              You can fix this by running: chown -R {} {}",
             git_dir_str,
@@ -414,7 +414,7 @@ fn ensure_repo_initialized(
     let parent_str = parent.to_string_lossy().to_string();
 
     // Create the parent as root (it may be under /workspaces or another root-owned path),
-    // then chown the target directory to the sandbox user.
+    // then chown the target directory to the pod user.
     exec_command(
         docker,
         container_id,
@@ -485,16 +485,16 @@ fn ensure_repo_initialized(
 }
 
 /// Set up git remotes and hooks inside the container for the gateway repository.
-/// Adds "host" and "sandbox" remotes pointing to the git HTTP server.
+/// Adds "host" and "rumpelpod" remotes pointing to the git HTTP server.
 /// Git commands are run as the specified user to avoid permission issues.
 ///
 /// The "host" remote is configured with a custom fetch refspec that maps
-/// `host/*` branches from the gateway to `host/*` remote refs in the sandbox.
+/// `host/*` branches from the gateway to remote refs in the pod.
 /// This way, when the host's `main` branch is stored as `host/main` in the
 /// gateway, it appears as `host/main` (not `host/host/main`) after fetching.
 ///
-/// The "sandbox" remote is configured with a push refspec that maps local branches
-/// to `sandbox/<branch>@<sandbox_name>` in the gateway, allowing multiple sandboxes
+/// The "rumpelpod" remote is configured with a push refspec that maps local branches
+/// in the gateway, allowing multiple pods
 /// to push branches without conflicts.
 ///
 /// A post-commit hook is installed to automatically push commits to the gateway.
@@ -509,7 +509,7 @@ fn setup_git_remotes(
     git_http_url: &str,
     token: &str,
     container_repo_path: &Path,
-    sandbox_name: &SandboxName,
+    pod_name: &PodName,
     user: &str,
     host_branch: Option<&str>,
 ) -> Result<()> {
@@ -517,7 +517,7 @@ fn setup_git_remotes(
 
     let repo_path_str = container_repo_path.to_string_lossy().to_string();
 
-    let push_refspec = format!("+refs/heads/*:refs/heads/sandbox/*@{}", sandbox_name.0);
+    let push_refspec = format!("+refs/heads/*:refs/heads/pod/*@{}", pod_name.0);
 
     let setup_script = if is_direct_git_config_mode()? {
         // Bypass `git config` / `git remote` and write directly to .git/config
@@ -533,7 +533,7 @@ fn setup_git_remotes(
             	url = {git_http_url}
             	fetch = +refs/heads/host/*:refs/remotes/host/*
             	pushurl = PUSH_DISABLED
-            [remote "sandbox"]
+            [remote "rumpelpod"]
             	url = {git_http_url}
             	push = {push_refspec}
             GIT_CONFIG_EOF
@@ -555,9 +555,9 @@ fn setup_git_remotes(
             git config remote.host.fetch '+refs/heads/host/*:refs/remotes/host/*'
             git config remote.host.pushurl PUSH_DISABLED
 
-            git remote add sandbox "{git_http_url}" 2>/dev/null \
-                || git remote set-url sandbox "{git_http_url}"
-            git config remote.sandbox.push '{push_refspec}'
+            git remote add rumpelpod "{git_http_url}" 2>/dev/null \
+                || git remote set-url rumpelpod "{git_http_url}"
+            git config remote.rumpelpod.push '{push_refspec}'
 
             git fetch host
         "#}
@@ -583,18 +583,18 @@ fn setup_git_remotes(
     // Install reference-transaction hook to auto-push to gateway on any ref update.
     // We install the hook first because we use its presence to detect whether this
     // is the first entry (hook not installed) or a re-entry (hook already installed).
-    let is_first_entry = install_sandbox_reference_transaction_hook(
+    let is_first_entry = install_pod_reference_transaction_hook(
         docker,
         container_id,
         container_repo_path,
-        sandbox_name,
+        pod_name,
         user,
     )?;
 
-    // Create and checkout a branch named after the sandbox, pointing to host/HEAD.
+    // Create and checkout a branch named after the pod, pointing to host/HEAD.
     // Only do this on initial setup to avoid disrupting work in progress.
     if is_first_entry {
-        let branch_name = &sandbox_name.0;
+        let branch_name = &pod_name.0;
         let branch_exists = run_git(&[
             "show-ref",
             "--verify",
@@ -634,15 +634,15 @@ fn setup_git_remotes(
     Ok(())
 }
 
-/// Reference-transaction hook script for sandbox repos that pushes branch updates to the gateway.
+/// Reference-transaction hook script for pod repos that pushes branch updates to the gateway.
 ///
 /// This hook is invoked whenever any reference is updated (commits, branch creation,
 /// deletion, resets, etc). It runs in the "committed" state after the reference
 /// transaction has been committed.
-const SANDBOX_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
+const POD_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
     #!/bin/sh
-    # Installed by sandbox to sync branch updates to the gateway repository.
-    # This allows the host to pull sandbox changes.
+    # Installed by rumpelpod to sync branch updates to the gateway repository.
+    # This allows the host to pull pod changes.
     # This hook runs on reference-transaction events.
 
     # Only process after the transaction is committed
@@ -656,23 +656,23 @@ const SANDBOX_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
                 branch="${refname#refs/heads/}"
                 if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
                     # Branch deleted - remove from gateway
-                    git push sandbox --delete "$branch" --quiet 2>/dev/null || true
+                    git push rumpelpod --delete "$branch" --quiet 2>/dev/null || true
                 else
                     # Branch updated or created - push to gateway
-                    git push sandbox "$branch" --force --quiet 2>/dev/null || true
+                    git push rumpelpod "$branch" --force --quiet 2>/dev/null || true
                 fi
                 ;;
         esac
     done
 "#};
 
-/// Install the reference-transaction hook in the sandbox repository.
+/// Install the reference-transaction hook in the pod repository.
 /// Returns true if this is the first installation (first entry), false if already installed.
-fn install_sandbox_reference_transaction_hook(
+fn install_pod_reference_transaction_hook(
     docker: &Docker,
     container_id: &str,
     container_repo_path: &Path,
-    _sandbox_name: &SandboxName,
+    _pod_name: &PodName,
     user: &str,
 ) -> Result<bool> {
     let hooks_dir = container_repo_path.join(".git").join("hooks");
@@ -703,7 +703,7 @@ fn install_sandbox_reference_transaction_hook(
     .ok()
     .map(|b| String::from_utf8_lossy(&b).to_string());
 
-    let hook_signature = "Installed by sandbox to sync branch updates";
+    let hook_signature = "Installed by rumpelpod to sync branch updates";
 
     let final_hook = match existing_hook {
         Some(existing) if existing.contains(hook_signature) => {
@@ -715,10 +715,10 @@ fn install_sandbox_reference_transaction_hook(
             format!(
                 "{}\n\n{}",
                 existing.trim_end(),
-                SANDBOX_REFERENCE_TRANSACTION_HOOK
+                POD_REFERENCE_TRANSACTION_HOOK
             )
         }
-        None => SANDBOX_REFERENCE_TRANSACTION_HOOK.to_string(),
+        None => POD_REFERENCE_TRANSACTION_HOOK.to_string(),
     };
 
     // Write the hook using sh -c with printf to avoid stdin piping issues
@@ -874,7 +874,7 @@ fn parse_device_mapping(spec: &str) -> DeviceMapping {
 fn create_container(
     docker: &Docker,
     name: &str,
-    sandbox_name: &SandboxName,
+    pod_name: &PodName,
     image: &Image,
     repo_path: &Path,
     container_repo_path: &Path,
@@ -894,7 +894,7 @@ fn create_container(
         CONTAINER_REPO_PATH_LABEL.to_string(),
         container_repo_path.display().to_string(),
     );
-    labels.insert(SANDBOX_NAME_LABEL.to_string(), sandbox_name.0.clone());
+    labels.insert(POD_NAME_LABEL.to_string(), pod_name.0.clone());
 
     // Apply user-specified labels from runArgs
     for (k, v) in &run_args_config.labels {
@@ -1013,7 +1013,7 @@ fn create_container(
 
     let config = ContainerCreateBody {
         image: Some(image.0.clone()),
-        hostname: Some(sandbox_name.0.clone()),
+        hostname: Some(pod_name.0.clone()),
         labels: Some(labels),
         env: env_vec,
         cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
@@ -1054,7 +1054,7 @@ fn resolve_port_number(port: &Port) -> Option<u16> {
 /// Decide which host port to request for each forwarded container port.
 ///
 /// For local Docker, request the container port number as the host port when
-/// available and not allocated by another sandbox. When taken, let Docker
+/// available and not allocated by another pod. When taken, let Docker
 /// auto-assign (port 0). For remote Docker, always auto-assign since the SSH
 /// forward manager handles local port allocation independently.
 fn compute_publish_ports(
@@ -1117,17 +1117,17 @@ fn get_docker_published_ports(docker: &Docker, container_id: &str) -> Result<Has
     Ok(result)
 }
 
-/// Set up port forwarding for a sandbox.
+/// Set up port forwarding for a pod.
 ///
 /// Reads the host ports Docker assigned via `-p` bindings, records them in the
-/// database, and for remote sandboxes establishes SSH local forwards.
+/// database, and for remote pods establishes SSH local forwards.
 #[allow(clippy::too_many_arguments)]
 fn setup_port_forwarding(
     conn: &Connection,
     ssh_forward: &SshForwardManager,
     docker: &Docker,
     container_id: &str,
-    sandbox_id: db::SandboxId,
+    pod_id: db::PodId,
     forward_ports: &[Port],
     ports_attributes: &std::collections::HashMap<String, PortAttributes>,
     docker_host: &DockerHost,
@@ -1138,7 +1138,7 @@ fn setup_port_forwarding(
 
     let published = get_docker_published_ports(docker, container_id)?;
 
-    let existing = db::list_forwarded_ports(conn, sandbox_id)?;
+    let existing = db::list_forwarded_ports(conn, pod_id)?;
     let existing_map: std::collections::HashMap<u16, u16> = existing
         .iter()
         .map(|p| (p.container_port, p.local_port))
@@ -1205,7 +1205,7 @@ fn setup_port_forwarding(
         };
 
         allocated_set.insert(local_port);
-        db::insert_forwarded_port(conn, sandbox_id, container_port, local_port, &label)?;
+        db::insert_forwarded_port(conn, pod_id, container_port, local_port, &label)?;
     }
 
     Ok(())
@@ -1232,15 +1232,15 @@ fn find_available_port(allocated: &std::collections::HashSet<u16>) -> Result<u16
 }
 
 #[derive(Clone)]
-struct SandboxContainerInfo {
-    status: SandboxStatus,
+struct PodContainerInfo {
+    status: PodStatus,
     container_id: Option<String>,
 }
 
-/// Compute the git status of the sandbox's primary branch vs the currently checked out commit.
+/// Compute the git status of the pod's primary branch vs the currently checked out commit.
 /// Returns a string like "ahead 2, behind 3" or "up to date" or None if the ref doesn't exist.
-/// "ahead N" means the sandbox is N commits ahead of the host HEAD.
-fn compute_git_status(repo_path: &Path, sandbox_name: &str) -> Option<String> {
+/// "ahead N" means the pod is N commits ahead of the host HEAD.
+fn compute_git_status(repo_path: &Path, pod_name: &str) -> Option<String> {
     use git2::Repository;
 
     let repo = Repository::open(repo_path).ok()?;
@@ -1249,19 +1249,19 @@ fn compute_git_status(repo_path: &Path, sandbox_name: &str) -> Option<String> {
     let head = repo.head().ok()?;
     let host_oid = head.target()?;
 
-    // Get the sandbox's primary branch ref: refs/remotes/sandbox/<sandbox_name>
-    let remote_ref_name = format!("refs/remotes/sandbox/{}", sandbox_name);
+    // Get the pod's primary branch ref: refs/remotes/pod/<pod_name>
+    let remote_ref_name = format!("refs/remotes/pod/{}", pod_name);
     let remote_ref = repo.find_reference(&remote_ref_name).ok()?;
-    let sandbox_oid = remote_ref.target()?;
+    let pod_oid = remote_ref.target()?;
 
     // If they're the same, we're up to date
-    if host_oid == sandbox_oid {
+    if host_oid == pod_oid {
         return Some("up to date".to_string());
     }
 
-    // Count ahead/behind from sandbox's perspective
-    // (ahead, behind) = how many commits sandbox is ahead/behind host
-    let (ahead, behind) = repo.graph_ahead_behind(sandbox_oid, host_oid).ok()?;
+    // Count ahead/behind from pod's perspective
+    // (ahead, behind) = how many commits pod is ahead/behind host
+    let (ahead, behind) = repo.graph_ahead_behind(pod_oid, host_oid).ok()?;
 
     match (ahead, behind) {
         (0, 0) => Some("up to date".to_string()),
@@ -1271,13 +1271,13 @@ fn compute_git_status(repo_path: &Path, sandbox_name: &str) -> Option<String> {
     }
 }
 
-/// List all sandbox containers for a given repository path.
+/// List all pod containers for a given repository path.
 /// Get the status of containers for a repository via a Docker socket.
-/// Returns a map from sandbox name to container status.
+/// Returns a map from pod name to container status.
 fn get_container_status_via_socket(
     docker_socket: &Path,
     repo_path: &Path,
-) -> Result<HashMap<String, SandboxContainerInfo>> {
+) -> Result<HashMap<String, PodContainerInfo>> {
     use bollard::models::ContainerSummaryStateEnum;
 
     let docker = Docker::connect_with_socket(
@@ -1307,20 +1307,20 @@ fn get_container_status_via_socket(
 
     for container in containers {
         let labels = container.labels.unwrap_or_default();
-        let sandbox_name = match labels.get(SANDBOX_NAME_LABEL) {
+        let pod_name = match labels.get(POD_NAME_LABEL) {
             Some(name) => name.clone(),
-            None => continue, // Skip containers without sandbox name label
+            None => continue, // Skip containers without pod name label
         };
 
         let status = match container.state {
-            Some(ContainerSummaryStateEnum::RUNNING) => SandboxStatus::Running,
-            _ => SandboxStatus::Stopped,
+            Some(ContainerSummaryStateEnum::RUNNING) => PodStatus::Running,
+            _ => PodStatus::Stopped,
         };
 
         if let Some(id) = container.id {
             status_map.insert(
-                sandbox_name,
-                SandboxContainerInfo {
+                pod_name,
+                PodContainerInfo {
                     status,
                     container_id: Some(id),
                 },
@@ -1408,7 +1408,7 @@ fn run_lifecycle_command(
 
 /// Copy only the minimal Claude Code config files needed to authenticate and
 /// run inside a container. Avoids leaking conversation history, telemetry,
-/// stats, and other projects' data into untrusted sandboxes.
+/// stats, and other projects' data into untrusted pods.
 ///
 /// What we copy:
 ///   ~/.claude/.credentials.json  -- OAuth tokens (needed unless ANTHROPIC_API_KEY is set)
@@ -1515,7 +1515,7 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// These commands run at most once per sandbox lifetime, tracked via the
+/// These commands run at most once per pod lifetime, tracked via the
 /// database. If onCreateCommand fails, postCreateCommand is skipped and both
 /// are marked as "ran" so they don't retry on subsequent enters.
 fn run_once_lifecycle_commands(
@@ -1524,12 +1524,12 @@ fn run_once_lifecycle_commands(
     user: &str,
     workdir: &Path,
     dc: &DevContainer,
-    sandbox_id: db::SandboxId,
+    pod_id: db::PodId,
     db_mutex: &Mutex<rusqlite::Connection>,
 ) -> Result<()> {
     let on_create_ran = {
         let conn = db_mutex.lock().unwrap();
-        db::has_on_create_run(&conn, sandbox_id)?
+        db::has_on_create_run(&conn, pod_id)?
     };
 
     if !on_create_ran {
@@ -1537,39 +1537,39 @@ fn run_once_lifecycle_commands(
             if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
                 // Mark both as ran to prevent retries and skip postCreate
                 let conn = db_mutex.lock().unwrap();
-                db::mark_on_create_ran(&conn, sandbox_id)?;
-                db::mark_post_create_ran(&conn, sandbox_id)?;
+                db::mark_on_create_ran(&conn, pod_id)?;
+                db::mark_post_create_ran(&conn, pod_id)?;
                 return Err(e.context("onCreateCommand failed"));
             }
         }
         let conn = db_mutex.lock().unwrap();
-        db::mark_on_create_ran(&conn, sandbox_id)?;
+        db::mark_on_create_ran(&conn, pod_id)?;
     }
 
     let post_create_ran = {
         let conn = db_mutex.lock().unwrap();
-        db::has_post_create_run(&conn, sandbox_id)?
+        db::has_post_create_run(&conn, pod_id)?
     };
 
     if !post_create_ran {
         if let Some(cmd) = &dc.post_create_command {
             if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
                 let conn = db_mutex.lock().unwrap();
-                db::mark_post_create_ran(&conn, sandbox_id)?;
+                db::mark_post_create_ran(&conn, pod_id)?;
                 return Err(e.context("postCreateCommand failed"));
             }
         }
         let conn = db_mutex.lock().unwrap();
-        db::mark_post_create_ran(&conn, sandbox_id)?;
+        db::mark_post_create_ran(&conn, pod_id)?;
     }
 
     Ok(())
 }
 
 impl Daemon for DaemonServer {
-    fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
-        let SandboxLaunchParams {
-            sandbox_name,
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+        let PodLaunchParams {
+            pod_name,
             repo_path,
             host_branch,
             docker_host,
@@ -1579,7 +1579,7 @@ impl Daemon for DaemonServer {
         // Resolve daemon-side variables (container workspace paths,
         // devcontainerId).  Client-side variables were already resolved
         // before the config was sent to us.
-        let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &sandbox_name.0);
+        let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
         let image = crate::image::resolve_image(&devcontainer, &docker_host, &repo_path)?;
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
@@ -1607,19 +1607,19 @@ impl Daemon for DaemonServer {
         // Get the host specification string for the database
         let host_spec = docker_host.to_db_string();
 
-        // Check for name conflicts between local and remote sandboxes
+        // Check for name conflicts between local and remote pods
         {
             let conn = self.db.lock().unwrap();
-            if let Some(existing) = db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
-                // A sandbox with this name exists - check if the host matches
+            if let Some(existing) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
+                // A pod with this name exists - check if the host matches
                 if existing.host != host_spec {
                     anyhow::bail!(
-                        "Sandbox '{}' already exists on {} but was requested on {}.\n\
-                         Delete the existing sandbox first with 'sandbox delete {}'.",
-                        sandbox_name.0,
+                        "Pod '{}' already exists on {} but was requested on {}.\n\
+                         Delete the existing pod first with 'rumpel delete {}'.",
+                        pod_name.0,
                         existing.host,
                         host_spec,
-                        sandbox_name.0
+                        pod_name.0
                     );
                 }
             }
@@ -1644,7 +1644,7 @@ impl Daemon for DaemonServer {
         // Set up gateway for git synchronization (idempotent)
         gateway::setup_gateway(&repo_path)?;
 
-        let name = docker_name(&repo_path, &sandbox_name);
+        let name = docker_name(&repo_path, &pod_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
 
         // Determine the git HTTP server URL based on network config and local/remote
@@ -1708,21 +1708,21 @@ impl Daemon for DaemonServer {
                 start_container(&docker, &name)?;
             }
 
-            // Ensure sandbox record exists in database
-            let sandbox_id = {
+            // Ensure pod record exists in database
+            let pod_id = {
                 let conn = self.db.lock().unwrap();
-                let sandbox_id = match db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
-                    Some(sandbox) => sandbox.id,
-                    None => db::create_sandbox(&conn, &repo_path, &sandbox_name.0, &host_spec)?,
+                let pod_id = match db::get_pod(&conn, &repo_path, &pod_name.0)? {
+                    Some(pod) => pod.id,
+                    None => db::create_pod(&conn, &repo_path, &pod_name.0, &host_spec)?,
                 };
-                db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Ready)?;
-                sandbox_id
+                db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
+                pod_id
             };
 
-            // Register sandbox with the git HTTP server (may already be registered, that's OK)
+            // Register pod with the git HTTP server (may already be registered, that's OK)
             let token = self.git_server_state.register(
                 gateway_path.clone(),
-                sandbox_name.0.clone(),
+                pod_name.0.clone(),
                 repo_path.clone(),
             );
 
@@ -1730,7 +1730,7 @@ impl Daemon for DaemonServer {
             self.active_tokens
                 .lock()
                 .unwrap()
-                .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
+                .insert((repo_path.clone(), pod_name.0.clone()), token.clone());
 
             let url = git_http_server::git_http_url(&server_ip, server_port);
 
@@ -1752,7 +1752,7 @@ impl Daemon for DaemonServer {
                 &url,
                 &token,
                 &container_repo_path,
-                &sandbox_name,
+                &pod_name,
                 &user,
                 None,
             )?;
@@ -1777,7 +1777,7 @@ impl Daemon for DaemonServer {
                     &self.ssh_forward,
                     &docker,
                     &state.id,
-                    sandbox_id,
+                    pod_id,
                     &forward_ports,
                     &ports_attributes,
                     &docker_host,
@@ -1791,27 +1791,27 @@ impl Daemon for DaemonServer {
             });
         }
 
-        // Register sandbox with the git HTTP server
+        // Register pod with the git HTTP server
         let token =
             self.git_server_state
-                .register(gateway_path, sandbox_name.0.clone(), repo_path.clone());
+                .register(gateway_path, pod_name.0.clone(), repo_path.clone());
 
         // Store the token for cleanup on delete
         self.active_tokens
             .lock()
             .unwrap()
-            .insert((repo_path.clone(), sandbox_name.0.clone()), token.clone());
+            .insert((repo_path.clone(), pod_name.0.clone()), token.clone());
 
-        // Create sandbox record in database with status "initializing"
-        let sandbox_id = {
+        // Create pod record in database with status "initializing"
+        let pod_id = {
             let conn = self.db.lock().unwrap();
-            db::create_sandbox(&conn, &repo_path, &sandbox_name.0, &host_spec)?
+            db::create_pod(&conn, &repo_path, &pod_name.0, &host_spec)?
         };
 
-        // Helper to mark sandbox as error and propagate the original error
+        // Helper to mark pod as error and propagate the original error
         let mark_error = |e: anyhow::Error| -> anyhow::Error {
             if let Ok(conn) = self.db.lock() {
-                let _ = db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Error);
+                let _ = db::update_pod_status(&conn, pod_id, db::PodStatus::Error);
             }
             e
         };
@@ -1824,7 +1824,7 @@ impl Daemon for DaemonServer {
         let container_id = create_container(
             &docker,
             &name,
-            &sandbox_name,
+            &pod_name,
             &image,
             &repo_path,
             &container_repo_path,
@@ -1864,7 +1864,7 @@ impl Daemon for DaemonServer {
             &url,
             &token,
             &container_repo_path,
-            &sandbox_name,
+            &pod_name,
             &user,
             host_branch.as_deref(),
         )
@@ -1878,7 +1878,7 @@ impl Daemon for DaemonServer {
             &user,
             &container_repo_path,
             &devcontainer,
-            sandbox_id,
+            pod_id,
             &self.db,
         )
         .map_err(mark_error)?;
@@ -1893,10 +1893,10 @@ impl Daemon for DaemonServer {
                 .map_err(mark_error)?;
         }
 
-        // Mark sandbox as ready and set up port forwarding
+        // Mark pod as ready and set up port forwarding
         {
             let conn = self.db.lock().unwrap();
-            db::update_sandbox_status(&conn, sandbox_id, db::SandboxStatus::Ready)?;
+            db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
 
             if !forward_ports.is_empty() {
                 setup_port_forwarding(
@@ -1904,7 +1904,7 @@ impl Daemon for DaemonServer {
                     &self.ssh_forward,
                     &docker,
                     &container_id.0,
-                    sandbox_id,
+                    pod_id,
                     &forward_ports,
                     &ports_attributes,
                     &docker_host,
@@ -1923,23 +1923,20 @@ impl Daemon for DaemonServer {
         })
     }
 
-    fn recreate_sandbox(&self, mut params: SandboxLaunchParams) -> Result<LaunchResult> {
+    fn recreate_pod(&self, mut params: PodLaunchParams) -> Result<LaunchResult> {
         // Resolve daemon-side variables so container_repo_path and other
         // fields are fully resolved before we use them for snapshotting.
-        params.devcontainer = resolve_daemon_vars(
-            params.devcontainer,
-            &params.repo_path,
-            &params.sandbox_name.0,
-        );
+        params.devcontainer =
+            resolve_daemon_vars(params.devcontainer, &params.repo_path, &params.pod_name.0);
 
-        let sandbox_name = &params.sandbox_name;
+        let pod_name = &params.pod_name;
         let repo_path = &params.repo_path;
         let docker_host = &params.docker_host;
         let image = crate::image::resolve_image(&params.devcontainer, docker_host, repo_path)?;
         let container_repo_path = params.devcontainer.container_repo_path(repo_path);
         let user = params.devcontainer.user().map(String::from);
 
-        let name = docker_name(repo_path, sandbox_name);
+        let name = docker_name(repo_path, pod_name);
 
         // Get the Docker socket to use (local or forwarded from remote)
         let docker_socket = match docker_host {
@@ -1996,11 +1993,11 @@ impl Daemon for DaemonServer {
 
             // 2. Delete the container
             // We use the internal deletion logic
-            self.delete_sandbox(sandbox_name.clone(), repo_path.clone())?;
+            self.delete_pod(pod_name.clone(), repo_path.clone())?;
         }
 
-        // 3. Create new sandbox
-        let launch_result = self.launch_sandbox(params)?;
+        // 3. Create new pod
+        let launch_result = self.launch_pod(params)?;
 
         // 4. Apply patch if we have one
         if let Some(patch_content) = patch {
@@ -2041,13 +2038,13 @@ impl Daemon for DaemonServer {
         Ok(launch_result)
     }
 
-    fn stop_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
-        let name = docker_name(&repo_path, &sandbox_name);
+    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
+        let name = docker_name(&repo_path, &pod_name);
 
         // Determine Docker socket from DB record
         let docker_socket = {
             let conn = self.db.lock().unwrap();
-            match db::get_sandbox(&conn, &repo_path, &sandbox_name.0)? {
+            match db::get_pod(&conn, &repo_path, &pod_name.0)? {
                 Some(record) => {
                     let host = DockerHost::from_db_string(&record.host)?;
                     match &host {
@@ -2076,15 +2073,15 @@ impl Daemon for DaemonServer {
         Ok(())
     }
 
-    fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
+    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
         use bollard::errors::Error as BollardError;
 
-        // Retrieve sandbox info to determine host
+        // Retrieve pod info to determine host
         let conn = self.db.lock().unwrap();
-        let sandbox_record = db::get_sandbox(&conn, &repo_path, &sandbox_name.0)?;
+        let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
         drop(conn);
 
-        let docker = if let Some(record) = sandbox_record {
+        let docker = if let Some(record) = pod_record {
             let host = DockerHost::from_db_string(&record.host)?;
             if let DockerHost::Ssh { .. } = &host {
                 let socket_path = self.ssh_forward.get_socket(&host)?;
@@ -2098,11 +2095,11 @@ impl Daemon for DaemonServer {
                 Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
             }
         } else {
-            // Sandbox not found in DB. Fallback to local.
+            // Pod not found in DB. Fallback to local.
             Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
         };
 
-        let name = docker_name(&repo_path, &sandbox_name);
+        let name = docker_name(&repo_path, &pod_name);
 
         // Stop the container with immediate SIGKILL (-t 0) because containers typically
         // run `sleep infinity` which won't handle SIGTERM gracefully anyway.
@@ -2131,32 +2128,32 @@ impl Daemon for DaemonServer {
             }
         }
 
-        // Unregister sandbox from git HTTP server
+        // Unregister pod from git HTTP server
         if let Some(token) = self
             .active_tokens
             .lock()
             .unwrap()
-            .remove(&(repo_path.clone(), sandbox_name.0.clone()))
+            .remove(&(repo_path.clone(), pod_name.0.clone()))
         {
             self.git_server_state.unregister(&token);
         }
 
-        // Clean up gateway refs for this sandbox
+        // Clean up gateway refs for this pod
         if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
-            cleanup_sandbox_refs(&gateway_path, &repo_path, &sandbox_name);
+            cleanup_pod_refs(&gateway_path, &repo_path, &pod_name);
         }
 
-        // Delete sandbox from database (cascades to conversations)
+        // Delete pod from database (cascades to conversations)
         let conn = self.db.lock().unwrap();
-        db::delete_sandbox(&conn, &repo_path, &sandbox_name.0)?;
+        db::delete_pod(&conn, &repo_path, &pod_name.0)?;
 
         Ok(())
     }
 
-    fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
-        // Get sandboxes from database (includes remote sandboxes)
+    fn list_pods(&self, repo_path: PathBuf) -> Result<Vec<PodInfo>> {
+        // Get pods from database (includes remote pods)
         let conn = self.db.lock().unwrap();
-        let db_sandboxes = db::list_sandboxes(&conn, &repo_path)?;
+        let db_pods = db::list_pods(&conn, &repo_path)?;
         drop(conn); // Release lock before calling Docker API
 
         // Get container status from local Docker
@@ -2164,34 +2161,34 @@ impl Daemon for DaemonServer {
             get_container_status_via_socket(&default_docker_socket(), &repo_path)?;
 
         // Collect unique remote hosts and check for existing connections
-        let mut remote_status_maps: HashMap<String, Option<HashMap<String, SandboxContainerInfo>>> =
+        let mut remote_status_maps: HashMap<String, Option<HashMap<String, PodContainerInfo>>> =
             HashMap::new();
-        for sandbox in &db_sandboxes {
-            let host = DockerHost::from_db_string(&sandbox.host).ok();
+        for pod in &db_pods {
+            let host = DockerHost::from_db_string(&pod.host).ok();
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
-            if is_remote && !remote_status_maps.contains_key(&sandbox.host) {
+            if is_remote && !remote_status_maps.contains_key(&pod.host) {
                 // Try to get existing socket for this remote
                 let status_map = host
                     .as_ref()
                     .and_then(|h| self.ssh_forward.try_get_socket(h))
                     .and_then(|socket| get_container_status_via_socket(&socket, &repo_path).ok());
-                remote_status_maps.insert(sandbox.host.clone(), status_map);
+                remote_status_maps.insert(pod.host.clone(), status_map);
             }
         }
 
         // Build combined list with status from Docker where available
-        let mut sandboxes = Vec::new();
-        for sandbox in db_sandboxes {
-            let host = DockerHost::from_db_string(&sandbox.host).ok();
+        let mut pods = Vec::new();
+        for pod in db_pods {
+            let host = DockerHost::from_db_string(&pod.host).ok();
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
 
             let container_info = if !is_remote {
-                local_container_status.get(&sandbox.name)
+                local_container_status.get(&pod.name)
             } else {
                 remote_status_maps
-                    .get(&sandbox.host)
+                    .get(&pod.host)
                     .and_then(|m| m.as_ref())
-                    .and_then(|status_map| status_map.get(&sandbox.name))
+                    .and_then(|status_map| status_map.get(&pod.name))
             };
 
             let status = match container_info {
@@ -2199,17 +2196,17 @@ impl Daemon for DaemonServer {
                 None => {
                     if is_remote
                         && remote_status_maps
-                            .get(&sandbox.host)
+                            .get(&pod.host)
                             .is_none_or(|m| m.is_none())
                     {
                         // No connection to remote -- we can't determine the actual status
-                        SandboxStatus::Disconnected
+                        PodStatus::Disconnected
                     } else {
                         // Container doesn't exist locally or on the remote
-                        match sandbox.status {
-                            db::SandboxStatus::Ready => SandboxStatus::Gone,
-                            db::SandboxStatus::Initializing => SandboxStatus::Stopped,
-                            db::SandboxStatus::Error => SandboxStatus::Stopped,
+                        match pod.status {
+                            db::PodStatus::Ready => PodStatus::Gone,
+                            db::PodStatus::Initializing => PodStatus::Stopped,
+                            db::PodStatus::Error => PodStatus::Stopped,
                         }
                     }
                 }
@@ -2217,34 +2214,33 @@ impl Daemon for DaemonServer {
 
             let container_id = container_info.and_then(|info| info.container_id.clone());
 
-            // Compute git status on the host by comparing HEAD to sandbox/<sandbox_name>
-            let repo_state = compute_git_status(&repo_path, &sandbox.name);
+            // Compute git status on the host by comparing HEAD to pod/<pod_name>
+            let repo_state = compute_git_status(&repo_path, &pod.name);
 
             // Display using DockerHost::Display to normalize the format
             // (e.g. strip default port 22 from old DB entries).
             let display_host = host
                 .map(|h| h.to_string())
-                .unwrap_or_else(|| sandbox.host.clone());
+                .unwrap_or_else(|| pod.host.clone());
 
-            sandboxes.push(SandboxInfo {
-                name: sandbox.name,
+            pods.push(PodInfo {
+                name: pod.name,
                 status,
-                created: sandbox.created_at.format("%Y-%m-%d %H:%M").to_string(),
+                created: pod.created_at.format("%Y-%m-%d %H:%M").to_string(),
                 host: display_host,
                 repo_state,
                 container_id,
             });
         }
 
-        Ok(sandboxes)
+        Ok(pods)
     }
 
-    fn list_ports(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<Vec<PortInfo>> {
+    fn list_ports(&self, pod_name: PodName, repo_path: PathBuf) -> Result<Vec<PortInfo>> {
         let conn = self.db.lock().unwrap();
-        let sandbox =
-            db::get_sandbox(&conn, &repo_path, &sandbox_name.0)?.context("sandbox not found")?;
+        let pod_rec = db::get_pod(&conn, &repo_path, &pod_name.0)?.context("pod not found")?;
 
-        let ports = db::list_forwarded_ports(&conn, sandbox.id)?;
+        let ports = db::list_forwarded_ports(&conn, pod_rec.id)?;
         Ok(ports
             .into_iter()
             .map(|p| PortInfo {
@@ -2259,30 +2255,24 @@ impl Daemon for DaemonServer {
         &self,
         id: Option<i64>,
         repo_path: PathBuf,
-        sandbox_name: String,
+        pod_name: String,
         model: String,
         provider: String,
         history: serde_json::Value,
     ) -> Result<i64> {
         let conn = self.db.lock().unwrap();
         db::save_conversation(
-            &conn,
-            id,
-            &repo_path,
-            &sandbox_name,
-            &model,
-            &provider,
-            &history,
+            &conn, id, &repo_path, &pod_name, &model, &provider, &history,
         )
     }
 
     fn list_conversations(
         &self,
         repo_path: PathBuf,
-        sandbox_name: String,
+        pod_name: String,
     ) -> Result<Vec<ConversationSummary>> {
         let conn = self.db.lock().unwrap();
-        let summaries = db::list_conversations(&conn, &repo_path, &sandbox_name)?;
+        let summaries = db::list_conversations(&conn, &repo_path, &pod_name)?;
         Ok(summaries
             .into_iter()
             .map(|s| ConversationSummary {
@@ -2305,14 +2295,14 @@ impl Daemon for DaemonServer {
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
-        let sandbox_id = {
+        let pod_id = {
             let conn = self.db.lock().unwrap();
-            let sandbox = db::get_sandbox(&conn, &request.repo_path, &request.sandbox_name.0)?
-                .context("Sandbox not found")?;
-            if db::has_claude_config_copied(&conn, sandbox.id)? {
+            let pod_rec = db::get_pod(&conn, &request.repo_path, &request.pod_name.0)?
+                .context("Pod not found")?;
+            if db::has_claude_config_copied(&conn, pod_rec.id)? {
                 return Ok(());
             }
-            sandbox.id
+            pod_rec.id
         };
 
         let docker = Docker::connect_with_socket(
@@ -2328,7 +2318,7 @@ impl Daemon for DaemonServer {
         // If this DB write fails, the next invocation will redo the copy,
         // which is fine -- overwriting complete files is idempotent.
         let conn = self.db.lock().unwrap();
-        db::mark_claude_config_copied(&conn, sandbox_id)?;
+        db::mark_claude_config_copied(&conn, pod_id)?;
 
         Ok(())
     }
@@ -2356,7 +2346,7 @@ pub fn run_daemon() -> Result<()> {
     let bridge_server = GitHttpServer::start(&bridge_ip, 0, git_server_state.clone())
         .context("starting git HTTP server on bridge network")?;
 
-    // TODO: Start this lazily only when a sandbox with unsafe-host network is created,
+    // TODO: Start this lazily only when a pod with unsafe-host network is created,
     // instead of always starting it.
     // Start git HTTP server on localhost for unsafe-host network mode
     let localhost_server = GitHttpServer::start("127.0.0.1", 0, git_server_state.clone())

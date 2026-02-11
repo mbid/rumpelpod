@@ -1,21 +1,21 @@
-//! Git HTTP server for exposing gateway repositories to sandboxes.
+//! Git HTTP server for exposing gateway repositories to pods.
 //!
 //! Runs a single axum server that serves multiple gateway git repositories via
 //! git-http-backend CGI, allowing containers to fetch from the host.
 //!
-//! Authentication uses bearer tokens: each sandbox is assigned a unique token
-//! when registered. The server maintains a mapping from tokens to sandbox info
-//! (gateway path and sandbox name). When a request arrives, the server looks up
-//! the token to determine which gateway to serve and which sandbox name to set.
+//! Authentication uses bearer tokens: each pod is assigned a unique token
+//! when registered. The server maintains a mapping from tokens to pod info
+//! (gateway path and pod name). When a request arrives, the server looks up
+//! the token to determine which gateway to serve and which pod name to set.
 //!
-//! The server sets the `SANDBOX_NAME` environment variable when invoking git-http-backend,
+//! The server sets the `POD_NAME` environment variable when invoking git-http-backend,
 //! which is then available to git hooks for access control.
 //!
 //! The server can listen on TCP sockets (for local containers) or Unix sockets
 //! (for SSH remote port forwarding to remote containers).
 //!
 //! Additionally, the server implements a minimal Git LFS Batch API so that
-//! sandboxes can download LFS objects (served from the host repo's `.git/lfs/`
+//! pods can download LFS objects (served from the host repo's `.git/lfs/`
 //! or the gateway's LFS storage) and upload new LFS objects to the gateway.
 
 use std::collections::{BTreeMap, HashMap};
@@ -36,7 +36,7 @@ use cgi_service::{CgiConfig, CgiService};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use log::{debug, error, info, warn};
-use rand::{distr::Alphanumeric, RngExt};
+use rand::{distr::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -49,26 +49,26 @@ use crate::async_runtime::RUNTIME;
 /// Path to git-http-backend CGI script.
 const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";
 
-/// Environment variable set by the HTTP server to identify the sandbox.
+/// Environment variable set by the HTTP server to identify the pod.
 /// This is used by the pre-receive hook for access control.
-pub const SANDBOX_NAME_ENV: &str = "SANDBOX_NAME";
+pub const POD_NAME_ENV: &str = "POD_NAME";
 
-/// Information about a registered sandbox.
+/// Information about a registered pod.
 #[derive(Clone)]
-struct SandboxInfo {
+struct PodInfo {
     /// Path to the gateway.git bare repository.
     gateway_path: PathBuf,
-    /// Name of the sandbox (used for access control in hooks).
-    sandbox_name: String,
+    /// Name of the pod (used for access control in hooks).
+    pod_name: String,
     /// Path to the host repository, used to locate `.git/lfs/objects/`.
     host_repo_path: PathBuf,
 }
 
 /// Shared state for the git HTTP server.
-/// Maps bearer tokens to sandbox information.
+/// Maps bearer tokens to pod information.
 #[derive(Clone, Default)]
 pub struct SharedGitServerState {
-    inner: Arc<Mutex<BTreeMap<String, SandboxInfo>>>,
+    inner: Arc<Mutex<BTreeMap<String, PodInfo>>>,
 }
 
 impl SharedGitServerState {
@@ -78,11 +78,11 @@ impl SharedGitServerState {
         }
     }
 
-    /// Register a sandbox and return its bearer token.
+    /// Register a pod and return its bearer token.
     pub fn register(
         &self,
         gateway_path: PathBuf,
-        sandbox_name: String,
+        pod_name: String,
         host_repo_path: PathBuf,
     ) -> String {
         let token: String = rand::rng()
@@ -91,9 +91,9 @@ impl SharedGitServerState {
             .map(char::from)
             .collect();
 
-        let info = SandboxInfo {
+        let info = PodInfo {
             gateway_path,
-            sandbox_name,
+            pod_name,
             host_repo_path,
         };
 
@@ -101,13 +101,13 @@ impl SharedGitServerState {
         token
     }
 
-    /// Unregister a sandbox by its token.
+    /// Unregister a pod by its token.
     pub fn unregister(&self, token: &str) {
         self.inner.lock().unwrap().remove(token);
     }
 
-    /// Look up sandbox info by token.
-    fn get(&self, token: &str) -> Option<SandboxInfo> {
+    /// Look up pod info by token.
+    fn get(&self, token: &str) -> Option<PodInfo> {
         self.inner.lock().unwrap().get(token).cloned()
     }
 }
@@ -122,7 +122,7 @@ pub struct GitHttpServer {
 }
 
 impl GitHttpServer {
-    /// Start a new git HTTP server with shared state for handling multiple sandboxes.
+    /// Start a new git HTTP server with shared state for handling multiple pods.
     ///
     /// The server binds to the specified address. If port is 0, a random port is assigned.
     /// Returns the server instance.
@@ -365,11 +365,11 @@ struct LfsError {
 
 // -- LFS helpers --------------------------------------------------------------
 
-/// Authenticate a request and return the sandbox info and bearer token.
+/// Authenticate a request and return the pod info and bearer token.
 fn authenticate(
     state: &SharedGitServerState,
     req: &Request<Body>,
-) -> Result<(SandboxInfo, String), Response> {
+) -> Result<(PodInfo, String), Response> {
     let auth_header = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -537,9 +537,9 @@ async fn lfs_batch_handler(
 
 /// Handle `GET /gateway.git/lfs/objects/:oid`.
 ///
-/// Serves the LFS object from gateway storage (sandbox uploads) or host storage
+/// Serves the LFS object from gateway storage (pod uploads) or host storage
 /// (objects that exist on the host).  Gateway storage is checked first so that
-/// sandbox-uploaded objects take precedence.
+/// pod-uploaded objects take precedence.
 async fn lfs_download_handler(
     State(state): State<SharedGitServerState>,
     AxumPath(oid): AxumPath<String>,
@@ -632,7 +632,7 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
         _ => return StatusCode::UNAUTHORIZED.into_response(),
     };
 
-    // Look up sandbox info
+    // Look up pod info
     let info = match state.get(token) {
         Some(info) => info,
         None => return StatusCode::UNAUTHORIZED.into_response(),
@@ -645,11 +645,11 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("/"));
 
-    // Configure CGI service for this specific sandbox
+    // Configure CGI service for this specific pod
     let cgi_config = CgiConfig::new(GIT_HTTP_BACKEND)
         .env("GIT_PROJECT_ROOT", gateway_parent.to_string_lossy())
         .env("GIT_HTTP_EXPORT_ALL", "")
-        .env(SANDBOX_NAME_ENV, &info.sandbox_name)
+        .env(POD_NAME_ENV, &info.pod_name)
         .script_name("");
 
     let mut cgi_service = CgiService::with_config(cgi_config);

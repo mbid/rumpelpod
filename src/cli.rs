@@ -5,18 +5,18 @@ use clap::{Args, Parser, Subcommand};
 use crate::config::Model;
 
 #[derive(Parser)]
-#[command(name = "sandbox")]
+#[command(name = "rumpel")]
 #[command(version)]
-#[command(about = "Sandbox management tool for LLM agents")]
-#[command(long_about = "Sandbox management tool for LLM agents.
+#[command(about = "Pod management tool for LLM agents")]
+#[command(long_about = "Pod management tool for LLM agents.
 
-Spawns isolated Docker containers with automatic git synchronization for running untrusted code safely. Each sandbox gets its own working copy of your repository where changes are isolated from the host filesystem.
+Spawns isolated Docker containers with automatic git synchronization for running untrusted code safely. Each pod gets its own working copy of your repository where changes are isolated from the host filesystem.
 
 SETUP:
   1. Create a .devcontainer/devcontainer.json for container settings
-  2. Optionally create a .sandbox.toml for agent settings
-  3. Run 'sandbox system-install' to start the background daemon
-  4. Use 'sandbox enter <name>' to create and enter sandboxes
+  2. Optionally create a .rumpelpod.toml for agent settings
+  3. Run 'rumpel system-install' to start the background daemon
+  4. Use 'rumpel enter <name>' to create and enter pods
 
 CONFIGURATION:
   .devcontainer/devcontainer.json (required):
@@ -25,9 +25,9 @@ CONFIGURATION:
     containerUser    User inside container (default: image's USER)
     runArgs          Additional Docker arguments (e.g., --runtime)
 
-  .sandbox.toml (optional):
+  .rumpelpod.toml (optional):
     [agent]
-    model            Default model for 'sandbox agent'
+    model            Default model for 'rumpel agent'
 
   See README.md for the full configuration reference.
 ")]
@@ -38,77 +38,77 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Enter a sandbox (create if needed)
-    #[command(long_about = "Enter a sandbox, creating it if it doesn't exist.
+    /// Enter a pod (create if needed)
+    #[command(long_about = "Enter a pod, creating it if it doesn't exist.
 
-Sandboxes are identified by name and are specific to the current repository. The same name in different repositories refers to different sandboxes.
+Pods are identified by name and are specific to the current repository. The same name in different repositories refers to different pods.
 
 By default, opens an interactive shell. You can also run a specific command by passing it after '--'.
 
-The working directory inside the sandbox corresponds to your current directory relative to the repository root.
+The working directory inside the pod corresponds to your current directory relative to the repository root.
 
 Examples:
-  sandbox enter dev              # Interactive shell in 'dev' sandbox
-  sandbox enter test -- make     # Run 'make' in 'test' sandbox
-  sandbox enter ci -- cargo test # Run tests in 'ci' sandbox
+  rumpel enter dev              # Interactive shell in pod
+  rumpel enter test -- make     # Run 'make' in 'test' pod
+  rumpel enter ci -- cargo test # Run tests in 'ci' pod
 ")]
     Enter(EnterCommand),
 
-    /// List all sandboxes for the current repository
-    #[command(long_about = "List all sandboxes for the current repository.
+    /// List all pods for the current repository
+    #[command(long_about = "List all pods for the current repository.
 
-Shows sandbox name, status (running/stopped), and creation time.
+Shows pod name, status (running/stopped), and creation time.
 ")]
     List,
 
-    /// Stop a running sandbox
-    #[command(long_about = "Stop a sandbox container without removing it.
+    /// Stop a running pod
+    #[command(long_about = "Stop a pod container without removing it.
 
-The container is stopped but preserved. Use 'sandbox enter' to restart it.
+The container is stopped but preserved. Use 'rumpel enter' to restart it.
 ")]
     Stop(StopCommand),
 
-    /// Delete a sandbox
-    #[command(long_about = "Delete a sandbox and its associated container.
+    /// Delete a pod
+    #[command(long_about = "Delete a pod and its associated container.
 
-This stops the container if running and removes all sandbox state. Any uncommitted changes in the sandbox will be lost.
+This stops the container if running and removes all pod state. Any uncommitted changes in the pod will be lost.
 ")]
     Delete(DeleteCommand),
 
-    /// Review changes in a sandbox using git difftool
-    #[command(long_about = "Review changes in a sandbox using git difftool.
+    /// Review changes in a pod using git difftool
+    #[command(long_about = "Review changes in a pod using git difftool.
 
-Shows the diff between the sandbox's primary branch and the merge base with its upstream branch. This effectively shows all changes made in the sandbox since it diverged from the host branch.
+Shows the diff between the pod's primary branch and the merge base with its upstream branch. This effectively shows all changes made in the pod since it diverged from the host branch.
 
-The sandbox must have been created while the host was on a branch (not in detached HEAD state) for the upstream to be set.
+The pod must have been created while the host was on a branch (not in detached HEAD state) for the upstream to be set.
 
 Examples:
-  sandbox review dev             # Review changes in 'dev' sandbox
+  rumpel review dev             # Review changes in 'dev' pod
 ")]
     Review(ReviewCommand),
 
-    /// Show forwarded ports for a sandbox
+    /// Show forwarded ports for a pod
     Ports(PortsCommand),
 
-    /// Recreate a sandbox
-    #[command(long_about = "Recreate a sandbox.
+    /// Recreate a pod
+    #[command(long_about = "Recreate a pod.
 
 Takes a snapshot of dirty files (including untracked files), destroys the container, and creates a new one with the snapshot applied.
 ")]
     Recreate(RecreateCommand),
 
-    /// Run an LLM agent inside a sandbox
-    #[command(long_about = "Run an LLM agent inside a sandbox.
+    /// Run an LLM agent inside a pod
+    #[command(long_about = "Run an LLM agent inside a pod.
 
-The agent runs autonomously, executing commands in the sandbox. All changes are isolated - safety comes from the sandbox, not from asking for permission.
+The agent runs autonomously, executing commands in the pod. All changes are isolated - safety comes from the pod isolation, not from asking for permission.
 
 Requires ANTHROPIC_API_KEY, XAI_API_KEY, or GEMINI_API_KEY environment variable depending on the model. Project-specific instructions can be provided in an AGENTS.md file.
 ")]
     Agent(AgentCommand),
 
-    /// Launch Claude Code in a persistent screen session inside a sandbox
+    /// Launch Claude Code in a persistent screen session inside a pod
     #[command(
-        long_about = "Launch Claude Code CLI inside a persistent screen session in a sandbox.
+        long_about = "Launch Claude Code CLI inside a persistent screen session in a pod.
 
 On first run, copies Claude Code config files (~/.claude.json, ~/.claude/settings.json) from the host into the container. Then attaches to or creates a GNU screen session running Claude Code.
 
@@ -117,85 +117,85 @@ Detach with Ctrl-a d to leave Claude Code running in the background. Re-run the 
 Requires 'screen' to be installed in the container image.
 
 Examples:
-  sandbox claude dev                    # Launch Claude Code in 'dev' sandbox
-  sandbox claude dev -- --model opus    # Pass args to claude CLI
+  rumpel claude dev                    # Launch Claude Code in 'dev' pod
+  rumpel claude dev -- --model opus    # Pass args to claude CLI
 "
     )]
     Claude(ClaudeCommand),
 
-    /// Run the sandbox daemon (internal)
+    /// Run the rumpelpod daemon (internal)
     #[command(hide = true)]
     Daemon,
 
-    /// Install the sandbox daemon as a systemd user service
-    #[command(long_about = "Install the sandbox daemon as a systemd user service.
+    /// Install the rumpelpod daemon as a systemd user service
+    #[command(long_about = "Install the rumpelpod daemon as a systemd user service.
 
-The daemon runs in the background and manages sandbox containers, handling git synchronization and container lifecycle. It starts automatically on login.
+The daemon runs in the background and manages pod containers, handling git synchronization and container lifecycle. It starts automatically on login.
 
-This is required before using other sandbox commands.
+This is required before using other rumpel commands.
 ")]
     SystemInstall,
 
-    /// Uninstall the sandbox daemon from systemd
-    #[command(long_about = "Uninstall the sandbox daemon from systemd.
+    /// Uninstall the rumpelpod daemon from systemd
+    #[command(long_about = "Uninstall the rumpelpod daemon from systemd.
 
-Stops the daemon and removes it from systemd. Existing sandbox containers are not automatically removed.
+Stops the daemon and removes it from systemd. Existing pod containers are not automatically removed.
 ")]
     SystemUninstall,
 }
 
 #[derive(Args)]
 pub struct EnterCommand {
-    /// Name for this sandbox instance
-    #[arg(help = "Name for this sandbox instance (e.g., 'dev', 'test')")]
+    /// Name for this pod instance
+    #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')")]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
-    /// Overrides .sandbox.toml setting.
+    /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
 
-    /// Command to run inside the sandbox (default: interactive shell)
+    /// Command to run inside the pod (default: interactive shell)
     #[arg(last = true, value_name = "COMMAND")]
     pub command: Vec<String>,
 }
 
 #[derive(Args)]
 pub struct StopCommand {
-    /// Name of the sandbox to stop
-    #[arg(help = "Name of the sandbox to stop")]
+    /// Name of the pod to stop
+    #[arg(help = "Name of the pod to stop")]
     pub name: String,
 }
 
 #[derive(Args)]
 pub struct DeleteCommand {
-    /// Name of the sandbox to delete
-    #[arg(help = "Name of the sandbox to delete")]
+    /// Name of the pod to delete
+    #[arg(help = "Name of the pod to delete")]
     pub name: String,
 }
 
 #[derive(Args)]
 pub struct RecreateCommand {
-    /// Name of the sandbox to recreate
-    #[arg(help = "Name of the sandbox to recreate")]
+    /// Name of the pod to recreate
+    #[arg(help = "Name of the pod to recreate")]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
-    /// Overrides .sandbox.toml setting.
+    /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
 }
 
 #[derive(Args)]
 pub struct PortsCommand {
-    /// Name of the sandbox
+    /// Name of the pod
     pub name: String,
 }
 
 #[derive(Args)]
 pub struct ReviewCommand {
-    /// Name of the sandbox to review
-    #[arg(help = "Name of the sandbox to review")]
+    /// Name of the pod to review
+    #[arg(help = "Name of the pod to review")]
     pub name: String,
 
     /// Skip prompting before opening each file
@@ -209,12 +209,12 @@ pub struct ReviewCommand {
 
 #[derive(Args)]
 pub struct AgentCommand {
-    /// Name of the sandbox to use
-    #[arg(help = "Name of the sandbox to use")]
+    /// Name of the pod to use
+    #[arg(help = "Name of the pod to use")]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
-    /// Overrides .sandbox.toml setting.
+    /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
 
@@ -268,12 +268,12 @@ pub struct AgentCommand {
 
 #[derive(Args)]
 pub struct ClaudeCommand {
-    /// Name for this sandbox instance
-    #[arg(help = "Name for this sandbox instance (e.g., 'dev', 'test')")]
+    /// Name for this pod instance
+    #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')")]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
-    /// Overrides .sandbox.toml setting.
+    /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
 

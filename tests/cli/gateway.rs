@@ -1,17 +1,17 @@
 //! Integration tests for the git gateway functionality.
 //!
 //! Tests verify that commits and branches are synchronized between the host
-//! repository and the gateway bare repository, and that sandboxes can access
+//! repository and the gateway bare repository, and that pods can access
 //! the gateway via HTTP.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
 use crate::common::{
-    build_test_image, create_commit, sandbox_command, write_test_sandbox_config,
-    write_test_sandbox_config_with_network, TestDaemon, TestRepo,
+    build_test_image, create_commit, pod_command, write_test_pod_config,
+    write_test_pod_config_with_network, TestDaemon, TestRepo,
 };
 
 /// Get the list of branches in a repository.
@@ -30,15 +30,15 @@ fn get_branches(repo_path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Get the list of sandbox remote-tracking refs in a repository.
-/// These are refs pushed by sandboxes, matching the pattern refs/remotes/sandbox/*@*
-/// (excludes refs/remotes/sandbox/host/* which are created by host pushes).
-fn get_sandbox_remote_refs(repo_path: &Path) -> Vec<String> {
+/// Get the list of pod remote-tracking refs in a repository.
+/// These are refs pushed by pods, matching the pattern refs/remotes/pod/*@*
+/// (excludes refs/remotes/pod/host/* which are created by host pushes).
+fn get_pod_remote_refs(repo_path: &Path) -> Vec<String> {
     let output: String = Command::new("git")
         .args([
             "for-each-ref",
             "--format=%(refname:short)",
-            "refs/remotes/sandbox/",
+            "refs/remotes/pod/",
         ])
         .current_dir(repo_path)
         .success()
@@ -48,7 +48,7 @@ fn get_sandbox_remote_refs(repo_path: &Path) -> Vec<String> {
     output
         .lines()
         .filter(|s| !s.is_empty())
-        // Filter to only sandbox refs with @ (exclude host/* refs)
+        // Filter to only pod refs with @ (exclude host/* refs)
         .filter(|s| s.contains('@'))
         .map(String::from)
         .collect()
@@ -119,10 +119,10 @@ fn amend_commit(repo_path: &Path, message: &str) {
         .expect("git commit --amend failed");
 }
 
-/// Get the gateway path for a repo by reading the sandbox remote URL.
+/// Get the gateway path for a repo by reading the rumpelpod remote URL.
 fn get_gateway_path(repo_path: &Path) -> Option<std::path::PathBuf> {
     Command::new("git")
-        .args(["remote", "get-url", "sandbox"])
+        .args(["remote", "get-url", "rumpelpod"])
         .current_dir(repo_path)
         .success()
         .ok()
@@ -131,7 +131,7 @@ fn get_gateway_path(repo_path: &Path) -> Option<std::path::PathBuf> {
 
 #[test]
 fn gateway_initial_branches_pushed() {
-    // Create repo with multiple branches before launching sandbox
+    // Create repo with multiple branches before launching pod
     let repo = TestRepo::new();
 
     // Create additional branches before building the image
@@ -144,15 +144,15 @@ fn gateway_initial_branches_pushed() {
     checkout_branch(repo.path(), "master");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox - this should set up gateway and push all branches
-    sandbox_command(&repo, &daemon)
+    // Launch pod - this should set up gateway and push all branches
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "hello"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Verify gateway was created and has all branches as host/<branch>
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
@@ -180,15 +180,15 @@ fn gateway_initial_branches_pushed() {
 fn gateway_commit_updates_branch() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
     let initial_commit = get_branch_commit(&gateway, "host/master");
@@ -214,15 +214,15 @@ fn gateway_commit_updates_branch() {
 fn gateway_force_push_updates_branch() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -253,15 +253,15 @@ fn gateway_new_branch_creation_pushed() {
     // Test that creating a new branch (without making a commit) is immediately pushed
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -303,15 +303,15 @@ fn gateway_branch_deletion_propagates() {
     checkout_branch(repo.path(), "master");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway with the branch
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway with the branch
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -339,15 +339,15 @@ fn gateway_host_reset_propagates() {
     // Test that resetting a branch (without making a new commit) updates the gateway
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -380,21 +380,21 @@ fn gateway_host_reset_propagates() {
 
 #[test]
 fn gateway_http_remotes_configured_in_container() {
-    // Test that the container gets "host" and "sandbox" remotes pointing to the gateway
+    // Test that the container gets "host" and "rumpelpod" remotes pointing to the gateway
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
+    // Launch pod
+    pod_command(&repo, &daemon)
         .args(["enter", "http-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Check that remotes are configured
-    let remotes_output = sandbox_command(&repo, &daemon)
+    let remotes_output = pod_command(&repo, &daemon)
         .args(["enter", "http-test", "--", "git", "remote"])
         .success()
         .expect("Failed to get git remotes");
@@ -403,12 +403,12 @@ fn gateway_http_remotes_configured_in_container() {
 
     assert!(
         remotes.contains("host"),
-        "Container should have 'host' remote, got: {}",
+        "Container should have remote, got: {}",
         remotes
     );
     assert!(
-        remotes.contains("sandbox"),
-        "Container should have 'sandbox' remote, got: {}",
+        remotes.contains("rumpelpod"),
+        "Container should have remote, got: {}",
         remotes
     );
 }
@@ -425,24 +425,24 @@ fn gateway_http_fetch_works_from_container() {
     checkout_branch(repo.path(), "master");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox (this sets up gateway and pushes branches)
-    sandbox_command(&repo, &daemon)
+    // Launch pod (this sets up gateway and pushes branches)
+    pod_command(&repo, &daemon)
         .args(["enter", "fetch-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Fetch from host remote inside the container
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fetch-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch from host remote");
 
     // Verify the fetched commit matches
-    let fetched_commit_output = sandbox_command(&repo, &daemon)
+    let fetched_commit_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "fetch-test",
@@ -469,18 +469,18 @@ fn gateway_http_fetch_new_commits_after_create() {
     // Test that new commits made on host after container creation can be fetched
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox first
-    sandbox_command(&repo, &daemon)
+    // Launch pod first
+    pod_command(&repo, &daemon)
         .args(["enter", "new-commits-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Initial fetch
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "new-commits-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to initial fetch");
@@ -490,13 +490,13 @@ fn gateway_http_fetch_new_commits_after_create() {
     let new_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
     // Fetch again - should get the new commit
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "new-commits-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch new commits");
 
     // Verify we got the new commit
-    let fetched_commit_output = sandbox_command(&repo, &daemon)
+    let fetched_commit_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "new-commits-test",
@@ -523,18 +523,18 @@ fn gateway_http_works_with_non_root_user() {
     // Test that git remotes work when running as a non-root user
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
+    // Launch pod
+    pod_command(&repo, &daemon)
         .args(["enter", "user-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Check that remotes are configured
-    let remotes_output = sandbox_command(&repo, &daemon)
+    let remotes_output = pod_command(&repo, &daemon)
         .args(["enter", "user-test", "--", "git", "remote", "-v"])
         .success()
         .expect("Failed to get git remotes");
@@ -543,106 +543,106 @@ fn gateway_http_works_with_non_root_user() {
 
     assert!(
         remotes.contains("host"),
-        "Container should have 'host' remote, got: {}",
+        "Container should have remote, got: {}",
         remotes
     );
 
     // Fetch should work
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "user-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch from host remote");
 }
 
 #[test]
-fn gateway_sandbox_commit_triggers_push() {
-    // Test that creating a commit in the sandbox triggers a push to the gateway
+fn gateway_pod_commit_triggers_push() {
+    // Test that creating a commit in the pod triggers a push to the gateway
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "commit-push-test";
+    let pod_name = "commit-push-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Create a commit in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Create a commit in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
             "--allow-empty",
             "-m",
-            "Sandbox commit",
+            "Pod commit",
         ])
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
-    // Get the commit hash from the sandbox
-    let sandbox_commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    // Get the commit hash from the pod
+    let pod_commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
-        .expect("Failed to get sandbox commit");
+        .expect("Failed to get pod commit");
 
-    let sandbox_commit = String::from_utf8_lossy(&sandbox_commit_output)
+    let pod_commit = String::from_utf8_lossy(&pod_commit_output)
         .trim()
         .to_string();
 
-    // Check that the gateway has the branch sandbox/<sandbox_name>@<sandbox_name>
-    // (sandbox is on a branch named after itself, not "master")
+    // Check that the gateway has the branch pod/<pod_name>@<pod_name>
+    // (pod is on a branch named after itself, not "master")
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
+    let expected_branch = format!("pod/{}@{}", pod_name, pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
         gateway_commit,
-        Some(sandbox_commit),
-        "Gateway should have branch '{}' with sandbox's commit",
+        Some(pod_commit),
+        "Gateway should have branch '{}' with pod's commit",
         expected_branch
     );
 }
 
 #[test]
-fn gateway_sandbox_push_works_from_new_branch() {
-    // Test that pushing from a new branch in sandbox works
+fn gateway_pod_push_works_from_new_branch() {
+    // Test that pushing from a new branch in pod works
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "new-branch-push";
+    let pod_name = "new-branch-push";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Create a new branch and commit in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Create a new branch and commit in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "checkout",
             "-b",
-            "feature-from-sandbox",
+            "feature-from-pod",
         ])
         .success()
-        .expect("Failed to create branch in sandbox");
+        .expect("Failed to create branch in pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -651,56 +651,56 @@ fn gateway_sandbox_push_works_from_new_branch() {
             "Feature commit",
         ])
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
-    // Get the commit hash from the sandbox
-    let sandbox_commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    // Get the commit hash from the pod
+    let pod_commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
-        .expect("Failed to get sandbox commit");
+        .expect("Failed to get pod commit");
 
-    let sandbox_commit = String::from_utf8_lossy(&sandbox_commit_output)
+    let pod_commit = String::from_utf8_lossy(&pod_commit_output)
         .trim()
         .to_string();
 
     // Check that the gateway has the branch
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/feature-from-sandbox@{}", sandbox_name);
+    let expected_branch = format!("pod/feature-from-pod@{}", pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
         gateway_commit,
-        Some(sandbox_commit),
-        "Gateway should have branch '{}' with sandbox's commit",
+        Some(pod_commit),
+        "Gateway should have branch '{}' with pod's commit",
         expected_branch
     );
 }
 
 #[test]
-fn gateway_multiple_sandboxes_push_independently() {
-    // Test that multiple sandboxes can push to the gateway without conflicts
+fn gateway_multiple_pods_push_independently() {
+    // Test that multiple pods can push to the gateway without conflicts
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch two sandboxes
-    sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-a", "--", "echo", "setup"])
+    // Launch two pods
+    pod_command(&repo, &daemon)
+        .args(["enter", "pod-a", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox-a enter");
+        .expect("Failed to run pod-a enter");
 
-    sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-b", "--", "echo", "setup"])
+    pod_command(&repo, &daemon)
+        .args(["enter", "pod-b", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox-b enter");
+        .expect("Failed to run pod-b enter");
 
-    // Create commits in both sandboxes on the same branch name
-    sandbox_command(&repo, &daemon)
+    // Create commits in both pods on the same branch name
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            "sandbox-a",
+            "pod-a",
             "--",
             "git",
             "commit",
@@ -709,12 +709,12 @@ fn gateway_multiple_sandboxes_push_independently() {
             "Commit from A",
         ])
         .success()
-        .expect("Failed to create commit in sandbox-a");
+        .expect("Failed to create commit in pod-a");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            "sandbox-b",
+            "pod-b",
             "--",
             "git",
             "commit",
@@ -723,66 +723,66 @@ fn gateway_multiple_sandboxes_push_independently() {
             "Commit from B",
         ])
         .success()
-        .expect("Failed to create commit in sandbox-b");
+        .expect("Failed to create commit in pod-b");
 
     // Get commit hashes
-    let commit_a_output = sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-a", "--", "git", "rev-parse", "HEAD"])
+    let commit_a_output = pod_command(&repo, &daemon)
+        .args(["enter", "pod-a", "--", "git", "rev-parse", "HEAD"])
         .success()
-        .expect("Failed to get sandbox-a commit");
+        .expect("Failed to get pod-a commit");
     let commit_a = String::from_utf8_lossy(&commit_a_output).trim().to_string();
 
-    let commit_b_output = sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-b", "--", "git", "rev-parse", "HEAD"])
+    let commit_b_output = pod_command(&repo, &daemon)
+        .args(["enter", "pod-b", "--", "git", "rev-parse", "HEAD"])
         .success()
-        .expect("Failed to get sandbox-b commit");
+        .expect("Failed to get pod-b commit");
     let commit_b = String::from_utf8_lossy(&commit_b_output).trim().to_string();
 
     // Check that the gateway has both branches with different commits
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
-    let gateway_commit_a = get_branch_commit(&gateway, "sandbox/sandbox-a@sandbox-a");
-    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/sandbox-b@sandbox-b");
+    let gateway_commit_a = get_branch_commit(&gateway, "pod/pod-a@pod-a");
+    let gateway_commit_b = get_branch_commit(&gateway, "pod/pod-b@pod-b");
 
     assert_eq!(
         gateway_commit_a,
         Some(commit_a.clone()),
-        "Gateway should have sandbox-a's commit"
+        "Gateway should have pod-a's commit"
     );
     assert_eq!(
         gateway_commit_b,
         Some(commit_b.clone()),
-        "Gateway should have sandbox-b's commit"
+        "Gateway should have pod-b's commit"
     );
 
     // The commits should be different
     assert_ne!(
         commit_a, commit_b,
-        "Commits from different sandboxes should be different"
+        "Commits from different pods should be different"
     );
 }
 
 #[test]
-fn gateway_sandbox_amend_triggers_push() {
-    // Test that amending a commit in the sandbox triggers a push to the gateway
+fn gateway_pod_amend_triggers_push() {
+    // Test that amending a commit in the pod triggers a push to the gateway
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "amend-push-test";
+    let pod_name = "amend-push-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Create a commit in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Create a commit in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -791,10 +791,10 @@ fn gateway_sandbox_amend_triggers_push() {
             "Original commit",
         ])
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
-    let original_commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let original_commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get original commit");
     let original_commit = String::from_utf8_lossy(&original_commit_output)
@@ -802,10 +802,10 @@ fn gateway_sandbox_amend_triggers_push() {
         .to_string();
 
     // Amend the commit
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -815,10 +815,10 @@ fn gateway_sandbox_amend_triggers_push() {
             "Amended commit",
         ])
         .success()
-        .expect("Failed to amend commit in sandbox");
+        .expect("Failed to amend commit in pod");
 
-    let amended_commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let amended_commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get amended commit");
     let amended_commit = String::from_utf8_lossy(&amended_commit_output)
@@ -833,7 +833,7 @@ fn gateway_sandbox_amend_triggers_push() {
 
     // Check that the gateway has the amended commit
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
+    let expected_branch = format!("pod/{}@{}", pod_name, pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -848,15 +848,15 @@ fn gateway_host_amend_updates_branch() {
     // Test that amending a commit on the host updates the gateway
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -883,30 +883,30 @@ fn gateway_host_amend_updates_branch() {
 }
 
 #[test]
-fn gateway_sandbox_cannot_push_to_other_sandbox_namespace() {
-    // Test that sandbox-a cannot push to sandbox-b's namespace
+fn gateway_pod_cannot_push_to_other_pod_namespace() {
+    // Test that pod-a cannot push to pod-b's namespace
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox-a
-    sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-a", "--", "echo", "setup"])
+    // Launch pod-a
+    pod_command(&repo, &daemon)
+        .args(["enter", "pod-a", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox-a enter");
+        .expect("Failed to run pod-a enter");
 
-    // Launch sandbox-b and create a commit so it has a branch in the gateway
-    sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-b", "--", "echo", "setup"])
+    // Launch pod-b and create a commit so it has a branch in the gateway
+    pod_command(&repo, &daemon)
+        .args(["enter", "pod-b", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox-b enter");
+        .expect("Failed to run pod-b enter");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            "sandbox-b",
+            "pod-b",
             "--",
             "git",
             "commit",
@@ -915,35 +915,35 @@ fn gateway_sandbox_cannot_push_to_other_sandbox_namespace() {
             "Commit from B",
         ])
         .success()
-        .expect("Failed to create commit in sandbox-b");
+        .expect("Failed to create commit in pod-b");
 
-    // Get sandbox-b's commit
-    let commit_b_output = sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-b", "--", "git", "rev-parse", "HEAD"])
+    // Get pod-b's commit
+    let commit_b_output = pod_command(&repo, &daemon)
+        .args(["enter", "pod-b", "--", "git", "rev-parse", "HEAD"])
         .success()
-        .expect("Failed to get sandbox-b commit");
+        .expect("Failed to get pod-b commit");
     let commit_b = String::from_utf8_lossy(&commit_b_output).trim().to_string();
 
-    // Verify sandbox-b's branch exists in gateway
+    // Verify pod-b's branch exists in gateway
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let gateway_commit_b = get_branch_commit(&gateway, "sandbox/sandbox-b@sandbox-b");
+    let gateway_commit_b = get_branch_commit(&gateway, "pod/pod-b@pod-b");
     assert_eq!(
         gateway_commit_b,
         Some(commit_b.clone()),
-        "Gateway should have sandbox-b's commit"
+        "Gateway should have pod-b's commit"
     );
 
-    // Now try to have sandbox-a push directly to sandbox-b's namespace
+    // Now try to have pod-a push directly to pod-b's namespace
     // This should fail because of access control
-    let result = sandbox_command(&repo, &daemon)
+    let result = pod_command(&repo, &daemon)
         .args([
             "enter",
-            "sandbox-a",
+            "pod-a",
             "--",
             "git",
             "push",
-            "sandbox",
-            "HEAD:refs/heads/sandbox/sandbox-b@sandbox-b",
+            "rumpelpod",
+            "HEAD:refs/heads/pod/pod-b@pod-b",
             "--force",
         ])
         .output()
@@ -952,46 +952,46 @@ fn gateway_sandbox_cannot_push_to_other_sandbox_namespace() {
     // The push should fail
     assert!(
         !result.status.success(),
-        "Push to another sandbox's namespace should fail, but it succeeded"
+        "Push to another pod's namespace should fail, but it succeeded"
     );
 
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("sandbox 'sandbox-a' cannot push to") || stderr.contains("cannot push"),
+        stderr.contains("pod 'pod-a' cannot push to") || stderr.contains("cannot push"),
         "Error message should mention access control, got: {}",
         stderr
     );
 
-    // Verify sandbox-b's branch still has its original commit (not overwritten)
-    let gateway_commit_b_after = get_branch_commit(&gateway, "sandbox/sandbox-b@sandbox-b");
+    // Verify pod-b's branch still has its original commit (not overwritten)
+    let gateway_commit_b_after = get_branch_commit(&gateway, "pod/pod-b@pod-b");
     assert_eq!(
         gateway_commit_b_after,
         Some(commit_b),
-        "sandbox-b's branch should not have been modified"
+        "pod-b's branch should not have been modified"
     );
 }
 
 #[test]
-fn gateway_sandbox_cannot_push_to_host_namespace() {
-    // Test that a sandbox cannot push to the host/* namespace
+fn gateway_pod_cannot_push_to_host_namespace() {
+    // Test that a pod cannot push to the host/* namespace
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
+    // Launch pod
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Get host/master commit before the attack
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
     let host_commit_before = get_branch_commit(&gateway, "host/master");
 
-    // Create a commit in sandbox
-    sandbox_command(&repo, &daemon)
+    // Create a commit in pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
@@ -1003,17 +1003,17 @@ fn gateway_sandbox_cannot_push_to_host_namespace() {
             "Malicious commit",
         ])
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
     // Try to push to host/master - should be rejected
-    let result = sandbox_command(&repo, &daemon)
+    let result = pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
             "--",
             "git",
             "push",
-            "sandbox",
+            "rumpelpod",
             "HEAD:refs/heads/host/master",
             "--force",
         ])
@@ -1028,7 +1028,7 @@ fn gateway_sandbox_cannot_push_to_host_namespace() {
 
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(
-        stderr.contains("cannot push to") || stderr.contains("sandbox"),
+        stderr.contains("cannot push to") || stderr.contains("rumpelpod"),
         "Error message should mention access control, got: {}",
         stderr
     );
@@ -1042,39 +1042,31 @@ fn gateway_sandbox_cannot_push_to_host_namespace() {
 }
 
 #[test]
-fn gateway_sandbox_can_push_to_own_namespace() {
-    // Test that a sandbox can push to its own namespace (positive test)
+fn gateway_pod_can_push_to_own_namespace() {
+    // Test that a pod can push to its own namespace (positive test)
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "my-sandbox";
+    let pod_name = "my-pod";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Create a new branch and commit
-    sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "checkout",
-            "-b",
-            "feature",
-        ])
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "checkout", "-b", "feature"])
         .success()
         .expect("Failed to create branch");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -1086,22 +1078,22 @@ fn gateway_sandbox_can_push_to_own_namespace() {
         .expect("Failed to create commit");
 
     // Get the commit hash
-    let commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit");
     let commit = String::from_utf8_lossy(&commit_output).trim().to_string();
 
     // Manually push to our own namespace with explicit refspec
-    let explicit_push = sandbox_command(&repo, &daemon)
+    let explicit_push = pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "push",
-            "sandbox",
-            &format!("HEAD:refs/heads/sandbox/feature@{}", sandbox_name),
+            "rumpelpod",
+            &format!("HEAD:refs/heads/pod/feature@{}", pod_name),
             "--force",
         ])
         .output()
@@ -1115,7 +1107,7 @@ fn gateway_sandbox_can_push_to_own_namespace() {
 
     // Verify the branch exists with our commit
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/feature@{}", sandbox_name);
+    let expected_branch = format!("pod/feature@{}", pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -1127,26 +1119,26 @@ fn gateway_sandbox_can_push_to_own_namespace() {
 }
 
 #[test]
-fn gateway_sandbox_reset_triggers_push() {
-    // Test that resetting in the sandbox (without making a new commit) triggers a push to the gateway
+fn gateway_pod_reset_triggers_push() {
+    // Test that resetting in the pod (without making a new commit) triggers a push to the gateway
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "reset-push-test";
+    let pod_name = "reset-push-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Create two commits in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Create two commits in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -1157,16 +1149,16 @@ fn gateway_sandbox_reset_triggers_push() {
         .success()
         .expect("Failed to create commit 1");
 
-    let commit1_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let commit1_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit1");
     let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -1179,21 +1171,13 @@ fn gateway_sandbox_reset_triggers_push() {
 
     // Verify gateway has commit2
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
+    let expected_branch = format!("pod/{}@{}", pod_name, pod_name);
 
     // Reset back to commit1 (no new commit created)
-    sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "reset",
-            "--hard",
-            &commit1,
-        ])
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "reset", "--hard", &commit1])
         .success()
-        .expect("Failed to reset in sandbox");
+        .expect("Failed to reset in pod");
 
     // Gateway should now have commit1 (reference-transaction hook triggers on reset)
     let gateway_commit_after_reset = get_branch_commit(&gateway, &expected_branch);
@@ -1205,25 +1189,25 @@ fn gateway_sandbox_reset_triggers_push() {
 }
 
 #[test]
-fn gateway_sandbox_branch_creation_triggers_push() {
-    // Test that creating a new branch (without making a commit) in the sandbox triggers a push
+fn gateway_pod_branch_creation_triggers_push() {
+    // Test that creating a new branch (without making a commit) in the pod triggers a push
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "branch-create-test";
+    let pod_name = "branch-create-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
     // Verify branch doesn't exist yet
-    let expected_branch = format!("sandbox/new-feature@{}", sandbox_name);
+    let expected_branch = format!("pod/new-feature@{}", pod_name);
     let branches_before = get_branches(&gateway);
     assert!(
         !branches_before.contains(&expected_branch),
@@ -1231,8 +1215,8 @@ fn gateway_sandbox_branch_creation_triggers_push() {
     );
 
     // Get the current commit
-    let current_commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let current_commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get current commit");
     let current_commit = String::from_utf8_lossy(&current_commit_output)
@@ -1240,10 +1224,10 @@ fn gateway_sandbox_branch_creation_triggers_push() {
         .to_string();
 
     // Create a new branch WITHOUT making a commit
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "checkout",
@@ -1251,7 +1235,7 @@ fn gateway_sandbox_branch_creation_triggers_push() {
             "new-feature",
         ])
         .success()
-        .expect("Failed to create branch in sandbox");
+        .expect("Failed to create branch in pod");
 
     // Gateway should now have the new branch (reference-transaction hook triggers on branch creation)
     let branches_after = get_branches(&gateway);
@@ -1272,50 +1256,50 @@ fn gateway_sandbox_branch_creation_triggers_push() {
 }
 
 #[test]
-fn gateway_sandbox_push_syncs_to_host_remote_ref() {
-    // Test that when a sandbox pushes to gateway, it appears as a remote-tracking ref in host
+fn gateway_pod_push_syncs_to_host_remote_ref() {
+    // Test that when a pod pushes to gateway, it appears as a remote-tracking ref in host
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "sync-test";
+    let pod_name = "sync-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Note: The sandbox branch is created and checked out on first entry, which
-    // triggers a push to the gateway. This is expected behavior - sandboxes now
+    // Note: The pod branch is created and checked out on first entry, which
+    // triggers a push to the gateway. This is expected behavior - pods now
     // automatically sync their initial branch.
-    let expected_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
+    let expected_ref = format!("pod/{}@{}", pod_name, pod_name);
 
-    // Create a commit in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Create a commit in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
             "--allow-empty",
             "-m",
-            "Sandbox commit",
+            "Pod commit",
         ])
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
     // Get the commit hash
-    let commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit");
     let commit = String::from_utf8_lossy(&commit_output).trim().to_string();
 
-    // Host should have the sandbox commit as a remote-tracking ref
-    let refs_after = get_sandbox_remote_refs(repo.path());
+    // Host should have remote-tracking ref
+    let refs_after = get_pod_remote_refs(repo.path());
     assert!(
         refs_after.contains(&expected_ref),
         "Host should have remote ref {}, got: {:?}",
@@ -1328,31 +1312,31 @@ fn gateway_sandbox_push_syncs_to_host_remote_ref() {
     assert_eq!(
         host_commit,
         Some(commit),
-        "Host remote ref should point to sandbox commit"
+        "Host remote ref should point to pod commit"
     );
 }
 
 #[test]
-fn gateway_sandbox_branch_sync_to_host() {
-    // Test that creating a new branch in sandbox syncs to host remote refs
+fn gateway_pod_branch_sync_to_host() {
+    // Test that creating a new branch in pod syncs to host remote refs
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "branch-sync-test";
+    let pod_name = "branch-sync-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Create a new branch in sandbox
-    sandbox_command(&repo, &daemon)
+    // Create a new branch in pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "checkout",
@@ -1360,11 +1344,11 @@ fn gateway_sandbox_branch_sync_to_host() {
             "feature-x",
         ])
         .success()
-        .expect("Failed to create branch in sandbox");
+        .expect("Failed to create branch in pod");
 
-    // Host should have the new branch as a remote-tracking ref
-    let expected_ref = format!("sandbox/feature-x@{}", sandbox_name);
-    let refs = get_sandbox_remote_refs(repo.path());
+    // Host should have remote-tracking ref
+    let expected_ref = format!("pod/feature-x@{}", pod_name);
+    let refs = get_pod_remote_refs(repo.path());
     assert!(
         refs.contains(&expected_ref),
         "Host should have remote ref {}, got: {:?}",
@@ -1374,62 +1358,62 @@ fn gateway_sandbox_branch_sync_to_host() {
 }
 
 #[test]
-fn gateway_multiple_sandboxes_sync_to_host() {
-    // Test that multiple sandboxes can sync independently to host remote refs
+fn gateway_multiple_pods_sync_to_host() {
+    // Test that multiple pods can sync independently to host remote refs
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Create first sandbox and commit
-    let sandbox1 = "multi-sync-1";
-    sandbox_command(&repo, &daemon)
+    // Create first pod and commit
+    let pod1 = "multi-sync-1";
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox1,
+            pod1,
             "--",
             "git",
             "commit",
             "--allow-empty",
             "-m",
-            "Commit from sandbox 1",
+            "Commit from pod 1",
         ])
         .success()
-        .expect("Failed to create commit in sandbox 1");
+        .expect("Failed to create commit in pod 1");
 
-    let commit1_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox1, "--", "git", "rev-parse", "HEAD"])
+    let commit1_output = pod_command(&repo, &daemon)
+        .args(["enter", pod1, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit 1");
     let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
 
-    // Create second sandbox and commit
-    let sandbox2 = "multi-sync-2";
-    sandbox_command(&repo, &daemon)
+    // Create second pod and commit
+    let pod2 = "multi-sync-2";
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox2,
+            pod2,
             "--",
             "git",
             "commit",
             "--allow-empty",
             "-m",
-            "Commit from sandbox 2",
+            "Commit from pod 2",
         ])
         .success()
-        .expect("Failed to create commit in sandbox 2");
+        .expect("Failed to create commit in pod 2");
 
-    let commit2_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox2, "--", "git", "rev-parse", "HEAD"])
+    let commit2_output = pod_command(&repo, &daemon)
+        .args(["enter", pod2, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit 2");
     let commit2 = String::from_utf8_lossy(&commit2_output).trim().to_string();
 
-    // Host should have both remote refs
-    let refs = get_sandbox_remote_refs(repo.path());
-    let expected_ref1 = format!("sandbox/{}@{}", sandbox1, sandbox1);
-    let expected_ref2 = format!("sandbox/{}@{}", sandbox2, sandbox2);
+    // Host should have remote refs
+    let refs = get_pod_remote_refs(repo.path());
+    let expected_ref1 = format!("pod/{}@{}", pod1, pod1);
+    let expected_ref2 = format!("pod/{}@{}", pod2, pod2);
 
     assert!(
         refs.contains(&expected_ref1),
@@ -1448,30 +1432,30 @@ fn gateway_multiple_sandboxes_sync_to_host() {
     assert_eq!(
         get_remote_ref_commit(repo.path(), &expected_ref1),
         Some(commit1),
-        "First sandbox remote ref should have correct commit"
+        "First pod remote ref should have correct commit"
     );
     assert_eq!(
         get_remote_ref_commit(repo.path(), &expected_ref2),
         Some(commit2),
-        "Second sandbox remote ref should have correct commit"
+        "Second pod remote ref should have correct commit"
     );
 }
 
 #[test]
-fn gateway_sandbox_reset_syncs_to_host_via_force_push() {
-    // Test that resetting in sandbox (requiring force push) syncs to host remote refs
+fn gateway_pod_reset_syncs_to_host_via_force_push() {
+    // Test that resetting in pod (requiring force push) syncs to host remote refs
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "force-push-test";
+    let pod_name = "force-push-test";
 
-    // Launch sandbox and create two commits
-    sandbox_command(&repo, &daemon)
+    // Launch pod and create two commits
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -1482,16 +1466,16 @@ fn gateway_sandbox_reset_syncs_to_host_via_force_push() {
         .success()
         .expect("Failed to create first commit");
 
-    let commit1_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let commit1_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit1");
     let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -1502,14 +1486,14 @@ fn gateway_sandbox_reset_syncs_to_host_via_force_push() {
         .success()
         .expect("Failed to create second commit");
 
-    let commit2_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    let commit2_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit2");
     let commit2 = String::from_utf8_lossy(&commit2_output).trim().to_string();
 
     // Verify host has commit2
-    let expected_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
+    let expected_ref = format!("pod/{}@{}", pod_name, pod_name);
     assert_eq!(
         get_remote_ref_commit(repo.path(), &expected_ref),
         Some(commit2.clone()),
@@ -1517,18 +1501,10 @@ fn gateway_sandbox_reset_syncs_to_host_via_force_push() {
     );
 
     // Reset back to commit1 (requires force push to update host remote ref)
-    sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "reset",
-            "--hard",
-            &commit1,
-        ])
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "reset", "--hard", &commit1])
         .success()
-        .expect("Failed to reset in sandbox");
+        .expect("Failed to reset in pod");
 
     // Host remote ref should now point to commit1 (force push succeeded)
     assert_eq!(
@@ -1543,18 +1519,18 @@ fn gateway_host_head_synced_on_setup() {
     // Test that host/HEAD is synced to the gateway when the gateway is set up
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Get the current HEAD commit before launching sandbox
+    // Get the current HEAD commit before launching pod
     let head_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
-    // Launch sandbox - this triggers gateway setup
-    sandbox_command(&repo, &daemon)
+    // Launch pod - this triggers gateway setup
+    pod_command(&repo, &daemon)
         .args(["enter", "head-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     // Verify gateway has host/HEAD
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
@@ -1575,43 +1551,41 @@ fn gateway_host_head_synced_on_setup() {
 }
 
 #[test]
-fn gateway_host_head_available_in_sandbox() {
-    // Test that sandbox can access host/HEAD as a remote-tracking ref
+fn gateway_host_head_available_in_pod() {
+    // Test that pod can access host/HEAD as a remote-tracking ref
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // Get the current HEAD commit
     let head_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
-    // Launch sandbox and fetch host refs
-    sandbox_command(&repo, &daemon)
-        .args(["enter", "sandbox-head-test", "--", "git", "fetch", "host"])
+    // Launch pod and fetch host refs
+    pod_command(&repo, &daemon)
+        .args(["enter", "pod-head-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch host refs");
 
-    // Verify sandbox can resolve host/HEAD
-    let sandbox_head_output = sandbox_command(&repo, &daemon)
+    // Verify pod can resolve host/HEAD
+    let pod_head_output = pod_command(&repo, &daemon)
         .args([
             "enter",
-            "sandbox-head-test",
+            "pod-head-test",
             "--",
             "git",
             "rev-parse",
             "host/HEAD",
         ])
         .success()
-        .expect("Failed to resolve host/HEAD in sandbox");
+        .expect("Failed to resolve host/HEAD in pod");
 
-    let sandbox_head_commit = String::from_utf8_lossy(&sandbox_head_output)
-        .trim()
-        .to_string();
+    let pod_head_commit = String::from_utf8_lossy(&pod_head_output).trim().to_string();
 
     assert_eq!(
-        sandbox_head_commit, head_commit,
-        "Sandbox should be able to resolve host/HEAD to the host's current commit"
+        pod_head_commit, head_commit,
+        "Pod should be able to resolve host/HEAD to the host's current commit"
     );
 }
 
@@ -1620,15 +1594,15 @@ fn gateway_host_head_updates_on_commit() {
     // Test that host/HEAD is updated when a new commit is made
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway
+    pod_command(&repo, &daemon)
         .args(["enter", "head-commit-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -1669,15 +1643,15 @@ fn gateway_host_head_updates_on_branch_switch() {
     assert_ne!(master_commit, feature_commit);
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway (currently on master)
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway (currently on master)
+    pod_command(&repo, &daemon)
         .args(["enter", "branch-switch-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -1698,13 +1672,13 @@ fn gateway_host_head_updates_on_branch_switch() {
         "host/HEAD should point to feature commit after branch switch"
     );
 
-    // Sandbox should see the updated HEAD after fetch
-    sandbox_command(&repo, &daemon)
+    // Pod should see the updated HEAD after fetch
+    pod_command(&repo, &daemon)
         .args(["enter", "branch-switch-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch after branch switch");
 
-    let sandbox_head_output = sandbox_command(&repo, &daemon)
+    let pod_head_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "branch-switch-test",
@@ -1716,13 +1690,11 @@ fn gateway_host_head_updates_on_branch_switch() {
         .success()
         .expect("Failed to resolve host/HEAD");
 
-    let sandbox_head = String::from_utf8_lossy(&sandbox_head_output)
-        .trim()
-        .to_string();
+    let pod_head = String::from_utf8_lossy(&pod_head_output).trim().to_string();
 
     assert_eq!(
-        sandbox_head, feature_commit,
-        "Sandbox host/HEAD should reflect the branch switch"
+        pod_head, feature_commit,
+        "Pod host/HEAD should reflect the branch switch"
     );
 }
 
@@ -1739,15 +1711,15 @@ fn gateway_host_head_works_in_detached_state() {
     let second_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox to set up gateway (on master at second_commit)
-    sandbox_command(&repo, &daemon)
+    // Launch pod to set up gateway (on master at second_commit)
+    pod_command(&repo, &daemon)
         .args(["enter", "detached-head-test", "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
@@ -1772,13 +1744,13 @@ fn gateway_host_head_works_in_detached_state() {
         "host/HEAD should point to first_commit in detached HEAD state"
     );
 
-    // Sandbox should be able to fetch and resolve the detached HEAD commit
-    sandbox_command(&repo, &daemon)
+    // Pod should be able to fetch and resolve the detached HEAD commit
+    pod_command(&repo, &daemon)
         .args(["enter", "detached-head-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch in detached HEAD state");
 
-    let sandbox_head_output = sandbox_command(&repo, &daemon)
+    let pod_head_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "detached-head-test",
@@ -1790,40 +1762,38 @@ fn gateway_host_head_works_in_detached_state() {
         .success()
         .expect("Failed to resolve host/HEAD");
 
-    let sandbox_head = String::from_utf8_lossy(&sandbox_head_output)
-        .trim()
-        .to_string();
+    let pod_head = String::from_utf8_lossy(&pod_head_output).trim().to_string();
 
     assert_eq!(
-        sandbox_head, first_commit,
-        "Sandbox host/HEAD should resolve to the detached HEAD commit"
+        pod_head, first_commit,
+        "Pod host/HEAD should resolve to the detached HEAD commit"
     );
 }
 
 #[test]
 fn gateway_primary_branch_alias_works_on_host() {
-    // Test that sandbox/<name> resolves to the same commit as sandbox/<name>@<name>
-    // For the alias to be created, the sandbox must be on a branch with the same name
-    // as the sandbox (the "primary branch").
+    // Test that pod/<name> resolves to the same commit as pod/<name>@<name>
+    // For the alias to be created, the pod must be on a branch with the same name
+    // as the pod (the "primary branch").
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "alias-test";
+    let pod_name = "alias-test";
 
-    // Launch sandbox - it automatically creates and checks out a branch named after
-    // the sandbox (the "primary branch")
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod - it automatically creates and checks out a branch named after
+    // the pod (the "primary branch")
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to launch sandbox");
+        .expect("Failed to launch pod");
 
     // Create a commit on the primary branch
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -1832,58 +1802,58 @@ fn gateway_primary_branch_alias_works_on_host() {
             "test commit for alias",
         ])
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
-    // Get commit from sandbox
-    let commit_output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "rev-parse", "HEAD"])
+    // Get commit from pod
+    let commit_output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
-        .expect("Failed to get sandbox HEAD");
-    let sandbox_commit = String::from_utf8_lossy(&commit_output).trim().to_string();
+        .expect("Failed to get pod HEAD");
+    let pod_commit = String::from_utf8_lossy(&commit_output).trim().to_string();
 
     // Verify host has both refs pointing to the same commit
-    let full_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
-    let alias_ref = format!("sandbox/{}", sandbox_name);
+    let full_ref = format!("pod/{}@{}", pod_name, pod_name);
+    let alias_ref = format!("pod/{}", pod_name);
 
     let full_ref_commit = get_remote_ref_commit(repo.path(), &full_ref);
     let alias_ref_commit = get_remote_ref_commit(repo.path(), &alias_ref);
 
     assert_eq!(
         full_ref_commit,
-        Some(sandbox_commit.clone()),
-        "Full ref sandbox/{}@{} should point to sandbox commit",
-        sandbox_name,
-        sandbox_name
+        Some(pod_commit.clone()),
+        "Full ref pod/{}@{} should point to pod commit",
+        pod_name,
+        pod_name
     );
     assert_eq!(
         alias_ref_commit,
-        Some(sandbox_commit),
-        "Alias ref sandbox/{} should point to same commit as full ref",
-        sandbox_name
+        Some(pod_commit),
+        "Alias ref pod/{} should point to same commit as full ref",
+        pod_name
     );
 }
 
 #[test]
-fn gateway_alias_deleted_with_sandbox() {
-    // Test that alias ref is removed when sandbox is deleted
+fn gateway_alias_deleted_with_pod() {
+    // Test that alias ref is removed when pod is deleted
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "delete-alias-test";
+    let pod_name = "delete-alias-test";
 
-    // Launch sandbox - it automatically creates and checks out the primary branch
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod - it automatically creates and checks out the primary branch
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to launch sandbox");
+        .expect("Failed to launch pod");
 
     // Create a commit on the primary branch
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -1892,11 +1862,11 @@ fn gateway_alias_deleted_with_sandbox() {
             "test commit",
         ])
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
     // Verify refs exist
-    let full_ref = format!("sandbox/{}@{}", sandbox_name, sandbox_name);
-    let alias_ref = format!("sandbox/{}", sandbox_name);
+    let full_ref = format!("pod/{}@{}", pod_name, pod_name);
+    let alias_ref = format!("pod/{}", pod_name);
 
     assert!(
         get_remote_ref_commit(repo.path(), &full_ref).is_some(),
@@ -1907,11 +1877,11 @@ fn gateway_alias_deleted_with_sandbox() {
         "Alias ref should exist before deletion"
     );
 
-    // Delete the sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["delete", sandbox_name])
+    // Delete the pod
+    pod_command(&repo, &daemon)
+        .args(["delete", pod_name])
         .success()
-        .expect("Failed to delete sandbox");
+        .expect("Failed to delete pod");
 
     // Verify refs are removed
     assert!(
@@ -1926,20 +1896,20 @@ fn gateway_alias_deleted_with_sandbox() {
 
 #[test]
 fn gateway_alias_does_not_conflict_with_branches() {
-    // Test that sandbox `alice` creating branch `bob` doesn't affect sandbox `bob`'s alias
+    // Test that pod `alice` creating branch `bob` does not affect pod `bob`'s alias
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Launch sandbox `bob` - it automatically creates and checks out its primary branch
-    sandbox_command(&repo, &daemon)
+    // Launch pod `bob` - it automatically creates and checks out its primary branch
+    pod_command(&repo, &daemon)
         .args(["enter", "bob", "--", "echo", "setup"])
         .success()
-        .expect("Failed to launch bob sandbox");
+        .expect("Failed to launch bob pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "bob",
@@ -1951,9 +1921,9 @@ fn gateway_alias_does_not_conflict_with_branches() {
             "bob commit",
         ])
         .success()
-        .expect("Failed to create commit in bob sandbox");
+        .expect("Failed to create commit in bob pod");
 
-    let bob_commit_output = sandbox_command(&repo, &daemon)
+    let bob_commit_output = pod_command(&repo, &daemon)
         .args(["enter", "bob", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get bob HEAD");
@@ -1961,8 +1931,8 @@ fn gateway_alias_does_not_conflict_with_branches() {
         .trim()
         .to_string();
 
-    // Create sandbox `alice` and create a branch named `bob` with different commit
-    sandbox_command(&repo, &daemon)
+    // Create pod `alice` and create a branch named `bob` with different commit
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "alice",
@@ -1974,14 +1944,14 @@ fn gateway_alias_does_not_conflict_with_branches() {
             "alice commit",
         ])
         .success()
-        .expect("Failed to create commit in alice sandbox");
+        .expect("Failed to create commit in alice pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "alice", "--", "git", "checkout", "-b", "bob"])
         .success()
-        .expect("Failed to create bob branch in alice sandbox");
+        .expect("Failed to create bob branch in alice pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "alice",
@@ -1993,9 +1963,9 @@ fn gateway_alias_does_not_conflict_with_branches() {
             "alice bob-branch commit",
         ])
         .success()
-        .expect("Failed to create commit on bob branch in alice sandbox");
+        .expect("Failed to create commit on bob branch in alice pod");
 
-    let alice_bob_commit_output = sandbox_command(&repo, &daemon)
+    let alice_bob_commit_output = pod_command(&repo, &daemon)
         .args(["enter", "alice", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get alice bob-branch HEAD");
@@ -2003,10 +1973,10 @@ fn gateway_alias_does_not_conflict_with_branches() {
         .trim()
         .to_string();
 
-    // Verify sandbox/bob alias still points to bob's primary branch, not alice's bob branch
-    let bob_alias_commit = get_remote_ref_commit(repo.path(), "sandbox/bob");
-    let bob_full_commit = get_remote_ref_commit(repo.path(), "sandbox/bob@bob");
-    let alice_bob_branch_commit = get_remote_ref_commit(repo.path(), "sandbox/bob@alice");
+    // Verify pod/bob alias still points to bob's primary branch, not alice's bob branch
+    let bob_alias_commit = get_remote_ref_commit(repo.path(), "pod/bob");
+    let bob_full_commit = get_remote_ref_commit(repo.path(), "pod/bob@bob");
+    let alice_bob_branch_commit = get_remote_ref_commit(repo.path(), "pod/bob@alice");
 
     assert_ne!(
         bob_commit, alice_bob_commit,
@@ -2015,41 +1985,41 @@ fn gateway_alias_does_not_conflict_with_branches() {
     assert_eq!(
         bob_alias_commit,
         Some(bob_commit.clone()),
-        "sandbox/bob alias should point to bob's primary branch"
+        "pod/bob alias should point to bob's primary branch"
     );
     assert_eq!(
         bob_full_commit,
         Some(bob_commit),
-        "sandbox/bob@bob should point to bob's commit"
+        "pod/bob@bob should point to bob's commit"
     );
     assert_eq!(
         alice_bob_branch_commit,
         Some(alice_bob_commit),
-        "sandbox/bob@alice should point to alice's bob-branch commit"
+        "pod/bob@alice should point to alice's bob-branch commit"
     );
 }
 
 #[test]
 fn gateway_non_primary_branches_have_no_alias() {
-    // Test that non-primary branches (feature@sandbox) don't get an alias
+    // Test that non-primary branches (feature@pod) don't get an alias
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "no-alias-test";
+    let pod_name = "no-alias-test";
 
-    // Launch sandbox - it automatically creates and checks out its primary branch
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod - it automatically creates and checks out its primary branch
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to launch sandbox");
+        .expect("Failed to launch pod");
 
     // Create initial commit on primary branch
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -2061,23 +2031,15 @@ fn gateway_non_primary_branches_have_no_alias() {
         .expect("Failed to create commit on primary branch");
 
     // Create a feature branch
-    sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "checkout",
-            "-b",
-            "feature",
-        ])
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "checkout", "-b", "feature"])
         .success()
         .expect("Failed to create feature branch");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -2088,25 +2050,22 @@ fn gateway_non_primary_branches_have_no_alias() {
         .success()
         .expect("Failed to create commit on feature branch");
 
-    // Verify feature@sandbox_name exists but sandbox/feature alias does not
-    let feature_ref = format!("sandbox/feature@{}", sandbox_name);
+    // Verify feature@pod_name exists but pod/feature alias does not
+    let feature_ref = format!("pod/feature@{}", pod_name);
     assert!(
         get_remote_ref_commit(repo.path(), &feature_ref).is_some(),
-        "sandbox/feature@{} should exist",
-        sandbox_name
+        "pod/feature@{} should exist",
+        pod_name
     );
     assert!(
-        get_remote_ref_commit(repo.path(), "sandbox/feature").is_none(),
-        "sandbox/feature alias should not exist (only primary branches get aliases)"
+        get_remote_ref_commit(repo.path(), "pod/feature").is_none(),
+        "pod/feature alias should not exist (only primary branches get aliases)"
     );
 
     // Verify primary branch alias still works
-    let primary_alias_commit =
-        get_remote_ref_commit(repo.path(), &format!("sandbox/{}", sandbox_name));
-    let primary_full_commit = get_remote_ref_commit(
-        repo.path(),
-        &format!("sandbox/{}@{}", sandbox_name, sandbox_name),
-    );
+    let primary_alias_commit = get_remote_ref_commit(repo.path(), &format!("pod/{}", pod_name));
+    let primary_full_commit =
+        get_remote_ref_commit(repo.path(), &format!("pod/{}@{}", pod_name, pod_name));
     assert!(
         primary_alias_commit.is_some(),
         "Primary branch alias should exist"
@@ -2118,18 +2077,18 @@ fn gateway_non_primary_branches_have_no_alias() {
 }
 
 #[test]
-fn sandbox_has_branch_named_after_sandbox() {
+fn pod_has_branch_named_after_pod() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Enter sandbox and check the current branch name
-    let stdout = sandbox_command(&repo, &daemon)
+    // Enter pod and check the current branch name
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
-            "my-sandbox",
+            "my-pod",
             "--",
             "git",
             "rev-parse",
@@ -2137,21 +2096,21 @@ fn sandbox_has_branch_named_after_sandbox() {
             "HEAD",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let branch = String::from_utf8_lossy(&stdout).trim().to_string();
     assert_eq!(
-        branch, "my-sandbox",
-        "Expected branch 'my-sandbox' to be checked out, got '{}'",
+        branch, "my-pod",
+        "Expected branch 'my-pod' to be checked out, got '{}'",
         branch
     );
 }
 
 #[test]
-fn sandbox_branch_points_to_host_head() {
+fn pod_branch_points_to_host_head() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -2163,22 +2122,22 @@ fn sandbox_branch_points_to_host_head() {
         .expect("Failed to get host HEAD");
     let host_head = String::from_utf8_lossy(&host_head).trim().to_string();
 
-    // Enter sandbox and get its HEAD commit
-    let sandbox_head = sandbox_command(&repo, &daemon)
+    // Enter pod and get its HEAD commit
+    let pod_head = pod_command(&repo, &daemon)
         .args(["enter", "test-branch", "--", "git", "rev-parse", "HEAD"])
         .success()
-        .expect("sandbox enter failed");
-    let sandbox_head = String::from_utf8_lossy(&sandbox_head).trim().to_string();
+        .expect("rumpel enter failed");
+    let pod_head = String::from_utf8_lossy(&pod_head).trim().to_string();
 
     assert_eq!(
-        sandbox_head, host_head,
-        "Sandbox HEAD ({}) should match host HEAD ({})",
-        sandbox_head, host_head
+        pod_head, host_head,
+        "Pod HEAD ({}) should match host HEAD ({})",
+        pod_head, host_head
     );
 }
 
 #[test]
-fn sandbox_has_host_remote_refs() {
+fn pod_has_host_remote_refs() {
     let repo = TestRepo::new();
 
     // Create a branch on the host before building the image
@@ -2202,15 +2161,15 @@ fn sandbox_has_host_remote_refs() {
         .expect("Failed to switch back");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // Enter sandbox and list remote refs
-    let stdout = sandbox_command(&repo, &daemon)
+    // Enter pod and list remote refs
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test-refs", "--", "git", "branch", "-r"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let refs = String::from_utf8_lossy(&stdout);
 
@@ -2228,8 +2187,8 @@ fn sandbox_has_host_remote_refs() {
 }
 
 #[test]
-fn sandbox_branch_is_different_from_host_branches() {
-    // The sandbox branch should be a new branch, not one that already exists on host
+fn pod_branch_is_different_from_host_branches() {
+    // The pod branch should be a new branch, not one that already exists on host
     let repo = TestRepo::new();
 
     // Create a branch named "existing" on host
@@ -2246,13 +2205,13 @@ fn sandbox_branch_is_different_from_host_branches() {
         .expect("Failed to switch back");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // The sandbox named "existing" should still have its own branch, separate
+    // The pod named "existing" should still have its own branch, separate
     // from the host's "existing" branch (which becomes host/existing)
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "existing",
@@ -2263,7 +2222,7 @@ fn sandbox_branch_is_different_from_host_branches() {
             "HEAD",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let branch = String::from_utf8_lossy(&stdout).trim().to_string();
     assert_eq!(
@@ -2273,10 +2232,10 @@ fn sandbox_branch_is_different_from_host_branches() {
     );
 
     // Check that both the local branch and remote ref exist
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "existing", "--", "git", "branch", "-a"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let branches = String::from_utf8_lossy(&stdout);
     assert!(
@@ -2292,22 +2251,22 @@ fn sandbox_branch_is_different_from_host_branches() {
 }
 
 #[test]
-fn re_entering_sandbox_preserves_branch() {
-    // Re-entering a sandbox should not reset the branch or checkout
+fn re_entering_pod_preserves_branch() {
+    // Re-entering a pod should not reset the branch or checkout
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // First enter - creates the sandbox and branch
-    sandbox_command(&repo, &daemon)
+    // First enter - creates the pod and branch
+    pod_command(&repo, &daemon)
         .args(["enter", "persist-test", "--", "echo", "first"])
         .success()
-        .expect("first sandbox enter failed");
+        .expect("first rumpel enter failed");
 
-    // Make a commit in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Make a commit in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "persist-test",
@@ -2316,13 +2275,13 @@ fn re_entering_sandbox_preserves_branch() {
             "commit",
             "--allow-empty",
             "-m",
-            "Sandbox commit",
+            "Pod commit",
         ])
         .success()
-        .expect("sandbox commit failed");
+        .expect("pod commit failed");
 
-    // Get the sandbox HEAD after the commit
-    let head_after_commit = sandbox_command(&repo, &daemon)
+    // Get the pod HEAD after the commit
+    let head_after_commit = pod_command(&repo, &daemon)
         .args(["enter", "persist-test", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("git rev-parse failed");
@@ -2330,8 +2289,8 @@ fn re_entering_sandbox_preserves_branch() {
         .trim()
         .to_string();
 
-    // Re-enter the sandbox and check HEAD is still at the same commit
-    let head_after_reenter = sandbox_command(&repo, &daemon)
+    // Re-enter the pod and check HEAD is still at the same commit
+    let head_after_reenter = pod_command(&repo, &daemon)
         .args(["enter", "persist-test", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("git rev-parse failed after re-enter");
@@ -2341,11 +2300,11 @@ fn re_entering_sandbox_preserves_branch() {
 
     assert_eq!(
         head_after_commit, head_after_reenter,
-        "Re-entering sandbox should preserve HEAD commit"
+        "Re-entering pod should preserve HEAD commit"
     );
 
     // Check we're still on the same branch
-    let branch = sandbox_command(&repo, &daemon)
+    let branch = pod_command(&repo, &daemon)
         .args([
             "enter",
             "persist-test",
@@ -2361,21 +2320,21 @@ fn re_entering_sandbox_preserves_branch() {
 
     assert_eq!(
         branch, "persist-test",
-        "Re-entering sandbox should preserve branch name"
+        "Re-entering pod should preserve branch name"
     );
 }
 
-/// Get the upstream tracking branch for a local branch in the sandbox.
-fn get_sandbox_upstream(
+/// Get the upstream tracking branch for a local branch in the pod.
+fn get_pod_upstream(
     repo: &TestRepo,
     daemon: &TestDaemon,
-    sandbox_name: &str,
+    pod_name: &str,
     branch: &str,
 ) -> Option<String> {
-    sandbox_command(repo, daemon)
+    pod_command(repo, daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "rev-parse",
@@ -2389,25 +2348,25 @@ fn get_sandbox_upstream(
 }
 
 #[test]
-fn sandbox_primary_branch_has_upstream_when_host_on_branch() {
-    // When the host is on a branch, the sandbox's primary branch should track it
+fn pod_primary_branch_has_upstream_when_host_on_branch() {
+    // When the host is on a branch, the pod's primary branch should track it
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // Host is on "master" branch by default (from TestRepo::new)
-    let sandbox_name = "upstream-test";
+    let pod_name = "upstream-test";
 
-    // Enter sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Enter pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // Check that the primary branch tracks host/master
-    let upstream = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    let upstream = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream,
         Some("host/master".to_string()),
@@ -2416,8 +2375,8 @@ fn sandbox_primary_branch_has_upstream_when_host_on_branch() {
 }
 
 #[test]
-fn sandbox_primary_branch_tracks_host_feature_branch() {
-    // When the host is on a feature branch, the sandbox should track that branch
+fn pod_primary_branch_tracks_host_feature_branch() {
+    // When the host is on a feature branch, the pod should track that branch
     let repo = TestRepo::new();
 
     // Create and switch to a feature branch
@@ -2425,19 +2384,19 @@ fn sandbox_primary_branch_tracks_host_feature_branch() {
     create_commit(repo.path(), "Feature commit");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "feature-upstream-test";
+    let pod_name = "feature-upstream-test";
 
-    // Enter sandbox while host is on feature-xyz
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Enter pod while host is on feature-xyz
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // Check that the primary branch tracks host/feature-xyz
-    let upstream = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    let upstream = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream,
         Some("host/feature-xyz".to_string()),
@@ -2446,8 +2405,8 @@ fn sandbox_primary_branch_tracks_host_feature_branch() {
 }
 
 #[test]
-fn sandbox_primary_branch_has_no_upstream_when_host_detached() {
-    // When the host is in detached HEAD state, the sandbox should have no upstream
+fn pod_primary_branch_has_no_upstream_when_host_detached() {
+    // When the host is in detached HEAD state, the pod should have no upstream
     let repo = TestRepo::new();
 
     // Create a commit and get its hash
@@ -2456,7 +2415,7 @@ fn sandbox_primary_branch_has_no_upstream_when_host_detached() {
 
     // Build image while still on master branch
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     // Now detach HEAD by checking out the commit directly
     Command::new("git")
@@ -2466,16 +2425,16 @@ fn sandbox_primary_branch_has_no_upstream_when_host_detached() {
         .expect("git checkout (detached) failed");
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "detached-upstream-test";
+    let pod_name = "detached-upstream-test";
 
-    // Enter sandbox while host is detached
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Enter pod while host is detached
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // Check that the primary branch has no upstream
-    let upstream = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    let upstream = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert!(
         upstream.is_none(),
         "Primary branch should have no upstream when host is detached, got: {:?}",
@@ -2484,23 +2443,23 @@ fn sandbox_primary_branch_has_no_upstream_when_host_detached() {
 }
 
 #[test]
-fn sandbox_re_entry_does_not_change_upstream() {
-    // Re-entering a sandbox should not change the upstream, even if host branch changed
+fn pod_re_entry_does_not_change_upstream() {
+    // Re-entering a pod should not change the upstream, even if host branch changed
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "upstream-preserve-test";
+    let pod_name = "upstream-preserve-test";
 
     // First entry while on master
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "first entry"])
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "first entry"])
         .success()
-        .expect("first sandbox enter failed");
+        .expect("first rumpel enter failed");
 
     // Verify upstream is host/master
-    let upstream_before = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    let upstream_before = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream_before,
         Some("host/master".to_string()),
@@ -2510,14 +2469,14 @@ fn sandbox_re_entry_does_not_change_upstream() {
     // Switch host to a different branch
     create_branch(repo.path(), "other-branch");
 
-    // Re-enter sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "second entry"])
+    // Re-enter pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "second entry"])
         .success()
-        .expect("second sandbox enter failed");
+        .expect("second rumpel enter failed");
 
     // Verify upstream is still host/master (not changed to host/other-branch)
-    let upstream_after = get_sandbox_upstream(&repo, &daemon, sandbox_name, sandbox_name);
+    let upstream_after = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream_after,
         Some("host/master".to_string()),
@@ -2526,40 +2485,32 @@ fn sandbox_re_entry_does_not_change_upstream() {
 }
 
 #[test]
-fn sandbox_unsafe_host_network_mode() {
+fn pod_unsafe_host_network_mode() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
     // Configure unsafe-host network
-    write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
+    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "unsafe-host-test";
+    let pod_name = "unsafe-host-test";
 
-    // Enter sandbox and verify it works
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "hello"])
+    // Enter pod and verify it works
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "hello"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
-    // Verify git sync works by pushing a branch from sandbox
-    sandbox_command(&repo, &daemon)
-        .args([
-            "enter",
-            sandbox_name,
-            "--",
-            "git",
-            "checkout",
-            "-b",
-            "feature",
-        ])
+    // Verify git sync works by pushing a branch from pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "checkout", "-b", "feature"])
         .success()
         .expect("git checkout failed");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -2570,19 +2521,19 @@ fn sandbox_unsafe_host_network_mode() {
         .success()
         .expect("git commit failed");
 
-    // The branch should appear in host as refs/remotes/sandbox/feature@unsafe-host-test
-    // Note: get_sandbox_remote_refs returns short names like "sandbox/feature@unsafe-host-test"
-    // Wait, get_sandbox_remote_refs returns refname:short, so it is "origin/..."?
-    // No, the function queries "refs/remotes/sandbox/", so it returns "sandbox/feature@..."
+    // The branch should appear in host as refs/remotes/pod/feature@unsafe-host-test
+    // Note: get_pod_remote_refs returns short names like "pod/feature@unsafe-host-test"
+    // Wait, get_pod_remote_refs returns refname:short, so it is "origin/..."?
+    // No, the function queries "refs/remotes/pod/", so it returns "pod/feature@..."
 
-    // Let's verify get_sandbox_remote_refs implementation
-    // "refs/remotes/sandbox/*" -> refname:short -> "sandbox/..."
+    // Let's verify get_pod_remote_refs implementation
+    // "refs/remotes/pod/*" -> refname:short -> "pod/..."
 
-    let remote_refs = get_sandbox_remote_refs(repo.path());
-    let expected_ref = format!("sandbox/feature@{}", sandbox_name);
+    let remote_refs = get_pod_remote_refs(repo.path());
+    let expected_ref = format!("pod/feature@{}", pod_name);
     assert!(
         remote_refs.contains(&expected_ref),
-        "Sandbox branch not synced to host. Found: {:?}",
+        "Pod branch not synced to host. Found: {:?}",
         remote_refs
     );
 }
@@ -2646,31 +2597,31 @@ fn lfs_object_path(base: &Path, oid: &str) -> PathBuf {
 #[test]
 fn gateway_lfs_download_from_host() {
     // Verify that an LFS file committed on the host is available in the
-    // sandbox with full content (not a pointer).
+    // pod with full content (not a pointer).
     let repo = TestRepo::new();
     let content = setup_lfs_repo(repo.path());
 
     let image_id =
         build_test_image(repo.path(), LFS_DOCKERFILE).expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "lfs-download";
+    let pod_name = "lfs-download";
 
-    let output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "cat", "large.bin"])
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "cat", "large.bin"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("pod enter failed");
 
     assert_eq!(
         output, content,
-        "LFS file content in sandbox should match host content"
+        "LFS file content in pod should match host content"
     );
 }
 
 #[test]
-fn gateway_lfs_upload_from_sandbox() {
-    // Verify that creating an LFS file inside a sandbox stores the object
+fn gateway_lfs_upload_from_pod() {
+    // Verify that creating an LFS file inside a pod stores the object
     // in the gateway's LFS directory.
     let repo = TestRepo::new();
 
@@ -2703,30 +2654,30 @@ fn gateway_lfs_upload_from_sandbox() {
 
     let image_id =
         build_test_image(repo.path(), LFS_DOCKERFILE).expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "lfs-upload";
+    let pod_name = "lfs-upload";
 
-    // Create an LFS file inside the sandbox, commit, and push
-    sandbox_command(&repo, &daemon)
+    // Create an LFS file inside the pod, commit, and push
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "sh",
             "-c",
-            "echo sandbox-lfs-content > upload.bin && git add upload.bin && git commit -m 'add upload.bin'",
+            "echo pod-lfs-content > upload.bin && git add upload.bin && git commit -m 'add upload.bin'",
         ])
         .success()
-        .expect("sandbox commit failed");
+        .expect("pod commit failed");
 
-    // The sandbox reference-transaction hook should have pushed to the
+    // The pod reference-transaction hook should have pushed to the
     // gateway.  The LFS pre-push hook uploads the object to the gateway's
     // LFS storage via our HTTP server.
 
     // Compute the expected OID (sha256 of the file content)
-    let file_content = b"sandbox-lfs-content\n";
+    let file_content = b"pod-lfs-content\n";
     let oid = {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();

@@ -1,8 +1,8 @@
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 
 fn write_devcontainer_json(repo: &TestRepo, config_body: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
@@ -37,12 +37,13 @@ fn write_devcontainer_json(repo: &TestRepo, config_body: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_sandbox_toml(repo: &TestRepo) {
+fn write_minimal_pod_toml(repo: &TestRepo) {
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 /// ${localEnv:MISSING:default_value} should fall back to the default when the
@@ -55,14 +56,14 @@ fn local_env_with_default() {
         &repo,
         r#""containerEnv": { "FALLBACK": "${localEnv:MISSING:default_value}" }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "env-default", "--", "printenv", "FALLBACK"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -82,14 +83,14 @@ fn local_workspace_folder() {
         &repo,
         r#""containerEnv": { "HOST_PATH": "${localWorkspaceFolder}" }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lwf", "--", "printenv", "HOST_PATH"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     let expected = repo.path().to_string_lossy();
@@ -110,14 +111,14 @@ fn local_workspace_folder_basename() {
         &repo,
         r#""containerEnv": { "WS_NAME": "${localWorkspaceFolderBasename}" }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lwfb", "--", "printenv", "WS_NAME"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     let expected = repo
@@ -142,14 +143,14 @@ fn container_workspace_folder() {
         &repo,
         r#""containerEnv": { "CWF": "${containerWorkspaceFolder}" }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "cwf", "--", "printenv", "CWF"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -169,14 +170,14 @@ fn container_workspace_folder_basename() {
         &repo,
         r#""containerEnv": { "CWF_BASE": "${containerWorkspaceFolderBasename}" }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "cwfb", "--", "printenv", "CWF_BASE"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     let expected = std::path::Path::new(TEST_REPO_PATH)
@@ -190,22 +191,22 @@ fn container_workspace_folder_basename() {
     );
 }
 
-/// ${devcontainerId} must be stable across sandbox rebuilds -- destroying and
-/// recreating a sandbox for the same repo+name should yield the same ID.
+/// ${devcontainerId} must be stable across pod rebuilds -- destroying and
+/// recreating a pod for the same repo+name should yield the same ID.
 #[test]
 fn devcontainer_id_stable() {
     let repo = TestRepo::new();
 
     write_devcontainer_json(&repo, r#""containerEnv": { "DC_ID": "${devcontainerId}" }"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // First creation — capture the ID.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-stable", "--", "printenv", "DC_ID"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
     let id_first = String::from_utf8_lossy(&stdout).trim().to_string();
 
     // A literal "${devcontainerId}" means substitution didn't happen.
@@ -214,17 +215,17 @@ fn devcontainer_id_stable() {
         "devcontainerId substitution not implemented"
     );
 
-    // Recreate the sandbox (destroy + create).
-    sandbox_command(&repo, &daemon)
+    // Recreate the pod (destroy + create).
+    pod_command(&repo, &daemon)
         .args(["recreate", "id-stable"])
         .success()
-        .expect("sandbox recreate failed");
+        .expect("pod recreate failed");
 
     // Second creation — ID should be identical.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-stable", "--", "printenv", "DC_ID"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
     let id_second = String::from_utf8_lossy(&stdout).trim().to_string();
 
     assert_eq!(
@@ -233,34 +234,34 @@ fn devcontainer_id_stable() {
     );
 }
 
-/// Different sandboxes (different names or repos) must receive distinct
+/// Different pods (different names or repos) must receive distinct
 /// ${devcontainerId} values.
 #[test]
-fn devcontainer_id_unique_per_sandbox() {
+fn devcontainer_id_unique_per_pod() {
     let repo = TestRepo::new();
 
     write_devcontainer_json(&repo, r#""containerEnv": { "DC_ID": "${devcontainerId}" }"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Sandbox A
-    let stdout = sandbox_command(&repo, &daemon)
+    // Pod A
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-unique-a", "--", "printenv", "DC_ID"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
     let id_a = String::from_utf8_lossy(&stdout).trim().to_string();
 
-    // Sandbox B (same repo, different name)
-    let stdout = sandbox_command(&repo, &daemon)
+    // Pod B (same repo, different name)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-unique-b", "--", "printenv", "DC_ID"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
     let id_b = String::from_utf8_lossy(&stdout).trim().to_string();
 
     assert_ne!(
         id_a, id_b,
-        "devcontainerId per-sandbox uniqueness not implemented"
+        "devcontainerId per-pod uniqueness not implemented"
     );
 }
 
@@ -304,15 +305,15 @@ fn variables_in_run_args() {
         devcontainer_json,
     )
     .expect("Failed to write devcontainer.json");
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Enter the sandbox so the container is created with the label.
-    sandbox_command(&repo, &daemon)
+    // Enter the pod so the container is created with the label.
+    pod_command(&repo, &daemon)
         .args(["enter", "run-args-var", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // Inspect the container to verify the label was set with the resolved value.
     let expected_basename = repo
@@ -363,7 +364,7 @@ fn variables_in_run_args() {
 }
 
 /// ${devcontainerId} in mount sources should be resolved, allowing
-/// per-sandbox named volumes.
+/// per-pod named volumes.
 #[test]
 fn variables_in_mounts() {
     let repo = TestRepo::new();
@@ -403,13 +404,13 @@ fn variables_in_mounts() {
         devcontainer_json,
     )
     .expect("Failed to write devcontainer.json");
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // The mount should succeed now that ${devcontainerId} is resolved.
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "mnt-var", "--", "ls", "/data"])
         .success()
-        .expect("sandbox enter with devcontainerId mount failed");
+        .expect("rumpel enter with devcontainerId mount failed");
 }

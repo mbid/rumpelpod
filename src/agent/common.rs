@@ -14,7 +14,7 @@ use crate::config::{get_runtime_dir, is_deterministic_test_mode, Model};
 use crate::docker_exec::{
     exec_capture_with_timeout, exec_check, exec_command, exec_with_stdin, ExecResult,
 };
-use rand::{distr::Alphanumeric, RngExt};
+use rand::{distr::Alphanumeric, Rng};
 
 /// Starting PID for deterministic mode. We start at 1000 so PIDs are easy to
 /// recognize (1000, 1050, 1100, ...).
@@ -26,21 +26,21 @@ const DETERMINISTIC_PID_INCREMENT: u32 = 50;
 
 /// Get and increment the next deterministic PID from a file.
 ///
-/// In deterministic mode, we store the last used PID in a per-sandbox file.
-/// The file is stored at `$DETERMINISTIC_PID_DIR/<sandbox_name>` if the env var
-/// is set, otherwise at `$XDG_RUNTIME_DIR/sandbox/deterministic-pids/<sandbox_name>`.
+/// In deterministic mode, we store the last used PID in a per-pod file.
+/// The file is stored at `$DETERMINISTIC_PID_DIR/<pod_name>` if the env var
+/// is set, otherwise at `$XDG_RUNTIME_DIR/rumpelpod/deterministic-pids/<pod_name>`.
 ///
 /// NOTE: This is not thread-safe. If multiple processes try to spawn commands
 /// simultaneously in the same test environment, they may get the same PID.
 /// For now this is a known limitation since tests typically run sequentially.
-fn get_next_deterministic_pid(sandbox_name: &str) -> Result<u32> {
+fn get_next_deterministic_pid(pod_name: &str) -> Result<u32> {
     let pid_dir = match std::env::var("DETERMINISTIC_PID_DIR") {
         Ok(dir) => PathBuf::from(dir),
         Err(_) => get_runtime_dir()
             .context("failed to get runtime directory for deterministic PID file")?
             .join("deterministic-pids"),
     };
-    let pid_file = pid_dir.join(sandbox_name);
+    let pid_file = pid_dir.join(pod_name);
 
     // Read the last PID from file, defaulting to START - INCREMENT so first call returns START
     let last_pid = match std::fs::read_to_string(&pid_file) {
@@ -123,7 +123,7 @@ impl ToolName {
     pub fn description(&self) -> &'static str {
         match self {
             ToolName::Bash => {
-                "Execute a bash command inside the sandbox and return the output.\n\
+                "Execute a bash command inside the pod and return the output.\n\
                                The working directory is the project root.\n\
                                If a command times out, wait and get output: `tail --pid=<PID> -f <output_file>`.\n\
                                If some output was already printed, use `tail -n +<START_LINE> --pid=<PID> -f <output_file>` to skip it."
@@ -200,14 +200,14 @@ impl ToolName {
     }
 }
 
-/// Read AGENTS.md from the sandbox if it exists.
+/// Read AGENTS.md from the pod if it exists.
 pub fn read_agents_md(
     container_name: &str,
     user: &str,
     repo_path: &Path,
     docker_socket: &Path,
 ) -> Option<String> {
-    debug!("Reading {} from sandbox", AGENTS_MD_PATH);
+    debug!("Reading {} from pod", AGENTS_MD_PATH);
     let docker = docker_connect(docker_socket).ok()?;
     let workdir = repo_path.to_string_lossy().to_string();
 
@@ -233,7 +233,7 @@ pub fn build_system_prompt(agents_md: Option<&str>) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn execute_edit_in_sandbox(
+pub fn execute_edit_in_pod(
     container_name: &str,
     user: &str,
     repo_path: &Path,
@@ -308,7 +308,7 @@ pub fn execute_edit_in_sandbox(
     Ok((format!("Successfully edited {file_path}"), true))
 }
 
-pub fn execute_write_in_sandbox(
+pub fn execute_write_in_pod(
     container_name: &str,
     user: &str,
     repo_path: &Path,
@@ -375,7 +375,7 @@ pub fn execute_write_in_sandbox(
     Ok((format!("Successfully wrote {file_path}"), true))
 }
 
-pub fn execute_bash_in_sandbox(
+pub fn execute_bash_in_pod(
     container_name: &str,
     user: &str,
     repo_path: &Path,
@@ -415,11 +415,11 @@ pub fn execute_bash_in_sandbox(
     };
     let output_file = format!("/tmp/agent/bash-{id}.log");
 
-    debug!("Executing bash in sandbox: {}", command);
+    debug!("Executing bash in pod: {}", command);
 
     // In test mode, set ns_last_pid to get a deterministic PID for this command.
     // This requires the container to run in privileged mode (set by daemon when
-    // SANDBOX_TEST_DETERMINISTIC_IDS is enabled), which makes /proc/sys writable.
+    // RUMPELPOD_TEST_DETERMINISTIC_IDS is enabled), which makes /proc/sys writable.
     if let Some(next_pid) = deterministic_pid {
         let ns_last_pid = next_pid - 1;
         // Set ns_last_pid so the next process gets `next_pid`.
@@ -458,7 +458,7 @@ pub fn execute_bash_in_sandbox(
         vec!["bash", "-c", &wrapped_command],
         timeout,
     )
-    .context("Failed to execute command in sandbox")?;
+    .context("Failed to execute command in pod")?;
 
     match exec_result {
         ExecResult::Completed(output) => {
@@ -597,12 +597,12 @@ pub fn confirm_exit() -> Result<bool> {
 /// If `editable_suffix` is provided, it will be appended to the chat history as editable
 /// content (useful when continuing a conversation and allowing the user to edit the last message).
 ///
-/// The `sandbox_name` parameter is used in the temp file name to help identify which sandbox
+/// The `pod_name` parameter is used in the temp file name to help identify which pod
 /// the chat session belongs to.
 pub fn get_input_via_editor(
     chat_history: &str,
     editable_suffix: Option<&str>,
-    sandbox_name: &str,
+    pod_name: &str,
 ) -> Result<String> {
     use std::fs;
 
@@ -611,7 +611,7 @@ pub fn get_input_via_editor(
     loop {
         let temp_dir = std::env::temp_dir();
         let pid = std::process::id();
-        let temp_file = temp_dir.join(format!("sandbox-chat-{sandbox_name}-{pid}.txt"));
+        let temp_file = temp_dir.join(format!("rumpelpod-chat-{pod_name}-{pid}.txt"));
 
         let initial_content = if let Some(suffix) = editable_suffix {
             format!("{}{}", chat_history, suffix)

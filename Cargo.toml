@@ -1,14 +1,14 @@
 [package]
-name = "sandbox"
+name = "rumpelpod"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "sandbox"
+name = "rumpelpod"
 path = "src/lib.rs"
 
 [[bin]]
-name = "sandbox"
+name = "rumpel"
 path = "src/main.rs"
 
 [dependencies]
@@ -38,7 +38,7 @@ indoc = "*"
 strum = { version = "*", features = ["derive"] }
 backoff = "*"
 retry = "*"
-rand = "*"
+rand = "0.9"
 tempfile = "*"
 listenfd = "*"
 url = "*"

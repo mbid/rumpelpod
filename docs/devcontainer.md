@@ -34,20 +34,20 @@ The following properties from `devcontainer.json` are fully implemented:
 
 **Repo Initialization:** Unlike VS Code Dev Containers which bind-mount the host workspace, we use Git-based synchronization. This means:
 
-1. **Detection:** On sandbox creation, check if `workspaceFolder` already contains a Git repository
+1. **Detection:** On pod creation, check if `workspaceFolder` already contains a Git repository
 2. **Initialization:** If no repo exists at `workspaceFolder`:
    - Clone the repository from host via our git-http bridge
-   - This happens on first sandbox creation for that image
-3. **Updates:** On each `sandbox enter`, sync recent commits from host to container
+   - This happens on first pod creation for that image
+3. **Updates:** On each `rumpel enter`, sync recent commits from host to container
 
 **Future Optimization (Image Pre-baking):**
-For faster sandbox startup, we could detect that an image doesn't have a repo at `workspaceFolder` and create a derived image with the repo pre-cloned:
+For faster pod startup, we could detect that an image doesn't have a repo at `workspaceFolder` and create a derived image with the repo pre-cloned:
 1. Start temporary container from base image
 2. Clone current repo state into `workspaceFolder`  
-3. Commit container as new image: `sandbox-<base-image-hash>-<repo-hash>`
-4. Use this pre-baked image for subsequent sandboxes
+3. Commit container as new image: `rumpelpod-<base-image-hash>-<repo-hash>`
+4. Use this pre-baked image for subsequent pods
 
-This optimization is deferred; the initial implementation will clone on each sandbox creation.
+This optimization is deferred; the initial implementation will clone on each pod creation.
 
 ### Metadata
 | Property | Status | Notes |
@@ -62,7 +62,7 @@ These features are intentionally not supported. When detected in `devcontainer.j
 
 | Property | Reason |
 |----------|--------|
-| `workspaceMount` | Defeats sandbox isolation; we use Git-based sync instead of bind mounts |
+| `workspaceMount` | Defeats pod isolation; we use Git-based sync instead of bind mounts |
 | `appPort` | Use `forwardPorts` instead; publishing ports bypasses our port management |
 | `dockerComposeFile` | Out of scope; use dedicated Docker Compose tooling |
 | `service` | Docker Compose specific |
@@ -70,8 +70,8 @@ These features are intentionally not supported. When detected in `devcontainer.j
 
 **Implementation:** In `DevContainer::load()` or config merging, check for these fields and emit warnings:
 ```
-warning: devcontainer.json contains 'workspaceMount' which is not supported by sandbox
-         (sandbox uses Git-based synchronization for isolation)
+warning: devcontainer.json contains 'workspaceMount' which is not supported by rumpelpod
+         (rumpelpod uses Git-based synchronization for isolation)
 ```
 
 ---
@@ -294,7 +294,7 @@ Final setup command. Has access to user-specific secrets.
 }
 ```
 
-**Implementation:** Execute each time `sandbox enter` is called.
+**Implementation:** Execute each time `rumpel enter` is called.
 
 ---
 
@@ -305,7 +305,7 @@ Final setup command. Has access to user-specific secrets.
 
 Which lifecycle command to wait for before considering the container ready.
 
-**Implementation:** Block `sandbox enter` until the specified command completes.
+**Implementation:** Block `rumpel enter` until the specified command completes.
 
 **Testing:** `tests/cli/devcontainer/lifecycle_commands.rs`
 
@@ -326,25 +326,25 @@ Ports that should be forwarded from the container to the local machine.
 }
 ```
 
-**Multi-Sandbox Port Allocation:**
+**Multi-Pod Port Allocation:**
 
-When multiple sandboxes are running for the same repository, port conflicts must be handled:
+When multiple pods are running for the same repository, port conflicts must be handled:
 
-1. **Port Registry:** The daemon maintains a registry of forwarded ports per sandbox
-2. **Automatic Allocation:** If the requested local port is in use by another sandbox:
+1. **Port Registry:** The daemon maintains a registry of forwarded ports per pod
+2. **Automatic Allocation:** If the requested local port is in use by another pod:
    - Allocate the next available port in a defined range (e.g., 10000-65535)
-   - Store the mapping: `sandbox-name -> {container_port: local_port}`
-3. **Port Query:** `sandbox ports <sandbox-name>` shows the port mappings:
+   - Store the mapping: `pod-name -> {container_port: local_port}`
+3. **Port Query:** `rumpel ports <pod-name>` shows the port mappings:
    ```
    CONTAINER    LOCAL      LABEL
    3000         3000       Application
-   5432         15432      Database (remapped: 5432 in use by sandbox-1)
+   5432         15432      Database (remapped: 5432 in use by pod-1)
    ```
-4. **Sticky Allocation:** Once a port is allocated to a sandbox, prefer reusing it on restart
+4. **Sticky Allocation: Once a port is allocated to a pod, prefer reusing it on restart
 
 **Implementation for Local Docker:**
 - Use `socat` or SSH local forwarding to forward from localhost to container
-- Don't use `--publish` (would conflict across sandboxes and bypass gVisor network isolation)
+- Don't use `--publish` (would conflict across pods and bypass gVisor network isolation)
 
 **Implementation for Remote Docker:**
 - All port forwarding goes through SSH tunnel to the developer's machine
@@ -363,7 +363,7 @@ Publishes ports when container runs. Unlike `forwardPorts`, requires application
 
 **Status:** ⚠️ **DISCOURAGED** - Use `forwardPorts` instead.
 
-**Why:** Publishing ports (`--publish`) bypasses our port management and can cause conflicts between sandboxes. It also doesn't work well with gVisor's network isolation.
+**Why:** Publishing ports (`--publish`) bypasses our port management and can cause conflicts between pods. It also doesn't work well with gVisor's network isolation.
 
 ---
 
@@ -387,7 +387,7 @@ Port-specific configuration for forwarded ports.
 ```
 
 **Properties:**
-- `label` - Display name (shown in `sandbox ports` output)
+- `label` - Display name (shown in `rumpel ports` output)
 - `protocol` - `http` or `https` (for URL display)
 - `onAutoForward` - Action when port detected: `notify`, `openBrowser`, `openBrowserOnce`, `openPreview`, `silent`, `ignore`
 - `requireLocalPort` - Must use same port number locally (error if unavailable)
@@ -440,7 +440,7 @@ Environment variables for dev tools and processes (like terminals), but not the 
 }
 ```
 
-**Implementation:** Apply these variables when executing commands via `sandbox enter` and `sandbox agent`. Both commands run processes inside the container and should have access to these environment variables. To resolve `${containerEnv:VAR}`, execute `printenv VAR` in the container first.
+**Implementation:** Apply these variables when executing commands via `rumpel enter` and `rumpel agent`. Both commands run processes inside the container and should have access to these environment variables. To resolve `${containerEnv:VAR}`, execute `printenv VAR` in the container first.
 
 ---
 
@@ -518,7 +518,7 @@ Additional mounts for the container. Accepts Docker `--mount` format strings or 
 2. Substitute supported variables
 3. Add to `ContainerCreateBody.host_config.mounts`
 
-**Security Consideration:** Should validate mount sources to prevent escaping sandbox.
+**Security Consideration:** Should validate mount sources to prevent escaping pod.
 
 **Remote Docker Hosts:** ❌ **NOT SUPPORTED** for `bind` mounts. When using a remote Docker host:
 - `bind` mounts would reference paths on the *remote* host, not the developer's machine
@@ -626,11 +626,11 @@ Tool-specific customizations. Each tool uses a unique key.
 }
 ```
 
-**Implementation:** Define a `sandbox` key for our tool-specific settings:
+**Implementation:** Define a `rumpelpod` key for our tool-specific settings:
 ```json
 {
   "customizations": {
-    "sandbox": {
+    "rumpelpod": {
       "agent": {
         "model": "claude-sonnet-4-5"
       }
@@ -732,8 +732,8 @@ Not all variables are available in all properties. This is because some variable
 3. **After container start:** `containerEnv` - requires running container to query env vars
 
 **`${devcontainerId}` Generation:**
-- Must be stable across container rebuilds for the same sandbox
-- Suggested: hash of `(repo_path, sandbox_name)`
+- Must be stable across container rebuilds for the same pod
+- Suggested: hash of `(repo_path, pod_name)`
 - Used by Features to store persistent data
 
 **`${containerEnv:VAR}` Implementation:**
@@ -760,7 +760,7 @@ Tests for devcontainer.json features are organized in `tests/cli/devcontainer/` 
 | `unsupported.rs` | Warnings for `workspaceMount`, `appPort`, `dockerComposeFile`, etc. |
 | `runtime_options.rs` | `privileged`, `init`, `capAdd`, `securityOpt`, `runArgs` |
 | `lifecycle_commands.rs` | `onCreateCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand`, `waitFor` |
-| `ports.rs` | `forwardPorts`, `portsAttributes`, multi-sandbox port allocation |
+| `ports.rs` | `forwardPorts`, `portsAttributes`, multi-pod port allocation |
 | `remote_env.rs` | `remoteEnv`, `${containerEnv}`, `userEnvProbe`, `updateRemoteUserUID` |
 | `mounts.rs` | `mounts` (volumes, tmpfs; bind blocked for remote) |
 | `workspace.rs` | `workspaceFolder` defaults, repo initialization |
@@ -810,7 +810,7 @@ For features that behave differently with remote Docker hosts:
    - `${localEnv:VAR}` with default value support
    - `${localWorkspaceFolder}`, `${localWorkspaceFolderBasename}`
    - `${containerWorkspaceFolder}`, `${containerWorkspaceFolderBasename}`
-   - `${devcontainerId}` generation (hash of repo + sandbox name)
+   - `${devcontainerId}` generation (hash of repo + pod name)
 2. **Warnings for unsupported features** - `workspaceMount`, `appPort`, `dockerComposeFile`, etc.
 
 ### Phase 1: Security & Debugging
@@ -820,8 +820,8 @@ For features that behave differently with remote Docker hosts:
 
 ### Phase 2: Developer Experience
 1. Lifecycle commands (`postCreateCommand`, etc.) with variable substitution
-2. Port forwarding with multi-sandbox support
-3. `remoteEnv` for `sandbox enter` and `sandbox agent`
+2. Port forwarding with multi-pod support
+3. `remoteEnv` for `rumpel enter` and `rumpel agent`
    - Includes `${containerEnv:VAR}` support (requires running container)
 
 ### Phase 3: Advanced Features
@@ -830,5 +830,5 @@ For features that behave differently with remote Docker hosts:
 3. `hostRequirements` for cloud deployments
 
 ### Phase 4: Compatibility
-1. `customizations.sandbox` namespace
+1. `customizations.rumpelpod` namespace
 2. `userEnvProbe` for environment detection

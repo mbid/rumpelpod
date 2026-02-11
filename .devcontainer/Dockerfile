@@ -80,8 +80,8 @@ USER root
 RUN mkdir /workspaces && chown -R ${USER}:${USER} /workspaces
 USER ${USER}
 
-RUN git clone https://github.com/mbid/sandbox /workspaces/sandbox
-WORKDIR /workspaces/sandbox
+RUN git clone https://github.com/mbid/rumpelpod /workspaces/rumpelpod
+WORKDIR /workspaces/rumpelpod
 
 ARG ANTHROPIC_API_KEY
 ARG XAI_API_KEY

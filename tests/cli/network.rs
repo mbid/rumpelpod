@@ -1,8 +1,8 @@
 use crate::common::{
-    build_test_image, create_commit, sandbox_command, write_test_sandbox_config_with_network,
-    TestDaemon, TestRepo,
+    build_test_image, create_commit, pod_command, write_test_pod_config_with_network, TestDaemon,
+    TestRepo,
 };
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
@@ -21,7 +21,7 @@ fn network_host_connectivity() {
     )
     .expect("Failed to build test image");
 
-    write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
+    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
 
     // Bind a listener on localhost on the host
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind listener");
@@ -40,10 +40,10 @@ fn network_host_connectivity() {
         thread::sleep(std::time::Duration::from_millis(100));
     });
 
-    // Run nc inside sandbox to connect to host's localhost
+    // Run nc inside pod to connect to host's localhost
     // We expect 127.0.0.1 to be reachable and map to the host.
     // We don't use -N because we want to read the response.
-    let output = sandbox_command(&repo, &daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -51,7 +51,7 @@ fn network_host_connectivity() {
         .arg("-c")
         .arg(format!("echo HELLO | nc 127.0.0.1 {}", port))
         .success()
-        .expect("Failed to run sandbox command");
+        .expect("Failed to run pod command");
 
     let stdout = String::from_utf8_lossy(&output);
     assert_eq!(stdout.trim(), "WORLD");
@@ -59,18 +59,18 @@ fn network_host_connectivity() {
     server_handle.join().expect("Server thread panicked");
 }
 
-/// With --network=host, both 'host' and 'sandbox' remotes inside the sandbox
-/// should use localhost since the sandbox shares the host's network namespace.
+/// With --network=host, both 'host' and 'rumpelpod' remotes inside the pod
+/// should use localhost since the pod shares the host's network namespace.
 #[test]
 fn network_host_remotes_use_localhost() {
     let daemon = TestDaemon::start();
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
-    write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
+    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
 
-    // Check 'host' remote inside sandbox
-    let output = sandbox_command(&repo, &daemon)
+    // Check 'host' remote inside pod
+    let output = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -79,59 +79,56 @@ fn network_host_remotes_use_localhost() {
         .arg("get-url")
         .arg("host")
         .success()
-        .expect("Failed to get 'host' remote URL inside sandbox");
+        .expect("Failed to get 'host' remote URL inside pod");
 
     let host_remote_url = String::from_utf8_lossy(&output).trim().to_string();
-    println!("Remote 'host' URL inside sandbox: {}", host_remote_url);
+    println!("Remote 'host' URL inside pod: {}", host_remote_url);
     assert!(
         host_remote_url.contains("127.0.0.1") || host_remote_url.contains("localhost"),
-        "Remote 'host' inside sandbox should use localhost, got: {}",
+        "Remote 'host' inside pod should use localhost, got: {}",
         host_remote_url
     );
 
-    // Check 'sandbox' remote inside sandbox
-    let output = sandbox_command(&repo, &daemon)
+    // Check 'rumpelpod' remote inside pod
+    let output = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
         .arg("git")
         .arg("remote")
         .arg("get-url")
-        .arg("sandbox")
+        .arg("rumpelpod")
         .success()
-        .expect("Failed to get 'sandbox' remote URL inside sandbox");
+        .expect("Failed to get 'rumpelpod' remote URL inside pod");
 
-    let sandbox_remote_url = String::from_utf8_lossy(&output).trim().to_string();
-    println!(
-        "Remote 'sandbox' URL inside sandbox: {}",
-        sandbox_remote_url
-    );
+    let pod_remote_url = String::from_utf8_lossy(&output).trim().to_string();
+    println!("Remote 'rumpelpod' URL inside pod: {}", pod_remote_url);
     assert!(
-        sandbox_remote_url.contains("127.0.0.1") || sandbox_remote_url.contains("localhost"),
-        "Remote 'sandbox' inside sandbox should use localhost, got: {}",
-        sandbox_remote_url
+        pod_remote_url.contains("127.0.0.1") || pod_remote_url.contains("localhost"),
+        "Remote 'rumpelpod' inside pod should use localhost, got: {}",
+        pod_remote_url
     );
 }
 
 /// Test that commits made on the host are available via the 'host' remote inside
-/// the sandbox when using --network=host.
+/// the pod when using --network=host.
 #[test]
-fn network_host_fetch_from_sandbox() {
+fn network_host_fetch_from_pod() {
     let daemon = TestDaemon::start();
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
-    write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
+    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
 
-    // Launch sandbox first
-    sandbox_command(&repo, &daemon)
+    // Launch pod first
+    pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
         .arg("echo")
         .arg("setup")
         .success()
-        .expect("Failed to setup sandbox");
+        .expect("Failed to setup pod");
 
     // Create a commit on the host (reference-transaction hook pushes to gateway)
     create_commit(repo.path(), "Host commit for fetch test");
@@ -142,8 +139,8 @@ fn network_host_fetch_from_sandbox() {
         .expect("Failed to get host commit");
     let host_commit = String::from_utf8_lossy(&host_commit).trim().to_string();
 
-    // Fetch from host remote inside the sandbox
-    sandbox_command(&repo, &daemon)
+    // Fetch from host remote inside the pod
+    pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -154,7 +151,7 @@ fn network_host_fetch_from_sandbox() {
         .expect("Failed to fetch from host remote");
 
     // Verify the fetched commit matches
-    let fetched_commit = sandbox_command(&repo, &daemon)
+    let fetched_commit = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -171,67 +168,67 @@ fn network_host_fetch_from_sandbox() {
     );
 }
 
-/// Test that commits pushed from inside the sandbox propagate to the host repo
+/// Test that commits pushed from inside the pod propagate to the host repo
 /// as remote-tracking refs when using --network=host.
 #[test]
-fn network_host_push_from_sandbox() {
+fn network_host_push_from_pod() {
     let daemon = TestDaemon::start();
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
-    write_test_sandbox_config_with_network(&repo, &image_id, "unsafe-host");
+    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
 
-    let sandbox_name = "push-test";
+    let pod_name = "push-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
+    // Launch pod
+    pod_command(&repo, &daemon)
         .arg("enter")
-        .arg(sandbox_name)
+        .arg(pod_name)
         .arg("--")
         .arg("echo")
         .arg("setup")
         .success()
-        .expect("Failed to setup sandbox");
+        .expect("Failed to setup pod");
 
-    // Create a commit inside the sandbox (reference-transaction hook pushes to gateway)
-    sandbox_command(&repo, &daemon)
+    // Create a commit inside the pod (reference-transaction hook pushes to gateway)
+    pod_command(&repo, &daemon)
         .arg("enter")
-        .arg(sandbox_name)
+        .arg(pod_name)
         .arg("--")
         .arg("git")
         .arg("commit")
         .arg("--allow-empty")
         .arg("-m")
-        .arg("Sandbox commit")
+        .arg("Pod commit")
         .success()
-        .expect("Failed to create commit in sandbox");
+        .expect("Failed to create commit in pod");
 
-    // Get the commit hash from the sandbox
-    let sandbox_commit = sandbox_command(&repo, &daemon)
+    // Get the commit hash from the pod
+    let pod_commit = pod_command(&repo, &daemon)
         .arg("enter")
-        .arg(sandbox_name)
+        .arg(pod_name)
         .arg("--")
         .arg("git")
         .arg("rev-parse")
         .arg("HEAD")
         .success()
-        .expect("Failed to get sandbox commit");
-    let sandbox_commit = String::from_utf8_lossy(&sandbox_commit).trim().to_string();
+        .expect("Failed to get pod commit");
+    let pod_commit = String::from_utf8_lossy(&pod_commit).trim().to_string();
 
-    // The sandbox's commit should be visible in the host repo as a remote-tracking ref.
-    // The gateway post-receive hook syncs sandbox/<branch>@<name> to the host repo
-    // as refs/remotes/sandbox/<branch>@<name>.
-    // For the primary branch (where branch == sandbox name), there's also an alias.
+    // The pod's commit should be visible in the host repo as a remote-tracking ref.
+    // The gateway post-receive hook syncs pod/<branch>@<name> to the host repo
+    // as refs/remotes/pod/<branch>@<name>.
+    // For the primary branch (where branch == pod name), there's also an alias.
     let host_ref_commit = Command::new("git")
-        .args(["rev-parse", &format!("sandbox/{}", sandbox_name)])
+        .args(["rev-parse", &format!("pod/{}", pod_name)])
         .current_dir(repo.path())
         .success()
-        .expect("Failed to get sandbox ref from host repo");
+        .expect("Failed to get pod ref from host repo");
     let host_ref_commit = String::from_utf8_lossy(&host_ref_commit).trim().to_string();
 
     assert_eq!(
-        host_ref_commit, sandbox_commit,
-        "Host repo should have sandbox's commit at sandbox/{} ref",
-        sandbox_name
+        host_ref_commit, pod_commit,
+        "Host repo should have pod's commit at pod/{} ref",
+        pod_name
     );
 }

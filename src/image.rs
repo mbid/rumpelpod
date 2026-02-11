@@ -1,6 +1,6 @@
 //! Docker image resolution and building.
 //!
-//! This module handles resolving Docker images for sandboxes, including building
+//! This module handles resolving Docker images for pods, including building
 //! images from devcontainer.json specifications when needed.
 
 use anyhow::{bail, Result};
@@ -183,5 +183,5 @@ fn compute_image_tag(build: &BuildOptions, dockerfile_path: &Path) -> Result<Str
     }
 
     let hash = hex::encode(&hasher.finalize()[..8]);
-    Ok(format!("sandbox-devcontainer-{}", hash))
+    Ok(format!("rumpelpod-devcontainer-{}", hash))
 }

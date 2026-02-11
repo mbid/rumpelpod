@@ -3,9 +3,9 @@
 use std::fs;
 
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
-use crate::common::{sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 
 /// Create a test devcontainer.json with a build configuration.
 fn write_devcontainer_with_build(repo: &TestRepo, dockerfile_name: &str) {
@@ -39,13 +39,14 @@ fn write_test_dockerfile(repo: &TestRepo, content: &str) {
     fs::write(devcontainer_dir.join("Dockerfile"), content).expect("Failed to write Dockerfile");
 }
 
-/// Write a minimal .sandbox.toml for agent settings (runtime is set via devcontainer.json).
-fn write_minimal_sandbox_toml(repo: &TestRepo) {
+/// Write a minimal .rumpelpod.toml for agent settings (runtime is set via devcontainer.json).
+fn write_minimal_pod_toml(repo: &TestRepo) {
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 #[test]
@@ -63,12 +64,12 @@ fn devcontainer_build_simple() {
 
     write_test_dockerfile(&repo, &dockerfile);
     write_devcontainer_with_build(&repo, "Dockerfile");
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Enter the sandbox - this should trigger an image build
-    let stdout = sandbox_command(&repo, &daemon)
+    // Enter the pod - this should trigger an image build
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "build-test",
@@ -77,7 +78,7 @@ fn devcontainer_build_simple() {
             "hello from built image",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "hello from built image");
@@ -125,15 +126,15 @@ fn devcontainer_build_with_args() {
     )
     .expect("Failed to write devcontainer.json");
 
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Enter the sandbox and check that the build arg was used
-    let stdout = sandbox_command(&repo, &daemon)
+    // Enter the pod and check that the build arg was used
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "args-test", "--", "cat", "/tmp/build-arg.txt"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "BUILD_ARG: custom_value");
@@ -185,15 +186,15 @@ fn devcontainer_build_with_target() {
     )
     .expect("Failed to write devcontainer.json");
 
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Enter the sandbox and verify we're using the development stage
-    let stdout = sandbox_command(&repo, &daemon)
+    // Enter the pod and verify we're using the development stage
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "target-test", "--", "cat", "/tmp/stage.txt"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "development stage");
@@ -213,30 +214,30 @@ fn devcontainer_build_reuses_cached_image() {
 
     write_test_dockerfile(&repo, &dockerfile);
     write_devcontainer_with_build(&repo, "Dockerfile");
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // First enter - should build the image
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "cache-test-1", "--", "echo", "first"])
         .success()
-        .expect("first sandbox enter failed");
+        .expect("first rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "first");
 
-    // Second enter with different sandbox name - should reuse the cached image
+    // Second enter with different pod name - should reuse the cached image
     // (same Dockerfile hash) without rebuilding
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "cache-test-2", "--", "echo", "second"])
         .success()
-        .expect("second sandbox enter failed");
+        .expect("second rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "second");
 
-    // Verify both sandboxes can run commands (they're using the same image)
-    let stdout = sandbox_command(&repo, &daemon)
+    // Verify both pods can run commands (they're using the same image)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "cache-test-1", "--", "echo", "still works"])
         .success()
-        .expect("reentry to first sandbox failed");
+        .expect("reentry to first pod failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "still works");
 }
 
@@ -257,14 +258,14 @@ fn devcontainer_build_with_context() {
 
     // First, use context ".." (repo root)
     write_devcontainer_with_build(&repo, "Dockerfile");
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "context-test", "--", "echo", "build works"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "build works");
 }
 
@@ -282,15 +283,15 @@ fn devcontainer_build_skips_when_image_exists() {
 
     write_test_dockerfile(&repo, &dockerfile);
     write_devcontainer_with_build(&repo, "Dockerfile");
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // First enter builds the image.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "skip-test-1", "--", "echo", "built"])
         .success()
-        .expect("first sandbox enter failed");
+        .expect("first pod enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "built");
 
     // Delete the build context so that `docker build` would fail if attempted.
@@ -299,7 +300,7 @@ fn devcontainer_build_skips_when_image_exists() {
     for entry in fs::read_dir(context_dir).unwrap() {
         let entry = entry.unwrap();
         let name = entry.file_name();
-        if name == ".devcontainer" || name == ".sandbox.toml" || name == ".git" {
+        if name == ".devcontainer" || name == ".rumpelpod.toml" || name == ".git" {
             continue;
         }
         let path = entry.path();
@@ -312,9 +313,9 @@ fn devcontainer_build_skips_when_image_exists() {
 
     // Second enter should skip the build entirely because the image tag
     // already exists, so the missing context directory doesn't matter.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "skip-test-2", "--", "echo", "skipped"])
         .success()
-        .expect("second sandbox enter should skip build");
+        .expect("second pod enter should skip build");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "skipped");
 }

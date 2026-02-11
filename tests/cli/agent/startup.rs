@@ -50,12 +50,12 @@ fn test_editor_opens_immediately() {
         })
         .expect("Failed to create PTY");
 
-    let sandbox_bin = cargo::cargo_bin!("sandbox");
+    let rumpel_bin = cargo::cargo_bin!("rumpel");
 
-    let mut cmd = CommandBuilder::new(sandbox_bin);
+    let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());
     cmd.env(
-        "SANDBOX_DAEMON_SOCKET",
+        "RUMPELPOD_DAEMON_SOCKET",
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
@@ -120,6 +120,6 @@ fn test_editor_opens_immediately() {
     // Assert that it took less than 0.2 seconds
     // Note: In a CI environment, 0.2s might be flaky if the machine is very slow.
     // But locally it should be very fast.
-    // If we wait for sandbox launch, it should be > 1s typically.
+    // If we wait for pod launch, it should be > 1s typically.
     assert!(diff < 0.2, "Editor took too long to open: {:.4}s", diff);
 }

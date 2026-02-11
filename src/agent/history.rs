@@ -15,7 +15,7 @@ pub struct ConversationTracker {
     client: DaemonClient,
     id: Option<i64>,
     repo_path: std::path::PathBuf,
-    sandbox_name: String,
+    pod_name: String,
     model: String,
     provider: String,
 }
@@ -27,7 +27,7 @@ impl ConversationTracker {
     /// If `id` is None, a new conversation will be created on first save.
     pub fn new(
         repo_path: std::path::PathBuf,
-        sandbox_name: String,
+        pod_name: String,
         model: String,
         provider: String,
         id: Option<i64>,
@@ -38,7 +38,7 @@ impl ConversationTracker {
             client,
             id,
             repo_path,
-            sandbox_name,
+            pod_name,
             model,
             provider,
         })
@@ -51,7 +51,7 @@ impl ConversationTracker {
         let returned_id = self.client.save_conversation(
             self.id,
             self.repo_path.clone(),
-            self.sandbox_name.clone(),
+            self.pod_name.clone(),
             self.model.clone(),
             self.provider.clone(),
             history.clone(),
@@ -142,7 +142,7 @@ fn show_picker(conversations: &[ConversationSummary]) -> Result<i64> {
 /// - --continue=N: resume Nth most recent (0 = most recent)
 pub fn resolve_conversation(
     repo_path: &Path,
-    sandbox_name: &str,
+    pod_name: &str,
     new_flag: bool,
     continue_flag: Option<u32>,
 ) -> Result<ConversationChoice> {
@@ -154,14 +154,13 @@ pub fn resolve_conversation(
     // Fetch existing conversations from daemon
     let socket = socket_path()?;
     let client = DaemonClient::new_unix(&socket);
-    let conversations =
-        client.list_conversations(repo_path.to_path_buf(), sandbox_name.to_string())?;
+    let conversations = client.list_conversations(repo_path.to_path_buf(), pod_name.to_string())?;
 
     // Handle --continue=N
     if let Some(n) = continue_flag {
         let n = n as usize;
         if conversations.is_empty() {
-            bail!("No conversations exist for sandbox '{}'.", sandbox_name);
+            bail!("No conversations exist for pod '{}'.", pod_name);
         }
         if n >= conversations.len() {
             bail!(
@@ -190,9 +189,9 @@ pub fn resolve_conversation(
             } else {
                 // Non-TTY: error with helpful message
                 bail!(
-                    "Multiple conversations exist for sandbox '{}'.\n\
+                    "Multiple conversations exist for pod '{}'.\n\
                      Use --continue=N to select (0 = most recent), or --new to start fresh.",
-                    sandbox_name
+                    pod_name
                 );
             }
         }

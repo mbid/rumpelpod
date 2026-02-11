@@ -5,10 +5,10 @@
 //! propagation, and the `waitFor` setting.
 
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 
 /// Write a devcontainer.json with the given lifecycle command properties spliced
 /// in alongside a standard build section.
@@ -45,12 +45,13 @@ fn write_devcontainer_with_lifecycle(repo: &TestRepo, lifecycle_json: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_sandbox_toml(repo: &TestRepo) {
+fn write_minimal_pod_toml(repo: &TestRepo) {
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 /// onCreateCommand should run only on first container creation — not on
@@ -60,26 +61,26 @@ fn on_create_command_runs_once() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_lifecycle(&repo, r#""onCreateCommand": "touch /tmp/on_create_marker""#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // First enter — onCreateCommand should have created the marker file.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-once", "--", "cat", "/tmp/on_create_marker"])
         .success()
-        .expect("first sandbox enter failed");
+        .expect("first rumpel enter failed");
     // File exists, so cat succeeds (empty output is fine for an empty file).
     let _ = String::from_utf8_lossy(&stdout);
 
     // Remove the marker so we can detect if the command runs again.
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-once", "--", "rm", "/tmp/on_create_marker"])
         .success()
         .expect("marker removal failed");
 
     // Second enter — onCreateCommand must NOT run again.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-once",
@@ -89,7 +90,7 @@ fn on_create_command_runs_once() {
             "test -f /tmp/on_create_marker && echo exists || echo missing",
         ])
         .success()
-        .expect("second sandbox enter failed");
+        .expect("second rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -111,14 +112,14 @@ fn post_create_command_runs_after_on_create() {
         r#""onCreateCommand": "echo 1 >> /tmp/lifecycle_order",
             "postCreateCommand": "echo 2 >> /tmp/lifecycle_order""#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-order", "--", "cat", "/tmp/lifecycle_order"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
@@ -139,29 +140,29 @@ fn post_start_command_runs_each_start() {
         &repo,
         r#""postStartCommand": "echo start >> /tmp/start_count""#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // First enter — triggers a start.
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-start", "--", "echo", "ok"])
         .success()
         .expect("first enter failed");
 
-    // Stop the sandbox, then start it again.
-    sandbox_command(&repo, &daemon)
+    // Stop the pod, then start it again.
+    pod_command(&repo, &daemon)
         .args(["stop", "lc-start"])
         .success()
-        .expect("sandbox stop failed");
+        .expect("rumpel stop failed");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-start", "--", "echo", "ok"])
         .success()
         .expect("second enter failed");
 
     // Verify the command ran twice.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-start",
@@ -183,7 +184,7 @@ fn post_start_command_runs_each_start() {
     );
 }
 
-/// postAttachCommand should run on every sandbox enter.
+/// postAttachCommand should run on every rumpel enter.
 #[test]
 fn post_attach_command_runs_each_enter() {
     let repo = TestRepo::new();
@@ -192,23 +193,23 @@ fn post_attach_command_runs_each_enter() {
         &repo,
         r#""postAttachCommand": "echo attach >> /tmp/attach_count""#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // Enter twice without stopping.
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-attach", "--", "echo", "ok"])
         .success()
         .expect("first enter failed");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-attach", "--", "echo", "ok"])
         .success()
         .expect("second enter failed");
 
     // Verify the command ran twice.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-attach",
@@ -240,14 +241,14 @@ fn lifecycle_command_string_format() {
         &repo,
         r#""postCreateCommand": "echo hello > /tmp/string_fmt""#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-str", "--", "cat", "/tmp/string_fmt"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "hello");
@@ -262,14 +263,14 @@ fn lifecycle_command_array_format() {
         &repo,
         r#""postCreateCommand": ["sh", "-c", "echo hello > /tmp/array_fmt"]"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-arr", "--", "cat", "/tmp/array_fmt"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "hello");
@@ -288,11 +289,11 @@ fn lifecycle_command_object_parallel() {
                 "b": "echo bravo > /tmp/parallel_b"
             }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-obj",
@@ -302,7 +303,7 @@ fn lifecycle_command_object_parallel() {
             "cat /tmp/parallel_a /tmp/parallel_b | sort",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     let lines: Vec<&str> = stdout.trim().lines().collect();
@@ -323,18 +324,18 @@ fn lifecycle_command_failure_stops_chain() {
         r#""onCreateCommand": "exit 1",
             "postCreateCommand": "touch /tmp/should_not_exist""#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // The first enter should fail because onCreateCommand exits 1.
-    let _ = sandbox_command(&repo, &daemon)
+    let _ = pod_command(&repo, &daemon)
         .args(["enter", "lc-fail", "--", "echo", "ok"])
         .output();
 
     // Second enter should succeed (failed lifecycle commands are marked as
     // "ran" and not retried), and postCreateCommand should never have executed.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-fail",
@@ -354,7 +355,7 @@ fn lifecycle_command_failure_stops_chain() {
     );
 }
 
-/// The `waitFor` property should block `sandbox enter` until the specified
+/// The `waitFor` property should block `rumpel enter` until the specified
 /// lifecycle command has completed.
 #[test]
 fn wait_for_setting() {
@@ -367,19 +368,19 @@ fn wait_for_setting() {
         r#""postCreateCommand": "sleep 1 && echo done > /tmp/wait_marker",
             "waitFor": "postCreateCommand""#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-wait", "--", "cat", "/tmp/wait_marker"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
         stdout.trim(),
         "done",
-        "sandbox enter should have waited for postCreateCommand to finish"
+        "rumpel enter should have waited for postCreateCommand to finish"
     );
 }

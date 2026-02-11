@@ -1,6 +1,6 @@
 //! Tests for web search and fetch functionality.
 
-use crate::common::{build_test_image, write_test_sandbox_config, TestDaemon, TestRepo};
+use crate::common::{build_test_image, write_test_pod_config, TestDaemon, TestRepo};
 
 use super::common::{
     run_agent_interactive_model_and_args, ANTHROPIC_MODEL, GEMINI_MODEL, XAI_MODEL,
@@ -9,7 +9,7 @@ use super::common::{
 fn agent_web_search(model: &str, extra_args: &[&str]) {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -53,7 +53,7 @@ fn agent_web_search_gemini() {
 fn agent_web_search_disabled_anthropic() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -82,10 +82,10 @@ fn agent_web_search_disabled_anthropic() {
 fn agent_web_search_anthropic_config_disable_works() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     // Disable websearch in config
-    let config_path = repo.path().join(".sandbox.toml");
+    let config_path = repo.path().join(".rumpelpod.toml");
     let mut config = std::fs::read_to_string(&config_path).expect("Failed to read config");
     config.push_str("\n[agent]\nanthropic-websearch = false\n");
     std::fs::write(&config_path, config).expect("Failed to update config");
@@ -116,10 +116,10 @@ fn agent_web_search_anthropic_config_disable_works() {
 fn agent_web_search_anthropic_config_disable_cli_enable() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     // Disable websearch in config
-    let config_path = repo.path().join(".sandbox.toml");
+    let config_path = repo.path().join(".rumpelpod.toml");
     let mut config = std::fs::read_to_string(&config_path).expect("Failed to read config");
     config.push_str("\n[agent]\nanthropic-websearch = false\n");
     std::fs::write(&config_path, config).expect("Failed to update config");
@@ -146,7 +146,7 @@ fn agent_web_search_anthropic_config_disable_cli_enable() {
 fn agent_web_search_anthropic_flags_conflict() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -182,10 +182,10 @@ fn agent_web_search_anthropic_flags_conflict() {
 fn agent_web_search_anthropic_config_enable_cli_disable() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     // Enable websearch in config
-    let config_path = repo.path().join(".sandbox.toml");
+    let config_path = repo.path().join(".rumpelpod.toml");
     let mut config = std::fs::read_to_string(&config_path).expect("Failed to read config");
     config.push_str("\n[agent]\nanthropic-websearch = true\n");
     std::fs::write(&config_path, config).expect("Failed to update config");

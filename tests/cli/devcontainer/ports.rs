@@ -4,19 +4,19 @@
 //! - Basic port forwarding from container to host
 //! - Multiple ports forwarded simultaneously
 //! - Port label display from portsAttributes
-//! - Multi-sandbox port conflict resolution (remapping)
-//! - `sandbox ports` CLI command output
+//! - Multi-pod port conflict resolution (remapping)
+//! - `rumpel ports` CLI command output
 
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::common::{
-    build_docker_image, sandbox_command, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH,
-    TEST_USER, TEST_USER_UID,
+    build_docker_image, pod_command, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+    TEST_USER_UID,
 };
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
@@ -55,26 +55,22 @@ fn write_devcontainer_with_ports(repo: &TestRepo, ports_config: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_sandbox_toml(repo: &TestRepo) {
+fn write_minimal_pod_toml(repo: &TestRepo) {
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 /// Start a TCP echo server inside the container on the given port.
 /// Uses socat to listen and echo back whatever is sent.
-fn start_echo_server_in_container(
-    repo: &TestRepo,
-    daemon: &TestDaemon,
-    sandbox_name: &str,
-    port: u16,
-) {
-    sandbox_command(repo, daemon)
+fn start_echo_server_in_container(repo: &TestRepo, daemon: &TestDaemon, pod_name: &str, port: u16) {
+    pod_command(repo, daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "sh",
             "-c",
@@ -103,15 +99,15 @@ fn forward_single_port() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9100],"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Create sandbox (this should set up port forwarding)
-    sandbox_command(&repo, &daemon)
+    // Create pod (this should set up port forwarding)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-single", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // Start an echo server on port 9100 inside the container
     start_echo_server_in_container(&repo, &daemon, "fwd-single", 9100);
@@ -130,14 +126,14 @@ fn forward_multiple_ports() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9200, 9201],"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-multi", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     start_echo_server_in_container(&repo, &daemon, "fwd-multi", 9200);
     start_echo_server_in_container(&repo, &daemon, "fwd-multi", 9201);
@@ -162,19 +158,19 @@ fn ports_command_shows_forwarded_ports() {
         },
         "#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-show", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "fwd-show"])
         .success()
-        .expect("sandbox ports failed");
+        .expect("rumpel ports failed");
 
     let output = String::from_utf8_lossy(&stdout);
     assert!(output.contains("9300"), "Should show container port 9300");
@@ -187,19 +183,19 @@ fn ports_command_empty_when_no_forwards() {
 
     // No forwardPorts at all
     write_devcontainer_with_ports(&repo, "");
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-empty", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "fwd-empty"])
         .success()
-        .expect("sandbox ports failed");
+        .expect("rumpel ports failed");
 
     let output = String::from_utf8_lossy(&stdout);
     // Should show the header but no port rows
@@ -210,47 +206,44 @@ fn ports_command_empty_when_no_forwards() {
 }
 
 #[test]
-fn multi_sandbox_port_remapping() {
+fn multi_pod_port_remapping() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9400],"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // First sandbox gets port 9400
-    sandbox_command(&repo, &daemon)
+    // First pod gets port 9400
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-first", "--", "true"])
         .success()
-        .expect("sandbox enter failed for first sandbox");
+        .expect("rumpel enter failed for first pod");
 
-    // Second sandbox also wants port 9400 but should get remapped
-    sandbox_command(&repo, &daemon)
+    // Second pod also wants port 9400 but should get remapped
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-second", "--", "true"])
         .success()
-        .expect("sandbox enter failed for second sandbox");
+        .expect("rumpel enter failed for second pod");
 
-    // Check the ports for both sandboxes
-    let stdout1 = sandbox_command(&repo, &daemon)
+    // Check the ports for both pods
+    let stdout1 = pod_command(&repo, &daemon)
         .args(["ports", "fwd-first"])
         .success()
-        .expect("sandbox ports failed for first");
+        .expect("rumpel ports failed for first");
     let output1 = String::from_utf8_lossy(&stdout1);
 
-    let stdout2 = sandbox_command(&repo, &daemon)
+    let stdout2 = pod_command(&repo, &daemon)
         .args(["ports", "fwd-second"])
         .success()
-        .expect("sandbox ports failed for second");
+        .expect("rumpel ports failed for second");
     let output2 = String::from_utf8_lossy(&stdout2);
 
     // Both should show container port 9400
-    assert!(
-        output1.contains("9400"),
-        "First sandbox should show port 9400"
-    );
+    assert!(output1.contains("9400"), "First pod should show port 9400");
     assert!(
         output2.contains("9400"),
-        "Second sandbox should show container port 9400"
+        "Second pod should show container port 9400"
     );
 
     // Extract local ports from each - they must differ
@@ -259,11 +252,11 @@ fn multi_sandbox_port_remapping() {
 
     assert_ne!(
         local_port_1, local_port_2,
-        "Two sandboxes should not share the same local port for 9400"
+        "Two pods should not share the same local port for 9400"
     );
 }
 
-/// Extract the local port for a given container port from `sandbox ports` output.
+/// Extract the local port for a given container port from `rumpel ports` output.
 /// The output format is: CONTAINER  LOCAL  LABEL
 fn extract_local_port(output: &str, container_port: u16) -> u16 {
     let port_str = container_port.to_string();
@@ -279,7 +272,7 @@ fn extract_local_port(output: &str, container_port: u16) -> u16 {
     );
 }
 
-/// Write a devcontainer.json with forwardPorts and a .sandbox.toml pointing
+/// Write a devcontainer.json with forwardPorts and a .rumpelpod.toml pointing
 /// to a remote Docker host with a pre-built image.
 fn write_remote_config_with_ports(
     repo: &TestRepo,
@@ -313,7 +306,8 @@ fn write_remote_config_with_ports(
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 #[test]
@@ -350,20 +344,20 @@ fn forward_port_remote_ssh() {
         r#""forwardPorts": [9500],"#,
     );
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-remote", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // Start an echo server on port 9500 inside the remote container
     start_echo_server_in_container(&repo, &daemon, "fwd-remote", 9500);
 
     // The port should be forwarded via SSH tunnel from localhost to the
     // container's port 9500 on the remote host's Docker network.
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "fwd-remote"])
         .success()
-        .expect("sandbox ports failed");
+        .expect("rumpel ports failed");
     let output = String::from_utf8_lossy(&stdout);
     assert!(
         output.contains("9500"),

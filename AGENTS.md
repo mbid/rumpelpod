@@ -1,4 +1,4 @@
-This is a rust project implementing a sandboxed LLM agent.
+This is a rust project implementing an isolated LLM agent runner (rumpelpod).
 
 - Don't run commands in interactive mode (e.g. git rebase, git rebase --continue):
   You can't operate the UI, only run commands.

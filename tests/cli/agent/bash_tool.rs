@@ -9,11 +9,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
-use crate::common::{
-    build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
-};
+use crate::common::{build_test_image, create_commit, write_test_pod_config, TestDaemon, TestRepo};
 
 use super::common::run_agent_with_prompt;
 
@@ -21,7 +19,7 @@ use super::common::run_agent_with_prompt;
 fn agent_bash_timeout() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -83,7 +81,7 @@ echo "Done sleeping"
 fn agent_handles_command_with_empty_output_and_nonzero_exit() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -116,7 +114,7 @@ fn agent_large_file_output() {
     create_commit(repo.path(), "Add large file");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -165,7 +163,7 @@ fn agent_can_read_large_output_from_one_time_command() {
     create_commit(repo.path(), "Add one-time script");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 

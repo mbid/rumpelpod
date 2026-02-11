@@ -1,27 +1,27 @@
-//! Integration tests for the `sandbox enter` subcommand.
+//! Integration tests for the `rumpel enter` subcommand.
 
 use std::fs;
 
 use indoc::indoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
 use crate::common::{
-    build_test_image, build_test_image_without_user, sandbox_command, write_test_sandbox_config,
-    write_test_sandbox_config_with_user, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+    build_test_image, build_test_image_without_user, pod_command, write_test_pod_config,
+    write_test_pod_config_with_user, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
 };
 
 #[test]
 fn enter_smoke_test() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "123"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "123");
@@ -31,28 +31,28 @@ fn enter_smoke_test() {
 fn enter_twice_sequentially() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // First enter
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "first"])
         .success()
-        .expect("first sandbox enter failed");
+        .expect("first rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "first");
 
-    // Second enter - should reuse the existing sandbox
-    let stdout = sandbox_command(&repo, &daemon)
+    // Second enter - should reuse the existing pod
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "second"])
         .success()
-        .expect("second sandbox enter failed");
+        .expect("second rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "second");
 }
 
 #[test]
 fn enter_from_subdir_uses_same_container() {
-    // Entering a sandbox from the repo root vs a subdirectory should result in
+    // Entering a pod from the repo root vs a subdirectory should result in
     // the same container (we detect the git repo root).
     let repo = TestRepo::new();
 
@@ -61,12 +61,12 @@ fn enter_from_subdir_uses_same_container() {
     fs::create_dir_all(&subdir).expect("Failed to create subdirectory");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // Enter from repo root and create a marker file
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "subdir-test",
@@ -76,10 +76,10 @@ fn enter_from_subdir_uses_same_container() {
             "echo marker > /tmp/marker.txt",
         ])
         .success()
-        .expect("sandbox enter from repo root failed");
+        .expect("rumpel enter from repo root failed");
 
     // Enter from subdirectory and verify the marker file exists
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .current_dir(&subdir)
         .args([
             "enter",
@@ -90,7 +90,7 @@ fn enter_from_subdir_uses_same_container() {
             "cat /tmp/marker.txt",
         ])
         .success()
-        .expect("sandbox enter from subdir failed");
+        .expect("rumpel enter from subdir failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -102,7 +102,7 @@ fn enter_from_subdir_uses_same_container() {
 
 #[test]
 fn enter_outside_git_repo_fails() {
-    // Trying to enter a sandbox outside of a git repository should fail with
+    // Trying to enter a pod outside of a git repository should fail with
     // a clear error message.
     let repo = TestRepo::new_without_git();
 
@@ -125,14 +125,14 @@ fn enter_outside_git_repo_fails() {
 
     let daemon = TestDaemon::start();
 
-    let output = sandbox_command(&repo, &daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "hello"])
         .output()
-        .expect("Failed to run sandbox command");
+        .expect("Failed to run pod command");
 
     assert!(
         !output.status.success(),
-        "sandbox enter should fail outside git repo"
+        "rumpel enter should fail outside git repo"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -148,15 +148,15 @@ fn enter_verifies_user_and_repo_path() {
     // Verify that the standard test image runs as the expected user and in the expected directory
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // Verify running as the configured user
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "verify-test", "--", "whoami"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -168,10 +168,10 @@ fn enter_verifies_user_and_repo_path() {
     );
 
     // Verify working directory is repo-path
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "verify-test", "--", "pwd"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -193,16 +193,16 @@ fn enter_subdir_workdir_is_relative() {
     fs::create_dir_all(&subdir).expect("Failed to create subdirectory");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // Enter from subdir - should use TEST_REPO_PATH/subdir as workdir
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .current_dir(&subdir)
         .args(["enter", "subdir-test", "--", "pwd"])
         .success()
-        .expect("sandbox enter from subdir failed");
+        .expect("rumpel enter from subdir failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     let expected = format!("{}/subdir", TEST_REPO_PATH);
@@ -217,19 +217,19 @@ fn enter_subdir_workdir_is_relative() {
 
 #[test]
 fn enter_uses_image_user_when_not_specified_in_config() {
-    // When the config doesn't specify a user, the sandbox should use the
+    // When the config doesn't specify a user, the pod should use the
     // image's USER directive.
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // Verify running as the user from the image's USER directive
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "image-user-test", "--", "whoami"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -243,24 +243,24 @@ fn enter_uses_image_user_when_not_specified_in_config() {
 
 #[test]
 fn enter_fails_when_image_has_no_user_and_config_omits_user() {
-    // When neither the config nor the image specifies a user, the sandbox
+    // When neither the config nor the image specifies a user, the pod
     // should fail with an error about requiring a non-root user.
     let repo = TestRepo::new();
     // Build an image WITHOUT the USER directive
     let image_id =
         build_test_image_without_user(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    let output = sandbox_command(&repo, &daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "no-user-test", "--", "whoami"])
         .output()
-        .expect("Failed to run sandbox command");
+        .expect("Failed to run pod command");
 
     assert!(
         !output.status.success(),
-        "sandbox enter should fail when no user is specified"
+        "rumpel enter should fail when no user is specified"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -274,22 +274,22 @@ fn enter_fails_when_image_has_no_user_and_config_omits_user() {
 #[test]
 fn enter_fails_when_image_has_root_user_and_config_omits_user() {
     // When the image explicitly sets USER to root and the config doesn't
-    // specify a user, the sandbox should fail.
+    // specify a user, the pod should fail.
     let repo = TestRepo::new();
     let image_id = build_test_image_without_user(repo.path(), "USER root")
         .expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    let output = sandbox_command(&repo, &daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "root-user-test", "--", "whoami"])
         .output()
-        .expect("Failed to run sandbox command");
+        .expect("Failed to run pod command");
 
     assert!(
         !output.status.success(),
-        "sandbox enter should fail when image USER is root"
+        "rumpel enter should fail when image USER is root"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -317,14 +317,14 @@ fn enter_allows_explicit_root_user_in_config() {
     })
     .expect("Failed to build test image");
 
-    write_test_sandbox_config_with_user(&repo, &image_id, "root");
+    write_test_pod_config_with_user(&repo, &image_id, "root");
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "explicit-root-test", "--", "whoami"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
@@ -336,24 +336,24 @@ fn enter_allows_explicit_root_user_in_config() {
 }
 
 #[test]
-fn enter_sets_hostname_to_sandbox_name() {
-    // The container's hostname should be set to the sandbox name.
+fn enter_sets_hostname_to_pod_name() {
+    // The container's hostname should be set to the pod name.
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
-        .args(["enter", "my-sandbox", "--", "hostname"])
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "my-pod", "--", "hostname"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(
         stdout.trim(),
-        "my-sandbox",
-        "Hostname should be the sandbox name, got: {}",
+        "my-pod",
+        "Hostname should be the pod name, got: {}",
         stdout.trim()
     );
 }

@@ -1,7 +1,7 @@
 //! Git gateway repository management.
 //!
 //! Creates and maintains a bare "gateway" git repository that acts as an intermediary
-//! between the host repository and sandboxes. This allows sandboxes to fetch commits
+//! between the host repository and pods. This allows pods to fetch commits
 //! without direct access to the host repo.
 //!
 //! # Repository sync architecture
@@ -9,66 +9,66 @@
 //! There are three types repositories involved:
 //!
 //! 1. **Host repo**: The user's working repository on the host machine.
-//! 2. **Gateway repo**: A bare repository at `~/.local/state/sandbox/<hash>/gateway.git`
-//!    that acts as an intermediary. Sandboxes cannot access the host repo directly.
-//! 3. **Sandbox repos**: The repositories inside each sandbox container.
+//! 2. **Gateway repo**: A bare repository at `~/.local/state/rumpelpod/<hash>/gateway.git`
+//!    that acts as an intermediary. Pods cannot access the host repo directly.
+//! 3. **Pod repos**: The repositories inside each pod container.
 //!
 //! ## Current sync: Host -> Gateway (implemented)
 //!
 //! Commits are synced from the host repo to the gateway repo:
 //!
 //! - On setup, all local branches are pushed to the gateway as `refs/heads/host/<branch>`.
-//! - The current HEAD commit is also pushed as `refs/heads/host/HEAD`, allowing sandboxes
+//! - The current HEAD commit is also pushed as `refs/heads/host/HEAD`, allowing pods
 //!   to find the host's current commit even when in detached HEAD state.
 //! - A reference-transaction hook in the host repo automatically pushes branch updates
 //!   to the gateway whenever any reference changes (commits, branch creation/deletion, resets).
-//! - The push uses the "sandbox" remote (host repo -> gateway repo).
+//! - The push uses the "rumpelpod" remote (host repo -> gateway repo).
 //!
 //! The gateway repo stores these as local branches (not remote refs), e.g.:
 //! - Host branch `main` becomes gateway branch `host/main`
 //! - Host branch `feature` becomes gateway branch `host/feature`
 //! - Host HEAD commit becomes gateway branch `host/HEAD`
 //!
-//! ## Sandbox access to gateway
+//! ## Pod access to gateway
 //!
-//! Sandbox repos have a "host" remote pointing to the gateway (via HTTP server on the
+//! Pod repos have a "host" remote pointing to the gateway (via HTTP server on the
 //! docker network gateway IP). The remote is configured with a custom fetch refspec
 //! (`+refs/heads/host/*:refs/remotes/host/*`) that strips the `host/` prefix, so:
-//! - Gateway branch `host/main` → Sandbox remote ref `host/main`
-//! - Gateway branch `host/feature` → Sandbox remote ref `host/feature`
+//! - Gateway branch → Pod remote ref `host/main`
+//! - Gateway branch → Pod remote ref `host/feature`
 //!
-//! This means `git fetch host` in the sandbox gives clean remote ref names like
+//! This means `git fetch host` in the pod gives clean remote ref names like
 //! `host/main` rather than the redundant `host/host/main`.
 //!
-//! ## Sandbox -> Gateway sync
+//! ## Pod -> Gateway sync
 //!
-//! Sandboxes can push their changes to the gateway for the host to pull.
+//! Pods can push their changes to the gateway for the host to pull.
 //!
-//! Sandbox branches in the gateway repo are in a separate namespace "sandbox/" to distinguish
-//! them from host branches, and are annotated with the name of the sandbox to distinguish them
-//! from a branch with the same name in another sandbox.
-//! A branch `foo` in a sandbox `bar` thus becomes branch `sandbox/foo@bar`. Note the `@` here.
-//! To keep this unambiguous, sandbox names must not contain the `@` character.
-//! By default, every sandbox is launched with the sandbox name as the branch, the *primary* branch
-//! of a sandbox.
+//! Pod branches in the gateway repo are in a separate namespace "pod/" to distinguish
+//! them from host branches, and are annotated with the name of the pod to distinguish them
+//! from a branch with the same name in another pod.
+//! A branch `foo` in a pod `bar` thus becomes branch `pod/foo@bar`. Note the `@` here.
+//! To keep this unambiguous, pod names must not contain the `@` character.
+//! By default, every pod is launched with the pod name as the branch, the *primary* branch
+//! of a pod.
 //!
 //! To make accessing more ergonomic, the host can fetch just branch `bar` (instead of
-//! `sandbox/bar@bar`) from the gateway via custom refspecs.
+//! `pod/bar@bar`) from the gateway via custom refspecs.
 //!
-//! A reference-transaction hook in the sandbox automatically pushes branch updates to the gateway.
+//! A reference-transaction hook in the pod automatically pushes branch updates to the gateway.
 //!
 //! ## Access control
 //!
-//! The gateway enforces that each sandbox can only write to its own namespace:
-//! - Sandboxes can only push to `refs/heads/sandbox/*@<sandbox_name>` where `<sandbox_name>`
-//!   is their own sandbox name.
+//! The gateway enforces that each pod can only write to its own namespace:
+//! - Pods can only push to `refs/heads/pod/*@<pod_name>` where `<pod_name>`
+//!   is their own pod name.
 //! - The host can push to `refs/heads/host/*` branches.
 //! - Reading (fetch) is unrestricted - all branches are visible to everyone.
 //!
-//! This is enforced by a pre-receive hook in the gateway that validates the sandbox name.
-//! The sandbox name is determined server-side by the git HTTP server based on the
-//! bearer token in the request. Each sandbox is assigned a unique token when created,
-//! and the server maps tokens to sandbox info. The server sets the SANDBOX_NAME
+//! This is enforced by a pre-receive hook in the gateway that validates the pod name.
+//! The pod name is determined server-side by the git HTTP server based on the
+//! bearer token in the request. Each pod is assigned a unique token when created,
+//! and the server maps tokens to pod info. The server sets the POD_NAME
 //! environment variable which hooks can trust (the client cannot forge it).
 
 use std::fs;
@@ -85,7 +85,7 @@ use crate::command_ext::CommandExt;
 use crate::config::{get_state_dir, is_direct_git_config_mode};
 
 /// Name of the remote added to the host repo pointing to the gateway.
-const SANDBOX_REMOTE: &str = "sandbox";
+const RUMPELPOD_REMOTE: &str = "rumpelpod";
 
 /// Name of the remote added to the gateway pointing to the host repo.
 const HOST_REMOTE: &str = "host";
@@ -104,12 +104,12 @@ const HOST_REMOTE: &str = "host";
 /// - For deletes (new-value is all zeros): delete the branch from gateway
 ///
 /// For HEAD updates, it pushes the current HEAD commit to `host/HEAD` in the gateway.
-/// This ensures sandboxes can always find the host's current commit, even when
+/// This ensures pods can always find the host's current commit, even when
 /// the host is in detached HEAD state.
 const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
     #!/bin/sh
-    # Installed by sandbox to sync branch updates to the gateway repository.
-    # The gateway allows sandboxes to fetch commits without direct host access.
+    # Installed by rumpelpod to sync branch updates to the gateway repository.
+    # The gateway allows pods to fetch commits without direct host access.
     # This hook runs on reference-transaction events.
 
     # Only process after the transaction is committed
@@ -126,17 +126,17 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
                 # git requires the full ref path for the destination.
                 head_commit=$(git rev-parse HEAD 2>/dev/null)
                 if [ -n "$head_commit" ]; then
-                    git push sandbox "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
+                    git push rumpelpod "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
                 fi
                 ;;
             refs/heads/*)
                 branch="${refname#refs/heads/}"
                 if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
                     # Branch deleted - remove from gateway
-                    git push sandbox --delete "host/$branch" --no-verify --quiet 2>/dev/null || true
+                    git push rumpelpod --delete "host/$branch" --no-verify --quiet 2>/dev/null || true
                 else
                     # Branch updated or created - push to gateway
-                    git push sandbox "$branch:host/$branch" --force --no-verify --quiet 2>/dev/null || true
+                    git push rumpelpod "$branch:host/$branch" --force --no-verify --quiet 2>/dev/null || true
                 fi
                 ;;
         esac
@@ -145,22 +145,22 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
 
 /// Pre-receive hook for the gateway repository.
 ///
-/// Enforces access control: sandboxes can only push to their own namespace.
-/// The sandbox name is provided via the SANDBOX_NAME environment variable,
+/// Enforces access control: pods can only push to their own namespace.
+/// The pod name is provided via the POD_NAME environment variable,
 /// which is set by the git HTTP server (not by the client). This is secure
-/// because the sandbox cannot modify this variable.
+/// because the pod cannot modify this variable.
 ///
 /// Access rules:
-/// - If SANDBOX_NAME is set, only allow refs matching `refs/heads/sandbox/*@<name>`
-/// - If SANDBOX_NAME is not set (host push), only allow refs matching `refs/heads/host/*`
+/// - If POD_NAME is set, only allow refs matching `refs/heads/pod/*@<name>`
+/// - If POD_NAME is not set (host push), only allow refs matching `refs/heads/host/*`
 const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
     #!/bin/sh
-    # Gateway access control: sandboxes can only write to their own namespace.
+    # Gateway access control: pods can only write to their own namespace.
     #
-    # SANDBOX_NAME is set by the git HTTP server based on the bearer token.
-    # The sandbox cannot forge this - it's set server-side.
+    # POD_NAME is set by the git HTTP server based on the bearer token.
+    # The pod cannot forge this - it's set server-side.
 
-    sandbox_name="$SANDBOX_NAME"
+    pod_name="$POD_NAME"
 
     # Read all refs being pushed
     while read old_oid new_oid refname; do
@@ -169,21 +169,21 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
             continue
         fi
 
-        if [ -n "$sandbox_name" ]; then
-            # Sandbox push: only allow sandbox/*@<sandbox_name>
-            expected_suffix="@$sandbox_name"
+        if [ -n "$pod_name" ]; then
+            # Pod push: only allow pod/*@<pod_name>
+            expected_suffix="@$pod_name"
             case "$refname" in
-                refs/heads/sandbox/*"$expected_suffix")
-                    # OK: matches sandbox namespace
+                refs/heads/pod/*"$expected_suffix")
+                    # OK: matches pod namespace
                     ;;
                 *)
-                    echo "error: sandbox '$sandbox_name' cannot push to '$refname'"
-                    echo "error: sandboxes can only push to refs/heads/sandbox/*@$sandbox_name"
+                    echo "error: pod '$pod_name' cannot push to '$refname'"
+                    echo "error: pods can only push to refs/heads/pod/*@$pod_name"
                     exit 1
                     ;;
             esac
         else
-            # Host push (no SANDBOX_NAME): only allow host/*
+            # Host push (no POD_NAME): only allow host/*
             case "$refname" in
                 refs/heads/host/*)
                     # OK: host namespace
@@ -202,51 +202,51 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
 
 /// Post-receive hook for the gateway repository.
 ///
-/// Syncs sandbox refs from the gateway to the host repo's remote-tracking refs.
-/// When a sandbox pushes `refs/heads/sandbox/*@<name>`, this hook mirrors it to
-/// the host repo as `refs/remotes/sandbox/*@<name>`.
+/// Syncs pod refs from the gateway to the host repo's remote-tracking refs.
+/// When a pod pushes `refs/heads/pod/*@<name>`, this hook mirrors it to
+/// the host repo as `refs/remotes/pod/*@<name>`.
 ///
-/// For primary branches (where branch name equals sandbox name, e.g., `foo@foo`),
-/// this hook also creates a symbolic ref alias `sandbox/<name>` -> `sandbox/<name>@<name>`.
-/// This allows users to refer to a sandbox's primary branch simply as `sandbox/alice`
-/// instead of the full `sandbox/alice@alice`.
+/// For primary branches (where branch name equals pod name, e.g., `foo@foo`),
+/// this hook also creates a symbolic ref alias `pod/<name>` -> `pod/<name>@<name>`.
+/// This allows users to refer to a pod's primary branch simply as `pod/alice`
+/// instead of the full `pod/alice@alice`.
 ///
 /// The post-receive hook runs after refs are updated but before git-receive-pack
-/// sends the response to the client. This means the pushing sandbox's `git push`
+/// sends the response to the client. This means the pushing pod's `git push`
 /// blocks until this hook completes, ensuring refs are visible in the host repo
 /// immediately after the push returns.
 const GATEWAY_POST_RECEIVE_HOOK: &str = indoc! {r#"
     #!/bin/sh
-    # Sync sandbox refs from gateway to host repo's remote-tracking refs.
-    # When sandbox pushes refs/heads/sandbox/*@<name>, mirror to host as
-    # refs/remotes/sandbox/*@<name>.
+    # Sync pod refs from gateway to host repo's remote-tracking refs.
+    # When pod pushes refs/heads/pod/*@<name>, mirror to host as
+    # refs/remotes/pod/*@<name>.
     #
-    # For primary branches (foo@foo), also create an alias symref sandbox/foo.
+    # For primary branches (foo@foo), also create an alias symref pod/foo.
 
     while read oldvalue newvalue refname; do
         case "$refname" in
-            refs/heads/sandbox/*)
-                # Extract branch name (sandbox/foo@bar)
+            refs/heads/pod/*)
+                # Extract branch name (pod/foo@bar)
                 branch="${refname#refs/heads/}"
-                ref_suffix="${branch#sandbox/}"  # foo@bar
+                ref_suffix="${branch#pod/}"  # foo@bar
                 branch_part="${ref_suffix%@*}"   # foo
-                sandbox_part="${ref_suffix##*@}" # bar
+                pod_part="${ref_suffix##*@}" # bar
 
                 if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
                     # Deletion - remove from host
                     git push host --delete "refs/remotes/$branch" --quiet 2>/dev/null || true
                     # Remove alias if this was a primary branch (foo@foo)
-                    if [ "$branch_part" = "$sandbox_part" ]; then
-                        git symbolic-ref --delete "refs/heads/sandbox/$sandbox_part" 2>/dev/null || true
-                        git push host --delete "refs/remotes/sandbox/$sandbox_part" --quiet 2>/dev/null || true
+                    if [ "$branch_part" = "$pod_part" ]; then
+                        git symbolic-ref --delete "refs/heads/pod/$pod_part" 2>/dev/null || true
+                        git push host --delete "refs/remotes/pod/$pod_part" --quiet 2>/dev/null || true
                     fi
                 else
                     # Update - push to host as remote-tracking ref
                     git push host "$refname:refs/remotes/$branch" --force --quiet 2>/dev/null || true
                     # Create alias if this is a primary branch (foo@foo)
-                    if [ "$branch_part" = "$sandbox_part" ]; then
-                        git symbolic-ref "refs/heads/sandbox/$sandbox_part" "$refname"
-                        git push host "$refname:refs/remotes/sandbox/$sandbox_part" --force --quiet 2>/dev/null || true
+                    if [ "$branch_part" = "$pod_part" ]; then
+                        git symbolic-ref "refs/heads/pod/$pod_part" "$refname"
+                        git push host "$refname:refs/remotes/pod/$pod_part" --force --quiet 2>/dev/null || true
                     fi
                 fi
                 ;;
@@ -284,7 +284,7 @@ fn is_git_repo(path: &Path) -> bool {
 /// This function is idempotent - it can be called multiple times safely.
 /// It will:
 /// 1. Create a bare gateway repo if it doesn't exist
-/// 2. Add the "sandbox" remote to the host repo (pointing to gateway)
+/// 2. Add the "rumpelpod" remote to the host repo (pointing to gateway)
 /// 3. Add the "host" remote to the gateway (pointing to host repo)
 /// 4. Install a post-commit hook in the host repo
 /// 5. Push all existing branches to the gateway
@@ -317,8 +317,8 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     }
 
     // Configure gateway settings (idempotent - safe to run on every call).
-    // Enable anonymous pushes via HTTP for sandboxes to push to gateway.
-    // This is safe because the gateway is only accessible from our sandboxes.
+    // Enable anonymous pushes via HTTP for pods to push to gateway.
+    // This is safe because the gateway is only accessible from our pods.
     if is_direct_git_config_mode()? {
         // Bypass `git config` / `git remote` and write directly to the config
         // files to avoid flaky lock failures on overlay2 under heavy test
@@ -336,7 +336,7 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
             repo_path,
             &format!(
                 "[remote \"{}\"]\n\turl = {}\n",
-                SANDBOX_REMOTE,
+                RUMPELPOD_REMOTE,
                 gateway.to_string_lossy(),
             ),
         )?;
@@ -347,8 +347,8 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
             .success()
             .context("enabling http.receivepack failed")?;
 
-        // Add "sandbox" remote to host repo (pointing to gateway)
-        ensure_remote(repo_path, SANDBOX_REMOTE, &gateway)?;
+        // Add "rumpelpod" remote to host repo (pointing to gateway)
+        ensure_remote(repo_path, RUMPELPOD_REMOTE, &gateway)?;
 
         // Add "host" remote to gateway (pointing to host repo)
         ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
@@ -427,7 +427,7 @@ fn install_gateway_pre_receive_hook(gateway_path: &Path) -> Result<()> {
 }
 
 /// Install the post-receive hook in the gateway repository.
-/// This hook syncs sandbox refs to the host repo as remote-tracking refs.
+/// This hook syncs pod refs to the host repo as remote-tracking refs.
 fn install_gateway_post_receive_hook(gateway_path: &Path) -> Result<()> {
     install_gateway_hook(gateway_path, "post-receive", GATEWAY_POST_RECEIVE_HOOK)
 }
@@ -470,7 +470,7 @@ fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
 
         // Check if our hook is already installed (look for our signature comment)
-        if existing.contains("Installed by sandbox to sync branch updates") {
+        if existing.contains("Installed by rumpelpod to sync branch updates") {
             // Already installed, nothing to do
             return Ok(());
         }
@@ -496,7 +496,7 @@ fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
 /// Push all local branches and current HEAD to the gateway.
 ///
 /// Branches are pushed as `host/<branch>`, and HEAD is pushed as `host/HEAD`.
-/// The `host/HEAD` ref allows sandboxes to find the host's current commit
+/// The `host/HEAD` ref allows pods to find the host's current commit
 /// even when the host is in detached HEAD state.
 fn push_all_branches(repo_path: &Path) -> Result<()> {
     // Get list of all local branches
@@ -519,12 +519,12 @@ fn push_all_branches(repo_path: &Path) -> Result<()> {
         .map(|b| format!("{}:host/{}", b, b))
         .collect();
 
-    // Also push HEAD to host/HEAD so sandboxes can find the current commit.
+    // Also push HEAD to host/HEAD so pods can find the current commit.
     // We use the fully qualified ref path because when HEAD is detached (pointing
     // to a commit rather than a branch), git requires the full ref name.
     refspecs.push("HEAD:refs/heads/host/HEAD".to_string());
 
-    let mut args: Vec<&str> = vec!["push", SANDBOX_REMOTE, "--force"];
+    let mut args: Vec<&str> = vec!["push", RUMPELPOD_REMOTE, "--force"];
     args.extend(refspecs.iter().map(|s| s.as_str()));
 
     Command::new("git")

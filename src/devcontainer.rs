@@ -530,7 +530,7 @@ impl DevContainer {
         for (name, present) in fields {
             if *present {
                 eprintln!(
-                    "warning: devcontainer.json contains '{name}' which is not supported by sandbox"
+                    "warning: devcontainer.json contains '{name}' which is not supported by rumpelpod"
                 );
             }
         }
@@ -968,15 +968,15 @@ fn split_var_default(s: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Compute a stable `${devcontainerId}` from the repo path and sandbox name.
+/// /// Compute a stable `${devcontainerId}` from the repo path and pod name.
 ///
 /// Per the spec this should be a SHA-256 hash that is stable across rebuilds
 /// but unique per dev container instance.  We derive it from the two values
-/// that uniquely identify a sandbox on the Docker host.
-pub fn compute_devcontainer_id(repo_path: &Path, sandbox_name: &str) -> String {
+/// that uniquely identify a pod on the Docker host.
+pub fn compute_devcontainer_id(repo_path: &Path, pod_name: &str) -> String {
     let label_json = serde_json::json!({
-        "sandbox.name": sandbox_name,
-        "sandbox.repo_path": repo_path.to_string_lossy(),
+        "rumpelpod.name": pod_name,
+        "rumpelpod.repo_path": repo_path.to_string_lossy(),
     });
     // Deterministic serialization (serde_json sorts keys in json! maps)
     let normalized = serde_json::to_string(&label_json).expect("JSON serialization cannot fail");
@@ -1031,7 +1031,7 @@ mod tests {
         };
         assert_eq!(
             substitute_vars(
-                "pre-${localEnv:SANDBOX_TEST_DEFINITELY_UNSET_12345}-post",
+                "pre-${localEnv:RUMPELPOD_TEST_DEFINITELY_UNSET_12345}-post",
                 &ctx
             ),
             "pre--post"
@@ -1046,7 +1046,7 @@ mod tests {
         };
         assert_eq!(
             substitute_vars(
-                "${localEnv:SANDBOX_TEST_DEFINITELY_UNSET_12345:fallback}",
+                "${localEnv:RUMPELPOD_TEST_DEFINITELY_UNSET_12345:fallback}",
                 &ctx
             ),
             "fallback"

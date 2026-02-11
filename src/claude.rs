@@ -6,9 +6,9 @@ use log::warn;
 use crate::cli::ClaudeCommand;
 use crate::daemon;
 use crate::daemon::protocol::{
-    ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, LaunchResult, SandboxName,
+    ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, LaunchResult, PodName,
 };
-use crate::enter::{launch_sandbox, load_and_resolve, resolve_remote_env};
+use crate::enter::{launch_pod, load_and_resolve, resolve_remote_env};
 use crate::git::get_repo_root;
 
 /// Check if `screen` is available in the container.
@@ -51,7 +51,7 @@ fn screen_session_exists(docker_host: &str, container_id: &str, user: &str) -> R
     Ok(stdout.contains(".claude"))
 }
 
-const SCREENRC_PATH: &str = "/tmp/sandbox-screenrc";
+const SCREENRC_PATH: &str = "/tmp/rumpelpod-screenrc";
 
 /// Write a screenrc to a well-known path so we can pass it via `screen -c`
 /// without clobbering the user's own ~/.screenrc.
@@ -80,7 +80,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         container_id,
         user,
         docker_socket,
-    } = launch_sandbox(&cmd.name, cmd.host.as_deref())?;
+    } = launch_pod(&cmd.name, cmd.host.as_deref())?;
 
     let docker_host = format!("unix://{}", docker_socket.display());
 
@@ -88,7 +88,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     if !check_screen_available(&docker_host, &container_id.0, &user)? {
         bail!(
             "screen is not installed in the container.\n\
-             Add `screen` to your container image to use `sandbox claude`."
+             Add `screen` to your container image to use `rumpel claude`."
         );
     }
 
@@ -96,7 +96,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
     client.ensure_claude_config(EnsureClaudeConfigRequest {
-        sandbox_name: SandboxName(cmd.name.clone()),
+        pod_name: PodName(cmd.name.clone()),
         repo_path: repo_root,
         container_id: ContainerId(container_id.0.clone()),
         user: user.clone(),

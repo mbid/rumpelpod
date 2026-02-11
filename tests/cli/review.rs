@@ -1,20 +1,19 @@
-//! Integration tests for the `sandbox review` command.
+//! Integration tests for the `rumpel review` command.
 //!
-//! These tests verify that `sandbox review` correctly:
-//! - Computes the merge base between the sandbox branch and its upstream
+//! These tests verify that `rumpel review` correctly:
+//! - Computes the merge base between the pod branch and its upstream
 //! - Invokes git difftool with the correct commits
-//! - Handles error cases (no upstream, sandbox not found)
+//! - Handles error cases (no upstream, pod not found)
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
 use crate::common::{
-    build_test_image, create_commit, sandbox_command, write_test_sandbox_config, TestDaemon,
-    TestRepo,
+    build_test_image, create_commit, pod_command, write_test_pod_config, TestDaemon, TestRepo,
 };
 
 /// Create a mock difftool script that logs the files it sees.
@@ -86,7 +85,7 @@ fn read_difftool_log(log_path: &Path) -> String {
 }
 
 #[test]
-fn review_shows_sandbox_changes() {
+fn review_shows_pod_changes() {
     let repo = TestRepo::new();
 
     // Create a file in the initial state
@@ -99,57 +98,57 @@ fn review_shows_sandbox_changes() {
     create_commit(repo.path(), "Add file.txt");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "review-test";
+    let pod_name = "review-test";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Make a change in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Make a change in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "sh",
             "-c",
             "echo 'modified content' > file.txt",
         ])
         .success()
-        .expect("Failed to modify file in sandbox");
+        .expect("Failed to modify file in pod");
 
-    // Commit the change in the sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "add", "file.txt"])
+    // Commit the change in the pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "add", "file.txt"])
         .success()
-        .expect("Failed to stage file in sandbox");
+        .expect("Failed to stage file in pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
             "-m",
-            "Modify file in sandbox",
+            "Modify file in pod",
         ])
         .success()
-        .expect("Failed to commit in sandbox");
+        .expect("Failed to commit in pod");
 
     // Set up mock difftool
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command
-    sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name, "--yes"])
+    pod_command(&repo, &daemon)
+        .args(["review", pod_name, "--yes"])
         .success()
-        .expect("sandbox review failed");
+        .expect("rumpel review failed");
 
     // Verify the difftool was called with the expected content
     let log = read_difftool_log(&log_file);
@@ -166,7 +165,7 @@ fn review_shows_sandbox_changes() {
     );
     assert!(
         log.contains("modified content"),
-        "Log should contain modified content (sandbox), got: {}",
+        "Log should contain modified content (pod), got: {}",
         log
     );
 }
@@ -175,57 +174,57 @@ fn review_shows_sandbox_changes() {
 fn review_shows_new_files() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "review-new-file";
+    let pod_name = "review-new-file";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Create a new file in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Create a new file in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "sh",
             "-c",
             "echo 'new file content' > newfile.txt",
         ])
         .success()
-        .expect("Failed to create file in sandbox");
+        .expect("Failed to create file in pod");
 
     // Commit the new file
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "add", "newfile.txt"])
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "add", "newfile.txt"])
         .success()
-        .expect("Failed to stage new file in sandbox");
+        .expect("Failed to stage new file in pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
             "-m",
-            "Add new file in sandbox",
+            "Add new file in pod",
         ])
         .success()
-        .expect("Failed to commit in sandbox");
+        .expect("Failed to commit in pod");
 
     // Set up mock difftool
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command
-    sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name, "--yes"])
+    pod_command(&repo, &daemon)
+        .args(["review", pod_name, "--yes"])
         .success()
-        .expect("sandbox review failed");
+        .expect("rumpel review failed");
 
     // Verify the difftool was called with the new file
     let log = read_difftool_log(&log_file);
@@ -252,34 +251,34 @@ fn review_multiple_files() {
     create_commit(repo.path(), "Add files");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "review-multi";
+    let pod_name = "review-multi";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Modify both files in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Modify both files in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "sh",
             "-c",
             "echo 'file1 modified' > file1.txt && echo 'file2 modified' > file2.txt",
         ])
         .success()
-        .expect("Failed to modify files in sandbox");
+        .expect("Failed to modify files in pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "add",
@@ -287,12 +286,12 @@ fn review_multiple_files() {
             "file2.txt",
         ])
         .success()
-        .expect("Failed to stage files in sandbox");
+        .expect("Failed to stage files in pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -300,16 +299,16 @@ fn review_multiple_files() {
             "Modify both files",
         ])
         .success()
-        .expect("Failed to commit in sandbox");
+        .expect("Failed to commit in pod");
 
     // Set up mock difftool
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command
-    sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name, "--yes"])
+    pod_command(&repo, &daemon)
+        .args(["review", pod_name, "--yes"])
         .success()
-        .expect("sandbox review failed");
+        .expect("rumpel review failed");
 
     // Verify both files were shown
     let log = read_difftool_log(&log_file);
@@ -362,57 +361,57 @@ fn review_works_in_detached_head() {
         .expect("git checkout --detach failed");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "review-detached-head";
+    let pod_name = "review-detached-head";
 
-    // Launch sandbox (created while host is in detached HEAD)
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod (created while host is in detached HEAD)
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Make a change in the sandbox
-    sandbox_command(&repo, &daemon)
+    // Make a change in the pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "sh",
             "-c",
             "echo 'modified content' > file.txt",
         ])
         .success()
-        .expect("Failed to modify file in sandbox");
+        .expect("Failed to modify file in pod");
 
     // Commit the change
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "git", "add", "file.txt"])
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "git", "add", "file.txt"])
         .success()
-        .expect("Failed to stage file in sandbox");
+        .expect("Failed to stage file in pod");
 
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
             "-m",
-            "Modify file in sandbox",
+            "Modify file in pod",
         ])
         .success()
-        .expect("Failed to commit in sandbox");
+        .expect("Failed to commit in pod");
 
     // Set up mock difftool
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command - should succeed even in detached HEAD
-    sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name, "--yes"])
+    pod_command(&repo, &daemon)
+        .args(["review", pod_name, "--yes"])
         .success()
-        .expect("sandbox review should work in detached HEAD state");
+        .expect("rumpel review should work in detached HEAD state");
 
     // Verify the difftool was called with the expected content
     let log = read_difftool_log(&log_file);
@@ -428,22 +427,22 @@ fn review_no_changes() {
     // Test that review works even when there are no changes (empty diff)
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
-    let sandbox_name = "review-no-changes";
+    let pod_name = "review-no-changes";
 
-    // Launch sandbox
-    sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "setup"])
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
-        .expect("Failed to run sandbox enter");
+        .expect("Failed to run rumpel enter");
 
-    // Make an empty commit so the sandbox ref exists
-    sandbox_command(&repo, &daemon)
+    // Make an empty commit so the pod ref exists
+    pod_command(&repo, &daemon)
         .args([
             "enter",
-            sandbox_name,
+            pod_name,
             "--",
             "git",
             "commit",
@@ -452,16 +451,16 @@ fn review_no_changes() {
             "Empty commit",
         ])
         .success()
-        .expect("Failed to commit in sandbox");
+        .expect("Failed to commit in pod");
 
     // Set up mock difftool (it should not be called since there are no file changes)
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command - should succeed
-    sandbox_command(&repo, &daemon)
-        .args(["review", sandbox_name, "--yes"])
+    pod_command(&repo, &daemon)
+        .args(["review", pod_name, "--yes"])
         .success()
-        .expect("sandbox review should succeed with no changes");
+        .expect("rumpel review should succeed with no changes");
 
     // The difftool log should be empty or not exist
     let log = read_difftool_log(&log_file);
@@ -473,24 +472,24 @@ fn review_no_changes() {
 }
 
 #[test]
-fn review_nonexistent_sandbox_fails() {
+fn review_nonexistent_pod_fails() {
     let repo = TestRepo::new();
     let daemon = TestDaemon::start();
 
-    let output = sandbox_command(&repo, &daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["review", "does-not-exist", "--yes"])
         .output()
-        .expect("Failed to run sandbox review command");
+        .expect("Failed to run rumpel review command");
 
     assert!(
         !output.status.success(),
-        "sandbox review should fail for non-existent sandbox"
+        "rumpel review should fail for non-existent pod"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("does not exist"),
-        "Error should say sandbox does not exist, got: {}",
+        "Error should say pod does not exist, got: {}",
         stderr
     );
 }

@@ -3,11 +3,9 @@
 use std::fs;
 use std::process::Command;
 
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
-use crate::common::{
-    build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
-};
+use crate::common::{build_test_image, create_commit, write_test_pod_config, TestDaemon, TestRepo};
 
 use super::common::run_agent_with_prompt_and_model;
 
@@ -26,7 +24,7 @@ fn agent_reads_file(model: &str) {
     create_commit(repo.path(), "Add secret");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 

@@ -25,44 +25,44 @@ pub struct Image(pub String);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerId(pub String);
 
-/// Result of launching a sandbox.
+/// Result of launching a pod.
 #[derive(Debug, Clone)]
 pub struct LaunchResult {
     pub container_id: ContainerId,
-    /// The resolved user for the sandbox. This is either the user specified in the config,
+    /// The resolved user for the pod. This is either the user specified in the config,
     /// or the user from the image's USER directive.
     pub user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
-    /// Clients must use this socket for all Docker operations on this sandbox.
+    /// Clients must use this socket for all Docker operations on this pod.
     pub docker_socket: std::path::PathBuf,
 }
 
-/// Human-readable sandbox name to distinguish multiple sandboxes for the same repo.
+/// Human-readable pod name to distinguish multiple pods for the same repo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxName(pub String);
+pub struct PodName(pub String);
 
-/// Status of a sandbox container.
+/// Status of a pod container.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SandboxStatus {
+pub enum PodStatus {
     Running,
     Stopped,
-    /// Container no longer exists (was deleted outside of sandbox tool)
+    /// Container no longer exists (was deleted outside of rumpel)
     Gone,
-    /// Remote sandbox where we don't have a connection to check actual status
+    /// Remote pod where we don't have a connection to check actual status
     Disconnected,
 }
 
-/// Information about a sandbox.
+/// Information about a pod.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxInfo {
+pub struct PodInfo {
     pub name: String,
-    pub status: SandboxStatus,
+    pub status: PodStatus,
     pub created: String,
-    /// Host where the sandbox runs: "local" or an SSH URL like "user@host:port".
+    /// Host where the pod runs: "local" or an SSH URL like "user@host:port".
     pub host: String,
-    /// State of the repository in the sandbox (e.g. "ahead 1, behind 2").
+    /// State of the repository in the pod (e.g. "ahead 1, behind 2").
     pub repo_state: Option<String>,
-    /// Docker container ID of the sandbox (short 12-char hex), if known.
+    /// Docker container ID of the pod (short 12-char hex), if known.
     pub container_id: Option<String>,
 }
 
@@ -74,18 +74,18 @@ pub struct PortInfo {
     pub label: String,
 }
 
-/// Everything the daemon needs to launch or recreate a sandbox.
+/// Everything the daemon needs to launch or recreate a pod.
 ///
 /// Contains the devcontainer.json config (with `${localEnv:...}` already
 /// resolved and build paths normalized to repo-root-relative by the client)
 /// plus a few fields that don't come from devcontainer.json.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SandboxLaunchParams {
-    pub sandbox_name: SandboxName,
+pub struct PodLaunchParams {
+    pub pod_name: PodName,
     /// Host-side path to the git repository.
     pub repo_path: PathBuf,
     /// The branch currently checked out on the host, if any.
-    /// Used to set the upstream of the primary branch in the sandbox.
+    /// Used to set the upstream of the primary branch in the pod.
     pub host_branch: Option<String>,
     /// Where the Docker daemon lives: localhost or a remote SSH host.
     pub docker_host: DockerHost,
@@ -94,58 +94,58 @@ pub struct SandboxLaunchParams {
     pub devcontainer: DevContainer,
 }
 
-/// Response body for launch/recreate sandbox endpoints.
+/// Response body for launch/recreate pod endpoints.
 #[derive(Debug, Serialize, Deserialize)]
-struct SandboxLaunchResponse {
+struct PodLaunchResponse {
     container_id: ContainerId,
-    /// The resolved user for the sandbox.
+    /// The resolved user for the pod.
     user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
     docker_socket: PathBuf,
 }
 
-/// Request body for stop_sandbox endpoint.
+/// Request body for stop_pod endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-struct StopSandboxRequest {
-    sandbox_name: SandboxName,
+struct StopPodRequest {
+    pod_name: PodName,
     repo_path: PathBuf,
 }
 
-/// Response body for stop_sandbox endpoint.
+/// Response body for stop_pod endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-struct StopSandboxResponse {
+struct StopPodResponse {
     stopped: bool,
 }
 
-/// Request body for delete_sandbox endpoint.
+/// Request body for delete_pod endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-struct DeleteSandboxRequest {
-    sandbox_name: SandboxName,
+struct DeletePodRequest {
+    pod_name: PodName,
     repo_path: PathBuf,
 }
 
-/// Response body for delete_sandbox endpoint.
+/// Response body for delete_pod endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-struct DeleteSandboxResponse {
+struct DeletePodResponse {
     deleted: bool,
 }
 
-/// Request body for list_sandboxes endpoint.
+/// Request body for list_pods endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-struct ListSandboxesRequest {
+struct ListPodsRequest {
     repo_path: PathBuf,
 }
 
-/// Response body for list_sandboxes endpoint.
+/// Response body for list_pods endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-struct ListSandboxesResponse {
-    sandboxes: Vec<SandboxInfo>,
+struct ListPodsResponse {
+    pods: Vec<PodInfo>,
 }
 
 /// Request body for list_ports endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct ListPortsRequest {
-    sandbox_name: SandboxName,
+    pod_name: PodName,
     repo_path: PathBuf,
 }
 
@@ -161,7 +161,7 @@ pub struct SaveConversationRequest {
     /// If present, update existing conversation; otherwise create new.
     pub id: Option<i64>,
     pub repo_path: PathBuf,
-    pub sandbox_name: String,
+    pub pod_name: String,
     pub model: String,
     pub provider: String,
     pub history: serde_json::Value,
@@ -177,7 +177,7 @@ pub struct SaveConversationResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListConversationsRequest {
     pub repo_path: PathBuf,
-    pub sandbox_name: String,
+    pub pod_name: String,
 }
 
 /// Summary of a conversation.
@@ -206,7 +206,7 @@ pub struct GetConversationResponse {
 /// Request body for ensure_claude_config endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnsureClaudeConfigRequest {
-    pub sandbox_name: SandboxName,
+    pub pod_name: PodName,
     pub repo_path: PathBuf,
     pub container_id: ContainerId,
     pub user: String,
@@ -220,26 +220,26 @@ struct ErrorResponse {
 }
 
 pub trait Daemon: Send + Sync + 'static {
-    // PUT /sandbox
-    fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult>;
+    // PUT /pod
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult>;
 
-    // POST /sandbox/recreate
-    fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult>;
+    // POST /pod/recreate
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult>;
 
-    // POST /sandbox/stop
-    // Stops a sandbox container without removing it.
-    fn stop_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()>;
+    // POST /pod/stop
+    // Stops a pod container without removing it.
+    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()>;
 
-    // DELETE /sandbox
-    // Stops and removes a sandbox container.
-    fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()>;
+    // DELETE /pod
+    // Stops and removes a pod container.
+    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()>;
 
-    // GET /sandbox
-    // Lists all sandboxes for a given repository.
-    fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>>;
+    // GET /pod
+    // Lists all pods for a given repository.
+    fn list_pods(&self, repo_path: PathBuf) -> Result<Vec<PodInfo>>;
 
-    // GET /sandbox/ports
-    fn list_ports(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<Vec<PortInfo>>;
+    // GET /pod/ports
+    fn list_ports(&self, pod_name: PodName, repo_path: PathBuf) -> Result<Vec<PortInfo>>;
 
     // POST /conversation
     // Save or update a conversation.
@@ -247,27 +247,27 @@ pub trait Daemon: Send + Sync + 'static {
         &self,
         id: Option<i64>,
         repo_path: PathBuf,
-        sandbox_name: String,
+        pod_name: String,
         model: String,
         provider: String,
         history: serde_json::Value,
     ) -> Result<i64>;
 
     // GET /conversations
-    // List all conversations for a sandbox.
+    // List all conversations for a pod.
     fn list_conversations(
         &self,
         repo_path: PathBuf,
-        sandbox_name: String,
+        pod_name: String,
     ) -> Result<Vec<ConversationSummary>>;
 
     // GET /conversation/<id>
     // Get a conversation by ID.
     fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>>;
 
-    // PUT /sandbox/claude-config
+    // PUT /pod/claude-config
     // Ensure Claude Code config files are present in the container.
-    // Idempotent: skips the copy if it has already been done for this sandbox.
+    // Idempotent: skips the copy if it has already been done for this pod.
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()>;
 }
 
@@ -304,8 +304,8 @@ impl DaemonClient {
 }
 
 impl Daemon for DaemonClient {
-    fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
-        let url = self.url.join("/sandbox")?;
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+        let url = self.url.join("/pod")?;
 
         let response = self
             .client
@@ -315,7 +315,7 @@ impl Daemon for DaemonClient {
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
         if response.status().is_success() {
-            let body: SandboxLaunchResponse = response
+            let body: PodLaunchResponse = response
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
             Ok(LaunchResult {
@@ -331,8 +331,8 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
-        let url = self.url.join("/sandbox/recreate")?;
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+        let url = self.url.join("/pod/recreate")?;
 
         let response = self
             .client
@@ -342,7 +342,7 @@ impl Daemon for DaemonClient {
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
         if response.status().is_success() {
-            let body: SandboxLaunchResponse = response
+            let body: PodLaunchResponse = response
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
             Ok(LaunchResult {
@@ -358,10 +358,10 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn stop_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
-        let url = self.url.join("/sandbox/stop")?;
-        let request = StopSandboxRequest {
-            sandbox_name,
+    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
+        let url = self.url.join("/pod/stop")?;
+        let request = StopPodRequest {
+            pod_name,
             repo_path,
         };
 
@@ -382,10 +382,10 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn delete_sandbox(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<()> {
-        let url = self.url.join("/sandbox")?;
-        let request = DeleteSandboxRequest {
-            sandbox_name,
+    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
+        let url = self.url.join("/pod")?;
+        let request = DeletePodRequest {
+            pod_name,
             repo_path,
         };
 
@@ -406,9 +406,9 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn list_sandboxes(&self, repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
-        let url = self.url.join("/sandbox")?;
-        let request = ListSandboxesRequest { repo_path };
+    fn list_pods(&self, repo_path: PathBuf) -> Result<Vec<PodInfo>> {
+        let url = self.url.join("/pod")?;
+        let request = ListPodsRequest { repo_path };
 
         let response = self
             .client
@@ -418,10 +418,10 @@ impl Daemon for DaemonClient {
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
         if response.status().is_success() {
-            let body: ListSandboxesResponse = response
+            let body: ListPodsResponse = response
                 .json()
                 .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
-            Ok(body.sandboxes)
+            Ok(body.pods)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
@@ -430,10 +430,10 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn list_ports(&self, sandbox_name: SandboxName, repo_path: PathBuf) -> Result<Vec<PortInfo>> {
-        let url = self.url.join("/sandbox/ports")?;
+    fn list_ports(&self, pod_name: PodName, repo_path: PathBuf) -> Result<Vec<PortInfo>> {
+        let url = self.url.join("/pod/ports")?;
         let request = ListPortsRequest {
-            sandbox_name,
+            pod_name,
             repo_path,
         };
 
@@ -461,7 +461,7 @@ impl Daemon for DaemonClient {
         &self,
         id: Option<i64>,
         repo_path: PathBuf,
-        sandbox_name: String,
+        pod_name: String,
         model: String,
         provider: String,
         history: serde_json::Value,
@@ -470,7 +470,7 @@ impl Daemon for DaemonClient {
         let request = SaveConversationRequest {
             id,
             repo_path,
-            sandbox_name,
+            pod_name,
             model,
             provider,
             history,
@@ -499,12 +499,12 @@ impl Daemon for DaemonClient {
     fn list_conversations(
         &self,
         repo_path: PathBuf,
-        sandbox_name: String,
+        pod_name: String,
     ) -> Result<Vec<ConversationSummary>> {
         let url = self.url.join("/conversations")?;
         let request = ListConversationsRequest {
             repo_path,
-            sandbox_name,
+            pod_name,
         };
 
         let response = self
@@ -554,7 +554,7 @@ impl Daemon for DaemonClient {
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
-        let url = self.url.join("/sandbox/claude-config")?;
+        let url = self.url.join("/pod/claude-config")?;
 
         let response = self
             .client
@@ -574,15 +574,15 @@ impl Daemon for DaemonClient {
     }
 }
 
-/// Handler for PUT /sandbox endpoint.
-async fn launch_sandbox_handler<D: Daemon>(
+/// Handler for PUT /pod endpoint.
+async fn launch_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(params): Json<SandboxLaunchParams>,
-) -> Result<Json<SandboxLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.launch_sandbox(params));
+    Json(params): Json<PodLaunchParams>,
+) -> Result<Json<PodLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.launch_pod(params));
 
     match result {
-        Ok(launch_result) => Ok(Json(SandboxLaunchResponse {
+        Ok(launch_result) => Ok(Json(PodLaunchResponse {
             container_id: launch_result.container_id,
             user: launch_result.user,
             docker_socket: launch_result.docker_socket,
@@ -596,15 +596,15 @@ async fn launch_sandbox_handler<D: Daemon>(
     }
 }
 
-/// Handler for POST /sandbox/recreate endpoint.
-async fn recreate_sandbox_handler<D: Daemon>(
+/// Handler for POST /pod/recreate endpoint.
+async fn recreate_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(params): Json<SandboxLaunchParams>,
-) -> Result<Json<SandboxLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.recreate_sandbox(params));
+    Json(params): Json<PodLaunchParams>,
+) -> Result<Json<PodLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.recreate_pod(params));
 
     match result {
-        Ok(res) => Ok(Json(SandboxLaunchResponse {
+        Ok(res) => Ok(Json(PodLaunchResponse {
             container_id: res.container_id,
             user: res.user,
             docker_socket: res.docker_socket,
@@ -618,15 +618,15 @@ async fn recreate_sandbox_handler<D: Daemon>(
     }
 }
 
-/// Handler for POST /sandbox/stop endpoint.
-async fn stop_sandbox_handler<D: Daemon>(
+/// Handler for POST /pod/stop endpoint.
+async fn stop_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(request): Json<StopSandboxRequest>,
-) -> Result<Json<StopSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.stop_sandbox(request.sandbox_name, request.repo_path));
+    Json(request): Json<StopPodRequest>,
+) -> Result<Json<StopPodResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.stop_pod(request.pod_name, request.repo_path));
 
     match result {
-        Ok(()) => Ok(Json(StopSandboxResponse { stopped: true })),
+        Ok(()) => Ok(Json(StopPodResponse { stopped: true })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -636,15 +636,15 @@ async fn stop_sandbox_handler<D: Daemon>(
     }
 }
 
-/// Handler for DELETE /sandbox endpoint.
-async fn delete_sandbox_handler<D: Daemon>(
+/// Handler for DELETE /pod endpoint.
+async fn delete_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(request): Json<DeleteSandboxRequest>,
-) -> Result<Json<DeleteSandboxResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.delete_sandbox(request.sandbox_name, request.repo_path));
+    Json(request): Json<DeletePodRequest>,
+) -> Result<Json<DeletePodResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.delete_pod(request.pod_name, request.repo_path));
 
     match result {
-        Ok(()) => Ok(Json(DeleteSandboxResponse { deleted: true })),
+        Ok(()) => Ok(Json(DeletePodResponse { deleted: true })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -654,15 +654,15 @@ async fn delete_sandbox_handler<D: Daemon>(
     }
 }
 
-/// Handler for GET /sandbox endpoint.
-async fn list_sandboxes_handler<D: Daemon>(
+/// Handler for GET /pod endpoint.
+async fn list_pods_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(request): Json<ListSandboxesRequest>,
-) -> Result<Json<ListSandboxesResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.list_sandboxes(request.repo_path));
+    Json(request): Json<ListPodsRequest>,
+) -> Result<Json<ListPodsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.list_pods(request.repo_path));
 
     match result {
-        Ok(sandboxes) => Ok(Json(ListSandboxesResponse { sandboxes })),
+        Ok(pods) => Ok(Json(ListPodsResponse { pods })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -672,12 +672,12 @@ async fn list_sandboxes_handler<D: Daemon>(
     }
 }
 
-/// Handler for GET /sandbox/ports endpoint.
+/// Handler for GET /pod/ports endpoint.
 async fn list_ports_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<ListPortsRequest>,
 ) -> Result<Json<ListPortsResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.list_ports(request.sandbox_name, request.repo_path));
+    let result = block_in_place(|| daemon.list_ports(request.pod_name, request.repo_path));
 
     match result {
         Ok(ports) => Ok(Json(ListPortsResponse { ports })),
@@ -699,7 +699,7 @@ async fn save_conversation_handler<D: Daemon>(
         daemon.save_conversation(
             request.id,
             request.repo_path,
-            request.sandbox_name,
+            request.pod_name,
             request.model,
             request.provider,
             request.history,
@@ -722,8 +722,7 @@ async fn list_conversations_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<ListConversationsRequest>,
 ) -> Result<Json<ListConversationsResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result =
-        block_in_place(|| daemon.list_conversations(request.repo_path, request.sandbox_name));
+    let result = block_in_place(|| daemon.list_conversations(request.repo_path, request.pod_name));
 
     match result {
         Ok(conversations) => Ok(Json(ListConversationsResponse { conversations })),
@@ -760,7 +759,7 @@ async fn get_conversation_handler<D: Daemon>(
     }
 }
 
-/// Handler for PUT /sandbox/claude-config endpoint.
+/// Handler for PUT /pod/claude-config endpoint.
 async fn ensure_claude_config_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<EnsureClaudeConfigRequest>,
@@ -804,19 +803,16 @@ where
     let daemon = Arc::new(daemon);
 
     let app = Router::new()
-        .route("/sandbox", put(launch_sandbox_handler::<D>))
-        .route("/sandbox/recreate", post(recreate_sandbox_handler::<D>))
-        .route("/sandbox/stop", post(stop_sandbox_handler::<D>))
-        .route("/sandbox", delete(delete_sandbox_handler::<D>))
-        .route("/sandbox", get(list_sandboxes_handler::<D>))
-        .route("/sandbox/ports", get(list_ports_handler::<D>))
+        .route("/pod", put(launch_pod_handler::<D>))
+        .route("/pod/recreate", post(recreate_pod_handler::<D>))
+        .route("/pod/stop", post(stop_pod_handler::<D>))
+        .route("/pod", delete(delete_pod_handler::<D>))
+        .route("/pod", get(list_pods_handler::<D>))
+        .route("/pod/ports", get(list_ports_handler::<D>))
         .route("/conversation", post(save_conversation_handler::<D>))
         .route("/conversations", get(list_conversations_handler::<D>))
         .route("/conversation/{id}", get(get_conversation_handler::<D>))
-        .route(
-            "/sandbox/claude-config",
-            put(ensure_claude_config_handler::<D>),
-        )
+        .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .with_state(daemon);
 
     block_on(async move {
@@ -837,7 +833,7 @@ mod tests {
     struct MockDaemon;
 
     impl Daemon for MockDaemon {
-        fn launch_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
+        fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
             let user = params
                 .devcontainer
                 .user()
@@ -845,13 +841,13 @@ mod tests {
                 .unwrap_or_else(|| "mockuser".to_string());
             let image = params.devcontainer.image.as_deref().unwrap_or("none");
             Ok(LaunchResult {
-                container_id: ContainerId(format!("{}:{}", params.sandbox_name.0, image)),
+                container_id: ContainerId(format!("{}:{}", params.pod_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
         }
 
-        fn recreate_sandbox(&self, params: SandboxLaunchParams) -> Result<LaunchResult> {
+        fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
             let user = params
                 .devcontainer
                 .user()
@@ -859,29 +855,25 @@ mod tests {
                 .unwrap_or_else(|| "mockuser".to_string());
             let image = params.devcontainer.image.as_deref().unwrap_or("none");
             Ok(LaunchResult {
-                container_id: ContainerId(format!("recreated:{}:{}", params.sandbox_name.0, image)),
+                container_id: ContainerId(format!("recreated:{}:{}", params.pod_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
             })
         }
 
-        fn stop_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
+        fn stop_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
             Ok(())
         }
 
-        fn delete_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
+        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
             Ok(())
         }
 
-        fn list_sandboxes(&self, _repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+        fn list_pods(&self, _repo_path: PathBuf) -> Result<Vec<PodInfo>> {
             Ok(vec![])
         }
 
-        fn list_ports(
-            &self,
-            _sandbox_name: SandboxName,
-            _repo_path: PathBuf,
-        ) -> Result<Vec<PortInfo>> {
+        fn list_ports(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<Vec<PortInfo>> {
             Ok(vec![])
         }
 
@@ -889,7 +881,7 @@ mod tests {
             &self,
             id: Option<i64>,
             _repo_path: PathBuf,
-            _sandbox_name: String,
+            _pod_name: String,
             _model: String,
             _provider: String,
             _history: serde_json::Value,
@@ -900,7 +892,7 @@ mod tests {
         fn list_conversations(
             &self,
             _repo_path: PathBuf,
-            _sandbox_name: String,
+            _pod_name: String,
         ) -> Result<Vec<ConversationSummary>> {
             Ok(vec![])
         }
@@ -977,8 +969,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = client.launch_sandbox(SandboxLaunchParams {
-            sandbox_name: SandboxName("test-sandbox".to_string()),
+        let result = client.launch_pod(PodLaunchParams {
+            pod_name: PodName("test-sandbox".to_string()),
             repo_path: PathBuf::from("/tmp/repo"),
             host_branch: Some("main".to_string()),
             docker_host: DockerHost::Localhost,
@@ -1004,31 +996,27 @@ mod tests {
     }
 
     impl Daemon for MockDaemonWithDb {
-        fn launch_sandbox(&self, _params: SandboxLaunchParams) -> Result<LaunchResult> {
+        fn launch_pod(&self, _params: PodLaunchParams) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn recreate_sandbox(&self, _params: SandboxLaunchParams) -> Result<LaunchResult> {
+        fn recreate_pod(&self, _params: PodLaunchParams) -> Result<LaunchResult> {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn stop_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
+        fn stop_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn delete_sandbox(&self, _sandbox_name: SandboxName, _repo_path: PathBuf) -> Result<()> {
+        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn list_sandboxes(&self, _repo_path: PathBuf) -> Result<Vec<SandboxInfo>> {
+        fn list_pods(&self, _repo_path: PathBuf) -> Result<Vec<PodInfo>> {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn list_ports(
-            &self,
-            _sandbox_name: SandboxName,
-            _repo_path: PathBuf,
-        ) -> Result<Vec<PortInfo>> {
+        fn list_ports(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<Vec<PortInfo>> {
             unimplemented!("not needed for conversation tests")
         }
 
@@ -1036,31 +1024,24 @@ mod tests {
             &self,
             id: Option<i64>,
             repo_path: PathBuf,
-            sandbox_name: String,
+            pod_name: String,
             model: String,
             provider: String,
             history: serde_json::Value,
         ) -> Result<i64> {
             let conn = self.db.lock().unwrap();
             crate::daemon::db::save_conversation(
-                &conn,
-                id,
-                &repo_path,
-                &sandbox_name,
-                &model,
-                &provider,
-                &history,
+                &conn, id, &repo_path, &pod_name, &model, &provider, &history,
             )
         }
 
         fn list_conversations(
             &self,
             repo_path: PathBuf,
-            sandbox_name: String,
+            pod_name: String,
         ) -> Result<Vec<ConversationSummary>> {
             let conn = self.db.lock().unwrap();
-            let summaries =
-                crate::daemon::db::list_conversations(&conn, &repo_path, &sandbox_name)?;
+            let summaries = crate::daemon::db::list_conversations(&conn, &repo_path, &pod_name)?;
             Ok(summaries
                 .into_iter()
                 .map(|s| ConversationSummary {
@@ -1094,10 +1075,10 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        // Create sandbox first (directly in DB since protocol doesn't expose this)
+        // Create pod first (directly in DB since protocol doesn't expose this)
         {
             let conn = crate::daemon::db::open_db(&db_path).unwrap();
-            crate::daemon::db::create_sandbox(
+            crate::daemon::db::create_pod(
                 &conn,
                 &repo_path,
                 "dev",
@@ -1147,10 +1128,10 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        // Create sandbox first (directly in DB since protocol doesn't expose this)
+        // Create pod first (directly in DB since protocol doesn't expose this)
         {
             let conn = crate::daemon::db::open_db(&db_path).unwrap();
-            crate::daemon::db::create_sandbox(
+            crate::daemon::db::create_pod(
                 &conn,
                 &repo_path,
                 "dev",

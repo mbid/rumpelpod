@@ -239,7 +239,7 @@ impl Drop for ForwardSession {
 /// Manager for SSH socket forwarding connections.
 ///
 /// Maintains one SSH connection per remote host configuration, shared across
-/// all sandboxes using that remote host.
+/// all pods using that remote host.
 pub struct SshForwardManager {
     /// Map from remote host to active forwarding session.
     connections: Mutex<HashMap<RemoteHost, ForwardSession>>,
@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn test_parse_allocated_port() {
         // Standard verbose format from ssh -O forward
-        let output = "Allocated port 43567 for remote forward to /run/sandbox/git-http.sock\n";
+        let output = "Allocated port 43567 for remote forward to /run/rumpelpod/git-http.sock\n";
         assert_eq!(parse_allocated_port(output), Some(43567));
 
         // Bare port number format (some SSH versions)

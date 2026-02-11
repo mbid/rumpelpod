@@ -4,10 +4,10 @@
 //! docs/devcontainer.md "Priority 5: Mounts and Volumes".
 
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
 /// Extract a short unique ID from a TestRepo's temp directory name.
@@ -53,12 +53,13 @@ fn write_devcontainer_with_mounts(repo: &TestRepo, mounts_config: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_sandbox_toml(repo: &TestRepo) {
+fn write_minimal_pod_toml(repo: &TestRepo) {
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 /// Volume mount: the target directory should exist and be writable inside the container.
@@ -75,12 +76,12 @@ fn mount_volume() {
         &repo,
         &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // Write a file to /data and read it back to confirm the mount is writable
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-vol",
@@ -90,7 +91,7 @@ fn mount_volume() {
             "echo hello > /data/testfile && cat /data/testfile",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "hello");
@@ -102,12 +103,12 @@ fn mount_tmpfs() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_mounts(&repo, r#"[{"type": "tmpfs", "target": "/tmp/mytmp"}]"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // Verify the mount point exists and is a tmpfs via `mount` output
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-tmpfs",
@@ -117,7 +118,7 @@ fn mount_tmpfs() {
             "mount | grep /tmp/mytmp",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert!(
@@ -137,12 +138,12 @@ fn mount_string_format() {
         &repo,
         &format!(r#"["type=volume,source={vol},target=/mnt"]"#),
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // Write and read back to confirm the volume is mounted and writable
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-strfmt",
@@ -152,7 +153,7 @@ fn mount_string_format() {
             "echo ok > /mnt/check && cat /mnt/check",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "ok");
@@ -169,12 +170,12 @@ fn mount_persists_across_restarts() {
         &repo,
         &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // First run: write a sentinel file into the volume
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-persist",
@@ -184,19 +185,19 @@ fn mount_persists_across_restarts() {
             "echo persisted > /data/sentinel",
         ])
         .success()
-        .expect("first sandbox enter failed");
+        .expect("first rumpel enter failed");
 
     // Recreate the container (volume should survive)
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "mnt-persist"])
         .success()
-        .expect("sandbox recreate failed");
+        .expect("pod recreate failed");
 
     // Second run: the sentinel should still be there
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "mnt-persist", "--", "cat", "/data/sentinel"])
         .success()
-        .expect("second sandbox enter failed");
+        .expect("second rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "persisted");
@@ -214,7 +215,7 @@ fn mount_bind_blocked_remote() {
         r#"[{"type": "bind", "source": "/tmp/hostdir", "target": "/mnt/hostdir"}]"#,
     );
 
-    // Point .sandbox.toml at a remote Docker host so the daemon tunnels
+    // Point .rumpelpod.toml at a remote Docker host so the daemon tunnels
     // over SSH.  The devcontainer.json is still used for image build and
     // mounts config.
     let remote = SshRemoteHost::start();
@@ -227,18 +228,19 @@ fn mount_bind_blocked_remote() {
         [agent]
         model = "claude-sonnet-4-5"
     "#, remote_spec = remote.ssh_spec()};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 
     // The command should fail with a clear error about bind mounts not
     // being supported on remote Docker.
-    let output = sandbox_command(&repo, &daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "mnt-bind-remote", "--", "true"])
         .output()
-        .expect("failed to execute sandbox enter");
+        .expect("failed to execute rumpel enter");
 
     assert!(
         !output.status.success(),
-        "sandbox enter should have rejected bind mount on remote Docker"
+        "rumpel enter should have rejected bind mount on remote Docker"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);

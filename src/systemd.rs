@@ -1,4 +1,4 @@
-//! Setup and installation of systemd user service for the sandbox daemon.
+//! Setup and installation of systemd user service for the rumpelpod daemon.
 
 use anyhow::{anyhow, Context, Result};
 use indoc::formatdoc;
@@ -8,7 +8,7 @@ use std::process::Command;
 
 use crate::daemon;
 
-const SERVICE_NAME: &str = "sandbox";
+const SERVICE_NAME: &str = "rumpelpod";
 
 fn systemd_user_dir() -> Result<PathBuf> {
     let config_dir = dirs::config_dir().context("Could not determine config directory")?;
@@ -27,7 +27,7 @@ fn socket_unit_content() -> Result<String> {
     let socket_path = daemon::socket_path()?;
     Ok(formatdoc! {"
         [Unit]
-        Description=Sandbox daemon socket
+        Description=Rumpelpod daemon socket
 
         [Socket]
         ListenStream={socket_path}
@@ -49,7 +49,7 @@ fn service_unit_content() -> Result<String> {
 
     Ok(formatdoc! {"
         [Unit]
-        Description=Sandbox daemon for managing sandboxed LLM agents
+        Description=Rumpelpod daemon for managing sandboxed LLM agents
         Requires={service}.socket
 
         [Service]
@@ -120,7 +120,7 @@ pub fn system_install() -> Result<()> {
     // Restarting the socket also stops the service (via Requires= dependency).
     systemctl(&["restart", &format!("{SERVICE_NAME}.socket")])?;
 
-    println!("Installed sandbox daemon.");
+    println!("Installed rumpelpod daemon.");
 
     Ok(())
 }
@@ -147,7 +147,7 @@ pub fn system_uninstall() -> Result<()> {
 
     systemctl(&["daemon-reload"])?;
 
-    println!("Uninstalled sandbox daemon.");
+    println!("Uninstalled rumpelpod daemon.");
 
     Ok(())
 }

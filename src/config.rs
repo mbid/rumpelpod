@@ -1,12 +1,12 @@
-//! Configuration types for sandbox settings.
+//! Configuration types for rumpelpod settings.
 //!
 //! This module provides:
 //! - Model enum for CLI and config file parsing
-//! - AgentConfig / TomlConfig for `.sandbox.toml`
+//! - AgentConfig / TomlConfig for `.rumpelpod.toml`
 //! - Utility functions for state directory paths
 //!
 //! Container settings (image, user, workspace, mounts, runArgs, etc.) come from
-//! `devcontainer.json`.  The optional `.sandbox.toml` provides sandbox-specific
+//! `devcontainer.json`.  The optional `.rumpelpod.toml` provides pod-specific
 //! settings that have no devcontainer equivalent (host, agent).
 
 use anyhow::{bail, Context, Result};
@@ -80,7 +80,7 @@ impl std::fmt::Display for Model {
 
 use url::Url;
 
-/// Where a sandbox's Docker daemon lives.
+/// Where a pod's Docker daemon lives.
 ///
 /// Either the local machine or a remote host accessed via SSH.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,14 +221,14 @@ impl DockerHost {
 }
 
 impl std::fmt::Display for DockerHost {
-    /// Human-readable display, used in `sandbox list`.
+    /// Human-readable display, used in `rumpel list`.
     /// Shows `"localhost"` or `"ssh://user@host"` (omitting default port 22).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_db_string())
     }
 }
 
-/// Configuration from `.sandbox.toml`.
+/// Configuration from `.rumpelpod.toml`.
 ///
 /// Fields that have equivalents in devcontainer.json (image, user,
 /// workspaceFolder, runtime, network) are intentionally omitted — they
@@ -244,9 +244,9 @@ pub struct TomlConfig {
     pub host: Option<String>,
 }
 
-/// Load `.sandbox.toml` from the given repo root, if present.
+/// Load `.rumpelpod.toml` from the given repo root, if present.
 pub fn load_toml_config(repo_root: &Path) -> Result<TomlConfig> {
-    let config_path = repo_root.join(".sandbox.toml");
+    let config_path = repo_root.join(".rumpelpod.toml");
     if config_path.exists() {
         let contents = std::fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read {}", config_path.display()))?;
@@ -290,8 +290,8 @@ pub struct AgentConfig {
     pub thinking_budget: Option<u32>,
 }
 
-/// Get the state directory for sandbox data.
-/// Uses $XDG_STATE_HOME/sandbox or ~/.local/state/sandbox as fallback.
+/// Get the state directory for rumpelpod data.
+/// Uses $XDG_STATE_HOME/rumpelpod or ~/.local/state/rumpelpod as fallback.
 pub fn get_state_dir() -> Result<PathBuf> {
     let state_base = std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -301,24 +301,24 @@ pub fn get_state_dir() -> Result<PathBuf> {
                 .join(".local/state")
         });
 
-    Ok(state_base.join("sandbox"))
+    Ok(state_base.join("rumpelpod"))
 }
 
-/// Get the runtime directory for sandbox sockets.
-/// Uses $XDG_RUNTIME_DIR/sandbox or /tmp/sandbox-<uid> as fallback.
+/// Get the runtime directory for rumpelpod sockets.
+/// Uses $XDG_RUNTIME_DIR/rumpelpod or /tmp/rumpelpod-<uid> as fallback.
 pub fn get_runtime_dir() -> Result<PathBuf> {
     let runtime_base = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            // Fallback to /tmp/sandbox-<uid>
+            // Fallback to /tmp/rumpelpod-<uid>
             let uid = unsafe { libc::getuid() };
-            PathBuf::from(format!("/tmp/sandbox-{}", uid))
+            PathBuf::from(format!("/tmp/rumpelpod-{}", uid))
         });
 
-    Ok(runtime_base.join("sandbox"))
+    Ok(runtime_base.join("rumpelpod"))
 }
 
-/// Check if direct git config writes are enabled via SANDBOX_TEST_DIRECT_GIT_CONFIG.
+/// Check if direct git config writes are enabled via RUMPELPOD_TEST_DIRECT_GIT_CONFIG.
 ///
 /// When set, git config entries and remotes are written directly to `.git/config`
 /// instead of invoking `git config` or `git remote add`. This avoids flaky lock
@@ -329,32 +329,32 @@ pub fn get_runtime_dir() -> Result<PathBuf> {
 /// - `Ok(false)` if not set
 /// - `Err(...)` if set to any other value
 pub fn is_direct_git_config_mode() -> Result<bool> {
-    match std::env::var("SANDBOX_TEST_DIRECT_GIT_CONFIG") {
+    match std::env::var("RUMPELPOD_TEST_DIRECT_GIT_CONFIG") {
         Ok(value) if value == "1" => Ok(true),
         Ok(value) => bail!(
-            "SANDBOX_TEST_DIRECT_GIT_CONFIG must be '1' if set, got '{}'",
+            "RUMPELPOD_TEST_DIRECT_GIT_CONFIG must be '1' if set, got '{}'",
             value
         ),
         Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(e) => Err(e).context("failed to read SANDBOX_TEST_DIRECT_GIT_CONFIG"),
+        Err(e) => Err(e).context("failed to read RUMPELPOD_TEST_DIRECT_GIT_CONFIG"),
     }
 }
 
-/// Check if deterministic test mode is enabled via SANDBOX_TEST_DETERMINISTIC_IDS.
+/// Check if deterministic test mode is enabled via RUMPELPOD_TEST_DETERMINISTIC_IDS.
 ///
 /// Returns:
 /// - `Ok(true)` if set to "1"
 /// - `Ok(false)` if not set
 /// - `Err(...)` if set to any other value
 pub fn is_deterministic_test_mode() -> Result<bool> {
-    match std::env::var("SANDBOX_TEST_DETERMINISTIC_IDS") {
+    match std::env::var("RUMPELPOD_TEST_DETERMINISTIC_IDS") {
         Ok(value) if value == "1" => Ok(true),
         Ok(value) => bail!(
-            "SANDBOX_TEST_DETERMINISTIC_IDS must be '1' if set, got '{}'",
+            "RUMPELPOD_TEST_DETERMINISTIC_IDS must be '1' if set, got '{}'",
             value
         ),
         Err(std::env::VarError::NotPresent) => Ok(false),
-        Err(e) => Err(e).context("failed to read SANDBOX_TEST_DETERMINISTIC_IDS"),
+        Err(e) => Err(e).context("failed to read RUMPELPOD_TEST_DETERMINISTIC_IDS"),
     }
 }
 

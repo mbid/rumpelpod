@@ -1,4 +1,4 @@
-//! Integration tests for the `sandbox agent` subcommand.
+//! Integration tests for the `rumpel agent` subcommand.
 //!
 //! Tests are organized into modules by feature area:
 //! - smoke: Basic smoke tests run with every supported model (model-specific)

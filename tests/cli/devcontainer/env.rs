@@ -1,8 +1,8 @@
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 
 fn write_devcontainer_with_env(repo: &TestRepo, env_config: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
@@ -37,12 +37,13 @@ fn write_devcontainer_with_env(repo: &TestRepo, env_config: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_sandbox_toml(repo: &TestRepo) {
+fn write_minimal_pod_toml(repo: &TestRepo) {
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 #[test]
@@ -50,14 +51,14 @@ fn container_env_simple() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "simple_value" }"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "env-simple", "--", "printenv", "MY_VAR"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "simple_value");
@@ -68,16 +69,16 @@ fn container_env_local_substitution() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_env(&repo, r#"{ "HOST_VAR": "${localEnv:TEST_HOST_VAR}" }"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // Set the environment variable in the command process
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .env("TEST_HOST_VAR", "secret_value")
         .args(["enter", "env-subst", "--", "printenv", "HOST_VAR"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "secret_value");
@@ -91,14 +92,14 @@ fn container_env_local_substitution_missing() {
         &repo,
         r#"{ "MISSING_VAR": "${localEnv:NON_EXISTENT_VAR}" }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "env-missing", "--", "printenv", "MISSING_VAR"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "");
@@ -115,11 +116,11 @@ fn container_env_mixed() {
         "DYNAMIC": "${localEnv:TEST_DYNAMIC}"
     }"#,
     );
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .env("TEST_DYNAMIC", "dynamic")
         .args([
             "enter",
@@ -130,7 +131,7 @@ fn container_env_mixed() {
             "echo $STATIC $DYNAMIC",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "static dynamic");
@@ -142,30 +143,30 @@ fn container_env_recreate() {
 
     // Initial config
     write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "value1" }"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // First enter
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "recreate-env", "--", "printenv", "MY_VAR"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "value1");
 
     // Update config
     write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "value2" }"#);
 
     // Recreate
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "recreate-env"])
         .success()
-        .expect("sandbox recreate failed");
+        .expect("pod recreate failed");
 
     // Verify new env var
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "recreate-env", "--", "printenv", "MY_VAR"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "value2");
 }

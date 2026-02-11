@@ -17,7 +17,7 @@ pub fn get_repo_root() -> Result<PathBuf> {
     let repo = Repository::discover(&cwd).with_context(|| {
         format!(
             "Not inside a git repository: {}. \
-             Sandbox commands must be run from within a git repository.",
+             Rumpel commands must be run from within a git repository.",
             cwd.display()
         )
     })?;
@@ -28,7 +28,7 @@ pub fn get_repo_root() -> Result<PathBuf> {
         None => {
             // Repository is bare (no working directory)
             bail!(
-                "Cannot use sandbox in a bare git repository. \
+                "Cannot use rumpel in a bare git repository. \
                  Please run from within a repository with a working directory."
             );
         }

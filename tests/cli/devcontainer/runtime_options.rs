@@ -2,18 +2,18 @@
 //! `privileged`, `init`, `capAdd`, `securityOpt`, and `runArgs` device passthrough.
 //!
 //! Note: The test harness sets `--privileged` for deterministic PID allocation
-//! (`SANDBOX_TEST_DETERMINISTIC_IDS=1`), which masks the effect of `privileged`,
+//! (`RUMPELPOD_TEST_DETERMINISTIC_IDS=1`), which masks the effect of `privileged`,
 //! `capAdd`, and `securityOpt` when verified from inside the container. Tests for
-//! those three properties verify the config parses and the sandbox starts
+//! those three properties verify the config parses and the pod starts
 //! successfully — the actual Docker API wiring is confirmed by the other tests
 //! (`init` and `device`) that can observe their effects.
 
 use std::fs;
 
 use indoc::formatdoc;
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
-use crate::common::{sandbox_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 
 /// Write a devcontainer.json with the given runtime options block merged in.
 fn write_devcontainer_with_runtime_opts(repo: &TestRepo, runtime_opts: &str) {
@@ -51,12 +51,13 @@ fn write_devcontainer_with_runtime_opts(repo: &TestRepo, runtime_opts: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_sandbox_toml(repo: &TestRepo) {
+fn write_minimal_pod_toml(repo: &TestRepo) {
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
     "#};
-    fs::write(repo.path().join(".sandbox.toml"), config).expect("Failed to write .sandbox.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 // ---------------------------------------------------------------------------
@@ -68,21 +69,21 @@ fn write_minimal_sandbox_toml(repo: &TestRepo) {
 ///
 /// The test harness already grants `--privileged` for deterministic PID
 /// allocation, so we can't distinguish the devcontainer setting's effect.
-/// This test verifies the config parses and the sandbox starts successfully.
+/// This test verifies the config parses and the pod starts successfully.
 #[test]
 fn privileged_mode_enabled() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""privileged": true"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Verify the config parses and the sandbox starts with privileged mode.
-    sandbox_command(&repo, &daemon)
+    // Verify the config parses and the pod starts with privileged mode.
+    pod_command(&repo, &daemon)
         .args(["enter", "privileged-test", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -98,14 +99,14 @@ fn init_process_enabled() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""init": true"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "init-test", "--", "cat", "/proc/1/comm"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     let pid1_name = String::from_utf8_lossy(&stdout).trim().to_string();
     assert!(
@@ -122,21 +123,21 @@ fn init_process_enabled() {
 ///
 /// The test harness already grants `--privileged` (which includes all
 /// capabilities), so we can't distinguish the devcontainer setting's effect.
-/// This test verifies the config parses and the sandbox starts successfully.
+/// This test verifies the config parses and the pod starts successfully.
 #[test]
 fn cap_add_sys_ptrace() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""capAdd": ["SYS_PTRACE"]"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Verify the config parses and the sandbox starts with capAdd.
-    sandbox_command(&repo, &daemon)
+    // Verify the config parses and the pod starts with capAdd.
+    pod_command(&repo, &daemon)
         .args(["enter", "cap-add-test", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -147,21 +148,21 @@ fn cap_add_sys_ptrace() {
 ///
 /// The test harness already grants `--privileged` which disables seccomp,
 /// so we can't distinguish the devcontainer setting's effect.
-/// This test verifies the config parses and the sandbox starts successfully.
+/// This test verifies the config parses and the pod starts successfully.
 #[test]
 fn security_opt_seccomp_unconfined() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""securityOpt": ["seccomp=unconfined"]"#);
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
-    // Verify the config parses and the sandbox starts with securityOpt.
-    sandbox_command(&repo, &daemon)
+    // Verify the config parses and the pod starts with securityOpt.
+    pod_command(&repo, &daemon)
         .args(["enter", "seccomp-test", "--", "true"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 }
 
 // ---------------------------------------------------------------------------
@@ -207,12 +208,12 @@ fn run_args_device() {
     )
     .expect("Failed to write devcontainer.json");
 
-    write_minimal_sandbox_toml(&repo);
+    write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
 
     // Verify device is accessible and is a character device
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "device-test", "--", "test", "-c", "/dev/null"])
         .success()
         .expect("/dev/null should be a character device in container");

@@ -15,7 +15,7 @@ use tempfile::TempDir;
 
 use crate::common::TestDaemon;
 
-use sandbox::daemon::protocol::{Daemon, DaemonClient};
+use rumpelpod::daemon::protocol::{Daemon, DaemonClient};
 
 use super::common::{
     create_mock_editor_exit, llm_cache_dir, run_agent_expecting_picker,
@@ -201,12 +201,12 @@ fn agent_interactive_resume_shows_history() {
         })
         .expect("Failed to create PTY");
 
-    let sandbox_bin = cargo::cargo_bin!("sandbox");
+    let rumpel_bin = cargo::cargo_bin!("rumpel");
 
-    let mut cmd = CommandBuilder::new(sandbox_bin);
+    let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());
     cmd.env(
-        "SANDBOX_DAEMON_SOCKET",
+        "RUMPELPOD_DAEMON_SOCKET",
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
@@ -308,7 +308,7 @@ fn agent_resume_user_last_message_no_double_prefix() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
 
-    // 1. Run agent normally to create the sandbox and a conversation.
+    // 1. Run agent normally to create the pod and a conversation.
     let output1 = run_agent_with_prompt(
         &repo,
         &daemon,

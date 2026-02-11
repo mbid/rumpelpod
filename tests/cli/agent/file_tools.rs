@@ -7,11 +7,9 @@
 use std::fs;
 use std::process::Command;
 
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
-use crate::common::{
-    build_test_image, create_commit, write_test_sandbox_config, TestDaemon, TestRepo,
-};
+use crate::common::{build_test_image, create_commit, write_test_pod_config, TestDaemon, TestRepo};
 
 use super::common::run_agent_with_prompt;
 
@@ -31,7 +29,7 @@ fn agent_edits_file() {
     create_commit(repo.path(), "Add greeting");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -52,7 +50,7 @@ fn agent_edits_file() {
 fn agent_writes_file() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 

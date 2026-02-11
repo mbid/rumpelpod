@@ -1,4 +1,4 @@
-//! Agent module for running AI assistants inside sandboxes.
+//! Agent module for running AI assistants inside pods.
 
 mod anthropic;
 pub mod common;
@@ -114,7 +114,7 @@ fn convert_config_model(m: ConfigModel) -> EffectiveModel {
     }
 }
 
-/// Entry point for the `sandbox agent` CLI subcommand.
+/// Entry point for the `rumpel agent` CLI subcommand.
 pub fn agent(cmd: &AgentCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
     let toml_config = load_toml_config(&repo_root)?;
@@ -197,11 +197,11 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
         conversation_id,
     )?;
 
-    // Launch the sandbox container in a background thread
+    // Launch the pod container in a background thread
     let name = cmd.name.clone();
     let host = cmd.host.clone();
-    let sandbox_handle: JoinHandle<Result<LaunchResult>> =
-        thread::spawn(move || enter::launch_sandbox(&name, host.as_deref()));
+    let pod_handle: JoinHandle<Result<LaunchResult>> =
+        thread::spawn(move || enter::launch_pod(&name, host.as_deref()));
 
     // Set up LLM cache if specified
     // We need a provider string for the cache.
@@ -237,7 +237,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             };
 
             run_claude_agent(
-                sandbox_handle,
+                pod_handle,
                 &cmd.name,
                 &repo_path,
                 remote_env,
@@ -251,7 +251,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             )
         }
         EffectiveModel::Xai(m) => run_grok_agent(
-            sandbox_handle,
+            pod_handle,
             &cmd.name,
             &repo_path,
             remote_env,
@@ -261,7 +261,7 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
             tracker,
         ),
         EffectiveModel::Gemini(m) => run_gemini_agent(
-            sandbox_handle,
+            pod_handle,
             &cmd.name,
             &repo_path,
             remote_env,

@@ -1,7 +1,7 @@
-//! Review sandbox changes using git difftool.
+//! Review pod changes using git difftool.
 //!
-//! This module implements the `sandbox review` command, which shows the diff
-//! between a sandbox's primary branch and the merge base with the host's current HEAD.
+//! This module implements the `rumpel review` command, which shows the diff
+//! between a pod's primary branch and the merge base with the host's current HEAD.
 
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -256,7 +256,7 @@ fn invoke_difftool(
 /// Prompt the user before opening a file in the difftool.
 /// Returns true if the user wants to view the file, false to skip.
 /// This matches git difftool's prompt format:
-///   Viewing (1/16): '.sandbox.toml'
+///   Viewing (1/16): '.rumpelpod.toml'
 ///   Launch 'nvimdiff' [Y/n]?
 fn prompt_for_file(
     file_path: &str,
@@ -286,33 +286,33 @@ fn prompt_for_file(
 pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
-    // Verify the sandbox exists in the daemon database before doing
+    // Verify the pod exists in the daemon database before doing
     // anything else -- gives a clear error instead of a confusing
-    // "ref not found" message for typos or deleted sandboxes.
+    // "ref not found" message for typos or deleted pods.
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
-    let sandboxes = client.list_sandboxes(repo_root.clone())?;
-    if !sandboxes.iter().any(|s| s.name == cmd.name) {
-        bail!("Sandbox '{}' does not exist.", cmd.name);
+    let pods = client.list_pods(repo_root.clone())?;
+    if !pods.iter().any(|s| s.name == cmd.name) {
+        bail!("Pod '{}' does not exist.", cmd.name);
     }
 
-    // Verify the sandbox remote-tracking ref exists on the host
-    let sandbox_ref = format!("sandbox/{}", cmd.name);
+    // Verify the pod remote-tracking ref exists on the host
+    let pod_ref = format!("pod/{}", cmd.name);
     let ref_check = Command::new("git")
         .args([
             "rev-parse",
             "--verify",
-            &format!("refs/remotes/{}", sandbox_ref),
+            &format!("refs/remotes/{}", pod_ref),
         ])
         .current_dir(&repo_root)
         .output()
-        .context("Failed to check sandbox ref")?;
+        .context("Failed to check pod ref")?;
 
     if !ref_check.status.success() {
         bail!(
-            "Sandbox ref '{}' not found in host repository.\n\
-             Make sure the sandbox has made at least one commit.",
-            sandbox_ref
+            "Pod ref '{}' not found in host repository.\n\
+             Make sure the pod has made at least one commit.",
+            pod_ref
         );
     }
 
@@ -332,9 +332,9 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         .trim()
         .to_string();
 
-    // Compute the merge base between the sandbox branch and the host HEAD
+    // Compute the merge base between the pod branch and the host HEAD
     let merge_base_output = Command::new("git")
-        .args(["merge-base", &sandbox_ref, &host_head])
+        .args(["merge-base", &pod_ref, &host_head])
         .current_dir(&repo_root)
         .output()
         .context("Failed to compute merge base")?;
@@ -343,7 +343,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
         bail!(
             "Failed to compute merge base between '{}' and HEAD:\n{}",
-            sandbox_ref,
+            pod_ref,
             stderr.trim()
         );
     }
@@ -358,7 +358,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let tool_path = get_tool_path(&repo_root, &tool)?;
 
     // Get the list of changed files
-    let changed_files = get_changed_files(&repo_root, &merge_base, &sandbox_ref)?;
+    let changed_files = get_changed_files(&repo_root, &merge_base, &pod_ref)?;
 
     if changed_files.is_empty() {
         // No changes to review
@@ -366,7 +366,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     }
 
     // Create a temporary directory for the diff files (cleaned up on drop)
-    let temp_dir = TempDir::with_prefix("sandbox-review-")?;
+    let temp_dir = TempDir::with_prefix("rumpelpod-review-")?;
     let local_dir = temp_dir.path().join("local");
     let remote_dir = temp_dir.path().join("remote");
     fs::create_dir_all(&local_dir).context("Failed to create local temp dir")?;
@@ -383,8 +383,8 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         // Get file content at merge base (local/old version)
         let local_content = get_file_at_commit(&repo_root, &merge_base, file_path)?;
 
-        // Get file content at sandbox ref (remote/new version)
-        let remote_content = get_file_at_commit(&repo_root, &sandbox_ref, file_path)?;
+        // Get file content at pod ref (remote/new version)
+        let remote_content = get_file_at_commit(&repo_root, &pod_ref, file_path)?;
 
         // Write temp files
         let local_file = write_temp_file(&local_dir, file_path, local_content.as_deref())?;

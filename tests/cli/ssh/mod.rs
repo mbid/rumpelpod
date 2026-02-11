@@ -1,6 +1,6 @@
 //! Integration tests for SSH remote Docker functionality.
 //!
-//! These tests verify that sandboxes can be created on remote Docker hosts
+//! These tests verify that pods can be created on remote Docker hosts
 //! accessed via SSH tunneling. The tests start a Docker container that runs
 //! both an SSH server and a Docker daemon (in privileged mode), simulating
 //! a remote Docker host.
@@ -14,10 +14,10 @@ use indoc::formatdoc;
 use tempfile::TempDir;
 
 use crate::common::{
-    build_docker_image, sandbox_command, DockerBuild, ImageId, TestDaemon, TestRepo,
-    TEST_REPO_PATH, TEST_USER_UID,
+    build_docker_image, pod_command, DockerBuild, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH,
+    TEST_USER_UID,
 };
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
 /// Test user for SSH connections.
 pub const SSH_USER: &str = "testuser";
@@ -54,7 +54,7 @@ impl SshRemoteHost {
 
         // Create temporary directory for SSH keys
         let temp_dir =
-            TempDir::with_prefix("sandbox-ssh-test-").expect("Failed to create temp dir for SSH");
+            TempDir::with_prefix("rumpelpod-ssh-test-").expect("Failed to create temp dir for SSH");
         let private_key_path = temp_dir.path().join("id_ed25519");
         let public_key_path = temp_dir.path().join("id_ed25519.pub");
 
@@ -405,13 +405,13 @@ pub struct SshConfig {
 /// - Configures each host with its specific identity file
 /// - Sets IdentitiesOnly to prevent using ssh-agent keys
 pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
-    let temp_dir = TempDir::with_prefix("sandbox-ssh-config-")
+    let temp_dir = TempDir::with_prefix("rumpelpod-ssh-config-")
         .expect("Failed to create temp dir for SSH config");
     let config_path = temp_dir.path().join("config");
     let known_hosts_path = temp_dir.path().join("known_hosts");
 
     let mut config = formatdoc! {r#"
-        # SSH config for sandbox integration tests
+        # SSH config for rumpelpod integration tests
         # Auto-generated - provides isolation from user's SSH configuration
 
         # Global settings
@@ -449,8 +449,8 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
 /// Write config files for a remote Docker host test.
 ///
 /// Writes a devcontainer.json with the image/workspace/runtime settings,
-/// and a .sandbox.toml with only the host specification.
-pub fn write_remote_sandbox_config(repo: &TestRepo, image_id: &ImageId, remote_spec: &str) {
+/// and a .rumpelpod.toml with only the host specification.
+pub fn write_remote_pod_config(repo: &TestRepo, image_id: &ImageId, remote_spec: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
 
@@ -470,8 +470,8 @@ pub fn write_remote_sandbox_config(repo: &TestRepo, image_id: &ImageId, remote_s
     let config = formatdoc! {r#"
         host = "{remote_spec}"
     "#};
-    std::fs::write(repo.path().join(".sandbox.toml"), config)
-        .expect("Failed to write .sandbox.toml");
+    std::fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
 }
 
 // Tests
@@ -496,22 +496,22 @@ fn ssh_smoke_test() {
     let ssh_config = create_ssh_config(&[&remote]);
     let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
 
-    // Write sandbox config
-    write_remote_sandbox_config(&repo, &image_id, &remote.ssh_spec());
+    // Write pod config
+    write_remote_pod_config(&repo, &image_id, &remote.ssh_spec());
 
-    // Enter the sandbox on the remote Docker host
-    let sandbox_name = "remote-test";
-    let output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "hello from remote"])
+    // Enter the pod on the remote Docker host
+    let pod_name = "remote-test";
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "hello from remote"])
         .output()
-        .expect("sandbox enter failed to execute");
+        .expect("rumpel enter failed to execute");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "sandbox enter failed: stdout={}, stderr={}",
+        "rumpel enter failed: stdout={}, stderr={}",
         stdout,
         stderr
     );
@@ -526,9 +526,9 @@ fn ssh_smoke_test() {
         .expect("docker ps failed");
     let remote_containers_str = String::from_utf8_lossy(&remote_containers);
 
-    // The container name usually contains the sandbox name.
+    // The container name usually contains the pod name.
     assert!(
-        remote_containers_str.contains(sandbox_name),
+        remote_containers_str.contains(pod_name),
         "remote container should exist: {}",
         remote_containers_str
     );
@@ -553,22 +553,22 @@ fn ssh_reconnect_test() {
     let ssh_config = create_ssh_config(&[&remote]);
     let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
 
-    // Write sandbox config
-    write_remote_sandbox_config(&repo, &image_id, &remote.ssh_spec());
+    // Write pod config
+    write_remote_pod_config(&repo, &image_id, &remote.ssh_spec());
 
-    // Enter the sandbox on the remote Docker host
-    let sandbox_name = "reconnect-test";
-    let output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "hello from remote"])
+    // Enter the pod on the remote Docker host
+    let pod_name = "reconnect-test";
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "hello from remote"])
         .output()
-        .expect("sandbox enter failed to execute");
+        .expect("rumpel enter failed to execute");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "first sandbox enter failed: stdout={}, stderr={}",
+        "first rumpel enter failed: stdout={}, stderr={}",
         stdout,
         stderr
     );
@@ -586,17 +586,17 @@ fn ssh_reconnect_test() {
     );
 
     // Try to enter again
-    let output = sandbox_command(&repo, &daemon)
-        .args(["enter", sandbox_name, "--", "echo", "hello again"])
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "hello again"])
         .output()
-        .expect("sandbox enter failed to execute");
+        .expect("rumpel enter failed to execute");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert!(
         output.status.success(),
-        "second sandbox enter failed: stdout={}, stderr={}",
+        "second rumpel enter failed: stdout={}, stderr={}",
         stdout,
         stderr
     );

@@ -8,9 +8,7 @@ use anyhow::{bail, Context, Result};
 use crate::cli::EnterCommand;
 use crate::config::{load_toml_config, DockerHost};
 use crate::daemon;
-use crate::daemon::protocol::{
-    Daemon, DaemonClient, LaunchResult, SandboxLaunchParams, SandboxName,
-};
+use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
 use crate::devcontainer::{
     substitute_vars, ContainerEnvSource, DevContainer, MountType, SubstitutionContext,
 };
@@ -65,9 +63,9 @@ pub fn load_and_resolve(
     Ok((devcontainer, docker_host))
 }
 
-/// Launch a sandbox and return the container ID and user.
+/// Launch a pod and return the container ID and user.
 /// This is shared logic between `enter` and `agent` commands.
-pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
+pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
     let repo_root = get_repo_root()?;
 
     let (devcontainer, docker_host) = load_and_resolve(&repo_root, host_override)?;
@@ -91,8 +89,8 @@ pub fn launch_sandbox(sandbox_name: &str, host_override: Option<&str>) -> Result
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    client.launch_sandbox(SandboxLaunchParams {
-        sandbox_name: SandboxName(sandbox_name.to_string()),
+    client.launch_pod(PodLaunchParams {
+        pod_name: PodName(pod_name.to_string()),
         repo_path: repo_root,
         host_branch,
         docker_host,
@@ -137,7 +135,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         container_id,
         user,
         docker_socket,
-    } = launch_sandbox(&cmd.name, cmd.host.as_deref())?;
+    } = launch_pod(&cmd.name, cmd.host.as_deref())?;
 
     let mut command = cmd.command.clone();
     if command.is_empty() {

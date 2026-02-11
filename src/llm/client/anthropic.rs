@@ -25,8 +25,8 @@ impl Client {
         cache: Option<LlmCache>,
         base_url: Option<String>,
     ) -> Result<Self, LlmError> {
-        // If SANDBOX_TEST_LLM_OFFLINE is set, ignore API key to ensure strict caching in tests
-        let offline_test_mode = std::env::var("SANDBOX_TEST_LLM_OFFLINE")
+        // If RUMPELPOD_TEST_LLM_OFFLINE is set, ignore API key to ensure strict caching in tests
+        let offline_test_mode = std::env::var("RUMPELPOD_TEST_LLM_OFFLINE")
             .map(|s| s == "1" || s.to_lowercase() == "true")
             .unwrap_or(false);
 
@@ -130,7 +130,7 @@ impl Client {
                 return Err(LlmError::Other(anyhow::anyhow!(
                     "LLM Cache miss in test offline mode.\n\
                      See llm-cache/README.md for details.\n\
-                     To populate the cache, rerun the test with SANDBOX_TEST_LLM_OFFLINE=0 set in the environment."
+                     To populate the cache, rerun the test with RUMPELPOD_TEST_LLM_OFFLINE=0 set in the environment."
                 )));
             }
             return Err(LlmError::Other(anyhow::anyhow!(

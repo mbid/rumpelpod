@@ -1,20 +1,20 @@
-//! Integration tests for the `sandbox recreate` subcommand.
+//! Integration tests for the `rumpel recreate` subcommand. subcommand.
 
 use crate::common::{
-    build_test_image, sandbox_command, write_test_sandbox_config, TestDaemon, TestRepo,
+    build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo,
 };
-use sandbox::CommandExt;
+use rumpelpod::CommandExt;
 
 #[test]
 fn recreate_preserves_dirty_files_but_resets_container() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    // 1. Enter sandbox and create a dirty file in the repo, and a file in /tmp
-    sandbox_command(&repo, &daemon)
+    // 1. Enter pod and create a dirty file in the repo, and a file in /tmp
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
@@ -24,28 +24,28 @@ fn recreate_preserves_dirty_files_but_resets_container() {
             "echo 'dirty content' > dirty_file.txt && echo 'temp content' > /tmp/temp_file.txt",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
-    // 2. Recreate the sandbox
-    sandbox_command(&repo, &daemon)
+    // 2. Recreate the pod
+    pod_command(&repo, &daemon)
         .args(["recreate", "test"])
         .success()
-        .expect("sandbox recreate failed");
+        .expect("pod recreate failed");
 
     // 3. Verify dirty file exists and has correct content (repo is preserved)
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "cat", "dirty_file.txt"])
         .success()
-        .expect("sandbox check failed");
+        .expect("pod check failed");
 
     let content = String::from_utf8_lossy(&stdout);
     assert_eq!(content.trim(), "dirty content");
 
     // 4. Verify /tmp/temp_file.txt is gone (container was reset)
-    let status = sandbox_command(&repo, &daemon)
+    let status = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "test", "-f", "/tmp/temp_file.txt"])
         .status()
-        .expect("sandbox check failed");
+        .expect("pod check failed");
 
     assert!(
         !status.success(),
@@ -57,24 +57,24 @@ fn recreate_preserves_dirty_files_but_resets_container() {
 fn recreate_preserves_untracked_files() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
     // 1. Create untracked file
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "touch", "untracked.txt"])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // 2. Recreate
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "test"])
         .success()
-        .expect("sandbox recreate failed");
+        .expect("pod recreate failed");
 
     // 3. Verify file exists
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "ls", "untracked.txt"])
         .success()
         .expect("untracked file should exist");
@@ -84,7 +84,7 @@ fn recreate_preserves_untracked_files() {
 fn recreate_preserves_modified_tracked_files() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_sandbox_config(&repo, &image_id);
+    write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
@@ -111,8 +111,8 @@ fn recreate_preserves_modified_tracked_files() {
         .output()
         .expect("git commit failed");
 
-    // 2. Modify it in sandbox
-    sandbox_command(&repo, &daemon)
+    // 2. Modify it in pod
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
@@ -122,16 +122,16 @@ fn recreate_preserves_modified_tracked_files() {
             "echo 'modification' >> tracked.txt",
         ])
         .success()
-        .expect("sandbox enter failed");
+        .expect("rumpel enter failed");
 
     // 3. Recreate
-    sandbox_command(&repo, &daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "test"])
         .success()
-        .expect("sandbox recreate failed");
+        .expect("pod recreate failed");
 
     // 4. Verify modification exists
-    let stdout = sandbox_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "cat", "tracked.txt"])
         .success()
         .expect("check failed");
