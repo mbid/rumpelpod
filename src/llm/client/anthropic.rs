@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::llm::cache::LlmCache;
 use crate::llm::error::LlmError;
-use crate::llm::types::anthropic::{MessagesRequest, MessagesResponse, ServerTool, Tool};
+use crate::llm::types::anthropic::{MessagesRequest, MessagesResponse};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -68,14 +68,10 @@ impl Client {
     fn build_headers(
         &self,
         for_cache_key: bool,
-        enable_web_fetch: bool,
         enable_thinking: bool,
         enable_effort: bool,
     ) -> Vec<(&'static str, String)> {
         let mut beta_flags = Vec::new();
-        if enable_web_fetch {
-            beta_flags.push("web-fetch-2025-09-10");
-        }
         if enable_thinking {
             beta_flags.push("interleaved-thinking-2025-05-14");
         }
@@ -103,19 +99,13 @@ impl Client {
     pub fn messages(&self, request: MessagesRequest) -> Result<MessagesResponse, LlmError> {
         let enable_thinking = request.thinking.is_some();
         let enable_effort = request.output_config.is_some();
-        let enable_web_fetch = request.tools.as_ref().is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|t| matches!(t, Tool::Server(ServerTool::WebFetch { .. })))
-        });
 
         // Serialize request body to a string once
         let body = serde_json::to_string(&request)
             .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
-        let cache_headers =
-            self.build_headers(true, enable_web_fetch, enable_thinking, enable_effort);
+        let cache_headers = self.build_headers(true, enable_thinking, enable_effort);
         let cache_header_refs: Vec<(&str, &str)> = cache_headers
             .iter()
             .map(|(k, v)| (*k, v.as_str()))
@@ -149,8 +139,7 @@ impl Client {
         }
 
         // Build headers including API key for actual requests
-        let request_headers =
-            self.build_headers(false, enable_web_fetch, enable_thinking, enable_effort);
+        let request_headers = self.build_headers(false, enable_thinking, enable_effort);
 
         debug!("Sending API request");
         let mut req = self.client.post(&self.base_url).body(body.clone());
@@ -182,17 +171,18 @@ impl Client {
         let response = if matches!(status.as_u16(), 500 | 502 | 503 | 504 | 511) {
             // error_for_status will convert this to a reqwest::Error
             response.error_for_status()?
+        } else if !status.is_success() {
+            // Read response body before converting to error for better diagnostics
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "(failed to read body)".to_string());
+            return Err(LlmError::Other(anyhow::anyhow!(
+                "Anthropic API error ({}): {}",
+                status,
+                body
+            )));
         } else {
-            // For non-retryable errors, convert to LlmError::Other
-            match response.error_for_status() {
-                Ok(r) => r,
-                Err(e) => {
-                    return Err(LlmError::Other(anyhow::anyhow!(
-                        "Anthropic API error: {}",
-                        e
-                    )))
-                }
-            }
+            response
         };
 
         let response_text = response

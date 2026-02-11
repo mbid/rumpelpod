@@ -14,8 +14,8 @@ use crate::llm::cache::LlmCache;
 use crate::llm::client::anthropic::Client;
 use crate::llm::error::LlmError;
 use crate::llm::types::anthropic::{
-    CacheControl, ContentBlock, CustomTool, Effort, FetchToolType, Message, MessagesRequest, Model,
-    OutputConfig, Role, ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool,
+    CacheControl, ContentBlock, CustomTool, Effort, Message, MessagesRequest, Model, OutputConfig,
+    Role, ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool,
     WebSearchToolType,
 };
 
@@ -42,15 +42,6 @@ fn websearch_tool() -> Tool {
         allowed_domains: None,
         blocked_domains: None,
         user_location: None,
-    })
-}
-
-fn fetch_tool() -> Tool {
-    Tool::Server(ServerTool::WebFetch {
-        tool_type: FetchToolType::WebFetch20250910,
-        max_uses: None,
-        allowed_domains: None,
-        blocked_domains: None,
     })
 }
 
@@ -254,7 +245,6 @@ pub fn run_claude_agent(
 
             if enable_websearch {
                 tools.push(websearch_tool());
-                tools.push(fetch_tool());
             }
 
             let mut max_tokens = MAX_TOKENS;
