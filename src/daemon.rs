@@ -1447,6 +1447,8 @@ fn strip_claude_json(data: &[u8]) -> Vec<u8> {
         "hasCompletedOnboarding",
         "lastOnboardingVersion",
         "oauthAccount",
+        "bypassPermissionsModeAccepted",
+        "customApiKeyResponses",
     ];
 
     let Ok(mut obj) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
