@@ -62,6 +62,8 @@ pub struct SandboxInfo {
     pub host: String,
     /// State of the repository in the sandbox (e.g. "ahead 1, behind 2").
     pub repo_state: Option<String>,
+    /// Docker container ID of the sandbox (short 12-char hex), if known.
+    pub container_id: Option<String>,
 }
 
 /// Information about a forwarded port.

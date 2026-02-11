@@ -30,6 +30,7 @@ fn list_empty_returns_header_only() {
     assert!(stdout.contains("STATUS"));
     assert!(stdout.contains("CREATED"));
     assert!(stdout.contains("HOST"));
+    assert!(stdout.contains("CONTAINER ID"));
 }
 
 #[test]
@@ -79,6 +80,21 @@ fn list_shows_created_sandbox() {
         stdout.contains("local"),
         "Expected 'local' host in output: {}",
         stdout
+    );
+
+    // Running sandboxes should show a docker container ID (12-char hex prefix)
+    let lines: Vec<&str> = stdout.lines().collect();
+    let sandbox_line = lines
+        .iter()
+        .find(|l| l.contains("test-list"))
+        .expect("Expected sandbox line in output");
+    let has_container_id = sandbox_line
+        .split_whitespace()
+        .any(|word| word.len() >= 12 && word.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(
+        has_container_id,
+        "Expected a container ID (hex string) in sandbox line: {}",
+        sandbox_line
     );
 }
 

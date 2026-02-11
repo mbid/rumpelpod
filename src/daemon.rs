@@ -1212,6 +1212,7 @@ fn find_available_port(allocated: &std::collections::HashSet<u16>) -> Result<u16
 #[derive(Clone)]
 struct SandboxContainerInfo {
     status: SandboxStatus,
+    container_id: Option<String>,
 }
 
 /// Compute the git status of the sandbox's primary branch vs the currently checked out commit.
@@ -1294,8 +1295,14 @@ fn get_container_status_via_socket(
             _ => SandboxStatus::Stopped,
         };
 
-        if container.id.is_some() {
-            status_map.insert(sandbox_name, SandboxContainerInfo { status });
+        if let Some(id) = container.id {
+            status_map.insert(
+                sandbox_name,
+                SandboxContainerInfo {
+                    status,
+                    container_id: Some(id),
+                },
+            );
         }
     }
 
@@ -2137,12 +2144,27 @@ impl Daemon for DaemonServer {
         // Build combined list with status from Docker where available
         let mut sandboxes = Vec::new();
         for sandbox in db_sandboxes {
-            let status = if sandbox.host == db::LOCAL_HOST {
-                // Local sandbox - check actual container status
-                match local_container_status.get(&sandbox.name) {
-                    Some(s) => s.status.clone(),
-                    None => {
-                        // Container doesn't exist
+            let container_info = if sandbox.host == db::LOCAL_HOST {
+                local_container_status.get(&sandbox.name)
+            } else {
+                remote_status_maps
+                    .get(&sandbox.host)
+                    .and_then(|m| m.as_ref())
+                    .and_then(|status_map| status_map.get(&sandbox.name))
+            };
+
+            let status = match container_info {
+                Some(info) => info.status.clone(),
+                None => {
+                    if sandbox.host != db::LOCAL_HOST
+                        && remote_status_maps
+                            .get(&sandbox.host)
+                            .map_or(true, |m| m.is_none())
+                    {
+                        // No connection to remote -- we can't determine the actual status
+                        SandboxStatus::Disconnected
+                    } else {
+                        // Container doesn't exist locally or on the remote
                         match sandbox.status {
                             db::SandboxStatus::Ready => SandboxStatus::Gone,
                             db::SandboxStatus::Initializing => SandboxStatus::Stopped,
@@ -2150,32 +2172,9 @@ impl Daemon for DaemonServer {
                         }
                     }
                 }
-            } else {
-                // Remote sandbox - check if we have live container status
-                match remote_status_maps
-                    .get(&sandbox.host)
-                    .and_then(|m| m.as_ref())
-                {
-                    Some(status_map) => {
-                        // We have a connection - use actual container status
-                        match status_map.get(&sandbox.name) {
-                            Some(s) => s.status.clone(),
-                            None => {
-                                // Container doesn't exist on remote
-                                match sandbox.status {
-                                    db::SandboxStatus::Ready => SandboxStatus::Gone,
-                                    db::SandboxStatus::Initializing => SandboxStatus::Stopped,
-                                    db::SandboxStatus::Error => SandboxStatus::Stopped,
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        // No connection - we can't determine the actual status
-                        SandboxStatus::Disconnected
-                    }
-                }
             };
+
+            let container_id = container_info.and_then(|info| info.container_id.clone());
 
             // Compute git status on the host by comparing HEAD to sandbox/<sandbox_name>
             let repo_state = compute_git_status(&repo_path, &sandbox.name);
@@ -2186,6 +2185,7 @@ impl Daemon for DaemonServer {
                 created: sandbox.created_at.format("%Y-%m-%d %H:%M").to_string(),
                 host: sandbox.host,
                 repo_state,
+                container_id,
             });
         }
 

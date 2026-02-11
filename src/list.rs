@@ -15,9 +15,14 @@ pub fn list() -> Result<()> {
     let sandboxes = client.list_sandboxes(repo_path)?;
 
     let mut table = Table::new();
-    table
-        .load_preset(NOTHING)
-        .set_header(vec!["NAME", "GIT", "STATUS", "CREATED", "HOST"]);
+    table.load_preset(NOTHING).set_header(vec![
+        "NAME",
+        "GIT",
+        "STATUS",
+        "CREATED",
+        "HOST",
+        "CONTAINER ID",
+    ]);
 
     for sandbox in sandboxes {
         let status_str = match sandbox.status {
@@ -27,6 +32,7 @@ pub fn list() -> Result<()> {
             SandboxStatus::Disconnected => "disconnected",
         };
         let repo_state = sandbox.repo_state.as_deref().unwrap_or("");
+        let container_id = sandbox.container_id.as_deref().unwrap_or("");
 
         table.add_row(vec![
             sandbox.name,
@@ -34,6 +40,7 @@ pub fn list() -> Result<()> {
             status_str.to_string(),
             sandbox.created,
             sandbox.host,
+            container_id.to_string(),
         ]);
     }
 
