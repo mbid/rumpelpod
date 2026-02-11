@@ -100,10 +100,10 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     if screen_session_exists(&docker_host, &container_id.0, &user)? {
         // Reattach to existing session
-        docker_cmd.args(["screen", "-d", "-R", "claude"]);
+        docker_cmd.args(["screen", "-U", "-d", "-R", "claude"]);
     } else {
         // Create new screen session running claude
-        docker_cmd.args(["screen", "-S", "claude", "--", "claude"]);
+        docker_cmd.args(["screen", "-U", "-S", "claude", "--", "claude"]);
         docker_cmd.args(&cmd.args);
     }
 
