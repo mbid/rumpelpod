@@ -103,7 +103,15 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         docker_cmd.args(["screen", "-U", "-d", "-R", "claude"]);
     } else {
         // Create new screen session running claude
-        docker_cmd.args(["screen", "-U", "-S", "claude", "--", "claude"]);
+        docker_cmd.args([
+            "screen",
+            "-U",
+            "-S",
+            "claude",
+            "--",
+            "claude",
+            "--dangerously-skip-permissions",
+        ]);
         docker_cmd.args(&cmd.args);
     }
 
