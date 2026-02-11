@@ -79,8 +79,8 @@ USER root
 RUN mkdir /workspaces && chown -R ${USER}:${USER} /workspaces
 USER ${USER}
 
-RUN git clone https://github.com/mbid/sandbox /home/$USER/sandbox
-WORKDIR /home/$USER/sandbox
+RUN git clone https://github.com/mbid/sandbox /workspaces/sandbox
+WORKDIR /workspaces/sandbox
 
 ARG ANTHROPIC_API_KEY
 ARG XAI_API_KEY
