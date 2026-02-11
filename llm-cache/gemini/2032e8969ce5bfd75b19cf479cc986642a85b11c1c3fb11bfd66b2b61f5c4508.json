@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "2025-11-12",
+            "thoughtSignature": "CrcBAb4+9vvhuU5yP/Fj6VVrC7tTPLMXsV+AciQBuP3WwOEHLx2aOQX8G3K5RYh2LzjAtkcC+BeNJtSXrxYciCW15X9F3cOUyckT33elEmyEOIJOOnqtXnliPxYOx7exN0tKPozIzP3KeFdsv1LvyI5bK4KphF0ndJs213tpyGoHizjLmFiE7nSnhZM+bcYdCR/UKeHDlz0SWFgn9U631sS5fY3g39lBXpAG6FxE6Oya91kfVl9R9Wp2"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 630,
+    "candidatesTokenCount": 10,
+    "totalTokenCount": 686,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 630
+      }
+    ],
+    "thoughtsTokenCount": 46
+  },
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "lhKNaZOrOcHIvdIPuZi74Q4"
+}

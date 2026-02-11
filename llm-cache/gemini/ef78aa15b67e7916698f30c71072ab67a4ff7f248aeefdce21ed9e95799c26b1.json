@@ -1,0 +1,31 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "The file `secret.txt` contains the following:\n\n```\nAGENT_SECRET_12345\n```",
+            "thoughtSignature": "Ev4GCvsGAb4+9vu+PWSFN3mYJAij/lZd55uAAdqVtliuVYUiz83qLwTQvCBdEKMBlvfeUgUwjOUwjbpPM5rtWHgtcsM2cMgBChgJKU8nviu2MAY80WI2fYlfedcbyqpTTMKap6FTzBBqPHcw9h3gcBDWJe7ycMSrzZH1c0qFiquXjZ5nXjZD883lKgZQYtPeN4erYMgI6OEVrFRbG4GaUnx1mg5wEASUyzJMj10wHb4T3f8ga3YsfsG+xdxFLJGkUDl409f364QQ/3ePJFFH9QbljXKpChK3G3VuxbFFPb7lQV7QtHkW+NqHczyD4Lq4ZVbIoBP0DSKTFsBXuT3PbBgtOCPHlsdbYNhibCGXgJAPF6a9ASyquXMgwbK2uhWc+8tfJpKA0qlqQgXnGwRDiDhtuBBtM1xZFf/7agzhk+qpD7g26E5+AOKbbF0DW5A0rFX/qaSkKlQE92NMrLJ+0RSTP919DCOnqkKU8GDDQMOQ/bqxWdqbmFsvSfgjP95UzkFJ0hJs9yRnEjx1tTZmbLCUtjAu7ItoZXpXxXggTuXc/SgVKYMPlaMBlIMHjQvQjrPW3Zjno1CBD1mn0Zb1SGLFwwTyLisf84XtQgI4OZVFixCXloLPt3RuP0mQmfWyAjJlDJaGy07vMB/b7MJYhUdTxdY3OixXilzGnJtHCwwVDKMdJKaJNUc2rdUItTSTmulTdBwQ4akGdtJv9wwFv0lQ6Ivi8A9VCb/qUcZ0McEzgs0EBwY6B0chSYHc3DKLetynjUh+GkggDj9zcQON94d3WP93G3t9WaA870UQZTXFPhR+4OemHBId3SX16H1/ycB2D2kP/sWBOsMWBm8L/uB2kR14CJDUWFJpQ+T5F3SBNnyvQNmGoUWkhcbO5evFykNphJKM667KBRoeXDS7ZhT6kj8iaOw+LRyUhJQE85nph/KWYGzFBtaY9QNgm94rhWWNlqn7hZnEUsXcZLEigKyAD0H99uCqfHih7Tit3ot4g7GnJpWhn5xpjcyXTFuMMxBN+TqYW8YyP+FGZnK48iUTkF6XNbuC8YJyfe17t2RZcFACVUfRUAjEZrRG2FTzUnT4Jf9atZipdWHWBwQAN+eqwevj+6AepE+M7EKtQNDn4f+un7VmsG/gxKd8n7xJtOe06LKmeIOkvYVR8Ag3FTQLQf8qK46INwWigX69DiYT"
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 601,
+    "candidatesTokenCount": 25,
+    "totalTokenCount": 934,
+    "promptTokensDetails": [
+      {
+        "modality": "TEXT",
+        "tokenCount": 601
+      }
+    ],
+    "thoughtsTokenCount": 308
+  },
+  "modelVersion": "gemini-3-flash-preview",
+  "responseId": "mBKNafCiBLe-nsEPsIrc4Ak"
+}
