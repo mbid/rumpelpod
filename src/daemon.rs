@@ -1380,11 +1380,14 @@ fn run_lifecycle_command(
     Ok(())
 }
 
-/// Copy Claude Code config files into a container.
+/// Copy only the minimal Claude Code config files needed to authenticate and
+/// run inside a container. Avoids leaking conversation history, telemetry,
+/// stats, and other projects' data into untrusted sandboxes.
 ///
-/// Reads ~/.claude.json and ~/.claude/ from the host (the daemon runs on the
-/// same machine as the CLI) and pipes them into the container. All commands
-/// run as `user` so files are created with the right ownership.
+/// What we copy:
+///   ~/.claude/.credentials.json  -- OAuth tokens (needed unless ANTHROPIC_API_KEY is set)
+///   ~/.claude/settings.json      -- user preferences (model, mode, attribution)
+///   ~/.claude.json               -- stripped to only essential keys
 fn copy_claude_config(docker: &Docker, container_id: &str, user: &str) -> Result<()> {
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
 
@@ -1400,39 +1403,62 @@ fn copy_claude_config(docker: &Docker, container_id: &str, user: &str) -> Result
     .context("determining container home directory")?;
     let container_home = String::from_utf8_lossy(&home_output).trim().to_string();
 
+    // Build a minimal .claude.json with only the keys needed to suppress
+    // warnings and onboarding prompts. Everything else (tips history,
+    // per-project stats, other projects' settings) is left out.
     if let Ok(data) = std::fs::read(host_home.join(".claude.json")) {
+        let minimal = strip_claude_json(&data);
         let dest = format!("{}/.claude.json", container_home);
-        write_file_via_stdin(docker, container_id, user, &dest, &data)
+        write_file_via_stdin(docker, container_id, user, &dest, &minimal)
             .context("writing .claude.json")?;
     }
 
-    if host_home.join(".claude").is_dir() {
-        let output = Command::new("tar")
-            .args(["cf", "-", "-C"])
-            .arg(&host_home)
-            .arg(".claude")
-            .output()
-            .context("running tar to pack ~/.claude")?;
-        if output.status.success() {
-            exec_with_stdin(
-                docker,
-                container_id,
-                Some(user),
-                None,
-                None,
-                vec!["tar", "xf", "-", "-C", &container_home],
-                Some(&output.stdout),
-            )
-            .context("extracting .claude directory tar")?;
-        } else {
-            log::warn!(
-                "tar of ~/.claude failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+    // Create ~/.claude/ and copy only the two small config files.
+    let claude_dir = host_home.join(".claude");
+    if claude_dir.is_dir() {
+        exec_command(
+            docker,
+            container_id,
+            Some(user),
+            None,
+            None,
+            vec!["mkdir", "-p", &format!("{}/.claude", container_home)],
+        )
+        .context("creating .claude directory")?;
+
+        for filename in &[".credentials.json", "settings.json"] {
+            let src = claude_dir.join(filename);
+            if let Ok(data) = std::fs::read(&src) {
+                let dest = format!("{}/.claude/{}", container_home, filename);
+                write_file_via_stdin(docker, container_id, user, &dest, &data)
+                    .context(format!("writing .claude/{}", filename))?;
+            }
         }
     }
 
     Ok(())
+}
+
+/// Keep only the keys from ~/.claude.json that are needed for a functional
+/// session. Returns the serialized JSON bytes to write into the container.
+fn strip_claude_json(data: &[u8]) -> Vec<u8> {
+    // Keys that suppress warnings/onboarding or are required for auth.
+    const KEEP_KEYS: &[&str] = &[
+        "hasCompletedOnboarding",
+        "lastOnboardingVersion",
+        "oauthAccount",
+    ];
+
+    let Ok(mut obj) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
+    else {
+        // If the file is not valid JSON, pass through an empty object so
+        // claude does not complain about a missing file.
+        return b"{}".to_vec();
+    };
+
+    obj.retain(|k, _| KEEP_KEYS.contains(&k.as_str()));
+
+    serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| b"{}".to_vec())
 }
 
 /// Write file contents into a container by piping data through `cat`.
