@@ -455,6 +455,32 @@ fn ensure_repo_initialized(
     )
     .context("cloning repository into workspaceFolder")?;
 
+    // Set up git-lfs and pull LFS objects.  If git-lfs is not installed in
+    // the container the install command will fail and we skip the pull.
+    // If install succeeds but pull fails, that is a real error.
+    let repo_dir = container_repo_path.to_string_lossy();
+    let lfs_installed = exec_command(
+        docker,
+        container_id,
+        Some(user),
+        Some(&repo_dir),
+        None,
+        vec!["git", "lfs", "install", "--local"],
+    )
+    .is_ok();
+
+    if lfs_installed {
+        exec_command(
+            docker,
+            container_id,
+            Some(user),
+            Some(&repo_dir),
+            None,
+            vec!["git", "lfs", "pull"],
+        )
+        .context("git lfs pull failed")?;
+    }
+
     Ok(())
 }
 
@@ -1694,9 +1720,11 @@ impl Daemon for DaemonServer {
             };
 
             // Register sandbox with the git HTTP server (may already be registered, that's OK)
-            let token = self
-                .git_server_state
-                .register(gateway_path.clone(), sandbox_name.0.clone());
+            let token = self.git_server_state.register(
+                gateway_path.clone(),
+                sandbox_name.0.clone(),
+                repo_path.clone(),
+            );
 
             // Store the token for cleanup on delete
             self.active_tokens
@@ -1764,9 +1792,9 @@ impl Daemon for DaemonServer {
         }
 
         // Register sandbox with the git HTTP server
-        let token = self
-            .git_server_state
-            .register(gateway_path, sandbox_name.0.clone());
+        let token =
+            self.git_server_state
+                .register(gateway_path, sandbox_name.0.clone(), repo_path.clone());
 
         // Store the token for cleanup on delete
         self.active_tokens

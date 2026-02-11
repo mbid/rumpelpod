@@ -126,17 +126,17 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
                 # git requires the full ref path for the destination.
                 head_commit=$(git rev-parse HEAD 2>/dev/null)
                 if [ -n "$head_commit" ]; then
-                    git push sandbox "$head_commit:refs/heads/host/HEAD" --force --quiet 2>/dev/null || true
+                    git push sandbox "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
                 fi
                 ;;
             refs/heads/*)
                 branch="${refname#refs/heads/}"
                 if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
                     # Branch deleted - remove from gateway
-                    git push sandbox --delete "host/$branch" --quiet 2>/dev/null || true
+                    git push sandbox --delete "host/$branch" --no-verify --quiet 2>/dev/null || true
                 else
                     # Branch updated or created - push to gateway
-                    git push sandbox "$branch:host/$branch" --force --quiet 2>/dev/null || true
+                    git push sandbox "$branch:host/$branch" --force --no-verify --quiet 2>/dev/null || true
                 fi
                 ;;
         esac

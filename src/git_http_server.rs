@@ -13,8 +13,12 @@
 //!
 //! The server can listen on TCP sockets (for local containers) or Unix sockets
 //! (for SSH remote port forwarding to remote containers).
+//!
+//! Additionally, the server implements a minimal Git LFS Batch API so that
+//! sandboxes can download LFS objects (served from the host repo's `.git/lfs/`
+//! or the gateway's LFS storage) and upload new LFS objects to the gateway.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,15 +27,18 @@ use bollard::Docker;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
 use axum::Router;
 use cgi_service::{CgiConfig, CgiService};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rand::{distr::Alphanumeric, RngExt};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
@@ -53,6 +60,8 @@ struct SandboxInfo {
     gateway_path: PathBuf,
     /// Name of the sandbox (used for access control in hooks).
     sandbox_name: String,
+    /// Path to the host repository, used to locate `.git/lfs/objects/`.
+    host_repo_path: PathBuf,
 }
 
 /// Shared state for the git HTTP server.
@@ -70,7 +79,12 @@ impl SharedGitServerState {
     }
 
     /// Register a sandbox and return its bearer token.
-    pub fn register(&self, gateway_path: PathBuf, sandbox_name: String) -> String {
+    pub fn register(
+        &self,
+        gateway_path: PathBuf,
+        sandbox_name: String,
+        host_repo_path: PathBuf,
+    ) -> String {
         let token: String = rand::rng()
             .sample_iter(&Alphanumeric)
             .take(64)
@@ -80,6 +94,7 @@ impl SharedGitServerState {
         let info = SandboxInfo {
             gateway_path,
             sandbox_name,
+            host_repo_path,
         };
 
         self.inner.lock().unwrap().insert(token.clone(), info);
@@ -152,8 +167,8 @@ impl GitHttpServer {
         let listener = tokio::net::TcpListener::from_std(std_listener)
             .context("converting to tokio listener")?;
 
-        // Build router that handles all requests via our auth handler
-        let app = Router::new().fallback(handle_request).with_state(state);
+        // Build router with explicit LFS routes before the CGI fallback
+        let app = build_router(state);
 
         // Spawn the server in the background
         let task_handle = RUNTIME.spawn(async move {
@@ -224,8 +239,8 @@ impl UnixGitHttpServer {
             socket_path.display()
         );
 
-        // Build router
-        let app = Router::new().fallback(handle_request).with_state(state);
+        // Build router with explicit LFS routes before the CGI fallback
+        let app = build_router(state);
 
         let socket_path_clone = socket_path.clone();
 
@@ -286,6 +301,321 @@ impl UnixGitHttpServer {
 impl Drop for UnixGitHttpServer {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+/// Build the axum router with LFS routes and the git-http-backend fallback.
+fn build_router(state: SharedGitServerState) -> Router {
+    Router::new()
+        .route(
+            "/gateway.git/info/lfs/objects/batch",
+            post(lfs_batch_handler),
+        )
+        .route(
+            "/gateway.git/lfs/objects/{oid}",
+            get(lfs_download_handler).put(lfs_upload_handler),
+        )
+        .fallback(handle_request)
+        .with_state(state)
+}
+
+// -- LFS JSON types -----------------------------------------------------------
+
+#[derive(Deserialize)]
+struct LfsBatchRequest {
+    operation: String,
+    #[serde(default)]
+    objects: Vec<LfsObject>,
+}
+
+#[derive(Deserialize)]
+struct LfsObject {
+    oid: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
+struct LfsBatchResponse {
+    transfer: String,
+    objects: Vec<LfsObjectResponse>,
+}
+
+#[derive(Serialize)]
+struct LfsObjectResponse {
+    oid: String,
+    size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions: Option<HashMap<String, LfsAction>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<LfsError>,
+}
+
+#[derive(Serialize)]
+struct LfsAction {
+    href: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    header: Option<HashMap<String, String>>,
+}
+
+#[derive(Serialize)]
+struct LfsError {
+    code: u16,
+    message: String,
+}
+
+// -- LFS helpers --------------------------------------------------------------
+
+/// Authenticate a request and return the sandbox info and bearer token.
+fn authenticate(
+    state: &SharedGitServerState,
+    req: &Request<Body>,
+) -> Result<(SandboxInfo, String), Response> {
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+
+    let token = match auth_header {
+        Some(h) if h.starts_with("Bearer ") => &h[7..],
+        _ => return Err(StatusCode::UNAUTHORIZED.into_response()),
+    };
+
+    match state.get(token) {
+        Some(info) => Ok((info, token.to_string())),
+        None => Err(StatusCode::UNAUTHORIZED.into_response()),
+    }
+}
+
+/// Return the path where an LFS object is stored under a given base directory.
+/// Layout: `<base>/lfs/objects/XX/YY/<oid>` (XX = oid[0..2], YY = oid[2..4]).
+fn lfs_object_path(base: &Path, oid: &str) -> PathBuf {
+    base.join("lfs")
+        .join("objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(oid)
+}
+
+/// Construct an LFS response with the correct content type.
+fn lfs_json_response(status: StatusCode, body: &impl Serialize) -> Response {
+    (
+        status,
+        [(header::CONTENT_TYPE, "application/vnd.git-lfs+json")],
+        serde_json::to_string(body).unwrap(),
+    )
+        .into_response()
+}
+
+// -- LFS handlers -------------------------------------------------------------
+
+/// Handle `POST /gateway.git/info/lfs/objects/batch`.
+///
+/// For downloads, checks whether the object exists in gateway or host LFS
+/// storage and returns a download URL.  For uploads, returns an upload URL
+/// (or omits `actions` if the object already exists).
+async fn lfs_batch_handler(
+    State(state): State<SharedGitServerState>,
+    req: Request<Body>,
+) -> Response {
+    let (info, token) = match authenticate(&state, &req) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let host_header = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost")
+        .to_string();
+
+    let auth_value = format!("Bearer {}", token);
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let batch_req: LfsBatchRequest = match serde_json::from_slice(&body_bytes) {
+        Ok(r) => r,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let mut response_objects = Vec::new();
+
+    for obj in &batch_req.objects {
+        let gateway_obj = lfs_object_path(&info.gateway_path, &obj.oid);
+        let host_obj = lfs_object_path(&info.host_repo_path.join(".git"), &obj.oid);
+
+        match batch_req.operation.as_str() {
+            "download" => {
+                if gateway_obj.exists() || host_obj.exists() {
+                    let mut headers = HashMap::new();
+                    headers.insert("Authorization".to_string(), auth_value.clone());
+                    let mut actions = HashMap::new();
+                    actions.insert(
+                        "download".to_string(),
+                        LfsAction {
+                            href: format!(
+                                "http://{}/gateway.git/lfs/objects/{}",
+                                host_header, obj.oid
+                            ),
+                            header: Some(headers),
+                        },
+                    );
+                    response_objects.push(LfsObjectResponse {
+                        oid: obj.oid.clone(),
+                        size: obj.size,
+                        actions: Some(actions),
+                        error: None,
+                    });
+                } else {
+                    response_objects.push(LfsObjectResponse {
+                        oid: obj.oid.clone(),
+                        size: obj.size,
+                        actions: None,
+                        error: Some(LfsError {
+                            code: 404,
+                            message: "Object not found".to_string(),
+                        }),
+                    });
+                }
+            }
+            "upload" => {
+                // Omit actions when the object already exists to signal
+                // "already have it" per the LFS batch API spec.
+                if gateway_obj.exists() || host_obj.exists() {
+                    response_objects.push(LfsObjectResponse {
+                        oid: obj.oid.clone(),
+                        size: obj.size,
+                        actions: None,
+                        error: None,
+                    });
+                } else {
+                    let mut headers = HashMap::new();
+                    headers.insert("Authorization".to_string(), auth_value.clone());
+                    let mut actions = HashMap::new();
+                    actions.insert(
+                        "upload".to_string(),
+                        LfsAction {
+                            href: format!(
+                                "http://{}/gateway.git/lfs/objects/{}",
+                                host_header, obj.oid
+                            ),
+                            header: Some(headers),
+                        },
+                    );
+                    response_objects.push(LfsObjectResponse {
+                        oid: obj.oid.clone(),
+                        size: obj.size,
+                        actions: Some(actions),
+                        error: None,
+                    });
+                }
+            }
+            _ => {
+                response_objects.push(LfsObjectResponse {
+                    oid: obj.oid.clone(),
+                    size: obj.size,
+                    actions: None,
+                    error: Some(LfsError {
+                        code: 400,
+                        message: format!("Unknown operation: {}", batch_req.operation),
+                    }),
+                });
+            }
+        }
+    }
+
+    let response = LfsBatchResponse {
+        transfer: "basic".to_string(),
+        objects: response_objects,
+    };
+
+    lfs_json_response(StatusCode::OK, &response)
+}
+
+/// Handle `GET /gateway.git/lfs/objects/:oid`.
+///
+/// Serves the LFS object from gateway storage (sandbox uploads) or host storage
+/// (objects that exist on the host).  Gateway storage is checked first so that
+/// sandbox-uploaded objects take precedence.
+async fn lfs_download_handler(
+    State(state): State<SharedGitServerState>,
+    AxumPath(oid): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    let (info, _) = match authenticate(&state, &req) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let gateway_obj = lfs_object_path(&info.gateway_path, &oid);
+    let host_obj = lfs_object_path(&info.host_repo_path.join(".git"), &oid);
+
+    let file_path = if gateway_obj.exists() {
+        gateway_obj
+    } else if host_obj.exists() {
+        host_obj
+    } else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    match tokio::fs::read(&file_path).await {
+        Ok(data) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            data,
+        )
+            .into_response(),
+        Err(e) => {
+            warn!("Failed to read LFS object {}: {}", oid, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+/// Handle `PUT /gateway.git/lfs/objects/:oid`.
+///
+/// Reads the request body, verifies the SHA-256 digest matches the OID, and
+/// writes the object into the gateway's LFS storage.
+async fn lfs_upload_handler(
+    State(state): State<SharedGitServerState>,
+    AxumPath(oid): AxumPath<String>,
+    req: Request<Body>,
+) -> Response {
+    let (info, _) = match authenticate(&state, &req) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    // 500 MB upper bound -- LFS objects can be large
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 500 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(&body_bytes);
+    let computed = hex::encode(hasher.finalize());
+    if computed != oid {
+        return (StatusCode::BAD_REQUEST, "SHA-256 mismatch").into_response();
+    }
+
+    let obj_path = lfs_object_path(&info.gateway_path, &oid);
+    if let Some(parent) = obj_path.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            warn!("Failed to create LFS object directory: {}", e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    match tokio::fs::write(&obj_path, &body_bytes).await {
+        Ok(_) => StatusCode::OK.into_response(),
+        Err(e) => {
+            warn!("Failed to write LFS object {}: {}", oid, e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 

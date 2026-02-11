@@ -4,7 +4,7 @@
 //! repository and the gateway bare repository, and that sandboxes can access
 //! the gateway via HTTP.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sandbox::CommandExt;
@@ -2584,5 +2584,168 @@ fn sandbox_unsafe_host_network_mode() {
         remote_refs.contains(&expected_ref),
         "Sandbox branch not synced to host. Found: {:?}",
         remote_refs
+    );
+}
+
+// -- Git LFS tests ------------------------------------------------------------
+
+/// Dockerfile snippet that installs git-lfs in the test container.
+/// Switches to root for apt-get, then back to the test user.
+const LFS_DOCKERFILE: &str = "\
+USER root\n\
+RUN apt-get update && apt-get install -y git-lfs\n\
+USER testuser";
+
+/// Set up an LFS-tracked file in a host repo and return the file's content.
+///
+/// Configures git-lfs, creates a `.gitattributes` tracking `*.bin` files,
+/// writes a binary file, and commits everything.
+fn setup_lfs_repo(repo_path: &Path) -> Vec<u8> {
+    Command::new("git")
+        .args(["lfs", "install", "--local"])
+        .current_dir(repo_path)
+        .success()
+        .expect("git lfs install failed");
+
+    Command::new("git")
+        .args(["lfs", "track", "*.bin"])
+        .current_dir(repo_path)
+        .success()
+        .expect("git lfs track failed");
+
+    // Deterministic "large" content (just needs to be tracked by LFS)
+    let content = b"lfs-test-content-1234567890\n";
+    std::fs::write(repo_path.join("large.bin"), content).expect("write large.bin");
+
+    Command::new("git")
+        .args(["add", ".gitattributes", "large.bin"])
+        .current_dir(repo_path)
+        .success()
+        .expect("git add failed");
+
+    Command::new("git")
+        .args(["commit", "-m", "add LFS file"])
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00+00:00")
+        .current_dir(repo_path)
+        .success()
+        .expect("git commit failed");
+
+    content.to_vec()
+}
+
+/// Return the LFS object storage path for a given OID under a base dir.
+fn lfs_object_path(base: &Path, oid: &str) -> PathBuf {
+    base.join("lfs")
+        .join("objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(oid)
+}
+
+#[test]
+fn gateway_lfs_download_from_host() {
+    // Verify that an LFS file committed on the host is available in the
+    // sandbox with full content (not a pointer).
+    let repo = TestRepo::new();
+    let content = setup_lfs_repo(repo.path());
+
+    let image_id =
+        build_test_image(repo.path(), LFS_DOCKERFILE).expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "lfs-download";
+
+    let output = sandbox_command(&repo, &daemon)
+        .args(["enter", sandbox_name, "--", "cat", "large.bin"])
+        .success()
+        .expect("sandbox enter failed");
+
+    assert_eq!(
+        output, content,
+        "LFS file content in sandbox should match host content"
+    );
+}
+
+#[test]
+fn gateway_lfs_upload_from_sandbox() {
+    // Verify that creating an LFS file inside a sandbox stores the object
+    // in the gateway's LFS directory.
+    let repo = TestRepo::new();
+
+    // Set up LFS tracking in the host repo so .gitattributes is present
+    Command::new("git")
+        .args(["lfs", "install", "--local"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git lfs install failed");
+
+    Command::new("git")
+        .args(["lfs", "track", "*.bin"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git lfs track failed");
+
+    Command::new("git")
+        .args(["add", ".gitattributes"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git add failed");
+
+    Command::new("git")
+        .args(["commit", "-m", "track bin files with LFS"])
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00+00:00")
+        .current_dir(repo.path())
+        .success()
+        .expect("git commit failed");
+
+    let image_id =
+        build_test_image(repo.path(), LFS_DOCKERFILE).expect("Failed to build test image");
+    write_test_sandbox_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let sandbox_name = "lfs-upload";
+
+    // Create an LFS file inside the sandbox, commit, and push
+    sandbox_command(&repo, &daemon)
+        .args([
+            "enter",
+            sandbox_name,
+            "--",
+            "sh",
+            "-c",
+            "echo sandbox-lfs-content > upload.bin && git add upload.bin && git commit -m 'add upload.bin'",
+        ])
+        .success()
+        .expect("sandbox commit failed");
+
+    // The sandbox reference-transaction hook should have pushed to the
+    // gateway.  The LFS pre-push hook uploads the object to the gateway's
+    // LFS storage via our HTTP server.
+
+    // Compute the expected OID (sha256 of the file content)
+    let file_content = b"sandbox-lfs-content\n";
+    let oid = {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(file_content);
+        hex::encode(h.finalize())
+    };
+
+    let gateway = get_gateway_path(repo.path()).expect("gateway should exist");
+    let obj_path = lfs_object_path(&gateway, &oid);
+
+    assert!(
+        obj_path.exists(),
+        "LFS object should exist in gateway storage at {}",
+        obj_path.display()
+    );
+
+    let stored = std::fs::read(&obj_path).expect("read LFS object");
+    assert_eq!(
+        stored, file_content,
+        "Stored LFS object content should match"
     );
 }
