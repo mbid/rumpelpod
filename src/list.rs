@@ -32,7 +32,9 @@ pub fn list() -> Result<()> {
             SandboxStatus::Disconnected => "disconnected",
         };
         let repo_state = sandbox.repo_state.as_deref().unwrap_or("");
+        let header = "CONTAINER ID";
         let container_id = sandbox.container_id.as_deref().unwrap_or("");
+        let container_id = &container_id[..container_id.len().min(header.len())];
 
         table.add_row(vec![
             sandbox.name,
