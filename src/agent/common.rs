@@ -14,7 +14,7 @@ use crate::config::{get_runtime_dir, is_deterministic_test_mode, Model};
 use crate::docker_exec::{
     exec_capture_with_timeout, exec_check, exec_command, exec_with_stdin, ExecResult,
 };
-use rand::{distr::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, RngExt};
 
 /// Starting PID for deterministic mode. We start at 1000 so PIDs are easy to
 /// recognize (1000, 1050, 1100, ...).

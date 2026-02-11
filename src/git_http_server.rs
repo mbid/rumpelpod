@@ -31,7 +31,7 @@ use cgi_service::{CgiConfig, CgiService};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use log::{debug, error, info};
-use rand::{distr::Alphanumeric, Rng};
+use rand::{distr::Alphanumeric, RngExt};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
