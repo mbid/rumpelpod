@@ -73,6 +73,7 @@ USER ${USER}
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
+RUN rustup component add rust-analyzer
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
