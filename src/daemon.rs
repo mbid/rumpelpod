@@ -26,7 +26,7 @@ use crate::async_runtime::block_on;
 use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, DockerHost};
 use crate::devcontainer::{
     self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
-    PortAttributes, StringOrArray, SubstitutionContext,
+    PortAttributes, StringOrArray, SubstitutionContext, WaitFor,
 };
 use crate::docker_exec::{exec_check, exec_command, exec_with_stdin};
 use crate::gateway;
@@ -1754,6 +1754,11 @@ fn shell_escape(s: &str) -> String {
 /// database. Order: onCreateCommand -> updateContentCommand -> postCreateCommand.
 /// If any command fails, later commands in the chain are skipped and marked as
 /// "ran" so they don't retry on subsequent enters.
+///
+/// Commands after the `wait_for` target are not executed here; instead
+/// they are returned for background execution so the enter can complete
+/// without waiting.
+#[allow(clippy::too_many_arguments)]
 fn run_once_lifecycle_commands(
     docker: &Docker,
     container_id: &str,
@@ -1762,7 +1767,10 @@ fn run_once_lifecycle_commands(
     dc: &DevContainer,
     pod_id: db::PodId,
     db_mutex: &Mutex<rusqlite::Connection>,
-) -> Result<()> {
+    wait_for: &WaitFor,
+) -> Result<Vec<(String, LifecycleCommand)>> {
+    let mut background = Vec::new();
+
     let on_create_ran = {
         let conn = db_mutex.lock().unwrap();
         db::has_on_create_run(&conn, pod_id)?
@@ -1770,12 +1778,16 @@ fn run_once_lifecycle_commands(
 
     if !on_create_ran {
         if let Some(cmd) = &dc.on_create_command {
-            if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
-                // Mark both as ran to prevent retries and skip postCreate
-                let conn = db_mutex.lock().unwrap();
-                db::mark_on_create_ran(&conn, pod_id)?;
-                db::mark_post_create_ran(&conn, pod_id)?;
-                return Err(e.context("onCreateCommand failed"));
+            if *wait_for >= WaitFor::OnCreateCommand {
+                if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+                    // Mark both as ran to prevent retries and skip postCreate
+                    let conn = db_mutex.lock().unwrap();
+                    db::mark_on_create_ran(&conn, pod_id)?;
+                    db::mark_post_create_ran(&conn, pod_id)?;
+                    return Err(e.context("onCreateCommand failed"));
+                }
+            } else {
+                background.push(("onCreateCommand".to_string(), cmd.clone()));
             }
         }
         let conn = db_mutex.lock().unwrap();
@@ -1783,11 +1795,15 @@ fn run_once_lifecycle_commands(
     }
 
     if let Some(cmd) = &dc.update_content_command {
-        if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
-            // Skip postCreateCommand on failure
-            let conn = db_mutex.lock().unwrap();
-            db::mark_post_create_ran(&conn, pod_id)?;
-            return Err(e.context("updateContentCommand failed"));
+        if *wait_for >= WaitFor::UpdateContentCommand {
+            if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+                // Skip postCreateCommand on failure
+                let conn = db_mutex.lock().unwrap();
+                db::mark_post_create_ran(&conn, pod_id)?;
+                return Err(e.context("updateContentCommand failed"));
+            }
+        } else {
+            background.push(("updateContentCommand".to_string(), cmd.clone()));
         }
     }
 
@@ -1798,17 +1814,41 @@ fn run_once_lifecycle_commands(
 
     if !post_create_ran {
         if let Some(cmd) = &dc.post_create_command {
-            if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
-                let conn = db_mutex.lock().unwrap();
-                db::mark_post_create_ran(&conn, pod_id)?;
-                return Err(e.context("postCreateCommand failed"));
+            if *wait_for >= WaitFor::PostCreateCommand {
+                if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+                    let conn = db_mutex.lock().unwrap();
+                    db::mark_post_create_ran(&conn, pod_id)?;
+                    return Err(e.context("postCreateCommand failed"));
+                }
+            } else {
+                background.push(("postCreateCommand".to_string(), cmd.clone()));
             }
         }
         let conn = db_mutex.lock().unwrap();
         db::mark_post_create_ran(&conn, pod_id)?;
     }
 
-    Ok(())
+    Ok(background)
+}
+
+/// Run lifecycle commands in a background thread.  Errors are logged but
+/// do not propagate, so the user's session is unaffected by background
+/// failures.
+fn spawn_background_lifecycle_commands(
+    docker: Docker,
+    container_id: String,
+    user: String,
+    workdir: PathBuf,
+    commands: Vec<(String, LifecycleCommand)>,
+) {
+    std::thread::spawn(move || {
+        for (label, cmd) in &commands {
+            if let Err(e) = run_lifecycle_command(&docker, &container_id, &user, &workdir, cmd) {
+                error!("background {} failed: {:#}", label, e);
+                break;
+            }
+        }
+    });
 }
 
 impl Daemon for DaemonServer {
@@ -2005,21 +2045,52 @@ impl Daemon for DaemonServer {
                 None,
             )?;
 
+            // Run updateContentCommand, per-start, and per-attach lifecycle
+            // commands, respecting the waitFor target for background execution.
+            let wait_for = devcontainer.effective_wait_for();
+            let mut bg_commands: Vec<(String, LifecycleCommand)> = Vec::new();
+
             // updateContentCommand runs on every re-entry after git sync
             if let Some(cmd) = &devcontainer.update_content_command {
-                run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
-            }
-
-            // Container was restarted from stopped state -- run postStartCommand
-            if was_stopped {
-                if let Some(cmd) = &devcontainer.post_start_command {
+                if wait_for >= WaitFor::UpdateContentCommand {
                     run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+                } else {
+                    bg_commands.push(("updateContentCommand".to_string(), cmd.clone()));
                 }
             }
 
-            // postAttachCommand runs on every enter
+            if was_stopped {
+                if let Some(cmd) = &devcontainer.post_start_command {
+                    if wait_for >= WaitFor::PostStartCommand {
+                        run_lifecycle_command(
+                            &docker,
+                            &state.id,
+                            &user,
+                            &container_repo_path,
+                            cmd,
+                        )?;
+                    } else {
+                        bg_commands.push(("postStartCommand".to_string(), cmd.clone()));
+                    }
+                }
+            }
+
             if let Some(cmd) = &devcontainer.post_attach_command {
-                run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+                if wait_for >= WaitFor::PostAttachCommand {
+                    run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+                } else {
+                    bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
+                }
+            }
+
+            if !bg_commands.is_empty() {
+                spawn_background_lifecycle_commands(
+                    docker.clone(),
+                    state.id.clone(),
+                    user.clone(),
+                    container_repo_path.clone(),
+                    bg_commands,
+                );
             }
 
             // Set up port forwarding for existing container on re-entry
@@ -2150,7 +2221,11 @@ impl Daemon for DaemonServer {
         // Run lifecycle commands for new container:
         // onCreateCommand -> updateContentCommand -> postCreateCommand ->
         // postStartCommand -> postAttachCommand
-        run_once_lifecycle_commands(
+        // Commands up to and including the waitFor target run synchronously;
+        // the rest are handed off to a background thread.
+        let wait_for = devcontainer.effective_wait_for();
+
+        let mut bg_commands = run_once_lifecycle_commands(
             &docker,
             &container_id.0,
             &user,
@@ -2158,17 +2233,36 @@ impl Daemon for DaemonServer {
             &devcontainer,
             pod_id,
             &self.db,
+            &wait_for,
         )
         .map_err(mark_error)?;
 
-        if let Some(cmd) = &devcontainer.post_start_command {
-            run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
-                .map_err(mark_error)?;
+        if wait_for >= WaitFor::PostStartCommand {
+            if let Some(cmd) = &devcontainer.post_start_command {
+                run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
+                    .map_err(mark_error)?;
+            }
+        } else if let Some(cmd) = &devcontainer.post_start_command {
+            bg_commands.push(("postStartCommand".to_string(), cmd.clone()));
         }
 
-        if let Some(cmd) = &devcontainer.post_attach_command {
-            run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
-                .map_err(mark_error)?;
+        if wait_for >= WaitFor::PostAttachCommand {
+            if let Some(cmd) = &devcontainer.post_attach_command {
+                run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
+                    .map_err(mark_error)?;
+            }
+        } else if let Some(cmd) = &devcontainer.post_attach_command {
+            bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
+        }
+
+        if !bg_commands.is_empty() {
+            spawn_background_lifecycle_commands(
+                docker.clone(),
+                container_id.0.clone(),
+                user.clone(),
+                container_repo_path.clone(),
+                bg_commands,
+            );
         }
 
         // Mark pod as ready and set up port forwarding

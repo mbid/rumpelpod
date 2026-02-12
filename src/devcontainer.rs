@@ -466,7 +466,10 @@ pub enum OnAutoForward {
 }
 
 /// Which lifecycle command to wait for before connecting.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Variant order matches the lifecycle execution order so that derived
+/// `Ord` gives the correct comparison semantics.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WaitFor {
     InitializeCommand,
@@ -546,6 +549,16 @@ impl DevContainer {
                 );
             }
         }
+    }
+
+    /// The effective waitFor target for this configuration.
+    ///
+    /// Commands at or before this target block the enter; commands after
+    /// it run in the background.
+    pub fn effective_wait_for(&self) -> WaitFor {
+        self.wait_for
+            .clone()
+            .unwrap_or(WaitFor::UpdateContentCommand)
     }
 
     /// Get the user to run as (prefers remoteUser over containerUser).

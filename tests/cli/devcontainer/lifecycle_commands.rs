@@ -239,7 +239,7 @@ fn lifecycle_command_string_format() {
     // Use shell-specific syntax (variable expansion) to prove a shell is used.
     write_devcontainer_with_lifecycle(
         &repo,
-        r#""postCreateCommand": "echo hello > /tmp/string_fmt""#,
+        r#""onCreateCommand": "echo hello > /tmp/string_fmt""#,
     );
     write_minimal_pod_toml(&repo);
 
@@ -261,7 +261,7 @@ fn lifecycle_command_array_format() {
 
     write_devcontainer_with_lifecycle(
         &repo,
-        r#""postCreateCommand": ["sh", "-c", "echo hello > /tmp/array_fmt"]"#,
+        r#""onCreateCommand": ["sh", "-c", "echo hello > /tmp/array_fmt"]"#,
     );
     write_minimal_pod_toml(&repo);
 
@@ -284,7 +284,7 @@ fn lifecycle_command_object_parallel() {
 
     write_devcontainer_with_lifecycle(
         &repo,
-        r#""postCreateCommand": {
+        r#""onCreateCommand": {
                 "a": "echo alpha > /tmp/parallel_a",
                 "b": "echo bravo > /tmp/parallel_b"
             }"#,
@@ -502,5 +502,89 @@ fn update_content_command_failure_stops_chain() {
         stdout.trim(),
         "missing",
         "postCreateCommand must not run when updateContentCommand fails"
+    );
+}
+
+/// With waitFor set to onCreateCommand, commands after it (like
+/// postCreateCommand) should run in the background so enter returns
+/// without waiting for them.
+#[test]
+fn wait_for_on_create_attaches_early() {
+    let repo = TestRepo::new();
+
+    // Use a long sleep so the timing assertion is robust even under
+    // heavy parallel test load where container creation alone may
+    // take 10+ seconds.
+    write_devcontainer_with_lifecycle(
+        &repo,
+        r#""onCreateCommand": "true",
+            "postCreateCommand": "sleep 30 && echo done > /tmp/marker",
+            "waitFor": "onCreateCommand""#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let start = std::time::Instant::now();
+    let _stdout = pod_command(&repo, &daemon)
+        .args(["enter", "lc-wait-early", "--", "echo", "attached"])
+        .success()
+        .expect("rumpel enter failed");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_secs() < 25,
+        "enter should return before postCreateCommand finishes (took {:?})",
+        elapsed,
+    );
+
+    // Poll until the background command finishes and writes the marker.
+    for _ in 0..45 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let result = pod_command(&repo, &daemon)
+            .args(["enter", "lc-wait-early", "--", "cat", "/tmp/marker"])
+            .output()
+            .expect("failed to run enter");
+        if result.status.success() {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            if stdout.trim() == "done" {
+                return;
+            }
+        }
+    }
+    panic!("marker file never appeared from background postCreateCommand");
+}
+
+/// Without an explicit waitFor the default is updateContentCommand.
+/// With only onCreateCommand set, all configured commands complete
+/// before enter returns since onCreateCommand precedes the default.
+#[test]
+fn wait_for_default_waits_for_all() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_lifecycle(
+        &repo,
+        r#""onCreateCommand": "echo done > /tmp/default_marker""#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "lc-wait-default",
+            "--",
+            "cat",
+            "/tmp/default_marker",
+        ])
+        .success()
+        .expect("rumpel enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "done",
+        "onCreateCommand should complete before enter returns with default waitFor"
     );
 }
