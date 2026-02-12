@@ -5,14 +5,15 @@ use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
-use log::trace;
+use log::{info, trace};
 
 use crate::cli::EnterCommand;
 use crate::config::{load_toml_config, DockerHost};
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
 use crate::devcontainer::{
-    substitute_vars, ContainerEnvSource, DevContainer, MountType, SubstitutionContext,
+    substitute_vars, ContainerEnvSource, DevContainer, GpuRequirement, HostRequirements, MountType,
+    SubstitutionContext,
 };
 use crate::git::{get_current_branch, get_repo_root};
 
@@ -29,6 +30,75 @@ fn container_workdir(devcontainer: &DevContainer, repo_root: &Path) -> Result<Pa
     let container_repo_path = devcontainer.container_repo_path(repo_root);
     let relative = relative_path(repo_root, &current_dir)?;
     Ok(container_repo_path.join(relative))
+}
+
+/// Parse a human-readable size string (e.g. "4gb", "512MB") into bytes.
+///
+/// Supports "tb", "gb", "mb", "kb" suffixes (case-insensitive).
+/// Returns None if the string cannot be parsed.
+pub fn parse_size_string(s: &str) -> Option<u64> {
+    let s = s.trim().to_lowercase();
+
+    let suffixes: &[(&str, u64)] = &[
+        ("tb", 1024 * 1024 * 1024 * 1024),
+        ("gb", 1024 * 1024 * 1024),
+        ("mb", 1024 * 1024),
+        ("kb", 1024),
+    ];
+
+    for (suffix, multiplier) in suffixes {
+        if let Some(num_str) = s.strip_suffix(suffix) {
+            return num_str.trim().parse::<u64>().ok().map(|n| n * multiplier);
+        }
+    }
+
+    // No suffix -- treat as raw bytes.
+    s.parse::<u64>().ok()
+}
+
+/// Log hostRequirements and decide whether to enforce them based on host type.
+fn check_host_requirements(requirements: &HostRequirements, docker_host: &DockerHost) {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(cpus) = requirements.cpus {
+        parts.push(format!("cpus={}", cpus));
+    }
+    if let Some(ref memory) = requirements.memory {
+        match parse_size_string(memory) {
+            Some(bytes) => parts.push(format!("memory={} ({} bytes)", memory, bytes)),
+            None => parts.push(format!("memory={} (unparseable)", memory)),
+        }
+    }
+    if let Some(ref storage) = requirements.storage {
+        match parse_size_string(storage) {
+            Some(bytes) => parts.push(format!("storage={} ({} bytes)", storage, bytes)),
+            None => parts.push(format!("storage={} (unparseable)", storage)),
+        }
+    }
+    if let Some(ref gpu) = requirements.gpu {
+        match gpu {
+            GpuRequirement::Required(true) => parts.push("gpu=required".to_string()),
+            GpuRequirement::Required(false) => {}
+            GpuRequirement::Optional(s) => parts.push(format!("gpu={}", s)),
+            GpuRequirement::Detailed(details) => parts.push(format!("gpu={:?}", details)),
+        }
+    }
+
+    if parts.is_empty() {
+        return;
+    }
+
+    info!("hostRequirements: {}", parts.join(", "));
+
+    // Localhost and remote Docker: the user controls their hardware, so we
+    // only log.  A future orchestrator backend (e.g. Kubernetes) should match
+    // here and use the parsed values to select an appropriate node or instance
+    // type.
+    match docker_host {
+        DockerHost::Localhost | DockerHost::Ssh { .. } => {
+            info!("Running on local/remote Docker -- hostRequirements are advisory only");
+        }
+    }
 }
 
 /// Load devcontainer.json, validate it, and prepare it for the daemon.
@@ -69,6 +139,10 @@ pub fn load_and_resolve(
         resolve_local_env: true,
         ..Default::default()
     });
+
+    if let Some(ref requirements) = devcontainer.host_requirements {
+        check_host_requirements(requirements, &docker_host);
+    }
 
     Ok((devcontainer, docker_host))
 }
@@ -220,4 +294,47 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_size_gb() {
+        assert_eq!(parse_size_string("4gb"), Some(4 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_size_case_insensitive() {
+        assert_eq!(parse_size_string("512MB"), Some(512 * 1024 * 1024));
+    }
+
+    #[test]
+    fn parse_size_tb() {
+        assert_eq!(
+            parse_size_string("2tb"),
+            Some(2 * 1024 * 1024 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn parse_size_kb() {
+        assert_eq!(parse_size_string("128kb"), Some(128 * 1024));
+    }
+
+    #[test]
+    fn parse_size_raw_bytes() {
+        assert_eq!(parse_size_string("1048576"), Some(1048576));
+    }
+
+    #[test]
+    fn parse_size_invalid() {
+        assert_eq!(parse_size_string("not-a-number"), None);
+    }
+
+    #[test]
+    fn parse_size_whitespace() {
+        assert_eq!(parse_size_string(" 8 gb "), Some(8 * 1024 * 1024 * 1024));
+    }
 }

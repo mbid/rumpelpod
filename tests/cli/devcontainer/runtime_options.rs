@@ -218,3 +218,64 @@ fn run_args_device() {
         .success()
         .expect("/dev/null should be a character device in container");
 }
+
+// ---------------------------------------------------------------------------
+// hostRequirements
+// ---------------------------------------------------------------------------
+
+/// Verify that hostRequirements with cpus and memory are logged at info level
+/// and the pod starts normally.
+#[test]
+fn host_requirements_logged() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_runtime_opts(
+        &repo,
+        r#""hostRequirements": { "cpus": 2, "memory": "4gb" }"#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .env("RUST_LOG", "info")
+        .args(["enter", "hostreq-logged", "--", "true"])
+        .output()
+        .expect("Failed to run pod command");
+
+    assert!(
+        output.status.success(),
+        "pod should start despite hostRequirements: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hostRequirements") && stderr.contains("cpus=2"),
+        "stderr should log hostRequirements with cpus, got: {stderr}",
+    );
+    assert!(
+        stderr.contains("memory=4gb"),
+        "stderr should log hostRequirements with memory, got: {stderr}",
+    );
+}
+
+/// Verify that absurd hostRequirements do not prevent the pod from starting
+/// on local Docker (we do not enforce).
+#[test]
+fn host_requirements_ignored_on_local() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_runtime_opts(
+        &repo,
+        r#""hostRequirements": { "cpus": 9999, "memory": "999tb", "storage": "999tb" }"#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "hostreq-absurd", "--", "true"])
+        .success()
+        .expect("pod should start even with absurd hostRequirements on local Docker");
+}
