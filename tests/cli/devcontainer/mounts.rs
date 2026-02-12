@@ -8,6 +8,7 @@ use rumpelpod::CommandExt;
 use std::fs;
 
 use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+#[cfg(not(target_os = "macos"))]
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
 /// Extract a short unique ID from a TestRepo's temp directory name.
@@ -206,6 +207,7 @@ fn mount_persists_across_restarts() {
 /// Bind mounts should be rejected when using a remote Docker host because
 /// the source path would reference the remote filesystem, not the developer's
 /// machine — almost certainly not the intended behavior.
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn mount_bind_blocked_remote() {
     let repo = TestRepo::new();

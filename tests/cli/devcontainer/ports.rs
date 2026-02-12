@@ -14,10 +14,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use crate::common::{
-    build_docker_image, pod_command, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
-    TEST_USER_UID,
-};
+#[cfg(not(target_os = "macos"))]
+use crate::common::{build_docker_image, DockerBuild, TEST_USER_UID};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
 #[cfg(not(target_os = "macos"))]
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
