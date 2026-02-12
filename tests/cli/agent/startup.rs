@@ -16,10 +16,14 @@ fn create_timestamped_mock_editor(script_dir: &Path, timestamp_file: &Path) -> P
     let script_path = script_dir.join("mock-editor.sh");
     let timestamp_file_str = timestamp_file.to_string_lossy();
 
-    // macOS date(1) does not support %N; use perl for sub-second precision.
+    // macOS date(1) does not support %N; fall back to perl there.
     let script_content = formatdoc! {r#"
         #!/bin/bash
-        perl -MTime::HiRes=time -e 'printf "%.6f\n", time()' > "{timestamp_file_str}"
+        if [ "$(uname)" = "Darwin" ]; then
+            perl -MTime::HiRes=time -e 'printf "%.6f\n", time()' > "{timestamp_file_str}"
+        else
+            date +%s.%N > "{timestamp_file_str}"
+        fi
     "#};
     fs::write(&script_path, &script_content).expect("Failed to write mock editor script");
 
