@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use crate::cli::{ImageBuildCommand, ImageFetchCommand};
 use crate::enter::load_and_resolve;
 use crate::git::get_repo_root;
-use crate::image;
+use crate::image::{self, BuildFlags};
 
 pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
@@ -19,7 +19,13 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
         ),
     };
 
-    let result = image::build_devcontainer_image(build_opts, &docker_host, &repo_root, cmd.force)?;
+    let flags = BuildFlags {
+        force: cmd.force,
+        no_cache: cmd.no_cache,
+        pull: cmd.pull,
+    };
+
+    let result = image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags)?;
 
     if result.built {
         println!("Image built: {}", result.image.0);

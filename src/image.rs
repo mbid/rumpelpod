@@ -22,6 +22,17 @@ pub struct BuildResult {
     pub built: bool,
 }
 
+/// Optional flags that control Docker build behavior.
+#[derive(Default)]
+pub struct BuildFlags {
+    /// Skip the image-exists check and rebuild unconditionally.
+    pub force: bool,
+    /// Pass `--no-cache` to disable Docker layer caching.
+    pub no_cache: bool,
+    /// Pass `--pull` to pull the base image before building.
+    pub pull: bool,
+}
+
 /// Resolve a Docker image, building from devcontainer.json 'build' if necessary.
 ///
 /// The DevContainer's build paths must already be resolved to repo-root-relative
@@ -32,7 +43,7 @@ pub fn resolve_image(
     repo_root: &Path,
 ) -> Result<BuildResult> {
     if let Some(build) = &devcontainer.build {
-        build_devcontainer_image(build, docker_host, repo_root, false)
+        build_devcontainer_image(build, docker_host, repo_root, &BuildFlags::default())
     } else {
         Ok(BuildResult {
             image: Image(
@@ -47,13 +58,11 @@ pub fn resolve_image(
 }
 
 /// Build a Docker image from devcontainer.json build configuration.
-///
-/// When `force` is true, the image is rebuilt even if it already exists.
 pub fn build_devcontainer_image(
     build: &BuildOptions,
     docker_host: &DockerHost,
     repo_root: &Path,
-    force: bool,
+    flags: &BuildFlags,
 ) -> Result<BuildResult> {
     let dockerfile = build
         .dockerfile
@@ -80,7 +89,7 @@ pub fn build_devcontainer_image(
     // Skip the build if the image already exists on the target host, avoiding
     // the overhead of sending build context (potentially the whole repo) over
     // the network to a remote Docker daemon.
-    if !force && image_exists(&image_name, docker_host) {
+    if !flags.force && image_exists(&image_name, docker_host) {
         return Ok(BuildResult {
             image: Image(image_name),
             built: false,
@@ -95,6 +104,12 @@ pub fn build_devcontainer_image(
     }
 
     cmd.arg("build").arg("--rm");
+    if flags.no_cache {
+        cmd.arg("--no-cache");
+    }
+    if flags.pull {
+        cmd.arg("--pull");
+    }
     cmd.arg(format!("-t={}", image_name));
     cmd.arg(format!("-f={}", dockerfile_path.display()));
 

@@ -313,6 +313,14 @@ pub struct ImageBuildCommand {
     /// Rebuild even if the image already exists
     #[arg(long)]
     pub force: bool,
+
+    /// Disable Docker layer cache (--no-cache)
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Pull the base image before building (--pull)
+    #[arg(long)]
+    pub pull: bool,
 }
 
 #[derive(Args)]
