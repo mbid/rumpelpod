@@ -115,6 +115,10 @@ struct DaemonServer {
     git_server_state: SharedGitServerState,
     /// Port the bridge network git HTTP server is listening on.
     bridge_server_port: u16,
+    /// IP that containers on the bridge network should use to reach the git server.
+    /// On Linux this is the bridge gateway IP (e.g. 172.17.0.1), on macOS Docker
+    /// Desktop it's `host.docker.internal`.
+    bridge_container_ip: String,
     /// Port the localhost git HTTP server is listening on.
     localhost_server_port: u16,
     /// Active tokens for each pod: (repo_path, pod_name) -> token
@@ -1974,12 +1978,14 @@ impl Daemon for DaemonServer {
                 }
             }
             DockerHost::Localhost => {
-                // Local Docker: use the local git HTTP servers directly
-                if host_network {
+                // Local Docker: use the local git HTTP servers directly.
+                // On macOS Docker Desktop, host.docker.internal works for
+                // both bridge and host-network containers since Docker runs
+                // in a VM.
+                if host_network && !cfg!(target_os = "macos") {
                     ("127.0.0.1".to_string(), self.localhost_server_port)
                 } else {
-                    let bridge_ip = git_http_server::get_network_gateway_ip("bridge")?;
-                    (bridge_ip, self.bridge_server_port)
+                    (self.bridge_container_ip.clone(), self.bridge_server_port)
                 }
             }
         };
@@ -2722,12 +2728,21 @@ pub fn run_daemon() -> Result<()> {
     // Create shared state for the git HTTP server
     let git_server_state = SharedGitServerState::new();
 
-    // Start git HTTP server on the bridge network's gateway IP.
+    // Start git HTTP server for bridge-network containers.
     // Use port 0 to let the OS auto-assign a port, allowing multiple daemons
     // (e.g., in tests) to run simultaneously without port conflicts.
-    let bridge_ip = git_http_server::get_network_gateway_ip("bridge")
-        .context("getting bridge network gateway IP")?;
-    let bridge_server = GitHttpServer::start(&bridge_ip, 0, git_server_state.clone())
+    //
+    // On macOS Docker Desktop, Docker runs in a VM so the bridge gateway IP
+    // is not reachable from the host. We bind to 0.0.0.0 instead and have
+    // containers connect via host.docker.internal.
+    let (bridge_bind_ip, bridge_container_ip) = if cfg!(target_os = "macos") {
+        ("0.0.0.0".to_string(), "host.docker.internal".to_string())
+    } else {
+        let ip = git_http_server::get_network_gateway_ip("bridge")
+            .context("getting bridge network gateway IP")?;
+        (ip.clone(), ip)
+    };
+    let bridge_server = GitHttpServer::start(&bridge_bind_ip, 0, git_server_state.clone())
         .context("starting git HTTP server on bridge network")?;
 
     // TODO: Start this lazily only when a pod with unsafe-host network is created,
@@ -2765,6 +2780,7 @@ pub fn run_daemon() -> Result<()> {
         db: Mutex::new(db_conn),
         git_server_state,
         bridge_server_port: bridge_server.port,
+        bridge_container_ip,
         localhost_server_port: localhost_server.port,
         active_tokens: Mutex::new(BTreeMap::new()),
         ssh_forward,

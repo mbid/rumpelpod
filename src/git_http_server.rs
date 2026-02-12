@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bollard::Docker;
 
@@ -46,8 +46,25 @@ use tower_service::Service;
 
 use crate::async_runtime::RUNTIME;
 
-/// Path to git-http-backend CGI script.
-const GIT_HTTP_BACKEND: &str = "/usr/lib/git-core/git-http-backend";
+/// Locate git-http-backend by querying `git --exec-path`.
+fn git_http_backend_path() -> &'static str {
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        if let Ok(output) = std::process::Command::new("git")
+            .arg("--exec-path")
+            .output()
+        {
+            if output.status.success() {
+                let exec_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let path = format!("{}/git-http-backend", exec_path);
+                if Path::new(&path).exists() {
+                    return path;
+                }
+            }
+        }
+        "/usr/lib/git-core/git-http-backend".to_string()
+    })
+}
 
 /// Environment variable set by the HTTP server to identify the pod.
 /// This is used by the pre-receive hook for access control.
@@ -646,7 +663,7 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
         .unwrap_or_else(|| PathBuf::from("/"));
 
     // Configure CGI service for this specific pod
-    let cgi_config = CgiConfig::new(GIT_HTTP_BACKEND)
+    let cgi_config = CgiConfig::new(git_http_backend_path())
         .env("GIT_PROJECT_ROOT", gateway_parent.to_string_lossy())
         .env("GIT_HTTP_EXPORT_ALL", "")
         .env(POD_NAME_ENV, &info.pod_name)
