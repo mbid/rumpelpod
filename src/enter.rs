@@ -153,6 +153,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
     trace!("load_and_resolve: {:?}", t.elapsed());
 
+    let container_repo_path = devcontainer.container_repo_path(&repo_root);
     let workdir = container_workdir(&devcontainer, &repo_root)?;
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
@@ -164,6 +165,24 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         image_built: _,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
+
+    // The host subdir may not exist in the container yet (e.g. empty dirs
+    // are not copied by `docker build`). Create it so --workdir succeeds.
+    if workdir != container_repo_path {
+        let docker_host_arg = format!("unix://{}", docker_socket.display());
+        let status = Command::new("docker")
+            .args(["-H", &docker_host_arg])
+            .args(["exec", "--user", &user, &container_id.0])
+            .args(["mkdir", "-p", &workdir.to_string_lossy()])
+            .status()
+            .context("Failed to create workdir in container")?;
+        if !status.success() {
+            bail!(
+                "Failed to create workdir {} in container",
+                workdir.display()
+            );
+        }
+    }
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
