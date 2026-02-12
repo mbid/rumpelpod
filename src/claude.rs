@@ -74,6 +74,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
     let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let workdir = devcontainer.container_repo_path(&repo_root);
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
     let LaunchResult {
@@ -110,6 +111,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     docker_cmd.args(["-H", &docker_host]);
     docker_cmd.arg("exec");
     docker_cmd.args(["--user", &user]);
+    docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
     // Inject remoteEnv variables
     let remote_env = resolve_remote_env(&remote_env_map, &docker_socket, &container_id.0);

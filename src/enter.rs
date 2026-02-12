@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -19,6 +19,14 @@ use crate::git::{get_current_branch, get_repo_root};
 fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
     path.strip_prefix(base)
         .with_context(|| format!("{} is not under {}", path.display(), base.display()))
+}
+
+/// Map the host's current directory into the corresponding container path.
+fn container_workdir(devcontainer: &DevContainer, repo_root: &Path) -> Result<PathBuf> {
+    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
+    let container_repo_path = devcontainer.container_repo_path(repo_root);
+    let relative = relative_path(repo_root, &current_dir)?;
+    Ok(container_repo_path.join(relative))
 }
 
 /// Load devcontainer.json, validate it, and prepare it for the daemon.
@@ -124,11 +132,10 @@ pub fn resolve_remote_env(
 }
 
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
-    let current_dir = std::env::current_dir().context("Failed to get current directory")?;
     let repo_root = get_repo_root()?;
 
     let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
-    let container_repo_path = devcontainer.container_repo_path(&repo_root);
+    let workdir = container_workdir(&devcontainer, &repo_root)?;
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
     let LaunchResult {
@@ -142,9 +149,6 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         command.push(shell);
     }
-
-    let relative = relative_path(&repo_root, &current_dir)?;
-    let workdir = container_repo_path.join(relative);
 
     let mut docker_cmd = Command::new("docker");
     docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
