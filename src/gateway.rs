@@ -143,6 +143,24 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
     done
 "#};
 
+/// Shared hook body that syncs the current branch and HEAD to the gateway.
+/// Used by post-checkout, post-commit, and post-rewrite hooks as a fallback
+/// for git versions that lack the reference-transaction hook (e.g. Apple Git).
+const SYNC_TO_GATEWAY_BODY: &str = indoc! {r#"
+    # Sync current branch and HEAD to the rumpelpod gateway.
+    branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+    if [ -n "$branch" ]; then
+        git push rumpelpod "HEAD:refs/heads/host/$branch" --force --no-verify --quiet 2>/dev/null || true
+    fi
+    head_commit=$(git rev-parse HEAD 2>/dev/null)
+    if [ -n "$head_commit" ]; then
+        git push rumpelpod "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
+    fi
+"#};
+
+/// Signature comment used to identify hooks installed by rumpelpod.
+const HOOK_SIGNATURE: &str = "Installed by rumpelpod";
+
 /// Pre-receive hook for the gateway repository.
 ///
 /// Enforces access control: pods can only push to their own namespace.
@@ -358,8 +376,12 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     install_gateway_pre_receive_hook(&gateway)?;
     install_gateway_post_receive_hook(&gateway)?;
 
-    // Install reference-transaction hook to sync branch updates
+    // Install hooks to sync branch updates from host to gateway.
+    // The reference-transaction hook covers all ref changes but is not
+    // supported by Apple Git. The individual hooks (post-checkout,
+    // post-commit, post-rewrite) serve as a fallback.
     install_reference_transaction_hook(repo_path)?;
+    install_host_sync_hooks(repo_path)?;
 
     // Push all existing branches to the gateway
     push_all_branches(repo_path)?;
@@ -489,6 +511,44 @@ fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
     let mut perms = fs::metadata(&hook_path)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&hook_path, perms)?;
+
+    Ok(())
+}
+
+/// Install post-checkout, post-commit, and post-rewrite hooks in the host repo.
+///
+/// These hooks serve as a fallback for git versions that don't support the
+/// reference-transaction hook (notably Apple Git). They sync the current
+/// branch and HEAD to the gateway after common operations.
+fn install_host_sync_hooks(repo_path: &Path) -> Result<()> {
+    let hooks_dir = repo_path.join(".git").join("hooks");
+    fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+
+    for hook_name in &["post-checkout", "post-commit", "post-rewrite"] {
+        let hook_path = hooks_dir.join(hook_name);
+        let hook_content = format!("#!/bin/sh\n# {HOOK_SIGNATURE}\n{SYNC_TO_GATEWAY_BODY}");
+
+        if hook_path.exists() {
+            let existing = fs::read_to_string(&hook_path)
+                .with_context(|| format!("Failed to read hook: {}", hook_path.display()))?;
+
+            if existing.contains(HOOK_SIGNATURE) {
+                continue;
+            }
+
+            let combined = format!("{}\n\n# {HOOK_SIGNATURE}\n{SYNC_TO_GATEWAY_BODY}", existing.trim_end());
+            fs::write(&hook_path, combined)
+                .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
+        } else {
+            fs::write(&hook_path, hook_content)
+                .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+        }
+
+        let mut perms = fs::metadata(&hook_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&hook_path, perms)?;
+    }
 
     Ok(())
 }

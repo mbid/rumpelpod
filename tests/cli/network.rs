@@ -23,8 +23,21 @@ fn network_host_connectivity() {
 
     write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
 
-    // Bind a listener on localhost on the host
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind listener");
+    // On macOS Docker Desktop, containers run in a VM so 127.0.0.1 inside the
+    // container is the VM's loopback, not the Mac host. Bind to 0.0.0.0 and
+    // have the container connect via host.docker.internal.
+    let bind_addr = if cfg!(target_os = "macos") {
+        "0.0.0.0:0"
+    } else {
+        "127.0.0.1:0"
+    };
+    let connect_host = if cfg!(target_os = "macos") {
+        "host.docker.internal"
+    } else {
+        "127.0.0.1"
+    };
+
+    let listener = TcpListener::bind(bind_addr).expect("Failed to bind listener");
     let addr = listener.local_addr().expect("Failed to get local addr");
     let port = addr.port();
 
@@ -40,16 +53,14 @@ fn network_host_connectivity() {
         thread::sleep(std::time::Duration::from_millis(100));
     });
 
-    // Run nc inside pod to connect to host's localhost
-    // We expect 127.0.0.1 to be reachable and map to the host.
-    // We don't use -N because we want to read the response.
+    // Run nc inside pod to connect to host
     let output = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
         .arg("bash")
         .arg("-c")
-        .arg(format!("echo HELLO | nc 127.0.0.1 {}", port))
+        .arg(format!("echo HELLO | nc {} {}", connect_host, port))
         .success()
         .expect("Failed to run pod command");
 
@@ -60,7 +71,8 @@ fn network_host_connectivity() {
 }
 
 /// With --network=host, both 'host' and 'rumpelpod' remotes inside the pod
-/// should use localhost since the pod shares the host's network namespace.
+/// should use a host-reachable address: localhost on Linux (shared network
+/// namespace) or host.docker.internal on macOS Docker Desktop (VM-based).
 #[test]
 fn network_host_remotes_use_localhost() {
     let daemon = TestDaemon::start();
@@ -84,8 +96,10 @@ fn network_host_remotes_use_localhost() {
     let host_remote_url = String::from_utf8_lossy(&output).trim().to_string();
     println!("Remote 'host' URL inside pod: {}", host_remote_url);
     assert!(
-        host_remote_url.contains("127.0.0.1") || host_remote_url.contains("localhost"),
-        "Remote 'host' inside pod should use localhost, got: {}",
+        host_remote_url.contains("127.0.0.1")
+            || host_remote_url.contains("localhost")
+            || host_remote_url.contains("host.docker.internal"),
+        "Remote 'host' inside pod should use a host-reachable address, got: {}",
         host_remote_url
     );
 
@@ -104,8 +118,10 @@ fn network_host_remotes_use_localhost() {
     let pod_remote_url = String::from_utf8_lossy(&output).trim().to_string();
     println!("Remote 'rumpelpod' URL inside pod: {}", pod_remote_url);
     assert!(
-        pod_remote_url.contains("127.0.0.1") || pod_remote_url.contains("localhost"),
-        "Remote 'rumpelpod' inside pod should use localhost, got: {}",
+        pod_remote_url.contains("127.0.0.1")
+            || pod_remote_url.contains("localhost")
+            || pod_remote_url.contains("host.docker.internal"),
+        "Remote 'rumpelpod' inside pod should use a host-reachable address, got: {}",
         pod_remote_url
     );
 }
