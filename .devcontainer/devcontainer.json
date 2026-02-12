@@ -8,8 +8,12 @@
     "containerEnv": {
         "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
         "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
-        "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
+        "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
+        "MACOS_SSH_PRIVATE_KEY": "${localEnv:MACOS_SSH_PRIVATE_KEY}",
+        "MACOS_SSH_HOST": "${localEnv:MACOS_SSH_HOST}",
+        "MACOS_SSH_USER": "${localEnv:MACOS_SSH_USER}"
     },
+    "postStartCommand": "if [ -n \"$MACOS_SSH_PRIVATE_KEY\" ]; then mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s' \"$MACOS_SSH_PRIVATE_KEY\" | base64 -d > ~/.ssh/macos_id && chmod 600 ~/.ssh/macos_id && printf 'Host macos\\n  HostName %s\\n  User %s\\n  IdentityFile ~/.ssh/macos_id\\n  StrictHostKeyChecking no\\n' \"$MACOS_SSH_HOST\" \"$MACOS_SSH_USER\" >> ~/.ssh/config; fi",
     "runArgs": [
         "--runtime=sysbox-runc"
     ],
