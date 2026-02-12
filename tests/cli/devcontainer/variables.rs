@@ -93,10 +93,13 @@ fn local_workspace_folder() {
         .expect("rumpel enter failed");
 
     let stdout = String::from_utf8_lossy(&stdout);
-    let expected = repo.path().to_string_lossy();
+    // On macOS, getcwd() resolves symlinks (e.g. /var -> /private/var),
+    // so the daemon sees the canonical path. Compare canonicalized paths.
+    let expected = std::fs::canonicalize(repo.path())
+        .unwrap_or_else(|_| repo.path().to_path_buf());
     assert_eq!(
         stdout.trim(),
-        expected.as_ref(),
+        expected.to_string_lossy().as_ref(),
         "localWorkspaceFolder substitution not implemented"
     );
 }
