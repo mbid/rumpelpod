@@ -305,11 +305,13 @@ fn devcontainer_build_with_context() {
 fn devcontainer_build_skips_when_image_exists() {
     let repo = TestRepo::new();
 
+    let unique = repo.path().file_name().unwrap().to_string_lossy();
     let dockerfile = formatdoc! {r#"
         FROM debian:13
         RUN apt-get update && apt-get install -y git
         RUN useradd -m -u 1007 -s /bin/bash {TEST_USER}
         COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        LABEL test.unique="{unique}"
         USER {TEST_USER}
     "#};
 
@@ -319,37 +321,29 @@ fn devcontainer_build_skips_when_image_exists() {
 
     let daemon = TestDaemon::start();
 
-    // First enter builds the image.
-    let stdout = pod_command(&repo, &daemon)
+    // First enter should build the image.
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "skip-test-1", "--", "echo", "built"])
-        .success()
+        .output()
         .expect("first pod enter failed");
-    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "built");
+    assert!(output.status.success(), "first enter failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Devcontainer image built"),
+        "first enter should build the image, stderr: {stderr}",
+    );
 
-    // Delete the build context so that `docker build` would fail if attempted.
-    // The Dockerfile stays so that compute_image_tag can still hash it.
-    let context_dir = repo.path();
-    for entry in fs::read_dir(context_dir).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name();
-        if name == ".devcontainer" || name == ".rumpelpod.toml" || name == ".git" {
-            continue;
-        }
-        let path = entry.path();
-        if path.is_dir() {
-            fs::remove_dir_all(&path).unwrap();
-        } else {
-            fs::remove_file(&path).unwrap();
-        }
-    }
-
-    // Second enter should skip the build entirely because the image tag
-    // already exists, so the missing context directory doesn't matter.
-    let stdout = pod_command(&repo, &daemon)
+    // Second enter with a different pod name should reuse the cached image.
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "skip-test-2", "--", "echo", "skipped"])
-        .success()
-        .expect("second pod enter should skip build");
-    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "skipped");
+        .output()
+        .expect("second pod enter failed");
+    assert!(output.status.success(), "second enter failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Devcontainer image built"),
+        "second enter should skip the build, stderr: {stderr}",
+    );
 }
 
 // ---- rumpel image build / fetch subcommand tests ----

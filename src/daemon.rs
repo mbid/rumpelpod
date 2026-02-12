@@ -1581,7 +1581,9 @@ impl Daemon for DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
-        let image = crate::image::resolve_image(&devcontainer, &docker_host, &repo_path)?;
+        let build_result = crate::image::resolve_image(&devcontainer, &docker_host, &repo_path)?;
+        let image = build_result.image;
+        let image_built = build_result.built;
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
         let user = devcontainer.user().map(String::from);
         let host_network = devcontainer.has_host_network();
@@ -1788,6 +1790,7 @@ impl Daemon for DaemonServer {
                 container_id: ContainerId(state.id),
                 user,
                 docker_socket,
+                image_built,
             });
         }
 
@@ -1920,6 +1923,7 @@ impl Daemon for DaemonServer {
             container_id,
             user,
             docker_socket,
+            image_built,
         })
     }
 
@@ -1932,7 +1936,10 @@ impl Daemon for DaemonServer {
         let pod_name = &params.pod_name;
         let repo_path = &params.repo_path;
         let docker_host = &params.docker_host;
-        let image = crate::image::resolve_image(&params.devcontainer, docker_host, repo_path)?;
+        // resolve_image here is only for resolve_user during snapshotting;
+        // the actual image_built flag comes from self.launch_pod below.
+        let image =
+            crate::image::resolve_image(&params.devcontainer, docker_host, repo_path)?.image;
         let container_repo_path = params.devcontainer.container_repo_path(repo_path);
         let user = params.devcontainer.user().map(String::from);
 

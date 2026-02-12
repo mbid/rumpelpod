@@ -30,17 +30,19 @@ pub fn resolve_image(
     devcontainer: &DevContainer,
     docker_host: &DockerHost,
     repo_root: &Path,
-) -> Result<Image> {
+) -> Result<BuildResult> {
     if let Some(build) = &devcontainer.build {
-        let result = build_devcontainer_image(build, docker_host, repo_root, false)?;
-        Ok(result.image)
+        build_devcontainer_image(build, docker_host, repo_root, false)
     } else {
-        Ok(Image(
-            devcontainer
-                .image
-                .clone()
-                .expect("either image or build must be set"),
-        ))
+        Ok(BuildResult {
+            image: Image(
+                devcontainer
+                    .image
+                    .clone()
+                    .expect("either image or build must be set"),
+            ),
+            built: false,
+        })
     }
 }
 

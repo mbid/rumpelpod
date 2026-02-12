@@ -97,13 +97,19 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    client.launch_pod(PodLaunchParams {
+    let result = client.launch_pod(PodLaunchParams {
         pod_name: PodName(pod_name.to_string()),
         repo_path: repo_root,
         host_branch,
         docker_host,
         devcontainer,
-    })
+    })?;
+
+    if result.image_built {
+        eprintln!("Devcontainer image built.");
+    }
+
+    Ok(result)
 }
 
 /// Resolve `${containerEnv:VAR}` placeholders in `remote_env` by running
@@ -142,6 +148,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         container_id,
         user,
         docker_socket,
+        image_built: _,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
 
     let mut command = cmd.command.clone();

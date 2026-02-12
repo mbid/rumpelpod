@@ -81,6 +81,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         container_id,
         user,
         docker_socket,
+        image_built: _,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
 
     let docker_host = format!("unix://{}", docker_socket.display());

@@ -35,6 +35,9 @@ pub struct LaunchResult {
     /// The Docker socket path to use for connecting to the Docker daemon.
     /// Clients must use this socket for all Docker operations on this pod.
     pub docker_socket: std::path::PathBuf,
+    /// Whether a devcontainer image was built during this launch.
+    /// False when the image was already cached or when using a pre-built image.
+    pub image_built: bool,
 }
 
 /// Human-readable pod name to distinguish multiple pods for the same repo.
@@ -102,6 +105,8 @@ struct PodLaunchResponse {
     user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
     docker_socket: PathBuf,
+    /// Whether a devcontainer image was built during this launch.
+    image_built: bool,
 }
 
 /// Request body for stop_pod endpoint.
@@ -322,6 +327,7 @@ impl Daemon for DaemonClient {
                 container_id: body.container_id,
                 user: body.user,
                 docker_socket: body.docker_socket,
+                image_built: body.image_built,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -349,6 +355,7 @@ impl Daemon for DaemonClient {
                 container_id: body.container_id,
                 user: body.user,
                 docker_socket: body.docker_socket,
+                image_built: body.image_built,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -586,6 +593,7 @@ async fn launch_pod_handler<D: Daemon>(
             container_id: launch_result.container_id,
             user: launch_result.user,
             docker_socket: launch_result.docker_socket,
+            image_built: launch_result.image_built,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -608,6 +616,7 @@ async fn recreate_pod_handler<D: Daemon>(
             container_id: res.container_id,
             user: res.user,
             docker_socket: res.docker_socket,
+            image_built: res.image_built,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -844,6 +853,7 @@ mod tests {
                 container_id: ContainerId(format!("{}:{}", params.pod_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
+                image_built: false,
             })
         }
 
@@ -858,6 +868,7 @@ mod tests {
                 container_id: ContainerId(format!("recreated:{}:{}", params.pod_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
+                image_built: false,
             })
         }
 
