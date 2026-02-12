@@ -16,6 +16,12 @@ use crate::devcontainer::{BuildOptions, DevContainer};
 // Re-export so callers can use image::Image
 pub use crate::daemon::protocol::Image;
 
+/// Result of a build attempt, indicating whether a build actually ran.
+pub struct BuildResult {
+    pub image: Image,
+    pub built: bool,
+}
+
 /// Resolve a Docker image, building from devcontainer.json 'build' if necessary.
 ///
 /// The DevContainer's build paths must already be resolved to repo-root-relative
@@ -26,7 +32,8 @@ pub fn resolve_image(
     repo_root: &Path,
 ) -> Result<Image> {
     if let Some(build) = &devcontainer.build {
-        build_devcontainer_image(build, docker_host, repo_root)
+        let result = build_devcontainer_image(build, docker_host, repo_root, false)?;
+        Ok(result.image)
     } else {
         Ok(Image(
             devcontainer
@@ -38,11 +45,14 @@ pub fn resolve_image(
 }
 
 /// Build a Docker image from devcontainer.json build configuration.
-fn build_devcontainer_image(
+///
+/// When `force` is true, the image is rebuilt even if it already exists.
+pub fn build_devcontainer_image(
     build: &BuildOptions,
     docker_host: &DockerHost,
     repo_root: &Path,
-) -> Result<Image> {
+    force: bool,
+) -> Result<BuildResult> {
     let dockerfile = build
         .dockerfile
         .as_deref()
@@ -68,8 +78,11 @@ fn build_devcontainer_image(
     // Skip the build if the image already exists on the target host, avoiding
     // the overhead of sending build context (potentially the whole repo) over
     // the network to a remote Docker daemon.
-    if image_exists(&image_name, docker_host) {
-        return Ok(Image(image_name));
+    if !force && image_exists(&image_name, docker_host) {
+        return Ok(BuildResult {
+            image: Image(image_name),
+            built: false,
+        });
     }
 
     // Build the Docker image
@@ -122,7 +135,27 @@ fn build_devcontainer_image(
         );
     }
 
-    Ok(Image(image_name))
+    Ok(BuildResult {
+        image: Image(image_name),
+        built: true,
+    })
+}
+
+/// Pull a Docker image from its registry.
+///
+/// Inherits stdout/stderr so the user sees download progress.
+pub fn pull_image(image_name: &str, docker_host: &DockerHost) -> Result<()> {
+    let mut cmd = Command::new("docker");
+    if let Some(uri) = docker_host.docker_host_uri() {
+        cmd.args(["-H", &uri]);
+    }
+    cmd.args(["pull", image_name]);
+
+    let status = cmd.status()?;
+    if !status.success() {
+        bail!("docker pull failed with status {}", status);
+    }
+    Ok(())
 }
 
 /// Check whether a Docker image already exists on the target host.

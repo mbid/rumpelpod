@@ -97,6 +97,10 @@ Takes a snapshot of dirty files (including untracked files), destroys the contai
 ")]
     Recreate(RecreateCommand),
 
+    /// Manage devcontainer images
+    #[command(subcommand)]
+    Image(ImageSubcommand),
+
     /// Run an LLM agent inside a pod
     #[command(long_about = "Run an LLM agent inside a pod.
 
@@ -280,4 +284,41 @@ pub struct ClaudeCommand {
     /// Arguments forwarded to `claude` CLI
     #[arg(last = true, value_name = "ARGS")]
     pub args: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum ImageSubcommand {
+    /// Build the devcontainer image from its Dockerfile
+    #[command(long_about = "Build the devcontainer image from its Dockerfile.
+
+Requires 'build.dockerfile' in devcontainer.json. Skips the build if a cached image with a matching content hash already exists. Use --force to rebuild unconditionally.
+")]
+    Build(ImageBuildCommand),
+
+    /// Pull the devcontainer image from its registry
+    #[command(long_about = "Pull the devcontainer image from its registry.
+
+Requires 'image' in devcontainer.json (not 'build'). Runs 'docker pull' so you get the latest version of the image.
+")]
+    Fetch(ImageFetchCommand),
+}
+
+#[derive(Args)]
+pub struct ImageBuildCommand {
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Overrides .rumpelpod.toml setting.
+    #[arg(long)]
+    pub host: Option<String>,
+
+    /// Rebuild even if the image already exists
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args)]
+pub struct ImageFetchCommand {
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Overrides .rumpelpod.toml setting.
+    #[arg(long)]
+    pub host: Option<String>,
 }

@@ -1,6 +1,7 @@
 //! Integration tests for devcontainer.json image building.
 
 use std::fs;
+use std::process::Command;
 
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
@@ -47,6 +48,37 @@ fn write_minimal_pod_toml(repo: &TestRepo) {
     "#};
     fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");
+}
+
+/// Create a test devcontainer.json with an `image` reference (no build).
+fn write_devcontainer_with_image(repo: &TestRepo, image: &str) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "image": "{image}",
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "containerUser": "{TEST_USER}",
+            "runArgs": ["--runtime=runc"]
+        }}
+    "#};
+
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+}
+
+/// Build a rumpel Command that does not need a daemon.
+///
+/// `image build` and `image fetch` call Docker directly, so no daemon socket
+/// is required.
+fn rumpel_cmd(repo: &TestRepo) -> Command {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("rumpel"));
+    cmd.current_dir(repo.path());
+    cmd
 }
 
 #[test]
@@ -318,4 +350,165 @@ fn devcontainer_build_skips_when_image_exists() {
         .success()
         .expect("second pod enter should skip build");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "skipped");
+}
+
+// ---- rumpel image build / fetch subcommand tests ----
+
+#[test]
+fn image_build_builds_and_reports() {
+    let repo = TestRepo::new();
+
+    // Embed the repo temp-dir name so the Dockerfile hash is unique across
+    // test runs and does not collide with cached images from other tests.
+    let unique = repo.path().file_name().unwrap().to_string_lossy();
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        LABEL test.unique="{unique}"
+    "#};
+
+    write_test_dockerfile(&repo, &dockerfile);
+    write_devcontainer_with_build(&repo, "Dockerfile");
+
+    let stdout = rumpel_cmd(&repo)
+        .args(["image", "build"])
+        .success()
+        .expect("rumpel image build failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert!(
+        stdout.contains("Image built:"),
+        "expected 'Image built:' in output, got: {stdout}",
+    );
+}
+
+#[test]
+fn image_build_reports_cached_on_second_run() {
+    let repo = TestRepo::new();
+
+    let unique = repo.path().file_name().unwrap().to_string_lossy();
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        LABEL test.unique="{unique}"
+    "#};
+
+    write_test_dockerfile(&repo, &dockerfile);
+    write_devcontainer_with_build(&repo, "Dockerfile");
+
+    // First build
+    rumpel_cmd(&repo)
+        .args(["image", "build"])
+        .success()
+        .expect("first image build failed");
+
+    // Second build -- should report cache hit
+    let stdout = rumpel_cmd(&repo)
+        .args(["image", "build"])
+        .success()
+        .expect("second image build failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert!(
+        stdout.contains("Image already up to date:"),
+        "expected cache-hit message, got: {stdout}",
+    );
+}
+
+#[test]
+fn image_build_force_rebuilds() {
+    let repo = TestRepo::new();
+
+    let unique = repo.path().file_name().unwrap().to_string_lossy();
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        LABEL test.unique="{unique}"
+    "#};
+
+    write_test_dockerfile(&repo, &dockerfile);
+    write_devcontainer_with_build(&repo, "Dockerfile");
+
+    // First build
+    rumpel_cmd(&repo)
+        .args(["image", "build"])
+        .success()
+        .expect("first image build failed");
+
+    // Force rebuild -- should build again, not hit cache
+    let stdout = rumpel_cmd(&repo)
+        .args(["image", "build", "--force"])
+        .success()
+        .expect("forced image build failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert!(
+        stdout.contains("Image built:"),
+        "expected 'Image built:' after --force, got: {stdout}",
+    );
+}
+
+#[test]
+fn image_build_errors_on_image_only_config() {
+    let repo = TestRepo::new();
+    write_devcontainer_with_image(&repo, "debian:13");
+
+    let output = rumpel_cmd(&repo)
+        .args(["image", "build"])
+        .output()
+        .expect("failed to run rumpel");
+
+    assert!(
+        !output.status.success(),
+        "image build should fail for image-only config"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("image fetch"),
+        "error should suggest 'image fetch', got: {stderr}",
+    );
+}
+
+#[test]
+fn image_fetch_pulls_image() {
+    let repo = TestRepo::new();
+    // hello-world is tiny and fast to pull
+    write_devcontainer_with_image(&repo, "hello-world:latest");
+
+    let stdout = rumpel_cmd(&repo)
+        .args(["image", "fetch"])
+        .success()
+        .expect("rumpel image fetch failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert!(
+        stdout.contains("Image pulled:"),
+        "expected 'Image pulled:' in output, got: {stdout}",
+    );
+}
+
+#[test]
+fn image_fetch_errors_on_build_config() {
+    let repo = TestRepo::new();
+
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+    "#};
+
+    write_test_dockerfile(&repo, &dockerfile);
+    write_devcontainer_with_build(&repo, "Dockerfile");
+
+    let output = rumpel_cmd(&repo)
+        .args(["image", "fetch"])
+        .output()
+        .expect("failed to run rumpel");
+
+    assert!(
+        !output.status.success(),
+        "image fetch should fail for build-based config"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("image build"),
+        "error should suggest 'image build', got: {stderr}",
+    );
 }

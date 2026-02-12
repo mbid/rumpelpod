@@ -16,6 +16,7 @@ mod gateway;
 mod git;
 mod git_http_server;
 pub(crate) mod image;
+mod image_cmd;
 mod list;
 mod llm;
 mod ports;
@@ -27,7 +28,7 @@ mod systemd;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, ImageSubcommand};
 
 pub fn run() -> Result<()> {
     env_logger::init();
@@ -61,6 +62,10 @@ pub fn run() -> Result<()> {
         Command::Recreate(ref cmd) => {
             recreate::recreate(cmd)?;
         }
+        Command::Image(ref sub) => match sub {
+            ImageSubcommand::Build(ref cmd) => image_cmd::build(cmd)?,
+            ImageSubcommand::Fetch(ref cmd) => image_cmd::fetch(cmd)?,
+        },
         Command::Review(ref cmd) => {
             review::review(cmd)?;
         }
