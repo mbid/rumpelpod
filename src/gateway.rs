@@ -537,7 +537,10 @@ fn install_host_sync_hooks(repo_path: &Path) -> Result<()> {
                 continue;
             }
 
-            let combined = format!("{}\n\n# {HOOK_SIGNATURE}\n{SYNC_TO_GATEWAY_BODY}", existing.trim_end());
+            let combined = format!(
+                "{}\n\n# {HOOK_SIGNATURE}\n{SYNC_TO_GATEWAY_BODY}",
+                existing.trim_end()
+            );
             fs::write(&hook_path, combined)
                 .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
         } else {

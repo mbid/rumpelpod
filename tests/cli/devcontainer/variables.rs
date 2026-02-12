@@ -95,8 +95,7 @@ fn local_workspace_folder() {
     let stdout = String::from_utf8_lossy(&stdout);
     // On macOS, getcwd() resolves symlinks (e.g. /var -> /private/var),
     // so the daemon sees the canonical path. Compare canonicalized paths.
-    let expected = std::fs::canonicalize(repo.path())
-        .unwrap_or_else(|_| repo.path().to_path_buf());
+    let expected = std::fs::canonicalize(repo.path()).unwrap_or_else(|_| repo.path().to_path_buf());
     assert_eq!(
         stdout.trim(),
         expected.to_string_lossy().as_ref(),
