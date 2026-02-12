@@ -406,6 +406,22 @@ fn ensure_repo_initialized(
         vec!["test", "-d", &git_dir_str],
     )?;
     if has_git {
+        // On first entry the image may have left the repo in a broken state
+        // (detached HEAD, unborn branch, dirty index/tree, untracked files).
+        // Clean it up so the subsequent branch checkout in setup_git_remotes
+        // can succeed.  We detect first entry by the absence of our hook.
+        let hook_path = container_repo_path.join(".git/hooks/reference-transaction");
+        let hook_str = hook_path.to_string_lossy().to_string();
+        let hook_exists = exec_check(
+            docker,
+            container_id,
+            Some(user),
+            None,
+            vec!["test", "-f", &hook_str],
+        )?;
+        if !hook_exists {
+            sanitize_existing_repo(docker, container_id, container_repo_path, user)?;
+        }
         return Ok(());
     }
 
@@ -480,6 +496,42 @@ fn ensure_repo_initialized(
         )
         .context("git lfs pull failed")?;
     }
+
+    Ok(())
+}
+
+/// Clean up a pre-existing .git that may be in a broken state (e.g. from an
+/// image that ran git init, left staged files, etc.).  Resets the index and
+/// working tree to HEAD and removes untracked files so the subsequent checkout
+/// in setup_git_remotes can succeed.
+fn sanitize_existing_repo(
+    docker: &Docker,
+    container_id: &str,
+    container_repo_path: &Path,
+    user: &str,
+) -> Result<()> {
+    let repo_path_str = container_repo_path.to_string_lossy().to_string();
+
+    let script = formatdoc! {r#"
+        set -e
+        cd "{repo_path_str}"
+        if git rev-parse --verify HEAD >/dev/null 2>&1; then
+            git reset --hard HEAD
+        else
+            git rm --cached -r . 2>/dev/null || true
+        fi
+        git clean -fd
+    "#};
+
+    exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["sh", "-c", &script],
+    )
+    .context("sanitizing existing git repository")?;
 
     Ok(())
 }
