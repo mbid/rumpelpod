@@ -1114,7 +1114,10 @@ fn create_container(
 /// directories are not visible inside newly created containers.
 fn is_overlay2_git_error(err: &anyhow::Error) -> bool {
     let msg = format!("{:#}", err);
-    msg.contains("Directory nonexistent") && msg.contains(".git")
+    // "Directory nonexistent" comes from git clone, "index.lock" from
+    // git reset/clean -- both are overlay2 failing to expose .git.
+    (msg.contains("Directory nonexistent") && msg.contains(".git"))
+        || (msg.contains("index.lock") && msg.contains("No such file or directory"))
 }
 
 /// Force-remove a container by name (best effort, for cleanup before retry).
