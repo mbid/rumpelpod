@@ -1225,6 +1225,7 @@ fn setup_port_forwarding(
     pod_id: db::PodId,
     forward_ports: &[Port],
     ports_attributes: &std::collections::HashMap<String, PortAttributes>,
+    other_ports_attributes: &Option<PortAttributes>,
     docker_host: &DockerHost,
 ) -> Result<()> {
     if forward_ports.is_empty() {
@@ -1264,6 +1265,7 @@ fn setup_port_forwarding(
 
         let label = ports_attributes
             .get(&container_port.to_string())
+            .or(other_ports_attributes.as_ref())
             .and_then(|a| a.label.as_deref())
             .unwrap_or("")
             .to_string();
@@ -1833,6 +1835,7 @@ impl Daemon for DaemonServer {
         let mounts = devcontainer.resolved_mounts()?;
         let forward_ports = devcontainer.forward_ports.clone().unwrap_or_default();
         let ports_attributes = devcontainer.ports_attributes.clone().unwrap_or_default();
+        let other_ports_attributes = devcontainer.other_ports_attributes.clone();
 
         // Reject bind mounts on remote Docker hosts -- the source paths would
         // reference the remote filesystem, not the developer's machine.
@@ -2030,6 +2033,7 @@ impl Daemon for DaemonServer {
                     pod_id,
                     &forward_ports,
                     &ports_attributes,
+                    &other_ports_attributes,
                     &docker_host,
                 )?;
             }
@@ -2181,6 +2185,7 @@ impl Daemon for DaemonServer {
                     pod_id,
                     &forward_ports,
                     &ports_attributes,
+                    &other_ports_attributes,
                     &docker_host,
                 )
                 .map_err(|e| {

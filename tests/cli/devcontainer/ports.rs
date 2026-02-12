@@ -206,6 +206,49 @@ fn ports_command_empty_when_no_forwards() {
 }
 
 #[test]
+fn other_ports_attributes_label() {
+    let repo = TestRepo::new();
+
+    // Port 9350 is in forwardPorts but NOT in portsAttributes,
+    // so it should pick up the label from otherPortsAttributes.
+    write_devcontainer_with_ports(
+        &repo,
+        r#"
+        "forwardPorts": [9350],
+        "portsAttributes": {
+            "9999": { "label": "Explicit" }
+        },
+        "otherPortsAttributes": { "label": "Fallback" },
+        "#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "fwd-other", "--", "true"])
+        .success()
+        .expect("rumpel enter failed");
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["ports", "fwd-other"])
+        .success()
+        .expect("rumpel ports failed");
+
+    let output = String::from_utf8_lossy(&stdout);
+    assert!(
+        output.contains("9350"),
+        "Should show container port 9350, got: {}",
+        output
+    );
+    assert!(
+        output.contains("Fallback"),
+        "Port not in portsAttributes should get otherPortsAttributes label, got: {}",
+        output
+    );
+}
+
+#[test]
 fn multi_pod_port_remapping() {
     let repo = TestRepo::new();
 
