@@ -1466,7 +1466,7 @@ fn copy_claude_config(
     // warnings and onboarding prompts. Everything else (tips history,
     // per-project stats, other projects' settings) is left out.
     if let Ok(data) = std::fs::read(host_home.join(".claude.json")) {
-        let minimal = strip_claude_json(&data);
+        let minimal = strip_claude_json(&data, repo_path, container_repo_path);
         let dest = format!("{}/.claude.json", container_home);
         write_file_via_stdin(docker, container_id, user, &dest, &minimal)
             .context("writing .claude.json")?;
@@ -1588,7 +1588,10 @@ fn copy_claude_project_dir(
 
 /// Keep only the keys from ~/.claude.json that are needed for a functional
 /// session. Returns the serialized JSON bytes to write into the container.
-fn strip_claude_json(data: &[u8]) -> Vec<u8> {
+///
+/// Also remaps the per-project entry for `repo_path` so it appears under
+/// `container_repo_path`, preserving trust-dialog and onboarding state.
+fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) -> Vec<u8> {
     // Keys that suppress warnings/onboarding or are required for auth.
     const KEEP_KEYS: &[&str] = &[
         "hasCompletedOnboarding",
@@ -1605,7 +1608,22 @@ fn strip_claude_json(data: &[u8]) -> Vec<u8> {
         return b"{}".to_vec();
     };
 
+    // Extract the project entry for this repo before stripping.
+    let project_entry = obj
+        .get("projects")
+        .and_then(|v| v.as_object())
+        .and_then(|projects| projects.get(&*repo_path.to_string_lossy()).cloned());
+
     obj.retain(|k, _| KEEP_KEYS.contains(&k.as_str()));
+
+    // Re-insert the project entry under the container path so claude in the
+    // sandbox inherits trust-dialog acceptance, onboarding state, etc.
+    if let Some(entry) = project_entry {
+        let container_key = container_repo_path.to_string_lossy().to_string();
+        let mut projects = serde_json::Map::new();
+        projects.insert(container_key, entry);
+        obj.insert("projects".to_string(), serde_json::Value::Object(projects));
+    }
 
     serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| b"{}".to_vec())
 }
