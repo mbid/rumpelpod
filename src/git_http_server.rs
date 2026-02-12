@@ -369,7 +369,7 @@ struct LfsError {
 fn authenticate(
     state: &SharedGitServerState,
     req: &Request<Body>,
-) -> Result<(PodInfo, String), Response> {
+) -> Result<(PodInfo, String), Box<Response>> {
     let auth_header = req
         .headers()
         .get(header::AUTHORIZATION)
@@ -377,12 +377,12 @@ fn authenticate(
 
     let token = match auth_header {
         Some(h) if h.starts_with("Bearer ") => &h[7..],
-        _ => return Err(StatusCode::UNAUTHORIZED.into_response()),
+        _ => return Err(Box::new(StatusCode::UNAUTHORIZED.into_response())),
     };
 
     match state.get(token) {
         Some(info) => Ok((info, token.to_string())),
-        None => Err(StatusCode::UNAUTHORIZED.into_response()),
+        None => Err(Box::new(StatusCode::UNAUTHORIZED.into_response())),
     }
 }
 
@@ -419,7 +419,7 @@ async fn lfs_batch_handler(
 ) -> Response {
     let (info, token) = match authenticate(&state, &req) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let host_header = req
@@ -547,7 +547,7 @@ async fn lfs_download_handler(
 ) -> Response {
     let (info, _) = match authenticate(&state, &req) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let gateway_obj = lfs_object_path(&info.gateway_path, &oid);
@@ -586,7 +586,7 @@ async fn lfs_upload_handler(
 ) -> Response {
     let (info, _) = match authenticate(&state, &req) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     // 500 MB upper bound -- LFS objects can be large
