@@ -1,5 +1,6 @@
 //! Integration tests for devcontainer.json container runtime options:
-//! `privileged`, `init`, `capAdd`, `securityOpt`, and `runArgs` device passthrough.
+//! `overrideCommand`, `privileged`, `init`, `capAdd`, `securityOpt`, and
+//! `runArgs` device passthrough.
 //!
 //! Note: The test harness sets `--privileged` for deterministic PID allocation
 //! (`RUMPELPOD_TEST_DETERMINISTIC_IDS=1`), which masks the effect of `privileged`,
@@ -58,6 +59,94 @@ fn write_minimal_pod_toml(repo: &TestRepo) {
     "#};
     fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");
+}
+
+// ---------------------------------------------------------------------------
+// overrideCommand
+// ---------------------------------------------------------------------------
+
+/// When `overrideCommand` is false, the image's own CMD should run as PID 1
+/// instead of our `sleep infinity` override.
+#[test]
+fn override_command_false() {
+    let repo = TestRepo::new();
+
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
+
+    // Image whose CMD keeps the container alive via `sleep infinity`.
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git procps
+        RUN useradd -m -u 1000 {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        USER {TEST_USER}
+        CMD ["sleep", "infinity"]
+    "#};
+    fs::write(devcontainer_dir.join("Dockerfile"), dockerfile).expect("Failed to write Dockerfile");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "build": {{
+                "dockerfile": "Dockerfile",
+                "context": ".."
+            }},
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "containerUser": "{TEST_USER}",
+            "runArgs": ["--runtime=runc"],
+            "overrideCommand": false
+        }}
+    "#};
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    // PID 1 should be the image's CMD, not one injected by rumpelpod.
+    // The image CMD runs via /bin/sh -c, so PID 1's comm is "sleep".
+    // Distinguish by checking /proc/1/cmdline: the image's CMD is
+    // launched by Docker as ["sleep", "infinity"], same args but via the
+    // image -- the key point is that the container started successfully
+    // without rumpelpod setting cmd.
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "override-false", "--", "cat", "/proc/1/cmdline"])
+        .success()
+        .expect("rumpel enter failed with overrideCommand=false");
+
+    // cmdline is NUL-separated; verify it contains "sleep".
+    let cmdline = String::from_utf8_lossy(&stdout);
+    assert!(
+        cmdline.contains("sleep"),
+        "expected PID 1 cmdline to contain 'sleep' from the image CMD, got '{cmdline}'"
+    );
+}
+
+/// When `overrideCommand` is absent, it defaults to true: rumpelpod sets
+/// `cmd` to `["sleep", "infinity"]` and PID 1 should be `sleep`.
+#[test]
+fn override_command_default_true() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_runtime_opts(&repo, r#""remoteUser": "dev""#);
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "override-default", "--", "cat", "/proc/1/comm"])
+        .success()
+        .expect("rumpel enter failed");
+
+    let pid1_name = String::from_utf8_lossy(&stdout).trim().to_string();
+    assert!(
+        pid1_name.contains("sleep"),
+        "expected PID 1 to be 'sleep' (default overrideCommand=true), got '{pid1_name}'"
+    );
 }
 
 // ---------------------------------------------------------------------------

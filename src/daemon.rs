@@ -1073,12 +1073,19 @@ fn create_container(
         )
     };
 
+    // Default is true per the devcontainer spec (for image/Dockerfile configs).
+    let override_command = dc.override_command.unwrap_or(true);
+
     let config = ContainerCreateBody {
         image: Some(image.0.clone()),
         hostname: Some(pod_name.0.clone()),
         labels: Some(labels),
         env: env_vec,
-        cmd: Some(vec!["sleep".to_string(), "infinity".to_string()]),
+        cmd: if override_command {
+            Some(vec!["sleep".to_string(), "infinity".to_string()])
+        } else {
+            None
+        },
         host_config: Some(host_config),
         exposed_ports,
         ..Default::default()
