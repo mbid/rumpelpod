@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
+use log::trace;
 
 use crate::cli::EnterCommand;
 use crate::config::{load_toml_config, DockerHost};
@@ -74,9 +76,10 @@ pub fn load_and_resolve(
 /// Launch a pod and return the container ID and user.
 /// This is shared logic between `enter` and `agent` commands.
 pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
+    let t = Instant::now();
     let repo_root = get_repo_root()?;
-
     let (devcontainer, docker_host) = load_and_resolve(&repo_root, host_override)?;
+    trace!("launch_pod config: {:?}", t.elapsed());
 
     // Reject bind mounts early for remote Docker
     if docker_host.is_remote() {
@@ -97,6 +100,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
+    let t = Instant::now();
     let result = client.launch_pod(PodLaunchParams {
         pod_name: PodName(pod_name.to_string()),
         repo_path: repo_root,
@@ -104,6 +108,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
         docker_host,
         devcontainer,
     })?;
+    trace!("launch_pod daemon RPC: {:?}", t.elapsed());
 
     if result.image_built {
         eprintln!("Devcontainer image built.");
@@ -138,18 +143,27 @@ pub fn resolve_remote_env(
 }
 
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
-    let repo_root = get_repo_root()?;
+    let t_total = Instant::now();
 
+    let t = Instant::now();
+    let repo_root = get_repo_root()?;
+    trace!("get_repo_root: {:?}", t.elapsed());
+
+    let t = Instant::now();
     let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    trace!("load_and_resolve: {:?}", t.elapsed());
+
     let workdir = container_workdir(&devcontainer, &repo_root)?;
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
+    let t = Instant::now();
     let LaunchResult {
         container_id,
         user,
         docker_socket,
         image_built: _,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
+    trace!("launch_pod: {:?}", t.elapsed());
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
@@ -164,7 +178,10 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
     // Inject remoteEnv variables, resolving ${containerEnv:VAR} lazily
+    let t = Instant::now();
     let remote_env = resolve_remote_env(&remote_env_map, &docker_socket, &container_id.0);
+    trace!("resolve_remote_env: {:?}", t.elapsed());
+
     for (key, value) in &remote_env {
         docker_cmd.args(["-e", &format!("{}={}", key, value)]);
     }
@@ -174,6 +191,8 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     }
     docker_cmd.arg(&container_id.0);
     docker_cmd.args(&command);
+
+    trace!("total enter startup: {:?}", t_total.elapsed());
 
     let status = docker_cmd.status()?;
 
