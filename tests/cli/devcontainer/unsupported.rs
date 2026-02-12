@@ -163,3 +163,55 @@ fn warns_on_multiple_unsupported() {
         "stderr should warn about runServices, got: {stderr}",
     );
 }
+
+#[test]
+fn warns_on_initialize_command() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_unsupported(
+        &repo,
+        r#",
+            "initializeCommand": "echo hello""#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "unsupported-initcmd", "--", "true"])
+        .output()
+        .expect("Failed to run pod command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("initializeCommand") && stderr.contains("not supported"),
+        "stderr should warn about unsupported initializeCommand, got: {stderr}",
+    );
+}
+
+#[test]
+fn warns_on_features() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_unsupported(
+        &repo,
+        r#",
+            "features": {
+                "ghcr.io/devcontainers/features/node:1": { "version": "20" }
+            }"#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "unsupported-features", "--", "true"])
+        .output()
+        .expect("Failed to run pod command");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("features") && stderr.contains("not supported"),
+        "stderr should warn about unsupported features, got: {stderr}",
+    );
+}

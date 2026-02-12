@@ -82,7 +82,8 @@ Failure in an earlier command prevents later commands from running.
 
 ## Intentionally Unsupported
 
-These emit a warning when detected and are ignored.
+These emit a warning when detected and are ignored. The warnings are
+covered by integration tests in `tests/cli/devcontainer/unsupported.rs`.
 
 | Property | Reason |
 |----------|--------|
@@ -91,6 +92,9 @@ These emit a warning when detected and are ignored.
 | `dockerComposeFile` | Out of scope |
 | `service` | Docker Compose specific |
 | `runServices` | Docker Compose specific |
+| `initializeCommand` | Runs on the host machine, which does not generalize to non-local backends (e.g. Kubernetes). Use a Dockerfile or `onCreateCommand` instead. |
+| `features` | Requires an OCI registry client and custom image build pipeline. Use a Dockerfile instead. |
+| `overrideFeatureInstallOrder` | Companion to `features` |
 
 ---
 
@@ -98,36 +102,24 @@ These emit a warning when detected and are ignored.
 
 Properties that are deserialized but not wired up to anything.
 
-### High Priority
+### To Be Implemented
 
 | Property | Impact |
 |----------|--------|
-| `features` | Many real-world devcontainers depend on Features for toolchain setup |
-| `overrideFeatureInstallOrder` | Companion to `features` |
-| `initializeCommand` | Host-side command before container creation; common in devcontainers |
 | `updateContentCommand` | Command after content changes (e.g. after git sync) |
 | `overrideCommand` | When `false`, container CMD should run instead of `sleep infinity` |
-
-### Medium Priority
-
-| Property | Impact |
-|----------|--------|
 | `updateRemoteUserUID` | UID/GID sync to avoid permission mismatches |
 | `userEnvProbe` | Shell type for environment probing (`loginInteractiveShell` etc.) |
-
-### Low Priority
-
-| Property | Impact |
-|----------|--------|
-| `shutdownAction` | What to do on disconnect (`none` / `stopContainer`) |
-| `customizations` | Parsed but no `rumpelpod` namespace defined |
-
-### Behavioral Gaps
-
-| Behavior | Current State |
-|----------|---------------|
-| `waitFor` background semantics | All lifecycle commands run synchronously; the spec allows attaching before later commands finish |
+| `waitFor` (background semantics) | All lifecycle commands run synchronously; the spec allows attaching before later commands finish |
+| `hostRequirements` (enforcement) | Parsed but not validated; for localhost and remote Docker we ignore this, but future backends (Kubernetes) should enforce it |
 | `otherPortsAttributes` | Parsed but not applied as defaults for unconfigured ports |
+
+### Known Shortcomings (No Plans to Implement)
+
+| Property | Notes |
+|----------|-------|
+| `shutdownAction` | Controls whether to stop the container when the last session disconnects. We always leave containers running; `rumpel rm` removes them explicitly. Implementing this would require session tracking in the daemon. May never be implemented -- the explicit `rumpel rm` workflow is simpler and less surprising for an agent runner. |
+| `customizations` | Parsed but no `rumpelpod` namespace defined. Not useful until we have tool-specific settings to configure. |
 
 ---
 
@@ -138,57 +130,7 @@ suitable for pasting into a coding agent.
 
 ---
 
-### Task 1: `initializeCommand` -- host-side command execution
-
-**What:** The `initializeCommand` runs on the *host machine* before the
-container is created. It is the only lifecycle command that runs outside
-the container. Currently it is deserialized and variable-substituted but
-never executed.
-
-**Where:** `src/enter.rs` -- after loading the devcontainer config, before
-sending the pod launch request to the daemon.
-
-**Prompt:**
-```
-Implement initializeCommand support for devcontainer.json in rumpelpod.
-
-Context: initializeCommand is a lifecycle command that runs on the HOST
-machine (not in the container) before the container is created. It is
-deserialized into DevContainer.initialize_command (src/devcontainer.rs:157)
-and gets variable substitution, but is never actually executed.
-
-Requirements:
-1. In src/enter.rs, after loading/resolving the devcontainer config but
-   BEFORE sending the pod launch to the daemon, execute initializeCommand
-   on the host.
-2. The command runs from the repo root directory.
-3. Support all three formats: string (via shell), array (direct exec),
-   and object (parallel -- each key runs concurrently, all must succeed).
-4. If initializeCommand fails, abort with a clear error. Do not create
-   the container.
-5. Only ${localEnv} and ${localWorkspaceFolder*} variables are available
-   (not container variables, since the container does not exist yet).
-6. initializeCommand should run on EVERY rumpel enter, not just first
-   creation. This matches the spec: "A command to run locally before
-   anything else. Runs on every start."
-
-Add integration tests in tests/cli/devcontainer/lifecycle_commands.rs:
-- initialize_command_runs_before_container: Set initializeCommand to
-  create a file on the host; verify it exists before container runs.
-- initialize_command_failure_aborts: Set initializeCommand to `exit 1`;
-  verify the pod is never created.
-- initialize_command_formats: Test string, array, and object formats.
-
-Look at how postStartCommand is executed in src/daemon.rs for reference
-on running lifecycle commands, but note that initializeCommand runs on
-the host (std::process::Command), not via docker exec.
-
-Run ./pipeline after committing.
-```
-
----
-
-### Task 2: `updateContentCommand` -- run after content sync
+### Task 1: `updateContentCommand` -- run after content sync
 
 **What:** The `updateContentCommand` runs inside the container after
 source content has been updated (e.g. after git sync). It sits between
@@ -241,7 +183,7 @@ Run ./pipeline after committing.
 
 ---
 
-### Task 3: `overrideCommand` -- respect container CMD
+### Task 2: `overrideCommand` -- respect container CMD
 
 **What:** When `overrideCommand` is `false`, the container should use
 its own CMD/ENTRYPOINT instead of `sleep infinity`. The default is `true`
@@ -287,78 +229,7 @@ Run ./pipeline after committing.
 
 ---
 
-### Task 4: Dev Container Features installation
-
-**What:** The `features` property installs reusable toolchain components
-from OCI registries (e.g. `ghcr.io/devcontainers/features/node:1`).
-This is the biggest missing feature. Many real-world devcontainers depend
-on Features for language runtimes, tools, etc.
-
-This task covers the core feature installation flow. Advanced features
-like `overrideFeatureInstallOrder` and feature options can follow later.
-
-**Where:** `src/image.rs` (image building) and possibly a new
-`src/features.rs` module.
-
-**Prompt:**
-```
-Implement basic Dev Container Features support for rumpelpod.
-
-Context: Dev Container Features are OCI artifacts that contain install
-scripts. When a devcontainer.json specifies features like:
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": { "version": "20" }
-  }
-the implementation must fetch the feature tarball from the OCI registry,
-extract it, and run its install.sh during image build.
-
-The features field is parsed at src/devcontainer.rs:92 as
-HashMap<String, serde_json::Value> but never used. Image building happens
-in src/image.rs.
-
-Read the Features spec: https://containers.dev/implementors/features/
-
-Requirements:
-1. Create src/features.rs for feature resolution and installation logic.
-2. Feature resolution: Parse the feature ID (e.g.
-   "ghcr.io/devcontainers/features/node:1") into registry/repo/tag.
-   Fetch the OCI manifest and download the tarball layer.
-3. Feature installation: For each feature, generate a Dockerfile snippet
-   that:
-   a. COPYs the feature's files into the image
-   b. Sets environment variables from the feature's devcontainer-feature.json
-   c. Runs install.sh with the user's options as environment variables
-      (e.g. VERSION=20)
-4. Integration with image building: When features are present, generate
-   a derived Dockerfile that starts FROM the base image (or the user's
-   Dockerfile build result) and appends feature installation layers.
-   Build this derived image instead.
-5. Feature options are passed as environment variables to install.sh
-   (uppercased key names, e.g. "version" -> "VERSION").
-6. Respect overrideFeatureInstallOrder if set; otherwise install in the
-   order listed in devcontainer.json.
-7. Cache: The derived image hash should incorporate the feature IDs,
-   versions, and options so that changing features triggers a rebuild.
-
-Add integration tests in a new tests/cli/devcontainer/features.rs:
-- feature_node_install: Use the official node feature to install Node.js.
-  Verify `node --version` works inside the container.
-- feature_with_options: Install a feature with specific options (e.g.
-  node version 20). Verify the correct version is installed.
-- feature_cached_on_rebuild: Second pod creation with same features
-  reuses the cached image.
-
-This is a large task. Focus on getting the basic flow working with
-a single well-known feature (ghcr.io/devcontainers/features/node).
-Edge cases (feature dependencies via installsAfter, containerEnv
-contributions from features, etc.) can be follow-up work.
-
-Run ./pipeline after committing.
-```
-
----
-
-### Task 5: `updateRemoteUserUID` -- UID/GID sync
+### Task 3: `updateRemoteUserUID` -- UID/GID sync
 
 **What:** When `updateRemoteUserUID` is `true` (the default on Linux),
 the container user's UID/GID should be updated to match the host user.
@@ -407,7 +278,7 @@ Run ./pipeline after committing.
 
 ---
 
-### Task 6: `userEnvProbe` -- shell environment probing
+### Task 4: `userEnvProbe` -- shell environment probing
 
 **What:** The `userEnvProbe` property controls which shell initialization
 files are sourced when probing for user environment variables. This
@@ -429,9 +300,8 @@ src/devcontainer.rs:60 as an enum (None, InteractiveShell, LoginShell,
 LoginInteractiveShell) but never read.
 
 Currently, rumpel enter runs docker exec with a plain command. This
-means .bashrc/.profile are not sourced, so tools installed by Features
-or lifecycle commands that modify PATH via shell init files are not
-found.
+means .bashrc/.profile are not sourced, so tools installed by lifecycle
+commands that modify PATH via shell init files are not found.
 
 Requirements:
 1. When executing commands via rumpel enter, wrap them according to
@@ -457,52 +327,7 @@ Run ./pipeline after committing.
 
 ---
 
-### Task 7: `shutdownAction` -- cleanup on disconnect
-
-**What:** The `shutdownAction` property controls what happens when the
-last tool disconnects from the container. Default is `stopContainer`.
-Currently parsed but not used -- containers are always left running.
-
-**Where:** `src/daemon.rs` -- pod lifecycle management.
-
-**Prompt:**
-```
-Implement shutdownAction support for devcontainer.json in rumpelpod.
-
-Context: shutdownAction (default: stopContainer for image/Dockerfile)
-controls what happens when the dev container tool disconnects. Values
-are "none" (leave running) and "stopContainer" (stop it). The property
-is parsed at src/devcontainer.rs:68 but never read.
-
-Currently rumpelpod always leaves containers running. The rumpel rm
-command removes them explicitly. shutdownAction:stopContainer would
-auto-stop the container when the last rumpel enter session exits.
-
-Requirements:
-1. Track active sessions per pod in the daemon (increment on enter,
-   decrement on exit/disconnect).
-2. When the last session for a pod exits and shutdownAction is
-   stopContainer (or unset, since that is the default): stop the
-   container via docker stop.
-3. When shutdownAction is none: leave the container running.
-4. The container should be stopped, not removed. A subsequent
-   rumpel enter should restart it.
-5. Handle edge cases: daemon restart (lose session count -- default
-   to leaving containers as-is).
-
-Add integration tests in tests/cli/devcontainer/lifecycle_commands.rs:
-- shutdown_action_stop: Set shutdownAction to stopContainer. After
-  rumpel enter exits, verify the container is stopped (docker inspect
-  shows State.Running = false).
-- shutdown_action_none: Set shutdownAction to none. After rumpel enter
-  exits, verify the container is still running.
-
-Run ./pipeline after committing.
-```
-
----
-
-### Task 8: `waitFor` -- background lifecycle commands
+### Task 5: `waitFor` -- background lifecycle commands
 
 **What:** The `waitFor` property controls which lifecycle command must
 complete before the user can attach. Commands after the `waitFor` target
@@ -561,10 +386,15 @@ Run ./pipeline after committing.
 
 ---
 
-### Task 9: `hostRequirements` -- validate host resources
+### Task 6: `hostRequirements` -- validate host resources
 
 **What:** The `hostRequirements` property specifies minimum CPU, memory,
 storage, and GPU requirements. Currently parsed but not validated.
+
+For localhost and remote Docker hosts we just log and ignore (the user
+is responsible for their own machine). The architecture should allow
+future backends (Kubernetes) to actually enforce requirements when
+selecting node types.
 
 **Where:** `src/daemon.rs` or `src/enter.rs` -- before creating the
 container.
@@ -575,36 +405,37 @@ Implement hostRequirements validation for devcontainer.json in rumpelpod.
 
 Context: hostRequirements specifies minimum host resources. It is parsed
 at src/devcontainer.rs:188 (cpus, memory, storage, gpu fields) but never
-checked. For a cloud-hosted agent runner, this is useful for selecting
-appropriate instance types or warning when resources are insufficient.
+checked.
 
 Requirements:
-1. Before creating a container, check hostRequirements against the
-   Docker host's actual resources.
-2. For local Docker: use sysinfo or /proc to check CPU count and
-   memory. For storage, check available disk space on the Docker root.
-3. For remote Docker: query the remote host via docker info or SSH.
+1. When hostRequirements is set, log the requirements at info level.
+2. For localhost and remote Docker hosts: log only, do not enforce.
+   The user controls their own hardware.
+3. Structure the code so that a future backend (e.g. Kubernetes) can
+   match on the host type and use hostRequirements to select an
+   appropriate node/instance type. Add an explicit match on the host
+   type (localhost, remote Docker, future backends) with a comment
+   explaining that Kubernetes should enforce these.
 4. Memory/storage strings use suffixes: "tb", "gb", "mb", "kb"
-   (case-insensitive). Parse these into bytes for comparison.
-5. If requirements are not met, print a warning but still proceed
-   (do not hard-fail -- the user may know better).
-6. GPU requirements: if gpu is true or a detailed object, check for
-   nvidia-smi or equivalent. If not available, warn.
+   (case-insensitive). Parse these into bytes so future backends can
+   compare them.
+5. GPU requirements: if gpu is true or a detailed object, log it.
+   No enforcement for local/remote Docker.
 
 Add integration tests in tests/cli/devcontainer/runtime_options.rs:
-- host_requirements_met: Set hostRequirements to values below the test
-  host's actual resources (e.g. cpus: 1, memory: "128mb"). Verify no
-  warning is printed and the pod starts normally.
-- host_requirements_not_met: Set hostRequirements to absurd values
-  (e.g. cpus: 9999, memory: "999tb"). Verify a warning is printed on
-  stderr but the pod still starts.
+- host_requirements_logged: Set hostRequirements with cpus and memory.
+  Verify the pod starts normally (no error) and the requirements
+  appear in stderr/logs.
+- host_requirements_ignored_on_local: Set absurd hostRequirements
+  (e.g. cpus: 9999). Verify the pod still starts (we do not enforce
+  on local Docker).
 
 Run ./pipeline after committing.
 ```
 
 ---
 
-### Task 10: `otherPortsAttributes` -- default port attributes
+### Task 7: `otherPortsAttributes` -- default port attributes
 
 **What:** The `otherPortsAttributes` property provides default attributes
 (label, protocol, onAutoForward) for ports not explicitly listed in
@@ -644,7 +475,7 @@ Run ./pipeline after committing.
 
 ---
 
-## Testing
+## Existing Test Coverage
 
 Tests live in `tests/cli/devcontainer/` with one file per feature group:
 
@@ -653,7 +484,7 @@ Tests live in `tests/cli/devcontainer/` with one file per feature group:
 | `env.rs` | `containerEnv`, `${localEnv}` substitution |
 | `image.rs` | `build.*` options, image caching, `rumpel image build/fetch` |
 | `variables.rs` | All variable substitution patterns |
-| `unsupported.rs` | Warnings for unsupported properties |
+| `unsupported.rs` | Warnings for unsupported properties (including `initializeCommand`, `features`) |
 | `runtime_options.rs` | `privileged`, `init`, `capAdd`, `securityOpt`, `runArgs` |
 | `lifecycle_commands.rs` | `onCreateCommand`, `postCreateCommand`, `postStartCommand`, `postAttachCommand`, `waitFor`, command formats, failure propagation |
 | `ports.rs` | `forwardPorts`, `portsAttributes`, multi-pod remapping, remote SSH |

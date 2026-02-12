@@ -516,8 +516,14 @@ impl DevContainer {
     /// Check for unsupported fields and emit warnings to stderr.
     ///
     /// These properties are intentionally not supported (see docs/devcontainer.md
-    /// "Unsupported Features") but may appear in devcontainer.json files shared
-    /// with other tools like VS Code.
+    /// "Intentionally Unsupported") but may appear in devcontainer.json files
+    /// shared with other tools like VS Code.
+    ///
+    /// - `initializeCommand`: runs on the host, which does not generalize to
+    ///   non-local backends (e.g. Kubernetes).
+    /// - `features` / `overrideFeatureInstallOrder`: Dev Container Features
+    ///   require an OCI registry client and a custom image build pipeline.
+    ///   Out of scope -- use a Dockerfile instead.
     pub fn warn_unsupported_fields(&self) {
         let fields: &[(&str, bool)] = &[
             ("workspaceMount", self.workspace_mount.is_some()),
@@ -525,6 +531,12 @@ impl DevContainer {
             ("dockerComposeFile", self.docker_compose_file.is_some()),
             ("service", self.service.is_some()),
             ("runServices", self.run_services.is_some()),
+            ("initializeCommand", self.initialize_command.is_some()),
+            ("features", self.features.is_some()),
+            (
+                "overrideFeatureInstallOrder",
+                self.override_feature_install_order.is_some(),
+            ),
         ];
 
         for (name, present) in fields {
