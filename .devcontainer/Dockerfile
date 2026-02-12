@@ -84,14 +84,6 @@ USER ${USER}
 RUN git clone https://github.com/mbid/rumpelpod /workspaces/rumpelpod
 WORKDIR /workspaces/rumpelpod
 
-ARG ANTHROPIC_API_KEY
-ARG XAI_API_KEY
-ARG GEMINI_API_KEY
-
-ENV ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-ENV XAI_API_KEY=${XAI_API_KEY}
-ENV GEMINI_API_KEY=${GEMINI_API_KEY}
-
 # Initialize cargo crate registry, populate target/ so that incremental builds will be fast.
 RUN cargo build; cargo test --no-run; true
 

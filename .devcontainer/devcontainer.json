@@ -2,11 +2,13 @@
     "build": {
         "dockerfile": "Dockerfile",
         "args": {
-            "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}",
-            "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-            "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
-            "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
+            "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}"
         }
+    },
+    "containerEnv": {
+        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+        "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
+        "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}"
     },
     "runArgs": [
         "--runtime=sysbox-runc"
