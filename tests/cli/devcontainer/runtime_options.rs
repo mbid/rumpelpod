@@ -132,7 +132,7 @@ fn override_command_false() {
 fn override_command_default_true() {
     let repo = TestRepo::new();
 
-    write_devcontainer_with_runtime_opts(&repo, r#""remoteUser": "dev""#);
+    write_devcontainer_with_runtime_opts(&repo, r#""remoteUser": "testuser""#);
     write_minimal_pod_toml(&repo);
 
     let daemon = TestDaemon::start();
