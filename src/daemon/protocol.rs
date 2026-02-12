@@ -213,6 +213,7 @@ pub struct GetConversationResponse {
 pub struct EnsureClaudeConfigRequest {
     pub pod_name: PodName,
     pub repo_path: PathBuf,
+    pub container_repo_path: PathBuf,
     pub container_id: ContainerId,
     pub user: String,
     pub docker_socket: PathBuf,

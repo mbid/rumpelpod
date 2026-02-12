@@ -1440,7 +1440,13 @@ fn run_lifecycle_command(
 ///   ~/.claude/.credentials.json  -- OAuth tokens (needed unless ANTHROPIC_API_KEY is set)
 ///   ~/.claude/settings.json      -- user preferences (model, mode, attribution)
 ///   ~/.claude.json               -- stripped to only essential keys
-fn copy_claude_config(docker: &Docker, container_id: &str, user: &str) -> Result<()> {
+fn copy_claude_config(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    repo_path: &Path,
+    container_repo_path: &Path,
+) -> Result<()> {
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
 
     // Determine the container user's home directory
@@ -1486,6 +1492,89 @@ fn copy_claude_config(docker: &Docker, container_id: &str, user: &str) -> Result
                     .context(format!("writing .claude/{}", filename))?;
             }
         }
+    }
+
+    // Copy project-specific conversation history and memory so claude inside
+    // the sandbox can see prior context for the same project.
+    copy_claude_project_dir(
+        docker,
+        container_id,
+        user,
+        &host_home,
+        &container_home,
+        repo_path,
+        container_repo_path,
+    )?;
+
+    Ok(())
+}
+
+/// Claude stores per-project data under ~/.claude/projects/<dir-name> where
+/// <dir-name> is the absolute repo path with `/` replaced by `-`.
+fn claude_project_dir_name(repo_path: &Path) -> String {
+    repo_path.to_string_lossy().replace('/', "-")
+}
+
+/// Copy the host's project-specific claude data (conversation history, memory)
+/// into the container, remapping the directory name to match the container's
+/// repo path.
+fn copy_claude_project_dir(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    host_home: &Path,
+    container_home: &str,
+    repo_path: &Path,
+    container_repo_path: &Path,
+) -> Result<()> {
+    let host_dir_name = claude_project_dir_name(repo_path);
+    let container_dir_name = claude_project_dir_name(container_repo_path);
+
+    let host_project_dir = host_home.join(".claude/projects").join(&host_dir_name);
+    if !host_project_dir.is_dir() {
+        return Ok(());
+    }
+
+    let container_project_dir =
+        format!("{}/.claude/projects/{}", container_home, container_dir_name);
+
+    exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["mkdir", "-p", &container_project_dir],
+    )
+    .context("creating claude project directory")?;
+
+    // Stream the whole directory via tar to avoid one docker exec per file.
+    let tar_output = Command::new("tar")
+        .arg("-c")
+        .arg("-C")
+        .arg(&host_project_dir)
+        .arg(".")
+        .output()
+        .context("creating tar archive of claude project data")?;
+
+    if !tar_output.status.success() {
+        anyhow::bail!(
+            "tar failed: {}",
+            String::from_utf8_lossy(&tar_output.stderr)
+        );
+    }
+
+    if !tar_output.stdout.is_empty() {
+        exec_with_stdin(
+            docker,
+            container_id,
+            Some(user),
+            None,
+            None,
+            vec!["tar", "-x", "-C", &container_project_dir],
+            Some(&tar_output.stdout),
+        )
+        .context("extracting claude project data into container")?;
     }
 
     Ok(())
@@ -2367,7 +2456,13 @@ impl Daemon for DaemonServer {
         )
         .context("connecting to Docker daemon")?;
 
-        copy_claude_config(&docker, &request.container_id.0, &request.user)?;
+        copy_claude_config(
+            &docker,
+            &request.container_id.0,
+            &request.user,
+            &request.repo_path,
+            &request.container_repo_path,
+        )?;
 
         // Mark as copied only after the full copy succeeds.
         // If this DB write fails, the next invocation will redo the copy,

@@ -86,6 +86,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             let result = client.ensure_claude_config(EnsureClaudeConfigRequest {
                 pod_name: PodName(cmd.name.clone()),
                 repo_path: repo_root.clone(),
+                container_repo_path: workdir.clone(),
                 container_id: ContainerId(container_id.0.clone()),
                 user: user.clone(),
                 docker_socket: docker_socket.clone(),
