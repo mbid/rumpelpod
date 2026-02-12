@@ -110,6 +110,18 @@ Requires ANTHROPIC_API_KEY, XAI_API_KEY, or GEMINI_API_KEY environment variable 
 ")]
     Agent(AgentCommand),
 
+    /// Copy files between host and a pod
+    #[command(long_about = "Copy files between the host and a pod container.
+
+Wraps 'docker cp' but uses pod names instead of container IDs. Exactly one of src or dest must use POD:PATH syntax to identify the pod.
+
+Examples:
+  rumpel cp dev:/app/output.txt ./output.txt   # Copy from pod to host
+  rumpel cp ./input.txt dev:/app/input.txt     # Copy from host to pod
+  rumpel cp -a dev:/app/dir ./dir              # Archive mode (preserve uid/gid)
+")]
+    Cp(CpCommand),
+
     /// Launch Claude Code in a persistent screen session inside a pod
     #[command(
         long_about = "Launch Claude Code CLI inside a persistent screen session in a pod.
@@ -284,6 +296,34 @@ pub struct ClaudeCommand {
     /// Arguments forwarded to `claude` CLI
     #[arg(last = true, value_name = "ARGS")]
     pub args: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct CpCommand {
+    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Overrides .rumpelpod.toml setting.
+    #[arg(long)]
+    pub host: Option<String>,
+
+    /// Archive mode (preserve uid/gid)
+    #[arg(short = 'a', long = "archive")]
+    pub archive: bool,
+
+    /// Follow symlinks in src path
+    #[arg(short = 'L', long = "follow-link")]
+    pub follow_link: bool,
+
+    /// Suppress progress output
+    #[arg(short = 'q', long = "quiet")]
+    pub quiet: bool,
+
+    /// Source: either POD:PATH or a local path
+    #[arg(value_name = "SRC")]
+    pub src: String,
+
+    /// Destination: either POD:PATH or a local path
+    #[arg(value_name = "DEST")]
+    pub dest: String,
 }
 
 #[derive(Subcommand)]

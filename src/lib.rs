@@ -5,6 +5,7 @@ mod claude;
 mod cli;
 mod command_ext;
 pub mod config;
+mod cp;
 pub mod devcontainer;
 mod docker_exec;
 
@@ -71,6 +72,9 @@ pub fn run() -> Result<()> {
         }
         Command::Agent(ref cmd) => {
             agent::agent(cmd)?;
+        }
+        Command::Cp(ref cmd) => {
+            cp::cp(cmd)?;
         }
         Command::Claude(ref cmd) => {
             claude::claude(cmd)?;
