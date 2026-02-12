@@ -501,9 +501,10 @@ fn ensure_repo_initialized(
 }
 
 /// Clean up a pre-existing .git that may be in a broken state (e.g. from an
-/// image that ran git init, left staged files, etc.).  Resets the index and
-/// working tree to HEAD and removes untracked files so the subsequent checkout
-/// in setup_git_remotes can succeed.
+/// image that ran git init, left staged files, got stuck mid-merge, etc.).
+/// Aborts any in-progress operations, resets the index and working tree to
+/// HEAD, and removes untracked files so the subsequent checkout in
+/// setup_git_remotes can succeed.
 fn sanitize_existing_repo(
     docker: &Docker,
     container_id: &str,
@@ -515,6 +516,15 @@ fn sanitize_existing_repo(
     let script = formatdoc! {r#"
         set -e
         cd "{repo_path_str}"
+
+        # Abort any in-progress operations that block checkout/reset
+        git merge --abort 2>/dev/null || true
+        git rebase --abort 2>/dev/null || true
+        git cherry-pick --abort 2>/dev/null || true
+        git revert --abort 2>/dev/null || true
+        git am --abort 2>/dev/null || true
+        git bisect reset 2>/dev/null || true
+
         if git rev-parse --verify HEAD >/dev/null 2>&1; then
             git reset --hard HEAD
         else
