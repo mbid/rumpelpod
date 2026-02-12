@@ -436,6 +436,35 @@ pub enum UserEnvProbe {
     LoginInteractiveShell,
 }
 
+impl UserEnvProbe {
+    /// Shell flags for wrapping a command with `-c`, e.g. `bash -lic '...'`.
+    /// Returns `None` for `UserEnvProbe::None` (no wrapping needed).
+    pub fn shell_flags_exec(&self) -> Option<&str> {
+        match self {
+            UserEnvProbe::None => None,
+            UserEnvProbe::InteractiveShell => Some("-ic"),
+            UserEnvProbe::LoginShell => Some("-lc"),
+            UserEnvProbe::LoginInteractiveShell => Some("-lic"),
+        }
+    }
+
+    /// Shell flags for launching an interactive shell, e.g. `bash -li`.
+    /// Returns `None` for `UserEnvProbe::None` (no special flags).
+    pub fn shell_flags_interactive(&self) -> Option<&str> {
+        match self {
+            UserEnvProbe::None => None,
+            UserEnvProbe::InteractiveShell => Some("-i"),
+            UserEnvProbe::LoginShell => Some("-l"),
+            UserEnvProbe::LoginInteractiveShell => Some("-li"),
+        }
+    }
+}
+
+/// Escape a string for safe embedding inside single-quoted shell arguments.
+pub fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Shutdown action when the tool window is closed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

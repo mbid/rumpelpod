@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -38,6 +39,9 @@ pub struct LaunchResult {
     /// Whether a devcontainer image was built during this launch.
     /// False when the image was already cached or when using a pre-built image.
     pub image_built: bool,
+    /// Environment variables captured by probing the user's shell init files.
+    /// Only contains vars that differ from the base container environment.
+    pub probed_env: HashMap<String, String>,
 }
 
 /// Human-readable pod name to distinguish multiple pods for the same repo.
@@ -107,6 +111,8 @@ struct PodLaunchResponse {
     docker_socket: PathBuf,
     /// Whether a devcontainer image was built during this launch.
     image_built: bool,
+    /// Environment variables captured by probing the user's shell init files.
+    probed_env: HashMap<String, String>,
 }
 
 /// Request body for stop_pod endpoint.
@@ -329,6 +335,7 @@ impl Daemon for DaemonClient {
                 user: body.user,
                 docker_socket: body.docker_socket,
                 image_built: body.image_built,
+                probed_env: body.probed_env,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -357,6 +364,7 @@ impl Daemon for DaemonClient {
                 user: body.user,
                 docker_socket: body.docker_socket,
                 image_built: body.image_built,
+                probed_env: body.probed_env,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -595,6 +603,7 @@ async fn launch_pod_handler<D: Daemon>(
             user: launch_result.user,
             docker_socket: launch_result.docker_socket,
             image_built: launch_result.image_built,
+            probed_env: launch_result.probed_env,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -618,6 +627,7 @@ async fn recreate_pod_handler<D: Daemon>(
             user: res.user,
             docker_socket: res.docker_socket,
             image_built: res.image_built,
+            probed_env: res.probed_env,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -855,6 +865,7 @@ mod tests {
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
                 image_built: false,
+                probed_env: HashMap::new(),
             })
         }
 
@@ -870,6 +881,7 @@ mod tests {
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
                 image_built: false,
+                probed_env: HashMap::new(),
             })
         }
 

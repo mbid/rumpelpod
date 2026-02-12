@@ -25,8 +25,8 @@ use tokio::net::UnixListener;
 use crate::async_runtime::block_on;
 use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, DockerHost};
 use crate::devcontainer::{
-    self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
-    PortAttributes, StringOrArray, SubstitutionContext, WaitFor,
+    self, compute_devcontainer_id, shell_escape, substitute_vars, DevContainer, LifecycleCommand,
+    Port, PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
 };
 use crate::docker_exec::{exec_check, exec_command, exec_with_stdin};
 use crate::gateway;
@@ -1438,6 +1438,97 @@ fn get_container_status_via_socket(
     Ok(status_map)
 }
 
+/// Parse null-delimited `env -0` output into a HashMap.
+fn parse_null_delimited_env(data: &[u8]) -> HashMap<String, String> {
+    let text = String::from_utf8_lossy(data);
+    let mut map = HashMap::new();
+    for entry in text.split('\0') {
+        if let Some((key, value)) = entry.split_once('=') {
+            if !key.is_empty() {
+                map.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+    map
+}
+
+/// Probe the user's shell init files to discover environment variables
+/// that tools like nvm/pyenv/cargo add to PATH via .bashrc/.profile.
+///
+/// Returns only variables that differ from the base container environment.
+fn probe_user_env(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    probe: &UserEnvProbe,
+) -> HashMap<String, String> {
+    let flags = match probe.shell_flags_exec() {
+        Some(f) => f,
+        None => return HashMap::new(),
+    };
+
+    // Check if bash is available
+    let has_bash = match exec_check(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        vec!["which", "bash"],
+    ) {
+        Ok(ok) => ok,
+        Err(e) => {
+            log::warn!("userEnvProbe: failed to check for bash: {e}");
+            return HashMap::new();
+        }
+    };
+    if !has_bash {
+        log::warn!("userEnvProbe: bash not found, skipping probe");
+        return HashMap::new();
+    }
+
+    // Get base environment (no shell init files)
+    let base_output = match exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["env", "-0"],
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("userEnvProbe: failed to get base env: {e}");
+            return HashMap::new();
+        }
+    };
+
+    // Get probed environment (with shell init files)
+    let probed_output = match exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["bash", flags, "env -0"],
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("userEnvProbe: failed to probe env: {e}");
+            return HashMap::new();
+        }
+    };
+
+    let base = parse_null_delimited_env(&base_output);
+    let probed = parse_null_delimited_env(&probed_output);
+
+    // Only keep variables that are new or changed
+    let skip = ["_", "SHLVL", "BASH_EXECUTION_STRING"];
+    probed
+        .into_iter()
+        .filter(|(key, value)| !skip.contains(&key.as_str()) && base.get(key) != Some(value))
+        .collect()
+}
+
 /// Execute a single lifecycle command inside a container.
 ///
 /// Supports the three devcontainer command formats:
@@ -1450,6 +1541,7 @@ fn run_lifecycle_command(
     user: &str,
     workdir: &Path,
     command: &LifecycleCommand,
+    env: Option<Vec<&str>>,
 ) -> Result<()> {
     let workdir_str = workdir.to_string_lossy();
 
@@ -1460,7 +1552,7 @@ fn run_lifecycle_command(
                 container_id,
                 Some(user),
                 Some(&workdir_str),
-                None,
+                env,
                 vec!["sh", "-c", s],
             )?;
         }
@@ -1471,13 +1563,15 @@ fn run_lifecycle_command(
                 container_id,
                 Some(user),
                 Some(&workdir_str),
-                None,
+                env,
                 args_ref,
             )?;
         }
         LifecycleCommand::Object(map) => {
             // Run all named commands in parallel using threads (we're already
             // in a synchronous context). Collect results and fail if any fail.
+            let env_owned: Option<Vec<String>> =
+                env.map(|v| v.into_iter().map(String::from).collect());
             let handles: Vec<_> = map
                 .iter()
                 .map(|(name, cmd_value)| {
@@ -1492,10 +1586,14 @@ fn run_lifecycle_command(
                     let u = user.to_string();
                     let wd = workdir_str.to_string();
                     let task_name = name.clone();
+                    let thread_env = env_owned.clone();
 
                     std::thread::spawn(move || {
                         let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-                        exec_command(&docker, &cid, Some(&u), Some(&wd), None, args_ref)
+                        let env_ref = thread_env
+                            .as_ref()
+                            .map(|v| v.iter().map(|s| s.as_str()).collect());
+                        exec_command(&docker, &cid, Some(&u), Some(&wd), env_ref, args_ref)
                             .with_context(|| format!("lifecycle command '{}' failed", task_name))
                     })
                 })
@@ -1755,11 +1853,6 @@ fn write_file_via_stdin(
     Ok(())
 }
 
-/// Escape a path for use in a shell command.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 /// These commands run at most once per pod lifetime, tracked via the
 /// database. Order: onCreateCommand -> updateContentCommand -> postCreateCommand.
 /// If any command fails, later commands in the chain are skipped and marked as
@@ -1778,6 +1871,7 @@ fn run_once_lifecycle_commands(
     pod_id: db::PodId,
     db_mutex: &Mutex<rusqlite::Connection>,
     wait_for: &WaitFor,
+    env: Option<Vec<&str>>,
 ) -> Result<Vec<(String, LifecycleCommand)>> {
     let mut background = Vec::new();
 
@@ -1789,7 +1883,9 @@ fn run_once_lifecycle_commands(
     if !on_create_ran {
         if let Some(cmd) = &dc.on_create_command {
             if *wait_for >= WaitFor::OnCreateCommand {
-                if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+                if let Err(e) =
+                    run_lifecycle_command(docker, container_id, user, workdir, cmd, env.clone())
+                {
                     // Mark both as ran to prevent retries and skip postCreate
                     let conn = db_mutex.lock().unwrap();
                     db::mark_on_create_ran(&conn, pod_id)?;
@@ -1806,7 +1902,9 @@ fn run_once_lifecycle_commands(
 
     if let Some(cmd) = &dc.update_content_command {
         if *wait_for >= WaitFor::UpdateContentCommand {
-            if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+            if let Err(e) =
+                run_lifecycle_command(docker, container_id, user, workdir, cmd, env.clone())
+            {
                 // Skip postCreateCommand on failure
                 let conn = db_mutex.lock().unwrap();
                 db::mark_post_create_ran(&conn, pod_id)?;
@@ -1825,7 +1923,9 @@ fn run_once_lifecycle_commands(
     if !post_create_ran {
         if let Some(cmd) = &dc.post_create_command {
             if *wait_for >= WaitFor::PostCreateCommand {
-                if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+                if let Err(e) =
+                    run_lifecycle_command(docker, container_id, user, workdir, cmd, env.clone())
+                {
                     let conn = db_mutex.lock().unwrap();
                     db::mark_post_create_ran(&conn, pod_id)?;
                     return Err(e.context("postCreateCommand failed"));
@@ -1850,10 +1950,14 @@ fn spawn_background_lifecycle_commands(
     user: String,
     workdir: PathBuf,
     commands: Vec<(String, LifecycleCommand)>,
+    env: Option<Vec<String>>,
 ) {
     std::thread::spawn(move || {
         for (label, cmd) in &commands {
-            if let Err(e) = run_lifecycle_command(&docker, &container_id, &user, &workdir, cmd) {
+            let env_refs = env.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
+            if let Err(e) =
+                run_lifecycle_command(&docker, &container_id, &user, &workdir, cmd, env_refs)
+            {
                 error!("background {} failed: {:#}", label, e);
                 break;
             }
@@ -2057,6 +2161,20 @@ impl Daemon for DaemonServer {
                 None,
             )?;
 
+            // Probe user env from shell init files
+            let effective_probe = devcontainer
+                .user_env_probe
+                .as_ref()
+                .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
+            let probed_env = probe_user_env(&docker, &state.id, &user, effective_probe);
+            let env_strings: Vec<String> =
+                probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let env_refs: Option<Vec<&str>> = if env_strings.is_empty() {
+                None
+            } else {
+                Some(env_strings.iter().map(|s| s.as_str()).collect())
+            };
+
             // Run updateContentCommand, per-start, and per-attach lifecycle
             // commands, respecting the waitFor target for background execution.
             let wait_for = devcontainer.effective_wait_for();
@@ -2065,7 +2183,14 @@ impl Daemon for DaemonServer {
             // updateContentCommand runs on every re-entry after git sync
             if let Some(cmd) = &devcontainer.update_content_command {
                 if wait_for >= WaitFor::UpdateContentCommand {
-                    run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+                    run_lifecycle_command(
+                        &docker,
+                        &state.id,
+                        &user,
+                        &container_repo_path,
+                        cmd,
+                        env_refs.clone(),
+                    )?;
                 } else {
                     bg_commands.push(("updateContentCommand".to_string(), cmd.clone()));
                 }
@@ -2080,6 +2205,7 @@ impl Daemon for DaemonServer {
                             &user,
                             &container_repo_path,
                             cmd,
+                            env_refs.clone(),
                         )?;
                     } else {
                         bg_commands.push(("postStartCommand".to_string(), cmd.clone()));
@@ -2089,7 +2215,14 @@ impl Daemon for DaemonServer {
 
             if let Some(cmd) = &devcontainer.post_attach_command {
                 if wait_for >= WaitFor::PostAttachCommand {
-                    run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+                    run_lifecycle_command(
+                        &docker,
+                        &state.id,
+                        &user,
+                        &container_repo_path,
+                        cmd,
+                        env_refs.clone(),
+                    )?;
                 } else {
                     bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
                 }
@@ -2102,6 +2235,11 @@ impl Daemon for DaemonServer {
                     user.clone(),
                     container_repo_path.clone(),
                     bg_commands,
+                    if env_strings.is_empty() {
+                        None
+                    } else {
+                        Some(env_strings.clone())
+                    },
                 );
             }
 
@@ -2126,6 +2264,7 @@ impl Daemon for DaemonServer {
                 user,
                 docker_socket,
                 image_built,
+                probed_env,
             });
         }
 
@@ -2230,6 +2369,19 @@ impl Daemon for DaemonServer {
             Err(e) => return Err(mark_error(e)),
         };
 
+        // Probe user env from shell init files
+        let effective_probe = devcontainer
+            .user_env_probe
+            .as_ref()
+            .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
+        let probed_env = probe_user_env(&docker, &container_id.0, &user, effective_probe);
+        let env_strings: Vec<String> = probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let env_refs: Option<Vec<&str>> = if env_strings.is_empty() {
+            None
+        } else {
+            Some(env_strings.iter().map(|s| s.as_str()).collect())
+        };
+
         // Run lifecycle commands for new container:
         // onCreateCommand -> updateContentCommand -> postCreateCommand ->
         // postStartCommand -> postAttachCommand
@@ -2246,13 +2398,21 @@ impl Daemon for DaemonServer {
             pod_id,
             &self.db,
             &wait_for,
+            env_refs.clone(),
         )
         .map_err(mark_error)?;
 
         if wait_for >= WaitFor::PostStartCommand {
             if let Some(cmd) = &devcontainer.post_start_command {
-                run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
-                    .map_err(mark_error)?;
+                run_lifecycle_command(
+                    &docker,
+                    &container_id.0,
+                    &user,
+                    &container_repo_path,
+                    cmd,
+                    env_refs.clone(),
+                )
+                .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_start_command {
             bg_commands.push(("postStartCommand".to_string(), cmd.clone()));
@@ -2260,8 +2420,15 @@ impl Daemon for DaemonServer {
 
         if wait_for >= WaitFor::PostAttachCommand {
             if let Some(cmd) = &devcontainer.post_attach_command {
-                run_lifecycle_command(&docker, &container_id.0, &user, &container_repo_path, cmd)
-                    .map_err(mark_error)?;
+                run_lifecycle_command(
+                    &docker,
+                    &container_id.0,
+                    &user,
+                    &container_repo_path,
+                    cmd,
+                    env_refs.clone(),
+                )
+                .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_attach_command {
             bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
@@ -2274,6 +2441,11 @@ impl Daemon for DaemonServer {
                 user.clone(),
                 container_repo_path.clone(),
                 bg_commands,
+                if env_strings.is_empty() {
+                    None
+                } else {
+                    Some(env_strings)
+                },
             );
         }
 
@@ -2306,6 +2478,7 @@ impl Daemon for DaemonServer {
             user,
             docker_socket,
             image_built,
+            probed_env,
         })
     }
 

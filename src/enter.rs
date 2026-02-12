@@ -13,7 +13,7 @@ use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
 use crate::devcontainer::{
     substitute_vars, ContainerEnvSource, DevContainer, GpuRequirement, HostRequirements, MountType,
-    SubstitutionContext,
+    SubstitutionContext, UserEnvProbe,
 };
 use crate::git::{get_current_branch, get_repo_root};
 
@@ -191,6 +191,20 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
     Ok(result)
 }
 
+/// Merge probed environment variables with remoteEnv overrides.
+/// Probed env provides the base (vars discovered from shell init files),
+/// remoteEnv takes precedence on conflicts.
+pub fn merge_env(
+    probed: HashMap<String, String>,
+    remote: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut merged = probed;
+    for (key, value) in remote {
+        merged.insert(key, value);
+    }
+    merged.into_iter().collect()
+}
+
 /// Resolve `${containerEnv:VAR}` placeholders in `remote_env` by running
 /// `docker exec printenv VAR` in the container.  `${localEnv:VAR}` is already
 /// resolved at config load time, so only container references remain.
@@ -231,12 +245,18 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let workdir = container_workdir(&devcontainer, &repo_root)?;
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
+    let effective_probe = devcontainer
+        .user_env_probe
+        .clone()
+        .unwrap_or(UserEnvProbe::LoginInteractiveShell);
+
     let t = Instant::now();
     let LaunchResult {
         container_id,
         user,
         docker_socket,
         image_built: _,
+        probed_env,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 
@@ -260,9 +280,21 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        command.push(shell);
+        // Interactive shell: launch with probe flags so init files are sourced
+        match effective_probe.shell_flags_interactive() {
+            Some(flags) => {
+                command.push("bash".to_string());
+                command.push(flags.to_string());
+            }
+            None => {
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                command.push(shell);
+            }
+        }
     }
+    // Non-interactive commands get probed env via -e flags (below), so no
+    // shell wrapping needed. Wrapping with `bash -lic` would re-source
+    // /etc/profile which unconditionally resets PATH, undoing -e overrides.
 
     let mut docker_cmd = Command::new("docker");
     docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
@@ -270,12 +302,13 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     docker_cmd.args(["--user", &user]);
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
-    // Inject remoteEnv variables, resolving ${containerEnv:VAR} lazily
+    // Inject probed + remoteEnv variables, resolving ${containerEnv:VAR} lazily
     let t = Instant::now();
     let remote_env = resolve_remote_env(&remote_env_map, &docker_socket, &container_id.0);
+    let merged_env = merge_env(probed_env, remote_env);
     trace!("resolve_remote_env: {:?}", t.elapsed());
 
-    for (key, value) in &remote_env {
+    for (key, value) in &merged_env {
         docker_cmd.args(["-e", &format!("{}={}", key, value)]);
     }
 

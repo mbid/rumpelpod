@@ -24,7 +24,7 @@ use super::common::{
     execute_write_in_pod, get_input_via_editor, read_agents_md, ToolName, MAX_TOKENS,
 };
 use super::history::ConversationTracker;
-use crate::enter::resolve_remote_env;
+use crate::enter::{merge_env, resolve_remote_env};
 
 fn make_tool(name: ToolName) -> Tool {
     Tool::Custom(CustomTool {
@@ -166,6 +166,7 @@ pub fn run_claude_agent(
 
     // Resolve ${containerEnv:VAR} now that the container is running
     let remote_env = resolve_remote_env(&remote_env, docker_socket, container_name);
+    let remote_env = merge_env(launch_result.probed_env.clone(), remote_env);
 
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);

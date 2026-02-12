@@ -9,7 +9,7 @@ use crate::daemon;
 use crate::daemon::protocol::{
     ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, LaunchResult, PodName,
 };
-use crate::enter::{launch_pod, load_and_resolve, resolve_remote_env};
+use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env};
 use crate::git::get_repo_root;
 
 const SCREENRC_PATH: &str = "/tmp/rumpelpod-screenrc";
@@ -70,6 +70,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         user,
         docker_socket,
         image_built: _,
+        probed_env,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 
@@ -121,12 +122,13 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     docker_cmd.args(["--user", &user]);
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
-    // Inject remoteEnv variables
+    // Inject probed + remoteEnv variables
     let t = Instant::now();
     let remote_env = resolve_remote_env(&remote_env_map, &docker_socket, &container_id.0);
+    let merged_env = merge_env(probed_env, remote_env);
     trace!("resolve_remote_env: {:?}", t.elapsed());
 
-    for (key, value) in &remote_env {
+    for (key, value) in &merged_env {
         docker_cmd.args(["-e", &format!("{}={}", key, value)]);
     }
 
