@@ -24,22 +24,7 @@ pub fn get_repo_root() -> Result<PathBuf> {
 
     let workdir = repo.workdir();
     match workdir {
-        Some(workdir) => {
-            // git2 resolves symlinks, which changes paths the user sees
-            // (e.g. /var/folders -> /private/var/folders on macOS). Reconstruct
-            // the workdir from the original cwd to preserve the user's path.
-            if let (Ok(cwd_canon), Ok(wd_canon)) = (cwd.canonicalize(), workdir.canonicalize())
-            {
-                if let Ok(suffix) = cwd_canon.strip_prefix(&wd_canon) {
-                    let mut result = cwd.clone();
-                    for _ in suffix.components() {
-                        result.pop();
-                    }
-                    return Ok(result);
-                }
-            }
-            Ok(workdir.to_path_buf())
-        }
+        Some(workdir) => Ok(workdir.to_path_buf()),
         None => {
             // Repository is bare (no working directory)
             bail!(

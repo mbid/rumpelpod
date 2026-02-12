@@ -6,6 +6,7 @@ use std::process::Stdio;
 use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
 
 use super::agent::llm_cache_dir;
+#[cfg(not(target_os = "macos"))]
 use super::ssh::{create_ssh_config, write_remote_pod_config, SshRemoteHost};
 
 #[test]
@@ -194,6 +195,7 @@ fn delete_pod_clears_conversation_history() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn ssh_remote_pod_delete() {
     let repo = TestRepo::new();

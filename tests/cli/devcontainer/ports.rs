@@ -18,6 +18,7 @@ use crate::common::{
     build_docker_image, pod_command, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
     TEST_USER_UID,
 };
+#[cfg(not(target_os = "macos"))]
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
 /// Write a devcontainer.json with port forwarding configuration.
@@ -315,6 +316,7 @@ fn extract_local_port(output: &str, container_port: u16) -> u16 {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 /// Write a devcontainer.json with forwardPorts and a .rumpelpod.toml pointing
 /// to a remote Docker host with a pre-built image.
 fn write_remote_config_with_ports(
@@ -353,6 +355,7 @@ fn write_remote_config_with_ports(
         .expect("Failed to write .rumpelpod.toml");
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn forward_port_remote_ssh() {
     let repo = TestRepo::new();

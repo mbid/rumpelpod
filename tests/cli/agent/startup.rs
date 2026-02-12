@@ -16,12 +16,10 @@ fn create_timestamped_mock_editor(script_dir: &Path, timestamp_file: &Path) -> P
     let script_path = script_dir.join("mock-editor.sh");
     let timestamp_file_str = timestamp_file.to_string_lossy();
 
-    // We use python3 to get high precision timestamp if available, or date
-    // But simplicity is better. date +%s.%N gives seconds.nanoseconds
+    // macOS date(1) does not support %N; use perl for sub-second precision.
     let script_content = formatdoc! {r#"
         #!/bin/bash
-        date +%s.%N > "{timestamp_file_str}"
-        # Exit immediately
+        perl -MTime::HiRes=time -e 'printf "%.6f\n", time()' > "{timestamp_file_str}"
     "#};
     fs::write(&script_path, &script_content).expect("Failed to write mock editor script");
 

@@ -1,5 +1,6 @@
 //! Integration tests for the `rumpel list` subcommand.
 
+#[cfg(not(target_os = "macos"))]
 use super::ssh::{create_ssh_config, write_remote_pod_config, SshRemoteHost, SSH_USER};
 use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
 
@@ -308,6 +309,7 @@ fn list_does_not_show_other_repo_pods() {
     );
 }
 
+#[cfg(not(target_os = "macos"))]
 #[test]
 fn ssh_remote_pod_list() {
     let repo = TestRepo::new();
