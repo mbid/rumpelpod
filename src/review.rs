@@ -297,7 +297,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     }
 
     // Verify the pod remote-tracking ref exists on the host
-    let pod_ref = format!("pod/{}", cmd.name);
+    let pod_ref = format!("rumpelpod/{}", cmd.name);
     let ref_check = Command::new("git")
         .args([
             "rev-parse",

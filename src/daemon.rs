@@ -294,11 +294,11 @@ fn start_container(docker: &Docker, container_name: &str) -> Result<()> {
 
 /// Clean up gateway refs for a deleted pod.
 ///
-/// Removes all refs matching `pod/*@<pod_name>` from both the gateway
-/// and host repos, including the alias symref `pod/<pod_name>`.
+/// Removes all refs matching `rumpelpod/*@<pod_name>` from both the gateway
+/// and host repos, including the alias symref `rumpelpod/<pod_name>`.
 fn cleanup_pod_refs(gateway_path: &Path, repo_path: &Path, pod_name: &PodName) {
-    // Find all refs matching pod/*@<pod_name> in gateway
-    let pattern = format!("refs/heads/pod/*@{}", pod_name.0);
+    // Find all refs matching rumpelpod/*@<pod_name> in gateway
+    let pattern = format!("refs/heads/rumpelpod/*@{}", pod_name.0);
     if let Ok(output) = Command::new("git")
         .args(["for-each-ref", "--format=%(refname)", &pattern])
         .current_dir(gateway_path)
@@ -323,15 +323,15 @@ fn cleanup_pod_refs(gateway_path: &Path, repo_path: &Path, pod_name: &PodName) {
         }
     }
 
-    // Delete the alias symref (pod/<name> -> pod/<name>@<name>)
-    let alias_ref = format!("refs/heads/pod/{}", pod_name.0);
+    // Delete the alias symref (rumpelpod/<name> -> rumpelpod/<name>@<name>)
+    let alias_ref = format!("refs/heads/rumpelpod/{}", pod_name.0);
     let _ = Command::new("git")
         .args(["symbolic-ref", "--delete", &alias_ref])
         .current_dir(gateway_path)
         .output();
 
     // Delete the alias remote-tracking ref from host
-    let alias_remote_ref = format!("refs/remotes/pod/{}", pod_name.0);
+    let alias_remote_ref = format!("refs/remotes/rumpelpod/{}", pod_name.0);
     let _ = Command::new("git")
         .args(["update-ref", "-d", &alias_remote_ref])
         .current_dir(repo_path)
@@ -517,7 +517,7 @@ fn setup_git_remotes(
 
     let repo_path_str = container_repo_path.to_string_lossy().to_string();
 
-    let push_refspec = format!("+refs/heads/*:refs/heads/pod/*@{}", pod_name.0);
+    let push_refspec = format!("+refs/heads/*:refs/heads/rumpelpod/*@{}", pod_name.0);
 
     let setup_script = if is_direct_git_config_mode()? {
         // Bypass `git config` / `git remote` and write directly to .git/config
@@ -1275,8 +1275,8 @@ fn compute_git_status(repo_path: &Path, pod_name: &str) -> Option<String> {
     let head = repo.head().ok()?;
     let host_oid = head.target()?;
 
-    // Get the pod's primary branch ref: refs/remotes/pod/<pod_name>
-    let remote_ref_name = format!("refs/remotes/pod/{}", pod_name);
+    // Get the pod's primary branch ref: refs/remotes/rumpelpod/<pod_name>
+    let remote_ref_name = format!("refs/remotes/rumpelpod/{}", pod_name);
     let remote_ref = repo.find_reference(&remote_ref_name).ok()?;
     let pod_oid = remote_ref.target()?;
 
@@ -2269,7 +2269,7 @@ impl Daemon for DaemonServer {
 
             let container_id = container_info.and_then(|info| info.container_id.clone());
 
-            // Compute git status on the host by comparing HEAD to pod/<pod_name>
+            // Compute git status on the host by comparing HEAD to rumpelpod/<pod_name>
             let repo_state = compute_git_status(&repo_path, &pod.name);
 
             // Display using DockerHost::Display to normalize the format

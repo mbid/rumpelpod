@@ -31,14 +31,14 @@ fn get_branches(repo_path: &Path) -> Vec<String> {
 }
 
 /// Get the list of pod remote-tracking refs in a repository.
-/// These are refs pushed by pods, matching the pattern refs/remotes/pod/*@*
-/// (excludes refs/remotes/pod/host/* which are created by host pushes).
+/// These are refs pushed by pods, matching the pattern refs/remotes/rumpelpod/*@*
+/// (excludes refs/remotes/rumpelpod/host/* which are created by host pushes).
 fn get_pod_remote_refs(repo_path: &Path) -> Vec<String> {
     let output: String = Command::new("git")
         .args([
             "for-each-ref",
             "--format=%(refname:short)",
-            "refs/remotes/pod/",
+            "refs/remotes/rumpelpod/",
         ])
         .current_dir(repo_path)
         .success()
@@ -595,10 +595,10 @@ fn gateway_pod_commit_triggers_push() {
         .trim()
         .to_string();
 
-    // Check that the gateway has the branch pod/<pod_name>@<pod_name>
+    // Check that the gateway has the branch rumpelpod/<pod_name>@<pod_name>
     // (pod is on a branch named after itself, not "master")
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("pod/{}@{}", pod_name, pod_name);
+    let expected_branch = format!("rumpelpod/{}@{}", pod_name, pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -665,7 +665,7 @@ fn gateway_pod_push_works_from_new_branch() {
 
     // Check that the gateway has the branch
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("pod/feature-from-pod@{}", pod_name);
+    let expected_branch = format!("rumpelpod/feature-from-pod@{}", pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -741,8 +741,8 @@ fn gateway_multiple_pods_push_independently() {
     // Check that the gateway has both branches with different commits
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
-    let gateway_commit_a = get_branch_commit(&gateway, "pod/pod-a@pod-a");
-    let gateway_commit_b = get_branch_commit(&gateway, "pod/pod-b@pod-b");
+    let gateway_commit_a = get_branch_commit(&gateway, "rumpelpod/pod-a@pod-a");
+    let gateway_commit_b = get_branch_commit(&gateway, "rumpelpod/pod-b@pod-b");
 
     assert_eq!(
         gateway_commit_a,
@@ -833,7 +833,7 @@ fn gateway_pod_amend_triggers_push() {
 
     // Check that the gateway has the amended commit
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("pod/{}@{}", pod_name, pod_name);
+    let expected_branch = format!("rumpelpod/{}@{}", pod_name, pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -926,7 +926,7 @@ fn gateway_pod_cannot_push_to_other_pod_namespace() {
 
     // Verify pod-b's branch exists in gateway
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let gateway_commit_b = get_branch_commit(&gateway, "pod/pod-b@pod-b");
+    let gateway_commit_b = get_branch_commit(&gateway, "rumpelpod/pod-b@pod-b");
     assert_eq!(
         gateway_commit_b,
         Some(commit_b.clone()),
@@ -943,7 +943,7 @@ fn gateway_pod_cannot_push_to_other_pod_namespace() {
             "git",
             "push",
             "rumpelpod",
-            "HEAD:refs/heads/pod/pod-b@pod-b",
+            "HEAD:refs/heads/rumpelpod/pod-b@pod-b",
             "--force",
         ])
         .output()
@@ -963,7 +963,7 @@ fn gateway_pod_cannot_push_to_other_pod_namespace() {
     );
 
     // Verify pod-b's branch still has its original commit (not overwritten)
-    let gateway_commit_b_after = get_branch_commit(&gateway, "pod/pod-b@pod-b");
+    let gateway_commit_b_after = get_branch_commit(&gateway, "rumpelpod/pod-b@pod-b");
     assert_eq!(
         gateway_commit_b_after,
         Some(commit_b),
@@ -1093,7 +1093,7 @@ fn gateway_pod_can_push_to_own_namespace() {
             "git",
             "push",
             "rumpelpod",
-            &format!("HEAD:refs/heads/pod/feature@{}", pod_name),
+            &format!("HEAD:refs/heads/rumpelpod/feature@{}", pod_name),
             "--force",
         ])
         .output()
@@ -1107,7 +1107,7 @@ fn gateway_pod_can_push_to_own_namespace() {
 
     // Verify the branch exists with our commit
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("pod/feature@{}", pod_name);
+    let expected_branch = format!("rumpelpod/feature@{}", pod_name);
     let gateway_commit = get_branch_commit(&gateway, &expected_branch);
 
     assert_eq!(
@@ -1171,7 +1171,7 @@ fn gateway_pod_reset_triggers_push() {
 
     // Verify gateway has commit2
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
-    let expected_branch = format!("pod/{}@{}", pod_name, pod_name);
+    let expected_branch = format!("rumpelpod/{}@{}", pod_name, pod_name);
 
     // Reset back to commit1 (no new commit created)
     pod_command(&repo, &daemon)
@@ -1207,7 +1207,7 @@ fn gateway_pod_branch_creation_triggers_push() {
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
 
     // Verify branch doesn't exist yet
-    let expected_branch = format!("pod/new-feature@{}", pod_name);
+    let expected_branch = format!("rumpelpod/new-feature@{}", pod_name);
     let branches_before = get_branches(&gateway);
     assert!(
         !branches_before.contains(&expected_branch),
@@ -1274,7 +1274,7 @@ fn gateway_pod_push_syncs_to_host_remote_ref() {
     // Note: The pod branch is created and checked out on first entry, which
     // triggers a push to the gateway. This is expected behavior - pods now
     // automatically sync their initial branch.
-    let expected_ref = format!("pod/{}@{}", pod_name, pod_name);
+    let expected_ref = format!("rumpelpod/{}@{}", pod_name, pod_name);
 
     // Create a commit in the pod
     pod_command(&repo, &daemon)
@@ -1347,7 +1347,7 @@ fn gateway_pod_branch_sync_to_host() {
         .expect("Failed to create branch in pod");
 
     // Host should have remote-tracking ref
-    let expected_ref = format!("pod/feature-x@{}", pod_name);
+    let expected_ref = format!("rumpelpod/feature-x@{}", pod_name);
     let refs = get_pod_remote_refs(repo.path());
     assert!(
         refs.contains(&expected_ref),
@@ -1412,8 +1412,8 @@ fn gateway_multiple_pods_sync_to_host() {
 
     // Host should have remote refs
     let refs = get_pod_remote_refs(repo.path());
-    let expected_ref1 = format!("pod/{}@{}", pod1, pod1);
-    let expected_ref2 = format!("pod/{}@{}", pod2, pod2);
+    let expected_ref1 = format!("rumpelpod/{}@{}", pod1, pod1);
+    let expected_ref2 = format!("rumpelpod/{}@{}", pod2, pod2);
 
     assert!(
         refs.contains(&expected_ref1),
@@ -1493,7 +1493,7 @@ fn gateway_pod_reset_syncs_to_host_via_force_push() {
     let commit2 = String::from_utf8_lossy(&commit2_output).trim().to_string();
 
     // Verify host has commit2
-    let expected_ref = format!("pod/{}@{}", pod_name, pod_name);
+    let expected_ref = format!("rumpelpod/{}@{}", pod_name, pod_name);
     assert_eq!(
         get_remote_ref_commit(repo.path(), &expected_ref),
         Some(commit2.clone()),
@@ -1772,7 +1772,7 @@ fn gateway_host_head_works_in_detached_state() {
 
 #[test]
 fn gateway_primary_branch_alias_works_on_host() {
-    // Test that pod/<name> resolves to the same commit as pod/<name>@<name>
+    // Test that rumpelpod/<name> resolves to the same commit as rumpelpod/<name>@<name>
     // For the alias to be created, the pod must be on a branch with the same name
     // as the pod (the "primary branch").
     let repo = TestRepo::new();
@@ -1812,8 +1812,8 @@ fn gateway_primary_branch_alias_works_on_host() {
     let pod_commit = String::from_utf8_lossy(&commit_output).trim().to_string();
 
     // Verify host has both refs pointing to the same commit
-    let full_ref = format!("pod/{}@{}", pod_name, pod_name);
-    let alias_ref = format!("pod/{}", pod_name);
+    let full_ref = format!("rumpelpod/{}@{}", pod_name, pod_name);
+    let alias_ref = format!("rumpelpod/{}", pod_name);
 
     let full_ref_commit = get_remote_ref_commit(repo.path(), &full_ref);
     let alias_ref_commit = get_remote_ref_commit(repo.path(), &alias_ref);
@@ -1821,14 +1821,14 @@ fn gateway_primary_branch_alias_works_on_host() {
     assert_eq!(
         full_ref_commit,
         Some(pod_commit.clone()),
-        "Full ref pod/{}@{} should point to pod commit",
+        "Full ref rumpelpod/{}@{} should point to pod commit",
         pod_name,
         pod_name
     );
     assert_eq!(
         alias_ref_commit,
         Some(pod_commit),
-        "Alias ref pod/{} should point to same commit as full ref",
+        "Alias ref rumpelpod/{} should point to same commit as full ref",
         pod_name
     );
 }
@@ -1865,8 +1865,8 @@ fn gateway_alias_deleted_with_pod() {
         .expect("Failed to create commit in pod");
 
     // Verify refs exist
-    let full_ref = format!("pod/{}@{}", pod_name, pod_name);
-    let alias_ref = format!("pod/{}", pod_name);
+    let full_ref = format!("rumpelpod/{}@{}", pod_name, pod_name);
+    let alias_ref = format!("rumpelpod/{}", pod_name);
 
     assert!(
         get_remote_ref_commit(repo.path(), &full_ref).is_some(),
@@ -1973,10 +1973,10 @@ fn gateway_alias_does_not_conflict_with_branches() {
         .trim()
         .to_string();
 
-    // Verify pod/bob alias still points to bob's primary branch, not alice's bob branch
-    let bob_alias_commit = get_remote_ref_commit(repo.path(), "pod/bob");
-    let bob_full_commit = get_remote_ref_commit(repo.path(), "pod/bob@bob");
-    let alice_bob_branch_commit = get_remote_ref_commit(repo.path(), "pod/bob@alice");
+    // Verify rumpelpod/bob alias still points to bob's primary branch, not alice's bob branch
+    let bob_alias_commit = get_remote_ref_commit(repo.path(), "rumpelpod/bob");
+    let bob_full_commit = get_remote_ref_commit(repo.path(), "rumpelpod/bob@bob");
+    let alice_bob_branch_commit = get_remote_ref_commit(repo.path(), "rumpelpod/bob@alice");
 
     assert_ne!(
         bob_commit, alice_bob_commit,
@@ -1985,17 +1985,17 @@ fn gateway_alias_does_not_conflict_with_branches() {
     assert_eq!(
         bob_alias_commit,
         Some(bob_commit.clone()),
-        "pod/bob alias should point to bob's primary branch"
+        "rumpelpod/bob alias should point to bob's primary branch"
     );
     assert_eq!(
         bob_full_commit,
         Some(bob_commit),
-        "pod/bob@bob should point to bob's commit"
+        "rumpelpod/bob@bob should point to bob's commit"
     );
     assert_eq!(
         alice_bob_branch_commit,
         Some(alice_bob_commit),
-        "pod/bob@alice should point to alice's bob-branch commit"
+        "rumpelpod/bob@alice should point to alice's bob-branch commit"
     );
 }
 
@@ -2050,22 +2050,23 @@ fn gateway_non_primary_branches_have_no_alias() {
         .success()
         .expect("Failed to create commit on feature branch");
 
-    // Verify feature@pod_name exists but pod/feature alias does not
-    let feature_ref = format!("pod/feature@{}", pod_name);
+    // Verify feature@pod_name exists but rumpelpod/feature alias does not
+    let feature_ref = format!("rumpelpod/feature@{}", pod_name);
     assert!(
         get_remote_ref_commit(repo.path(), &feature_ref).is_some(),
-        "pod/feature@{} should exist",
+        "rumpelpod/feature@{} should exist",
         pod_name
     );
     assert!(
-        get_remote_ref_commit(repo.path(), "pod/feature").is_none(),
-        "pod/feature alias should not exist (only primary branches get aliases)"
+        get_remote_ref_commit(repo.path(), "rumpelpod/feature").is_none(),
+        "rumpelpod/feature alias should not exist (only primary branches get aliases)"
     );
 
     // Verify primary branch alias still works
-    let primary_alias_commit = get_remote_ref_commit(repo.path(), &format!("pod/{}", pod_name));
+    let primary_alias_commit =
+        get_remote_ref_commit(repo.path(), &format!("rumpelpod/{}", pod_name));
     let primary_full_commit =
-        get_remote_ref_commit(repo.path(), &format!("pod/{}@{}", pod_name, pod_name));
+        get_remote_ref_commit(repo.path(), &format!("rumpelpod/{}@{}", pod_name, pod_name));
     assert!(
         primary_alias_commit.is_some(),
         "Primary branch alias should exist"
@@ -2521,16 +2522,16 @@ fn pod_unsafe_host_network_mode() {
         .success()
         .expect("git commit failed");
 
-    // The branch should appear in host as refs/remotes/pod/feature@unsafe-host-test
-    // Note: get_pod_remote_refs returns short names like "pod/feature@unsafe-host-test"
+    // The branch should appear in host as refs/remotes/rumpelpod/feature@unsafe-host-test
+    // Note: get_pod_remote_refs returns short names like "rumpelpod/feature@unsafe-host-test"
     // Wait, get_pod_remote_refs returns refname:short, so it is "origin/..."?
-    // No, the function queries "refs/remotes/pod/", so it returns "pod/feature@..."
+    // No, the function queries "refs/remotes/rumpelpod/", so it returns "rumpelpod/feature@..."
 
     // Let's verify get_pod_remote_refs implementation
-    // "refs/remotes/pod/*" -> refname:short -> "pod/..."
+    // "refs/remotes/rumpelpod/*" -> refname:short -> "rumpelpod/..."
 
     let remote_refs = get_pod_remote_refs(repo.path());
-    let expected_ref = format!("pod/feature@{}", pod_name);
+    let expected_ref = format!("rumpelpod/feature@{}", pod_name);
     assert!(
         remote_refs.contains(&expected_ref),
         "Pod branch not synced to host. Found: {:?}",

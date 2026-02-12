@@ -216,11 +216,11 @@ fn network_host_push_from_pod() {
     let pod_commit = String::from_utf8_lossy(&pod_commit).trim().to_string();
 
     // The pod's commit should be visible in the host repo as a remote-tracking ref.
-    // The gateway post-receive hook syncs pod/<branch>@<name> to the host repo
-    // as refs/remotes/pod/<branch>@<name>.
+    // The gateway post-receive hook syncs rumpelpod/<branch>@<name> to the host repo
+    // as refs/remotes/rumpelpod/<branch>@<name>.
     // For the primary branch (where branch == pod name), there's also an alias.
     let host_ref_commit = Command::new("git")
-        .args(["rev-parse", &format!("pod/{}", pod_name)])
+        .args(["rev-parse", &format!("rumpelpod/{}", pod_name)])
         .current_dir(repo.path())
         .success()
         .expect("Failed to get pod ref from host repo");
@@ -228,7 +228,7 @@ fn network_host_push_from_pod() {
 
     assert_eq!(
         host_ref_commit, pod_commit,
-        "Host repo should have pod's commit at pod/{} ref",
+        "Host repo should have pod's commit at rumpelpod/{} ref",
         pod_name
     );
 }

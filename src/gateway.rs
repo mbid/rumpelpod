@@ -44,23 +44,23 @@
 //!
 //! Pods can push their changes to the gateway for the host to pull.
 //!
-//! Pod branches in the gateway repo are in a separate namespace "pod/" to distinguish
+//! Pod branches in the gateway repo are in a separate namespace "rumpelpod/" to distinguish
 //! them from host branches, and are annotated with the name of the pod to distinguish them
 //! from a branch with the same name in another pod.
-//! A branch `foo` in a pod `bar` thus becomes branch `pod/foo@bar`. Note the `@` here.
+//! A branch `foo` in a pod `bar` thus becomes branch `rumpelpod/foo@bar`. Note the `@` here.
 //! To keep this unambiguous, pod names must not contain the `@` character.
 //! By default, every pod is launched with the pod name as the branch, the *primary* branch
 //! of a pod.
 //!
 //! To make accessing more ergonomic, the host can fetch just branch `bar` (instead of
-//! `pod/bar@bar`) from the gateway via custom refspecs.
+//! `rumpelpod/bar@bar`) from the gateway via custom refspecs.
 //!
 //! A reference-transaction hook in the pod automatically pushes branch updates to the gateway.
 //!
 //! ## Access control
 //!
 //! The gateway enforces that each pod can only write to its own namespace:
-//! - Pods can only push to `refs/heads/pod/*@<pod_name>` where `<pod_name>`
+//! - Pods can only push to `refs/heads/rumpelpod/*@<pod_name>` where `<pod_name>`
 //!   is their own pod name.
 //! - The host can push to `refs/heads/host/*` branches.
 //! - Reading (fetch) is unrestricted - all branches are visible to everyone.
@@ -151,7 +151,7 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
 /// because the pod cannot modify this variable.
 ///
 /// Access rules:
-/// - If POD_NAME is set, only allow refs matching `refs/heads/pod/*@<name>`
+/// - If POD_NAME is set, only allow refs matching `refs/heads/rumpelpod/*@<name>`
 /// - If POD_NAME is not set (host push), only allow refs matching `refs/heads/host/*`
 const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
     #!/bin/sh
@@ -170,15 +170,15 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
         fi
 
         if [ -n "$pod_name" ]; then
-            # Pod push: only allow pod/*@<pod_name>
+            # Pod push: only allow rumpelpod/*@<pod_name>
             expected_suffix="@$pod_name"
             case "$refname" in
-                refs/heads/pod/*"$expected_suffix")
+                refs/heads/rumpelpod/*"$expected_suffix")
                     # OK: matches pod namespace
                     ;;
                 *)
                     echo "error: pod '$pod_name' cannot push to '$refname'"
-                    echo "error: pods can only push to refs/heads/pod/*@$pod_name"
+                    echo "error: pods can only push to refs/heads/rumpelpod/*@$pod_name"
                     exit 1
                     ;;
             esac
@@ -203,13 +203,13 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
 /// Post-receive hook for the gateway repository.
 ///
 /// Syncs pod refs from the gateway to the host repo's remote-tracking refs.
-/// When a pod pushes `refs/heads/pod/*@<name>`, this hook mirrors it to
-/// the host repo as `refs/remotes/pod/*@<name>`.
+/// When a pod pushes `refs/heads/rumpelpod/*@<name>`, this hook mirrors it to
+/// the host repo as `refs/remotes/rumpelpod/*@<name>`.
 ///
 /// For primary branches (where branch name equals pod name, e.g., `foo@foo`),
-/// this hook also creates a symbolic ref alias `pod/<name>` -> `pod/<name>@<name>`.
-/// This allows users to refer to a pod's primary branch simply as `pod/alice`
-/// instead of the full `pod/alice@alice`.
+/// this hook also creates a symbolic ref alias `rumpelpod/<name>` -> `rumpelpod/<name>@<name>`.
+/// This allows users to refer to a pod's primary branch simply as `rumpelpod/alice`
+/// instead of the full `rumpelpod/alice@alice`.
 ///
 /// The post-receive hook runs after refs are updated but before git-receive-pack
 /// sends the response to the client. This means the pushing pod's `git push`
@@ -218,17 +218,17 @@ const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
 const GATEWAY_POST_RECEIVE_HOOK: &str = indoc! {r#"
     #!/bin/sh
     # Sync pod refs from gateway to host repo's remote-tracking refs.
-    # When pod pushes refs/heads/pod/*@<name>, mirror to host as
-    # refs/remotes/pod/*@<name>.
+    # When pod pushes refs/heads/rumpelpod/*@<name>, mirror to host as
+    # refs/remotes/rumpelpod/*@<name>.
     #
-    # For primary branches (foo@foo), also create an alias symref pod/foo.
+    # For primary branches (foo@foo), also create an alias symref rumpelpod/foo.
 
     while read oldvalue newvalue refname; do
         case "$refname" in
-            refs/heads/pod/*)
-                # Extract branch name (pod/foo@bar)
+            refs/heads/rumpelpod/*)
+                # Extract branch name (rumpelpod/foo@bar)
                 branch="${refname#refs/heads/}"
-                ref_suffix="${branch#pod/}"  # foo@bar
+                ref_suffix="${branch#rumpelpod/}"  # foo@bar
                 branch_part="${ref_suffix%@*}"   # foo
                 pod_part="${ref_suffix##*@}" # bar
 
@@ -237,16 +237,16 @@ const GATEWAY_POST_RECEIVE_HOOK: &str = indoc! {r#"
                     git push host --delete "refs/remotes/$branch" --quiet 2>/dev/null || true
                     # Remove alias if this was a primary branch (foo@foo)
                     if [ "$branch_part" = "$pod_part" ]; then
-                        git symbolic-ref --delete "refs/heads/pod/$pod_part" 2>/dev/null || true
-                        git push host --delete "refs/remotes/pod/$pod_part" --quiet 2>/dev/null || true
+                        git symbolic-ref --delete "refs/heads/rumpelpod/$pod_part" 2>/dev/null || true
+                        git push host --delete "refs/remotes/rumpelpod/$pod_part" --quiet 2>/dev/null || true
                     fi
                 else
                     # Update - push to host as remote-tracking ref
                     git push host "$refname:refs/remotes/$branch" --force --quiet 2>/dev/null || true
                     # Create alias if this is a primary branch (foo@foo)
                     if [ "$branch_part" = "$pod_part" ]; then
-                        git symbolic-ref "refs/heads/pod/$pod_part" "$refname"
-                        git push host "$refname:refs/remotes/pod/$pod_part" --force --quiet 2>/dev/null || true
+                        git symbolic-ref "refs/heads/rumpelpod/$pod_part" "$refname"
+                        git push host "$refname:refs/remotes/rumpelpod/$pod_part" --force --quiet 2>/dev/null || true
                     fi
                 fi
                 ;;
