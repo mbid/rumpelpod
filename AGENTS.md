@@ -12,3 +12,5 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
   Assume all containers/files/databases were created with the current version.
 - No unicode (e.g. emojis, em dashes) in comments, code, commit messages etc.
   Only if needed to test unicode support etc.
+- Most features should have tests.
+  Prefer integration tests/ over unit tests.
