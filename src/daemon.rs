@@ -1037,6 +1037,28 @@ fn create_container(
     Ok(ContainerId(response.id))
 }
 
+/// Check if an error is the known Docker overlay2 issue where .git
+/// directories are not visible inside newly created containers.
+fn is_overlay2_git_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{:#}", err);
+    msg.contains("Directory nonexistent") && msg.contains(".git")
+}
+
+/// Force-remove a container by name (best effort, for cleanup before retry).
+fn force_remove_container(docker: &Docker, name: &str) {
+    let stop_options = StopContainerOptions {
+        t: Some(0),
+        ..Default::default()
+    };
+    let _ = block_on(docker.stop_container(name, Some(stop_options)));
+
+    let remove_options = RemoveContainerOptions {
+        force: true,
+        ..Default::default()
+    };
+    let _ = block_on(docker.remove_container(name, Some(remove_options)));
+}
+
 /// Parse a Port spec into the numeric container port.
 fn resolve_port_number(port: &Port) -> Option<u16> {
     match port {
@@ -1824,54 +1846,76 @@ impl Daemon for DaemonServer {
             compute_publish_ports(&conn, &forward_ports, docker_host.is_remote())?
         };
 
-        let container_id = create_container(
-            &docker,
-            &name,
-            &pod_name,
-            &image,
-            &repo_path,
-            &container_repo_path,
-            &devcontainer,
-            &mounts,
-            &publish_ports,
-        )
-        .map_err(mark_error)?;
-
-        // Fix ownership of mount targets so the container user can write to them.
-        // Docker creates volume/tmpfs mounts as root by default.
-        if !mounts.is_empty() {
-            let targets: Vec<&str> = mounts.iter().map(|m| m.target.as_str()).collect();
-            let mut args = vec!["chown", &user];
-            args.extend(targets);
-            exec_command(&docker, &container_id.0, Some("root"), None, None, args)
-                .context("chown mount targets for container user")
-                .map_err(mark_error)?;
-        }
-
         let url = git_http_server::git_http_url(&server_ip, server_port);
 
-        // Clone repo if not already present (e.g. devcontainer without COPY)
-        ensure_repo_initialized(
-            &docker,
-            &container_id.0,
-            &url,
-            &token,
-            &container_repo_path,
-            &user,
-        )
-        .map_err(mark_error)?;
+        // Create container and run initial git setup.  Closure used so we
+        // can retry once on overlay2 filesystem errors (see below).
+        let do_create_and_setup = || -> Result<ContainerId> {
+            let container_id = create_container(
+                &docker,
+                &name,
+                &pod_name,
+                &image,
+                &repo_path,
+                &container_repo_path,
+                &devcontainer,
+                &mounts,
+                &publish_ports,
+            )?;
 
-        setup_git_remotes(
-            &docker,
-            &container_id.0,
-            &url,
-            &token,
-            &container_repo_path,
-            &pod_name,
-            &user,
-            host_branch.as_deref(),
-        )
-        .map_err(mark_error)?;
+            // Fix ownership of mount targets so the container user can write
+            // to them.  Docker creates volume/tmpfs mounts as root by default.
+            if !mounts.is_empty() {
+                let targets: Vec<&str> = mounts.iter().map(|m| m.target.as_str()).collect();
+                let mut args = vec!["chown", &user];
+                args.extend(targets);
+                exec_command(&docker, &container_id.0, Some("root"), None, None, args)
+                    .context("chown mount targets for container user")?;
+            }
+
+            ensure_repo_initialized(
+                &docker,
+                &container_id.0,
+                &url,
+                &token,
+                &container_repo_path,
+                &user,
+            )?;
+
+            setup_git_remotes(
+                &docker,
+                &container_id.0,
+                &url,
+                &token,
+                &container_repo_path,
+                &pod_name,
+                &user,
+                host_branch.as_deref(),
+            )?;
+
+            Ok(container_id)
+        };
+
+        // Docker's overlay2 storage driver occasionally fails to make the
+        // .git directory visible inside a newly created container.  Retry
+        // once after removing the broken container.
+        let container_id = match do_create_and_setup() {
+            Ok(id) => id,
+            Err(first_err) if is_overlay2_git_error(&first_err) => {
+                error!(
+                    "overlay2 .git error, removing container and retrying: {:#}",
+                    first_err
+                );
+                force_remove_container(&docker, &name);
+                do_create_and_setup().map_err(|e| {
+                    mark_error(e.context(
+                        "container setup failed again after retry; this is a known \
+                         Docker/overlay2 limitation -- please retry",
+                    ))
+                })?
+            }
+            Err(e) => return Err(mark_error(e)),
+        };
 
         // Run lifecycle commands for new container:
         // onCreateCommand -> postCreateCommand -> postStartCommand -> postAttachCommand
