@@ -1,8 +1,9 @@
 //! Tests that `rumpel enter` recovers from malformed git checkouts.
 //!
 //! When the container image already has a .git directory in a broken state
-//! (detached HEAD, unborn branch, dirty index/tree, untracked files),
-//! rumpel should fix it transparently rather than failing.
+//! (detached HEAD, unborn branch, dirty index/tree, untracked files,
+//! in-progress merge/rebase), rumpel should fix it transparently rather
+//! than failing.
 
 use rumpelpod::CommandExt;
 
@@ -113,4 +114,42 @@ fn recover_from_untracked_files() {
 
     let daemon = TestDaemon::start();
     assert_repo_usable(&repo, &daemon, "recover-untracked");
+}
+
+#[test]
+fn recover_from_in_progress_merge() {
+    let repo = TestRepo::new();
+    // Create a merge conflict so the repo is stuck mid-merge
+    let extra = concat!(
+        "RUN cd /home/testuser/workspace && ",
+        "git config user.email t@t && git config user.name T && ",
+        "echo base > file.txt && git add file.txt && git commit -m base && ",
+        "git checkout -b other && echo other > file.txt && git commit -am other && ",
+        "git checkout master && echo main > file.txt && git commit -am main && ",
+        "git merge other || true",
+    );
+    let image_id = build_test_image(repo.path(), extra).expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    assert_repo_usable(&repo, &daemon, "recover-merge");
+}
+
+#[test]
+fn recover_from_in_progress_rebase() {
+    let repo = TestRepo::new();
+    // Create a rebase conflict so the repo is stuck mid-rebase
+    let extra = concat!(
+        "RUN cd /home/testuser/workspace && ",
+        "git config user.email t@t && git config user.name T && ",
+        "echo base > file.txt && git add file.txt && git commit -m base && ",
+        "git checkout -b feature && echo feature > file.txt && git commit -am feature && ",
+        "git checkout master && echo main > file.txt && git commit -am main && ",
+        "git checkout feature && git rebase master || true",
+    );
+    let image_id = build_test_image(repo.path(), extra).expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    assert_repo_usable(&repo, &daemon, "recover-rebase");
 }
