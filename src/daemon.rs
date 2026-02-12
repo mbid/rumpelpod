@@ -1446,6 +1446,7 @@ fn copy_claude_config(
     user: &str,
     repo_path: &Path,
     container_repo_path: &Path,
+    pod_name: &str,
 ) -> Result<()> {
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
 
@@ -1487,6 +1488,11 @@ fn copy_claude_config(
         for filename in &[".credentials.json", "settings.json"] {
             let src = claude_dir.join(filename);
             if let Ok(data) = std::fs::read(&src) {
+                let data = if *filename == "settings.json" {
+                    inject_statusline(&data, pod_name)
+                } else {
+                    data
+                };
                 let dest = format!("{}/.claude/{}", container_home, filename);
                 write_file_via_stdin(docker, container_id, user, &dest, &data)
                     .context(format!("writing .claude/{}", filename))?;
@@ -1602,6 +1608,31 @@ fn strip_claude_json(data: &[u8]) -> Vec<u8> {
     obj.retain(|k, _| KEEP_KEYS.contains(&k.as_str()));
 
     serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| b"{}".to_vec())
+}
+
+/// If the host settings.json has no statusLine configured, inject one that
+/// displays the pod name so users can tell which rumpelpod they are in.
+fn inject_statusline(data: &[u8], pod_name: &str) -> Vec<u8> {
+    let Ok(mut obj) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
+    else {
+        return data.to_vec();
+    };
+
+    if obj.contains_key("statusLine") {
+        return data.to_vec();
+    }
+
+    let escaped = pod_name.replace('\'', "'\\''");
+    let cmd = format!("echo 'Rumpelpod: {}'", escaped);
+    let mut sl = serde_json::Map::new();
+    sl.insert(
+        "type".to_string(),
+        serde_json::Value::String("command".to_string()),
+    );
+    sl.insert("command".to_string(), serde_json::Value::String(cmd));
+    obj.insert("statusLine".to_string(), serde_json::Value::Object(sl));
+
+    serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| data.to_vec())
 }
 
 /// Write file contents into a container by piping data through `cat`.
@@ -2462,6 +2493,7 @@ impl Daemon for DaemonServer {
             &request.user,
             &request.repo_path,
             &request.container_repo_path,
+            &request.pod_name.0,
         )?;
 
         // Mark as copied only after the full copy succeeds.
