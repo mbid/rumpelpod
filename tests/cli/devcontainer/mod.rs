@@ -1,6 +1,7 @@
 mod env;
 mod image;
 mod lifecycle_commands;
+mod malformed_checkout;
 mod mounts;
 mod ports;
 mod remote_env;
