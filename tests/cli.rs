@@ -20,6 +20,5 @@ mod list;
 mod network;
 #[path = "cli/review.rs"]
 mod review;
-#[cfg(not(target_os = "macos"))]
 #[path = "cli/ssh/mod.rs"]
 mod ssh;

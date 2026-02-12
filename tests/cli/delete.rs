@@ -6,7 +6,6 @@ use std::process::Stdio;
 use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
 
 use super::agent::llm_cache_dir;
-#[cfg(not(target_os = "macos"))]
 use super::ssh::{create_ssh_config, write_remote_pod_config, SshRemoteHost};
 
 #[test]
@@ -195,7 +194,6 @@ fn delete_pod_clears_conversation_history() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn ssh_remote_pod_delete() {
     let repo = TestRepo::new();
@@ -206,7 +204,7 @@ fn ssh_remote_pod_delete() {
 
     // Start remote host and load the image
     let remote = SshRemoteHost::start();
-    remote
+    let remote_image_id = remote
         .load_image(&image_id)
         .expect("Failed to load image into remote Docker");
 
@@ -215,7 +213,7 @@ fn ssh_remote_pod_delete() {
     let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
 
     // Write pod config
-    write_remote_pod_config(&repo, &image_id, &remote.ssh_spec());
+    write_remote_pod_config(&repo, &remote_image_id, &remote.ssh_spec());
 
     // Create a pod on the remote
     let pod_name = "delete-test-remote";

@@ -143,24 +143,6 @@ const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
     done
 "#};
 
-/// Shared hook body that syncs the current branch and HEAD to the gateway.
-/// Used by post-checkout, post-commit, and post-rewrite hooks as a fallback
-/// for git versions that lack the reference-transaction hook (e.g. Apple Git).
-const SYNC_TO_GATEWAY_BODY: &str = indoc! {r#"
-    # Sync current branch and HEAD to the rumpelpod gateway.
-    branch=$(git symbolic-ref --short HEAD 2>/dev/null)
-    if [ -n "$branch" ]; then
-        git push rumpelpod "HEAD:refs/heads/host/$branch" --force --no-verify --quiet 2>/dev/null || true
-    fi
-    head_commit=$(git rev-parse HEAD 2>/dev/null)
-    if [ -n "$head_commit" ]; then
-        git push rumpelpod "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
-    fi
-"#};
-
-/// Signature comment used to identify hooks installed by rumpelpod.
-const HOOK_SIGNATURE: &str = "Installed by rumpelpod";
-
 /// Pre-receive hook for the gateway repository.
 ///
 /// Enforces access control: pods can only push to their own namespace.
@@ -376,12 +358,15 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     install_gateway_pre_receive_hook(&gateway)?;
     install_gateway_post_receive_hook(&gateway)?;
 
-    // Install hooks to sync branch updates from host to gateway.
-    // The reference-transaction hook covers all ref changes but is not
-    // supported by Apple Git. The individual hooks (post-checkout,
-    // post-commit, post-rewrite) serve as a fallback.
+    // Install hook to sync branch updates from host to gateway.
     install_reference_transaction_hook(repo_path)?;
-    install_host_sync_hooks(repo_path)?;
+
+    // Older git versions (notably Apple Git 2.39) don't fire the
+    // reference-transaction hook when HEAD changes via checkout/switch.
+    // Install a post-checkout hook as fallback for those versions.
+    if !git_supports_symref_in_ref_transaction(repo_path) {
+        install_post_checkout_hook(repo_path)?;
+    }
 
     // Push all existing branches to the gateway
     push_all_branches(repo_path)?;
@@ -515,43 +500,79 @@ fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Install post-checkout, post-commit, and post-rewrite hooks in the host repo.
-///
-/// These hooks serve as a fallback for git versions that don't support the
-/// reference-transaction hook (notably Apple Git). They sync the current
-/// branch and HEAD to the gateway after common operations.
-fn install_host_sync_hooks(repo_path: &Path) -> Result<()> {
+/// Post-checkout hook for git versions that don't fire reference-transaction
+/// on symbolic HEAD changes (checkout/switch).
+const POST_CHECKOUT_HOOK: &str = indoc! {r#"
+    #!/bin/sh
+    # Installed by rumpelpod to sync HEAD to the gateway on branch switch.
+    # Only needed for git versions where reference-transaction does not fire
+    # for symbolic ref changes (e.g. Apple Git 2.39).
+
+    # Only process branch checkouts (flag=1), not file checkouts (flag=0)
+    [ "$3" = "1" ] || exit 0
+
+    head_commit=$(git rev-parse HEAD 2>/dev/null)
+    if [ -n "$head_commit" ]; then
+        git push rumpelpod "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
+    fi
+"#};
+
+/// Check whether `git checkout` triggers the reference-transaction hook for
+/// HEAD changes. Older git versions (including Apple Git 2.39) only fire the
+/// hook for direct ref updates, not for symbolic ref changes.
+fn git_supports_symref_in_ref_transaction(repo_path: &Path) -> bool {
+    let output = Command::new("git")
+        .args(["--version"])
+        .current_dir(repo_path)
+        .success();
+
+    let version_str = match output {
+        Ok(out) => String::from_utf8_lossy(&out).trim().to_string(),
+        Err(_) => return false,
+    };
+
+    // Parse "git version X.Y.Z" or "git version X.Y.Z (Apple Git-NNN)"
+    let version_part = version_str
+        .strip_prefix("git version ")
+        .unwrap_or(&version_str);
+
+    // Extract major.minor
+    let parts: Vec<&str> = version_part.split('.').collect();
+    let major: u32 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    // Git 2.40+ fires reference-transaction for symbolic ref changes during checkout.
+    // Apple Git 2.39 does not. We use 2.40 as the cutoff.
+    major > 2 || (major == 2 && minor >= 40)
+}
+
+/// Install the post-checkout hook in the host repository.
+fn install_post_checkout_hook(repo_path: &Path) -> Result<()> {
     let hooks_dir = repo_path.join(".git").join("hooks");
+    let hook_path = hooks_dir.join("post-checkout");
+
     fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
 
-    for hook_name in &["post-checkout", "post-commit", "post-rewrite"] {
-        let hook_path = hooks_dir.join(hook_name);
-        let hook_content = format!("#!/bin/sh\n# {HOOK_SIGNATURE}\n{SYNC_TO_GATEWAY_BODY}");
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path)
+            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
 
-        if hook_path.exists() {
-            let existing = fs::read_to_string(&hook_path)
-                .with_context(|| format!("Failed to read hook: {}", hook_path.display()))?;
-
-            if existing.contains(HOOK_SIGNATURE) {
-                continue;
-            }
-
-            let combined = format!(
-                "{}\n\n# {HOOK_SIGNATURE}\n{SYNC_TO_GATEWAY_BODY}",
-                existing.trim_end()
-            );
-            fs::write(&hook_path, combined)
-                .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
-        } else {
-            fs::write(&hook_path, hook_content)
-                .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+        if existing.contains("Installed by rumpelpod to sync HEAD") {
+            return Ok(());
         }
 
-        let mut perms = fs::metadata(&hook_path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&hook_path, perms)?;
+        let combined = format!("{}\n\n{}", existing.trim_end(), POST_CHECKOUT_HOOK);
+        fs::write(&hook_path, combined)
+            .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
+    } else {
+        fs::write(&hook_path, POST_CHECKOUT_HOOK)
+            .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
     }
+
+    let mut perms = fs::metadata(&hook_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hook_path, perms)?;
 
     Ok(())
 }

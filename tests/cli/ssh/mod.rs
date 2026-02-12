@@ -34,8 +34,11 @@ const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct SshRemoteHost {
     /// Docker container ID.
     container_id: String,
-    /// IP address of the container.
+    /// IP address of the container (used on Linux for direct connection).
     ip_address: String,
+    /// Published SSH port on localhost (used on macOS Docker Desktop where
+    /// container IPs are not routable from the host).
+    published_port: Option<u16>,
     /// Temporary directory containing SSH keys.
     _temp_dir: TempDir,
     /// Path to the private key file.
@@ -83,28 +86,39 @@ impl SshRemoteHost {
         let public_key =
             std::fs::read_to_string(&public_key_path).expect("Failed to read public key");
 
-        // Start the container with privileged mode for nested Docker
-        // No port publishing - we connect directly to the container IP
+        // Start the container with privileged mode for nested Docker.
+        // On macOS Docker Desktop, container IPs are inside the VM and not
+        // routable from the host, so we publish the SSH port.
+        let mut run_args = vec!["run", "-d", "--privileged", "--network"];
+        run_args.push(&network_name);
+        if cfg!(target_os = "macos") {
+            run_args.push("-p");
+            run_args.push("0:22");
+        }
+        let image_str = image_id.to_string();
+        run_args.push(&image_str);
+
         let stdout = Command::new("docker")
-            .args([
-                "run",
-                "-d",
-                "--privileged",
-                "--network",
-                &network_name,
-                &image_id.to_string(),
-            ])
+            .args(&run_args)
             .success()
             .expect("Failed to start remote docker container");
 
         let container_id = String::from_utf8_lossy(&stdout).trim().to_string();
 
-        // Get the container's IP address
+        // Get the container's IP address (used on Linux for direct access)
         let ip_address = get_container_ip(&container_id).expect("Failed to get container IP");
+
+        // On macOS, find the published port for SSH
+        let published_port = if cfg!(target_os = "macos") {
+            Some(get_published_port(&container_id, 22).expect("Failed to get published SSH port"))
+        } else {
+            None
+        };
 
         let host = SshRemoteHost {
             container_id,
             ip_address,
+            published_port,
             _temp_dir: temp_dir,
             private_key_path,
             network_name,
@@ -135,6 +149,12 @@ impl SshRemoteHost {
 
         // Update IP address in case it changed
         self.ip_address = get_container_ip(&self.container_id).expect("Failed to get container IP");
+        if self.published_port.is_some() {
+            self.published_port = Some(
+                get_published_port(&self.container_id, 22)
+                    .expect("Failed to get published SSH port"),
+            );
+        }
 
         // Verify SSH is actually connectable from outside, not just listening
         if let Some(config) = ssh_config {
@@ -163,12 +183,25 @@ impl SshRemoteHost {
 
     /// Get the SSH connection string for this remote host (ssh://user@host format).
     pub fn ssh_spec(&self) -> String {
-        format!("ssh://{}@{}", SSH_USER, self.ip_address)
+        if let Some(port) = self.published_port {
+            format!("ssh://{}@127.0.0.1:{}", SSH_USER, port)
+        } else {
+            format!("ssh://{}@{}", SSH_USER, self.ip_address)
+        }
     }
 
-    /// Get the IP address of this remote host.
+    /// Get the container's IP address (for the ignored reconnect test).
     pub fn ip_address(&self) -> &str {
         &self.ip_address
+    }
+
+    /// Get the SSH host identifier used in SSH config Host directives.
+    pub fn ssh_host(&self) -> String {
+        if self.published_port.is_some() {
+            "127.0.0.1".to_string()
+        } else {
+            self.ip_address.clone()
+        }
     }
 
     /// Get the path to the private key for this remote host.
@@ -258,7 +291,11 @@ impl SshRemoteHost {
     }
 
     /// Load a Docker image into this remote host's Docker daemon.
-    pub fn load_image(&self, image_id: &ImageId) -> Result<()> {
+    ///
+    /// Returns the image ID as seen by the remote Docker daemon, which may
+    /// differ from the local ID when Docker engine versions differ (e.g.
+    /// Docker Desktop vs docker.io in Debian).
+    pub fn load_image(&self, image_id: &ImageId) -> Result<ImageId> {
         // Save image to a tar file
         let tar_path = self._temp_dir.path().join("image.tar");
         Command::new("docker")
@@ -282,8 +319,10 @@ impl SshRemoteHost {
             .success()
             .context("copying image tar to remote")?;
 
-        // Load the image on the remote Docker daemon
-        Command::new("docker")
+        // Load the image on the remote Docker daemon.
+        // Parse the output ("Loaded image ID: sha256:...") to get the
+        // remote image ID, which may differ from the local one.
+        let load_output = Command::new("docker")
             .args([
                 "exec",
                 &self.container_id,
@@ -295,12 +334,22 @@ impl SshRemoteHost {
             .success()
             .context("loading image on remote docker")?;
 
+        let load_str = String::from_utf8_lossy(&load_output);
+        let remote_id = load_str
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Loaded image ID: ")
+                    .or_else(|| line.strip_prefix("Loaded image: "))
+            })
+            .map(|s| s.trim().to_string())
+            .with_context(|| format!("parsing docker load output: {}", load_str))?;
+
         // Clean up the tar file
         let _ = Command::new("docker")
             .args(["exec", &self.container_id, "rm", remote_tar])
             .success();
 
-        Ok(())
+        Ok(ImageId(remote_id))
     }
 }
 
@@ -313,6 +362,27 @@ impl Drop for SshRemoteHost {
             .args(["network", "rm", &self.network_name])
             .output();
     }
+}
+
+/// Get the host port that Docker published for a given container port.
+fn get_published_port(container_id: &str, container_port: u16) -> Result<u16> {
+    let stdout = Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            &format!(
+                "{{{{(index (index .NetworkSettings.Ports \"{}/tcp\") 0).HostPort}}}}",
+                container_port
+            ),
+            container_id,
+        ])
+        .success()
+        .context("getting published port")?;
+
+    let port_str = String::from_utf8_lossy(&stdout).trim().to_string();
+    port_str
+        .parse()
+        .with_context(|| format!("parsing published port: {:?}", port_str))
 }
 
 /// Get a container's IP address.
@@ -427,15 +497,19 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
 
     // Add host-specific settings
     for host in hosts {
-        config.push_str(&formatdoc! {r#"
-            Host {ip}
+        let mut host_config = formatdoc! {r#"
+            Host {ssh_host}
                 IdentityFile {key}
                 IdentitiesOnly yes
-
         "#,
-            ip = host.ip_address(),
+            ssh_host = host.ssh_host(),
             key = host.private_key_path().display(),
-        });
+        };
+        if let Some(port) = host.published_port {
+            host_config.push_str(&format!("    Port {}\n", port));
+        }
+        host_config.push('\n');
+        config.push_str(&host_config);
     }
 
     std::fs::write(&config_path, config).expect("Failed to write SSH config");
@@ -488,7 +562,7 @@ fn ssh_smoke_test() {
 
     // Start remote host and load the image
     let remote = SshRemoteHost::start();
-    remote
+    let remote_image_id = remote
         .load_image(&image_id)
         .expect("Failed to load image into remote Docker");
 
@@ -496,8 +570,9 @@ fn ssh_smoke_test() {
     let ssh_config = create_ssh_config(&[&remote]);
     let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
 
-    // Write pod config
-    write_remote_pod_config(&repo, &image_id, &remote.ssh_spec());
+    // Write pod config using the remote image ID (may differ from local
+    // when Docker engine versions differ, e.g. Docker Desktop vs docker.io)
+    write_remote_pod_config(&repo, &remote_image_id, &remote.ssh_spec());
 
     // Enter the pod on the remote Docker host
     let pod_name = "remote-test";
@@ -545,7 +620,7 @@ fn ssh_reconnect_test() {
 
     // Start remote host and load the image
     let mut remote = SshRemoteHost::start();
-    remote
+    let remote_image_id = remote
         .load_image(&image_id)
         .expect("Failed to load image into remote Docker");
 
@@ -554,7 +629,7 @@ fn ssh_reconnect_test() {
     let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
 
     // Write pod config
-    write_remote_pod_config(&repo, &image_id, &remote.ssh_spec());
+    write_remote_pod_config(&repo, &remote_image_id, &remote.ssh_spec());
 
     // Enter the pod on the remote Docker host
     let pod_name = "reconnect-test";

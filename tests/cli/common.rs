@@ -41,6 +41,10 @@ pub struct TestDaemon {
     process: Child,
     #[allow(dead_code)]
     temp_dir: TempDir,
+    /// Separate short-path temp dir for the runtime directory on macOS,
+    /// where Unix socket paths must be under 104 bytes.
+    #[allow(dead_code)]
+    runtime_temp_dir: Option<TempDir>,
 }
 
 /// Environment variable for custom SSH config file (must match ssh_forward.rs).
@@ -66,7 +70,18 @@ impl TestDaemon {
 
         let socket_path = temp_dir.path().join("rumpelpod.sock");
         let state_dir = temp_dir.path().join("state");
-        let runtime_dir = temp_dir.path().join("runtime");
+
+        // macOS limits Unix socket paths to 104 bytes. The default TMPDIR
+        // on macOS is ~51 chars, making our socket paths too long. Use a
+        // short-prefix temp dir under /tmp for the runtime directory.
+        let (runtime_dir, runtime_temp_dir) = if cfg!(target_os = "macos") {
+            let rt =
+                TempDir::with_prefix_in("rp-", "/tmp").expect("Failed to create runtime temp dir");
+            let path = rt.path().to_path_buf();
+            (path, Some(rt))
+        } else {
+            (temp_dir.path().join("runtime"), None)
+        };
 
         // Ensure runtime directory exists, including the 'rumpelpod' subdirectory that
         // the daemon expects for the git socket.
@@ -111,6 +126,7 @@ impl TestDaemon {
             socket_path,
             process,
             temp_dir,
+            runtime_temp_dir,
         }
     }
 
@@ -259,7 +275,7 @@ pub struct DockerBuild {
 
 /// A Docker image ID.
 #[derive(Debug, Clone)]
-pub struct ImageId(String);
+pub struct ImageId(pub String);
 
 impl std::fmt::Display for ImageId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

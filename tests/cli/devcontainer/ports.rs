@@ -14,10 +14,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-#[cfg(not(target_os = "macos"))]
-use crate::common::{build_docker_image, DockerBuild, TEST_USER_UID};
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
-#[cfg(not(target_os = "macos"))]
+use crate::common::{
+    build_docker_image, pod_command, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+    TEST_USER_UID,
+};
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
 /// Write a devcontainer.json with port forwarding configuration.
@@ -315,7 +315,6 @@ fn extract_local_port(output: &str, container_port: u16) -> u16 {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
 /// Write a devcontainer.json with forwardPorts and a .rumpelpod.toml pointing
 /// to a remote Docker host with a pre-built image.
 fn write_remote_config_with_ports(
@@ -354,7 +353,6 @@ fn write_remote_config_with_ports(
         .expect("Failed to write .rumpelpod.toml");
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn forward_port_remote_ssh() {
     let repo = TestRepo::new();
@@ -375,7 +373,7 @@ fn forward_port_remote_ssh() {
 
     // Start a remote Docker host (Docker-in-Docker via SSH)
     let remote = SshRemoteHost::start();
-    remote
+    let remote_image_id = remote
         .load_image(&image_id)
         .expect("Failed to load image into remote Docker");
 
@@ -384,7 +382,7 @@ fn forward_port_remote_ssh() {
 
     write_remote_config_with_ports(
         &repo,
-        &image_id,
+        &remote_image_id,
         &remote.ssh_spec(),
         r#""forwardPorts": [9500],"#,
     );

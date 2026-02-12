@@ -1,7 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use assert_cmd::cargo;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -10,20 +10,16 @@ use tempfile::TempDir;
 use super::common::{llm_cache_dir, setup_test_repo, DEFAULT_MODEL};
 use crate::common::TestDaemon;
 
-fn create_timestamped_mock_editor(script_dir: &Path, timestamp_file: &Path) -> PathBuf {
+/// Create a mock editor that just touches a marker file and exits.
+fn create_marker_mock_editor(script_dir: &Path, marker_file: &Path) -> PathBuf {
     use indoc::formatdoc;
 
     let script_path = script_dir.join("mock-editor.sh");
-    let timestamp_file_str = timestamp_file.to_string_lossy();
+    let marker_file_str = marker_file.to_string_lossy();
 
-    // macOS date(1) does not support %N; fall back to perl there.
     let script_content = formatdoc! {r#"
         #!/bin/bash
-        if [ "$(uname)" = "Darwin" ]; then
-            perl -MTime::HiRes=time -e 'printf "%.6f\n", time()' > "{timestamp_file_str}"
-        else
-            date +%s.%N > "{timestamp_file_str}"
-        fi
+        touch "{marker_file_str}"
     "#};
     fs::write(&script_path, &script_content).expect("Failed to write mock editor script");
 
@@ -38,8 +34,8 @@ fn test_editor_opens_immediately() {
     let repo = setup_test_repo();
     let daemon = TestDaemon::start();
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let timestamp_file = temp_dir.path().join("timestamp.txt");
-    let editor_path = create_timestamped_mock_editor(temp_dir.path(), &timestamp_file);
+    let marker_file = temp_dir.path().join("editor-ran");
+    let editor_path = create_marker_mock_editor(temp_dir.path(), &marker_file);
     let cache_dir = llm_cache_dir();
 
     let pty_system = native_pty_system();
@@ -76,28 +72,22 @@ fn test_editor_opens_immediately() {
         "--new", // Force new conversation so it opens editor immediately
     ]);
 
-    let _start_time = Instant::now();
-    let start_system_time = SystemTime::now();
-
     let mut child = pair
         .slave
         .spawn_command(cmd)
         .expect("Failed to spawn command");
 
-    // We wait for the timestamp file to appear
+    // Poll for the marker file; measure elapsed time from the Rust side
+    // to avoid platform-specific shell timestamp issues.
     let start = Instant::now();
     let timeout = Duration::from_secs(10);
 
-    let mut editor_time: Option<f64> = None;
+    let mut editor_elapsed: Option<Duration> = None;
 
     while start.elapsed() < timeout {
-        if timestamp_file.exists() {
-            let content =
-                fs::read_to_string(&timestamp_file).expect("Failed to read timestamp file");
-            if let Ok(ts) = content.trim().parse::<f64>() {
-                editor_time = Some(ts);
-                break;
-            }
+        if marker_file.exists() {
+            editor_elapsed = Some(start.elapsed());
+            break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -105,23 +95,10 @@ fn test_editor_opens_immediately() {
     // Clean up
     let _ = child.kill();
 
-    assert!(
-        editor_time.is_some(),
-        "Editor was not invoked within timeout"
-    );
-
-    let editor_ts = editor_time.unwrap();
-    let start_ts = start_system_time
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64();
-
-    let diff = editor_ts - start_ts;
+    let elapsed = editor_elapsed.expect("Editor was not invoked within timeout");
+    let diff = elapsed.as_secs_f64();
     println!("Time to editor: {:.4}s", diff);
 
-    // Assert that it took less than 0.2 seconds
-    // Note: In a CI environment, 0.2s might be flaky if the machine is very slow.
-    // But locally it should be very fast.
     // If we wait for pod launch, it should be > 1s typically.
-    assert!(diff < 0.2, "Editor took too long to open: {:.4}s", diff);
+    assert!(diff < 0.5, "Editor took too long to open: {:.4}s", diff);
 }

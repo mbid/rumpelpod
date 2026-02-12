@@ -1,6 +1,5 @@
 //! Integration tests for the `rumpel list` subcommand.
 
-#[cfg(not(target_os = "macos"))]
 use super::ssh::{create_ssh_config, write_remote_pod_config, SshRemoteHost, SSH_USER};
 use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
 
@@ -309,7 +308,6 @@ fn list_does_not_show_other_repo_pods() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
 #[test]
 fn ssh_remote_pod_list() {
     let repo = TestRepo::new();
@@ -320,7 +318,7 @@ fn ssh_remote_pod_list() {
 
     // Start remote host and load the image
     let remote = SshRemoteHost::start();
-    remote
+    let remote_image_id = remote
         .load_image(&image_id)
         .expect("Failed to load image into remote Docker");
 
@@ -329,7 +327,7 @@ fn ssh_remote_pod_list() {
     let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
 
     // Write pod config
-    write_remote_pod_config(&repo, &image_id, &remote.ssh_spec());
+    write_remote_pod_config(&repo, &remote_image_id, &remote.ssh_spec());
 
     // Create a pod on the remote
     let output = pod_command(&repo, &daemon)
