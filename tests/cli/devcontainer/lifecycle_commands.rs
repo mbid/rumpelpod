@@ -384,3 +384,123 @@ fn wait_for_setting() {
         "rumpel enter should have waited for postCreateCommand to finish"
     );
 }
+
+/// On first creation, updateContentCommand must run after onCreateCommand
+/// and before postCreateCommand.
+#[test]
+fn update_content_command_runs_after_on_create() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_lifecycle(
+        &repo,
+        r#""onCreateCommand": "echo 1 >> /tmp/uc_order",
+            "updateContentCommand": "echo 2 >> /tmp/uc_order",
+            "postCreateCommand": "echo 3 >> /tmp/uc_order""#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "lc-uc-order", "--", "cat", "/tmp/uc_order"])
+        .success()
+        .expect("rumpel enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(
+        lines,
+        vec!["1", "2", "3"],
+        "order must be onCreateCommand -> updateContentCommand -> postCreateCommand"
+    );
+}
+
+/// updateContentCommand should run again on every re-entry (not just first
+/// creation), since its purpose is to react to content changes after git sync.
+#[test]
+fn update_content_command_runs_on_reentry() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_lifecycle(
+        &repo,
+        r#""updateContentCommand": "echo update >> /tmp/uc_count""#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    // First enter (creation)
+    pod_command(&repo, &daemon)
+        .args(["enter", "lc-uc-reentry", "--", "echo", "ok"])
+        .success()
+        .expect("first enter failed");
+
+    // Second enter (re-entry)
+    pod_command(&repo, &daemon)
+        .args(["enter", "lc-uc-reentry", "--", "echo", "ok"])
+        .success()
+        .expect("second enter failed");
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "lc-uc-reentry",
+            "--",
+            "sh",
+            "-c",
+            "grep -c update /tmp/uc_count",
+        ])
+        .success()
+        .expect("count check failed");
+
+    let count: usize = String::from_utf8_lossy(&stdout)
+        .trim()
+        .parse()
+        .expect("expected a number");
+    assert!(
+        count >= 2,
+        "updateContentCommand should have run at least twice, ran {count} times"
+    );
+}
+
+/// If updateContentCommand fails, postCreateCommand must not run.
+#[test]
+fn update_content_command_failure_stops_chain() {
+    let repo = TestRepo::new();
+
+    // Fail only on first run so re-entry succeeds and we can inspect state.
+    write_devcontainer_with_lifecycle(
+        &repo,
+        r#""updateContentCommand": "if [ ! -f /tmp/uc_fail_done ]; then touch /tmp/uc_fail_done && exit 1; fi",
+            "postCreateCommand": "touch /tmp/uc_should_not_exist""#,
+    );
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    // First enter fails because updateContentCommand exits 1 on first run.
+    let _ = pod_command(&repo, &daemon)
+        .args(["enter", "lc-uc-fail", "--", "echo", "ok"])
+        .output();
+
+    // Second enter succeeds (updateContentCommand passes on re-run,
+    // postCreateCommand was marked as ran after the failure).
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "lc-uc-fail",
+            "--",
+            "sh",
+            "-c",
+            "test -f /tmp/uc_should_not_exist && echo exists || echo missing",
+        ])
+        .success()
+        .expect("check enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "missing",
+        "postCreateCommand must not run when updateContentCommand fails"
+    );
+}

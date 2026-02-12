@@ -1742,8 +1742,9 @@ fn shell_escape(s: &str) -> String {
 }
 
 /// These commands run at most once per pod lifetime, tracked via the
-/// database. If onCreateCommand fails, postCreateCommand is skipped and both
-/// are marked as "ran" so they don't retry on subsequent enters.
+/// database. Order: onCreateCommand -> updateContentCommand -> postCreateCommand.
+/// If any command fails, later commands in the chain are skipped and marked as
+/// "ran" so they don't retry on subsequent enters.
 fn run_once_lifecycle_commands(
     docker: &Docker,
     container_id: &str,
@@ -1770,6 +1771,15 @@ fn run_once_lifecycle_commands(
         }
         let conn = db_mutex.lock().unwrap();
         db::mark_on_create_ran(&conn, pod_id)?;
+    }
+
+    if let Some(cmd) = &dc.update_content_command {
+        if let Err(e) = run_lifecycle_command(docker, container_id, user, workdir, cmd) {
+            // Skip postCreateCommand on failure
+            let conn = db_mutex.lock().unwrap();
+            db::mark_post_create_ran(&conn, pod_id)?;
+            return Err(e.context("updateContentCommand failed"));
+        }
     }
 
     let post_create_ran = {
@@ -1985,7 +1995,12 @@ impl Daemon for DaemonServer {
                 None,
             )?;
 
-            // Container was restarted from stopped state — run postStartCommand
+            // updateContentCommand runs on every re-entry after git sync
+            if let Some(cmd) = &devcontainer.update_content_command {
+                run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
+            }
+
+            // Container was restarted from stopped state -- run postStartCommand
             if was_stopped {
                 if let Some(cmd) = &devcontainer.post_start_command {
                     run_lifecycle_command(&docker, &state.id, &user, &container_repo_path, cmd)?;
@@ -2122,7 +2137,8 @@ impl Daemon for DaemonServer {
         };
 
         // Run lifecycle commands for new container:
-        // onCreateCommand -> postCreateCommand -> postStartCommand -> postAttachCommand
+        // onCreateCommand -> updateContentCommand -> postCreateCommand ->
+        // postStartCommand -> postAttachCommand
         run_once_lifecycle_commands(
             &docker,
             &container_id.0,
