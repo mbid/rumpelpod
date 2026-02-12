@@ -143,19 +143,19 @@ Examples:
     #[command(hide = true)]
     Daemon,
 
-    /// Install the rumpelpod daemon as a systemd user service
-    #[command(long_about = "Install the rumpelpod daemon as a systemd user service.
+    /// Install the rumpelpod daemon as a system service
+    #[command(long_about = "Install the rumpelpod daemon as a system service.
 
-The daemon runs in the background and manages pod containers, handling git synchronization and container lifecycle. It starts automatically on login.
+Uses systemd on Linux and launchd on macOS. The daemon runs in the background and manages pod containers, handling git synchronization and container lifecycle. It starts automatically on login.
 
 This is required before using other rumpel commands.
 ")]
     SystemInstall,
 
-    /// Uninstall the rumpelpod daemon from systemd
-    #[command(long_about = "Uninstall the rumpelpod daemon from systemd.
+    /// Uninstall the rumpelpod daemon
+    #[command(long_about = "Uninstall the rumpelpod daemon.
 
-Stops the daemon and removes it from systemd. Existing pod containers are not automatically removed.
+Stops the daemon and removes it from the system service manager. Existing pod containers are not automatically removed.
 ")]
     SystemUninstall,
 }

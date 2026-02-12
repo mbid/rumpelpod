@@ -16,7 +16,7 @@ use bollard::secret::{
     PortBinding,
 };
 use bollard::Docker;
-use indoc::{formatdoc, indoc};
+use indoc::formatdoc;
 use listenfd::ListenFd;
 use log::error;
 use rusqlite::Connection;
@@ -95,17 +95,20 @@ fn get_created_files_from_patch(patch: &[u8]) -> Result<Vec<String>> {
 }
 
 /// Get the daemon socket path.
-/// Uses $RUMPELPOD_DAEMON_SOCKET if set, otherwise $XDG_RUNTIME_DIR/rumpelpod.sock.
+/// Uses $RUMPELPOD_DAEMON_SOCKET if set, then $XDG_RUNTIME_DIR/rumpelpod.sock,
+/// then /tmp/rumpelpod-<uid>/rumpelpod.sock as fallback.
 pub fn socket_path() -> Result<PathBuf> {
     if let Ok(path) = std::env::var(SOCKET_PATH_ENV) {
         return Ok(PathBuf::from(path));
     }
 
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").context(indoc! {"
-        XDG_RUNTIME_DIR not set. This usually means you're not running in a
-        systemd user session. The rumpelpod daemon requires systemd for socket activation.
-    "})?;
-    Ok(PathBuf::from(runtime_dir).join("rumpelpod.sock"))
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let uid = unsafe { libc::getuid() };
+            PathBuf::from(format!("/tmp/rumpelpod-{}", uid))
+        });
+    Ok(runtime_dir.join("rumpelpod.sock"))
 }
 
 struct DaemonServer {
@@ -2770,6 +2773,12 @@ pub fn run_daemon() -> Result<()> {
         UnixListener::from_std(listener)?
     } else {
         let socket = socket_path()?;
+
+        // The fallback socket dir (/tmp/rumpelpod-<uid>/) may not exist yet
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+        }
 
         // Remove stale socket file if it exists
         if socket.exists() {

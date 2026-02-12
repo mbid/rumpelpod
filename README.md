@@ -13,7 +13,7 @@ Run LLM agents in isolated Docker containers with filesystem isolation.
 
 ```bash
 cargo install --path .
-rumpel system-install  # Sets up systemd daemon for git sync
+rumpel system-install  # Sets up background daemon for git sync
 ```
 
 Requires Docker with gVisor runtime (`runsc`). Alternative runtimes: `runc`, `sysbox-runc`.
@@ -59,8 +59,8 @@ rumpel enter my-shell
 | `rumpel list` | List pods for the current repository |
 | `rumpel review <name>` | Review changes in a pod using git difftool |
 | `rumpel delete <name>` | Delete a pod |
-| `rumpel system-install` | Install the systemd daemon |
-| `rumpel system-uninstall` | Uninstall the systemd daemon |
+| `rumpel system-install` | Install the background daemon |
+| `rumpel system-uninstall` | Uninstall the background daemon |
 
 ## Configuration
 

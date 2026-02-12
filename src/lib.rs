@@ -23,8 +23,8 @@ mod llm;
 mod ports;
 mod recreate;
 mod review;
+mod service;
 mod stop;
-mod systemd;
 
 use anyhow::Result;
 use clap::Parser;
@@ -40,10 +40,10 @@ pub fn run() -> Result<()> {
             daemon::run_daemon()?;
         }
         Command::SystemInstall => {
-            systemd::system_install()?;
+            service::system_install()?;
         }
         Command::SystemUninstall => {
-            systemd::system_uninstall()?;
+            service::system_uninstall()?;
         }
         Command::Enter(ref cmd) => {
             enter::enter(cmd)?;
