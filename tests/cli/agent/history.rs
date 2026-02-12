@@ -5,7 +5,7 @@
 //! all providers.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -225,27 +225,58 @@ fn agent_interactive_resume_shows_history() {
         .spawn_command(cmd)
         .expect("Failed to spawn command");
 
-    thread::sleep(Duration::from_secs(2));
+    // Monitor output and respond to prompts instead of blind sleep,
+    // since Docker Desktop on macOS can be slower to reach prompts.
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .expect("Failed to clone reader");
+    let mut writer = pair.master.take_writer().expect("Failed to get writer");
 
-    {
-        let mut writer = pair.master.take_writer().expect("Failed to get writer");
-        writeln!(writer, "y").expect("Failed to write to PTY");
-    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            if tx
+                .send(String::from_utf8_lossy(&buffer[..n]).to_string())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
 
+    let mut output = String::new();
     let start = Instant::now();
-    let timeout = Duration::from_secs(10);
+    let timeout = Duration::from_secs(30);
     loop {
         match child.try_wait() {
             Ok(Some(_status)) => break,
-            Ok(None) => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    panic!("Process did not exit within timeout");
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
+            Ok(None) => {}
             Err(e) => panic!("Error waiting for process: {}", e),
         }
+
+        while let Ok(s) = rx.try_recv() {
+            output.push_str(&s);
+        }
+
+        if output.contains("Exit? [Y/n]") {
+            output = output.replace("Exit? [Y/n]", "Exit? [Y/n] (answered)");
+            let _ = writeln!(writer, "y");
+        }
+
+        if start.elapsed() > timeout {
+            let _ = child.kill();
+            panic!(
+                "Process did not exit within timeout.\nOutput so far:\n{}",
+                output
+            );
+        }
+
+        thread::sleep(Duration::from_millis(50));
     }
 
     assert!(
