@@ -74,14 +74,15 @@ fn override_command_false() {
     let devcontainer_dir = repo.path().join(".devcontainer");
     fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
 
-    // Image whose CMD keeps the container alive via `sleep infinity`.
+    // Use `tail -f /dev/null` so we can distinguish the image's CMD
+    // from rumpelpod's `sleep infinity` override.
     let dockerfile = formatdoc! {r#"
         FROM debian:13
         RUN apt-get update && apt-get install -y git procps
         RUN useradd -m -u 1000 {TEST_USER}
         COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
         USER {TEST_USER}
-        CMD ["sleep", "infinity"]
+        CMD ["tail", "-f", "/dev/null"]
     "#};
     fs::write(devcontainer_dir.join("Dockerfile"), dockerfile).expect("Failed to write Dockerfile");
 
@@ -107,22 +108,17 @@ fn override_command_false() {
 
     let daemon = TestDaemon::start();
 
-    // PID 1 should be the image's CMD, not one injected by rumpelpod.
-    // The image CMD runs via /bin/sh -c, so PID 1's comm is "sleep".
-    // Distinguish by checking /proc/1/cmdline: the image's CMD is
-    // launched by Docker as ["sleep", "infinity"], same args but via the
-    // image -- the key point is that the container started successfully
-    // without rumpelpod setting cmd.
+    // PID 1 should be `tail` from the image's CMD, not rumpelpod's
+    // `sleep infinity` override.
     let stdout = pod_command(&repo, &daemon)
-        .args(["enter", "override-false", "--", "cat", "/proc/1/cmdline"])
+        .args(["enter", "override-false", "--", "cat", "/proc/1/comm"])
         .success()
         .expect("rumpel enter failed with overrideCommand=false");
 
-    // cmdline is NUL-separated; verify it contains "sleep".
-    let cmdline = String::from_utf8_lossy(&stdout);
+    let pid1_name = String::from_utf8_lossy(&stdout).trim().to_string();
     assert!(
-        cmdline.contains("sleep"),
-        "expected PID 1 cmdline to contain 'sleep' from the image CMD, got '{cmdline}'"
+        pid1_name.contains("tail"),
+        "expected PID 1 to be 'tail' (image CMD), got '{pid1_name}'"
     );
 }
 
