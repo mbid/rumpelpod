@@ -12,49 +12,49 @@ name = "rumpel"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "*"
-thiserror = "*"
-toml = "*"
-log = "*"
-env_logger = "*"
-clap = { version = "*", features = ["derive"] }
-sha2 = "*"
-hex = "*"
-serde = { version = "*", features = ["derive"] }
-serde_json = { version = "*", features = ["preserve_order"] }
-json5 = "*"
-notify = "*"
-tokio = { version = "*", features = ["full"] }
-dirs = "*"
-nix = { version = "*", features = ["user", "fs"] }
-chrono = { version = "*", features = ["serde"] }
-libc = "*"
-reflink-copy = "*"
-git2 = { version = "*", default-features = false }
-reqwest = { version = "*", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-jsonwebtoken = { version = "*", features = ["rust_crypto"] }
-base64 = "*"
-indoc = "*"
-strum = { version = "*", features = ["derive"] }
-backoff = "*"
-retry = "*"
-rand = "0.9"
-tempfile = "*"
-listenfd = "*"
-url = "*"
-axum = "*"
-hyper = { version = "*", features = ["server", "http1"] }
-hyper-util = { version = "*", features = ["tokio"] }
-tower = { version = "*", features = ["util"] }
-cgi-service = "*"
-rusqlite = { version = "*", features = ["bundled", "chrono"] }
-socket2 = "*"
-tower-service = ">=0"
-bollard = "*"
-tokio-stream = ">=0"
-comfy-table = "*"
+anyhow = ">= 0"
+thiserror = ">= 0"
+toml = ">= 0"
+log = ">= 0"
+env_logger = ">= 0"
+clap = { version = ">= 0", features = ["derive"] }
+sha2 = ">= 0"
+hex = ">= 0"
+serde = { version = ">= 0", features = ["derive"] }
+serde_json = { version = ">= 0", features = ["preserve_order"] }
+json5 = ">= 0"
+notify = ">= 0"
+tokio = { version = ">= 0", features = ["full"] }
+dirs = ">= 0"
+nix = { version = ">= 0", features = ["user", "fs"] }
+chrono = { version = ">= 0", features = ["serde"] }
+libc = ">= 0"
+reflink-copy = ">= 0"
+git2 = { version = ">= 0", default-features = false }
+reqwest = { version = ">= 0", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+jsonwebtoken = { version = ">= 0", features = ["rust_crypto"] }
+base64 = ">= 0"
+indoc = ">= 0"
+strum = { version = ">= 0", features = ["derive"] }
+backoff = ">= 0"
+retry = ">= 0"
+rand = ">= 0"
+tempfile = ">= 0"
+listenfd = ">= 0"
+url = ">= 0"
+axum = ">= 0"
+hyper = { version = ">= 0", features = ["server", "http1"] }
+hyper-util = { version = ">= 0", features = ["tokio"] }
+tower = { version = ">= 0", features = ["util"] }
+cgi-service = ">= 0"
+rusqlite = { version = ">= 0", features = ["bundled", "chrono"] }
+socket2 = ">= 0"
+tower-service = ">= 0"
+bollard = ">= 0"
+tokio-stream = ">= 0"
+comfy-table = ">= 0"
 
 [dev-dependencies]
-assert_cmd = "*"
-portable-pty = "*"
-walkdir = "*"
+assert_cmd = ">= 0"
+portable-pty = ">= 0"
+walkdir = ">= 0"
