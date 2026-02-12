@@ -1050,13 +1050,17 @@ fn force_remove_container(docker: &Docker, name: &str) {
         t: Some(0),
         ..Default::default()
     };
-    let _ = block_on(docker.stop_container(name, Some(stop_options)));
+    if let Err(e) = block_on(docker.stop_container(name, Some(stop_options))) {
+        error!("failed to stop broken container {}: {}", name, e);
+    }
 
     let remove_options = RemoveContainerOptions {
         force: true,
         ..Default::default()
     };
-    let _ = block_on(docker.remove_container(name, Some(remove_options)));
+    if let Err(e) = block_on(docker.remove_container(name, Some(remove_options))) {
+        error!("failed to remove broken container {}: {}", name, e);
+    }
 }
 
 /// Parse a Port spec into the numeric container port.
