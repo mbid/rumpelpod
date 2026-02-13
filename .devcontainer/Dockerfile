@@ -30,7 +30,8 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         docker.io \
         kubectl \
         kind \
-        screen
+        screen \
+        musl-tools
 
 RUN echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
     && systemctl mask \
@@ -73,7 +74,8 @@ USER ${USER}
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
-RUN rustup component add rust-analyzer
+RUN rustup component add rust-analyzer \
+    && rustup target add x86_64-unknown-linux-musl
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
