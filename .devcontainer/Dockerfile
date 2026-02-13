@@ -31,8 +31,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         kubectl \
         kind \
         screen \
-        musl-tools \
-        skopeo
+        musl-tools
 
 RUN echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
     && systemctl mask \
@@ -91,12 +90,5 @@ WORKDIR /workspaces/rumpelpod
 RUN cargo build; cargo test --no-run; true
 
 USER root
-
-# Pre-download test base image so tests don't depend on Docker Hub availability.
-RUN skopeo copy docker://docker.io/library/debian:13 docker-archive:/preloaded-images/debian-13.tar:debian:13
-
-RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nExecStart=/usr/bin/docker load -i /preloaded-images/debian-13.tar\n\n[Install]\nWantedBy=multi-user.target\n' \
-    > /etc/systemd/system/preload-images.service \
-    && systemctl enable preload-images.service
 
 ENTRYPOINT ["/sbin/init"]
