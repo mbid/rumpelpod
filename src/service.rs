@@ -70,6 +70,10 @@ fn launchd_plist_content() -> Result<String> {
     let socket = daemon::socket_path()?;
     let socket = socket.display();
     let label = LAUNCHD_LABEL;
+    // Capture the installer's PATH so the daemon can find docker, git, etc.
+    // even when they live outside the default launchd PATH (e.g. /opt/homebrew/bin).
+    let path = std::env::var("PATH")
+        .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string());
 
     Ok(formatdoc! {"
         <?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -88,7 +92,7 @@ fn launchd_plist_content() -> Result<String> {
             <key>EnvironmentVariables</key>
             <dict>
                 <key>PATH</key>
-                <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+                <string>{path}</string>
                 <key>RUMPELPOD_DAEMON_SOCKET</key>
                 <string>{socket}</string>
             </dict>
