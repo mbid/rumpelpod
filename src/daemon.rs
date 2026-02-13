@@ -1089,14 +1089,26 @@ fn create_container(
     Ok(ContainerId(response.id))
 }
 
-/// Check if an error is the known Docker overlay2 issue where .git
-/// directories are not visible inside newly created containers.
-fn is_overlay2_git_error(err: &anyhow::Error) -> bool {
+/// Check if an error looks like the known Docker overlay2 issue where the
+/// container filesystem is not fully visible right after creation.
+fn is_overlay2_setup_error(err: &anyhow::Error) -> bool {
     let msg = format!("{:#}", err);
     // "Directory nonexistent" comes from git clone, "index.lock" from
     // git reset/clean -- both are overlay2 failing to expose .git.
-    (msg.contains("Directory nonexistent") && msg.contains(".git"))
+    if (msg.contains("Directory nonexistent") && msg.contains(".git"))
         || (msg.contains("index.lock") && msg.contains("No such file or directory"))
+    {
+        return true;
+    }
+    // copy_rumpel_binary runs before git ops and hits the same overlay2
+    // issue -- the container filesystem is not yet writeable/visible.
+    if msg.contains("creating /opt/rumpelpod/bin")
+        || msg.contains("writing rumpel binary")
+        || msg.contains("making rumpel binary executable")
+    {
+        return true;
+    }
+    false
 }
 
 /// Force-remove a container by name (best effort, for cleanup before retry).
@@ -2374,13 +2386,13 @@ impl Daemon for DaemonServer {
         };
 
         // Docker's overlay2 storage driver occasionally fails to make the
-        // .git directory visible inside a newly created container.  Retry
-        // once after removing the broken container.
+        // container filesystem visible right after creation.  Retry once
+        // after removing the broken container.
         let container_id = match do_create_and_setup() {
             Ok(id) => id,
-            Err(first_err) if is_overlay2_git_error(&first_err) => {
+            Err(first_err) if is_overlay2_setup_error(&first_err) => {
                 error!(
-                    "overlay2 .git error, removing container and retrying: {:#}",
+                    "overlay2 setup error, removing container and retrying: {:#}",
                     first_err
                 );
                 force_remove_container(&docker, &name);
