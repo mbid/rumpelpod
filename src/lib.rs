@@ -84,6 +84,18 @@ pub fn run() -> Result<()> {
             HookSubcommand::ReferenceTransaction(ref cmd) => {
                 hook::reference_transaction(cmd)?;
             }
+            HookSubcommand::HostReferenceTransaction(ref cmd) => {
+                hook::host_reference_transaction(cmd)?;
+            }
+            HookSubcommand::HostPostCheckout(ref cmd) => {
+                hook::host_post_checkout(cmd)?;
+            }
+            HookSubcommand::GatewayPreReceive => {
+                hook::gateway_pre_receive()?;
+            }
+            HookSubcommand::GatewayPostReceive => {
+                hook::gateway_post_receive()?;
+            }
         },
     }
 

@@ -78,7 +78,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use indoc::indoc;
 use sha2::{Digest, Sha256};
 
 use crate::command_ext::CommandExt;
@@ -90,169 +89,16 @@ const RUMPELPOD_REMOTE: &str = "rumpelpod";
 /// Name of the remote added to the gateway pointing to the host repo.
 const HOST_REMOTE: &str = "host";
 
-/// Reference-transaction hook script that pushes branch updates to the gateway.
-///
-/// This hook is invoked whenever any reference is updated (commits, branch creation,
-/// deletion, resets, etc). It runs in the "committed" state after the reference
-/// transaction has been committed.
-///
-/// The hook reads updated refs from stdin in the format:
-/// `<old-value> <new-value> <ref-name>`
-///
-/// For branch updates (refs/heads/*), it pushes the change to the gateway:
-/// - For updates/creates: push the new commit
-/// - For deletes (new-value is all zeros): delete the branch from gateway
-///
-/// For HEAD updates, it pushes the current HEAD commit to `host/HEAD` in the gateway.
-/// This ensures pods can always find the host's current commit, even when
-/// the host is in detached HEAD state.
-const REFERENCE_TRANSACTION_HOOK: &str = indoc! {r#"
-    #!/bin/sh
-    # Installed by rumpelpod to sync branch updates to the gateway repository.
-    # The gateway allows pods to fetch commits without direct host access.
-    # This hook runs on reference-transaction events.
-
-    # Only process after the transaction is committed
-    [ "$1" = "committed" ] || exit 0
-
-    # Process each ref update from stdin
-    while read oldvalue newvalue refname; do
-        case "$refname" in
-            HEAD)
-                # HEAD changed - sync current commit to host/HEAD in gateway.
-                # The newvalue may be a symbolic ref (e.g., "ref:refs/heads/main")
-                # or a commit hash (detached HEAD). We always resolve to the commit.
-                # We use the fully qualified ref because when HEAD is a commit hash,
-                # git requires the full ref path for the destination.
-                head_commit=$(git rev-parse HEAD 2>/dev/null)
-                if [ -n "$head_commit" ]; then
-                    git push rumpelpod "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
-                fi
-                ;;
-            refs/heads/*)
-                branch="${refname#refs/heads/}"
-                if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
-                    # Branch deleted - remove from gateway
-                    git push rumpelpod --delete "host/$branch" --no-verify --quiet 2>/dev/null || true
-                else
-                    # Branch updated or created - push to gateway
-                    git push rumpelpod "$branch:host/$branch" --force --no-verify --quiet 2>/dev/null || true
-                fi
-                ;;
-        esac
-    done
-"#};
-
-/// Pre-receive hook for the gateway repository.
-///
-/// Enforces access control: pods can only push to their own namespace.
-/// The pod name is provided via the POD_NAME environment variable,
-/// which is set by the git HTTP server (not by the client). This is secure
-/// because the pod cannot modify this variable.
-///
-/// Access rules:
-/// - If POD_NAME is set, only allow refs matching `refs/heads/rumpelpod/*@<name>`
-/// - If POD_NAME is not set (host push), only allow refs matching `refs/heads/host/*`
-const GATEWAY_PRE_RECEIVE_HOOK: &str = indoc! {r#"
-    #!/bin/sh
-    # Gateway access control: pods can only write to their own namespace.
-    #
-    # POD_NAME is set by the git HTTP server based on the bearer token.
-    # The pod cannot forge this - it's set server-side.
-
-    pod_name="$POD_NAME"
-
-    # Read all refs being pushed
-    while read old_oid new_oid refname; do
-        # Skip deletions (new_oid is all zeros)
-        if echo "$new_oid" | grep -q '^0\{40\}$'; then
-            continue
-        fi
-
-        if [ -n "$pod_name" ]; then
-            # Pod push: only allow rumpelpod/*@<pod_name>
-            expected_suffix="@$pod_name"
-            case "$refname" in
-                refs/heads/rumpelpod/*"$expected_suffix")
-                    # OK: matches pod namespace
-                    ;;
-                *)
-                    echo "error: pod '$pod_name' cannot push to '$refname'"
-                    echo "error: pods can only push to refs/heads/rumpelpod/*@$pod_name"
-                    exit 1
-                    ;;
-            esac
-        else
-            # Host push (no POD_NAME): only allow host/*
-            case "$refname" in
-                refs/heads/host/*)
-                    # OK: host namespace
-                    ;;
-                *)
-                    echo "error: host can only push to refs/heads/host/*"
-                    echo "error: attempted to push to '$refname'"
-                    exit 1
-                    ;;
-            esac
-        fi
-    done
-
-    exit 0
-"#};
-
-/// Post-receive hook for the gateway repository.
-///
-/// Syncs pod refs from the gateway to the host repo's remote-tracking refs.
-/// When a pod pushes `refs/heads/rumpelpod/*@<name>`, this hook mirrors it to
-/// the host repo as `refs/remotes/rumpelpod/*@<name>`.
-///
-/// For primary branches (where branch name equals pod name, e.g., `foo@foo`),
-/// this hook also creates a symbolic ref alias `rumpelpod/<name>` -> `rumpelpod/<name>@<name>`.
-/// This allows users to refer to a pod's primary branch simply as `rumpelpod/alice`
-/// instead of the full `rumpelpod/alice@alice`.
-///
-/// The post-receive hook runs after refs are updated but before git-receive-pack
-/// sends the response to the client. This means the pushing pod's `git push`
-/// blocks until this hook completes, ensuring refs are visible in the host repo
-/// immediately after the push returns.
-const GATEWAY_POST_RECEIVE_HOOK: &str = indoc! {r#"
-    #!/bin/sh
-    # Sync pod refs from gateway to host repo's remote-tracking refs.
-    # When pod pushes refs/heads/rumpelpod/*@<name>, mirror to host as
-    # refs/remotes/rumpelpod/*@<name>.
-    #
-    # For primary branches (foo@foo), also create an alias symref rumpelpod/foo.
-
-    while read oldvalue newvalue refname; do
-        case "$refname" in
-            refs/heads/rumpelpod/*)
-                # Extract branch name (rumpelpod/foo@bar)
-                branch="${refname#refs/heads/}"
-                ref_suffix="${branch#rumpelpod/}"  # foo@bar
-                branch_part="${ref_suffix%@*}"   # foo
-                pod_part="${ref_suffix##*@}" # bar
-
-                if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
-                    # Deletion - remove from host
-                    git push host --delete "refs/remotes/$branch" --quiet 2>/dev/null || true
-                    # Remove alias if this was a primary branch (foo@foo)
-                    if [ "$branch_part" = "$pod_part" ]; then
-                        git symbolic-ref --delete "refs/heads/rumpelpod/$pod_part" 2>/dev/null || true
-                        git push host --delete "refs/remotes/rumpelpod/$pod_part" --quiet 2>/dev/null || true
-                    fi
-                else
-                    # Update - push to host as remote-tracking ref
-                    git push host "$refname:refs/remotes/$branch" --force --quiet 2>/dev/null || true
-                    # Create alias if this is a primary branch (foo@foo)
-                    if [ "$branch_part" = "$pod_part" ]; then
-                        git symbolic-ref "refs/heads/rumpelpod/$pod_part" "$refname"
-                        git push host "$refname:refs/remotes/rumpelpod/$pod_part" --force --quiet 2>/dev/null || true
-                    fi
-                fi
-                ;;
-        esac
-    done
-"#};
+/// Generate a shim script that delegates to `rumpel hook <subcommand>`.
+/// The rumpel binary path is resolved at install time and embedded in the shim.
+fn hook_shim(rumpel_path: &str, signature: &str, subcommand: &str, use_exec: bool) -> String {
+    let invoke = if use_exec { "exec " } else { "" };
+    format!(
+        "#!/bin/sh\n\
+         # {signature}\n\
+         {invoke}{rumpel_path} hook {subcommand} \"$@\"\n"
+    )
+}
 
 /// Compute a hash of the repo path for use in the gateway directory name.
 fn repo_path_hash(repo_path: &Path) -> String {
@@ -354,18 +200,23 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
         ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
     }
 
+    let rumpel_exe = std::env::current_exe()
+        .context("resolving rumpel binary path")?
+        .to_string_lossy()
+        .to_string();
+
     // Install gateway hooks (overwrites any existing hooks).
-    install_gateway_pre_receive_hook(&gateway)?;
-    install_gateway_post_receive_hook(&gateway)?;
+    install_gateway_pre_receive_hook(&gateway, &rumpel_exe)?;
+    install_gateway_post_receive_hook(&gateway, &rumpel_exe)?;
 
     // Install hook to sync branch updates from host to gateway.
-    install_reference_transaction_hook(repo_path)?;
+    install_reference_transaction_hook(repo_path, &rumpel_exe)?;
 
     // Older git versions (notably Apple Git 2.39) don't fire the
     // reference-transaction hook when HEAD changes via checkout/switch.
     // Install a post-checkout hook as fallback for those versions.
     if !git_supports_symref_in_ref_transaction(repo_path) {
-        install_post_checkout_hook(repo_path)?;
+        install_post_checkout_hook(repo_path, &rumpel_exe)?;
     }
 
     // Push all existing branches to the gateway
@@ -429,14 +280,26 @@ fn append_git_config(repo_path: &Path, content: &str) -> Result<()> {
 }
 
 /// Install the pre-receive hook in the gateway repository for access control.
-fn install_gateway_pre_receive_hook(gateway_path: &Path) -> Result<()> {
-    install_gateway_hook(gateway_path, "pre-receive", GATEWAY_PRE_RECEIVE_HOOK)
+fn install_gateway_pre_receive_hook(gateway_path: &Path, rumpel_exe: &str) -> Result<()> {
+    let content = hook_shim(
+        rumpel_exe,
+        "Gateway access control: pods can only write to their own namespace.",
+        "gateway-pre-receive",
+        true,
+    );
+    install_gateway_hook(gateway_path, "pre-receive", &content)
 }
 
 /// Install the post-receive hook in the gateway repository.
 /// This hook syncs pod refs to the host repo as remote-tracking refs.
-fn install_gateway_post_receive_hook(gateway_path: &Path) -> Result<()> {
-    install_gateway_hook(gateway_path, "post-receive", GATEWAY_POST_RECEIVE_HOOK)
+fn install_gateway_post_receive_hook(gateway_path: &Path, rumpel_exe: &str) -> Result<()> {
+    let content = hook_shim(
+        rumpel_exe,
+        "Sync pod refs from gateway to host repo.",
+        "gateway-post-receive",
+        true,
+    );
+    install_gateway_hook(gateway_path, "post-receive", &content)
 }
 
 /// Install a hook script in the gateway repository.
@@ -460,13 +323,16 @@ fn install_gateway_hook(gateway_path: &Path, hook_name: &str, hook_content: &str
     Ok(())
 }
 
-/// Install the post-commit hook in the host repository.
+/// Install the reference-transaction hook in the host repository.
 ///
 /// If a reference-transaction hook already exists and wasn't installed by us, we append
 /// our hook invocation to it.
-fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
+fn install_reference_transaction_hook(repo_path: &Path, rumpel_exe: &str) -> Result<()> {
     let hooks_dir = repo_path.join(".git").join("hooks");
     let hook_path = hooks_dir.join("reference-transaction");
+
+    let signature = "Installed by rumpelpod to sync branch updates";
+    let shim = hook_shim(rumpel_exe, signature, "host-reference-transaction", false);
 
     // Ensure hooks directory exists
     fs::create_dir_all(&hooks_dir)
@@ -477,18 +343,18 @@ fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
 
         // Check if our hook is already installed (look for our signature comment)
-        if existing.contains("Installed by rumpelpod to sync branch updates") {
+        if existing.contains(signature) {
             // Already installed, nothing to do
             return Ok(());
         }
 
         // Append our hook to the existing one
-        let combined = format!("{}\n\n{}", existing.trim_end(), REFERENCE_TRANSACTION_HOOK);
+        let combined = format!("{}\n\n{}", existing.trim_end(), shim);
         fs::write(&hook_path, combined)
             .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
     } else {
         // Create new hook
-        fs::write(&hook_path, REFERENCE_TRANSACTION_HOOK)
+        fs::write(&hook_path, shim)
             .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
     }
 
@@ -500,22 +366,8 @@ fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Post-checkout hook for git versions that don't fire reference-transaction
-/// on symbolic HEAD changes (checkout/switch).
-const POST_CHECKOUT_HOOK: &str = indoc! {r#"
-    #!/bin/sh
-    # Installed by rumpelpod to sync HEAD to the gateway on branch switch.
-    # Only needed for git versions where reference-transaction does not fire
-    # for symbolic ref changes (e.g. Apple Git 2.39).
-
-    # Only process branch checkouts (flag=1), not file checkouts (flag=0)
-    [ "$3" = "1" ] || exit 0
-
-    head_commit=$(git rev-parse HEAD 2>/dev/null)
-    if [ -n "$head_commit" ]; then
-        git push rumpelpod "$head_commit:refs/heads/host/HEAD" --force --no-verify --quiet 2>/dev/null || true
-    fi
-"#};
+/// Signature used to detect whether the post-checkout hook was installed by us.
+const POST_CHECKOUT_SIGNATURE: &str = "Installed by rumpelpod to sync HEAD";
 
 /// Check whether `git checkout` triggers the reference-transaction hook for
 /// HEAD changes. Older git versions (including Apple Git 2.39) only fire the
@@ -547,9 +399,16 @@ fn git_supports_symref_in_ref_transaction(repo_path: &Path) -> bool {
 }
 
 /// Install the post-checkout hook in the host repository.
-fn install_post_checkout_hook(repo_path: &Path) -> Result<()> {
+fn install_post_checkout_hook(repo_path: &Path, rumpel_exe: &str) -> Result<()> {
     let hooks_dir = repo_path.join(".git").join("hooks");
     let hook_path = hooks_dir.join("post-checkout");
+
+    let shim = hook_shim(
+        rumpel_exe,
+        POST_CHECKOUT_SIGNATURE,
+        "host-post-checkout",
+        false,
+    );
 
     fs::create_dir_all(&hooks_dir)
         .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
@@ -558,15 +417,15 @@ fn install_post_checkout_hook(repo_path: &Path) -> Result<()> {
         let existing = fs::read_to_string(&hook_path)
             .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
 
-        if existing.contains("Installed by rumpelpod to sync HEAD") {
+        if existing.contains(POST_CHECKOUT_SIGNATURE) {
             return Ok(());
         }
 
-        let combined = format!("{}\n\n{}", existing.trim_end(), POST_CHECKOUT_HOOK);
+        let combined = format!("{}\n\n{}", existing.trim_end(), shim);
         fs::write(&hook_path, combined)
             .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
     } else {
-        fs::write(&hook_path, POST_CHECKOUT_HOOK)
+        fs::write(&hook_path, shim)
             .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
     }
 

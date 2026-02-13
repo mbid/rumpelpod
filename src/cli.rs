@@ -397,12 +397,34 @@ pub struct ImageFetchCommand {
 
 #[derive(Subcommand)]
 pub enum HookSubcommand {
-    /// Handle git reference-transaction hook events
+    /// Handle git reference-transaction hook events (pod repo)
     ReferenceTransaction(ReferenceTransactionCommand),
+
+    /// Handle git reference-transaction hook events (host repo)
+    HostReferenceTransaction(ReferenceTransactionCommand),
+
+    /// Handle git post-checkout hook events (host repo)
+    HostPostCheckout(PostCheckoutCommand),
+
+    /// Handle git pre-receive hook events (gateway repo)
+    GatewayPreReceive,
+
+    /// Handle git post-receive hook events (gateway repo)
+    GatewayPostReceive,
 }
 
 #[derive(Args)]
 pub struct ReferenceTransactionCommand {
     /// Transaction state: "prepared", "committed", or "aborted"
     pub state: String,
+}
+
+#[derive(Args)]
+pub struct PostCheckoutCommand {
+    /// Previous HEAD ref
+    pub prev_ref: String,
+    /// New HEAD ref
+    pub new_ref: String,
+    /// Checkout type: "0" for file checkout, "1" for branch checkout
+    pub flag: String,
 }
