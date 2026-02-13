@@ -703,36 +703,12 @@ fn setup_git_remotes(
     Ok(())
 }
 
-/// Reference-transaction hook script for pod repos that pushes branch updates to the gateway.
-///
-/// This hook is invoked whenever any reference is updated (commits, branch creation,
-/// deletion, resets, etc). It runs in the "committed" state after the reference
-/// transaction has been committed.
+/// Thin shim that delegates to the rumpel binary copied into the container.
+/// The actual logic lives in src/hook.rs.
 const POD_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
     #!/bin/sh
     # Installed by rumpelpod to sync branch updates to the gateway repository.
-    # This allows the host to pull pod changes.
-    # This hook runs on reference-transaction events.
-
-    # Only process after the transaction is committed
-    [ "$1" = "committed" ] || exit 0
-
-    # Process each ref update from stdin
-    while read oldvalue newvalue refname; do
-        # Only handle local branches (refs/heads/*)
-        case "$refname" in
-            refs/heads/*)
-                branch="${refname#refs/heads/}"
-                if [ "$newvalue" = "0000000000000000000000000000000000000000" ]; then
-                    # Branch deleted - remove from gateway
-                    git push rumpelpod --delete "$branch" --quiet 2>/dev/null || true
-                else
-                    # Branch updated or created - push to gateway
-                    git push rumpelpod "$branch" --force --quiet 2>/dev/null || true
-                fi
-                ;;
-        esac
-    done
+    exec /opt/rumpelpod/bin/rumpel hook reference-transaction "$@"
 "#};
 
 /// Install the reference-transaction hook in the pod repository.
@@ -1853,6 +1829,51 @@ fn write_file_via_stdin(
     Ok(())
 }
 
+/// Copy the host rumpel binary into the container so hook shims can invoke it.
+///
+/// This assumes the host binary is a Linux ELF that can run inside the
+/// container.  When building on macOS for a Linux Docker host, we would
+/// need to cross-compile a Linux binary (e.g. via build.rs + Docker)
+/// and embed it instead.
+fn copy_rumpel_binary(docker: &Docker, container_id: &str) -> Result<()> {
+    let exe = std::env::current_exe().context("resolving own binary path")?;
+    let data = std::fs::read(&exe).with_context(|| format!("reading {}", exe.display()))?;
+
+    exec_command(
+        docker,
+        container_id,
+        Some("root"),
+        None,
+        None,
+        vec!["mkdir", "-p", "/opt/rumpelpod/bin"],
+    )
+    .context("creating /opt/rumpelpod/bin")?;
+
+    let cmd = format!("cat > {}", shell_escape("/opt/rumpelpod/bin/rumpel"));
+    exec_with_stdin(
+        docker,
+        container_id,
+        Some("root"),
+        None,
+        None,
+        vec!["sh", "-c", &cmd],
+        Some(&data),
+    )
+    .context("writing rumpel binary")?;
+
+    exec_command(
+        docker,
+        container_id,
+        Some("root"),
+        None,
+        None,
+        vec!["chmod", "+x", "/opt/rumpelpod/bin/rumpel"],
+    )
+    .context("making rumpel binary executable")?;
+
+    Ok(())
+}
+
 /// These commands run at most once per pod lifetime, tracked via the
 /// database. Order: onCreateCommand -> updateContentCommand -> postCreateCommand.
 /// If any command fails, later commands in the chain are skipped and marked as
@@ -2324,6 +2345,10 @@ impl Daemon for DaemonServer {
                 exec_command(&docker, &container_id.0, Some("root"), None, None, args)
                     .context("chown mount targets for container user")?;
             }
+
+            // The rumpel binary must be present before git operations
+            // that trigger the reference-transaction hook shim.
+            copy_rumpel_binary(&docker, &container_id.0)?;
 
             ensure_repo_initialized(
                 &docker,

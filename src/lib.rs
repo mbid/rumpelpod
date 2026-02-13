@@ -16,6 +16,7 @@ mod enter;
 mod gateway;
 mod git;
 mod git_http_server;
+mod hook;
 pub(crate) mod image;
 mod image_cmd;
 mod list;
@@ -29,7 +30,7 @@ mod stop;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command, ImageSubcommand};
+use cli::{Cli, Command, HookSubcommand, ImageSubcommand};
 
 pub fn run() -> Result<()> {
     env_logger::init();
@@ -79,6 +80,11 @@ pub fn run() -> Result<()> {
         Command::Claude(ref cmd) => {
             claude::claude(cmd)?;
         }
+        Command::Hook(ref sub) => match sub {
+            HookSubcommand::ReferenceTransaction(ref cmd) => {
+                hook::reference_transaction(cmd)?;
+            }
+        },
     }
 
     Ok(())

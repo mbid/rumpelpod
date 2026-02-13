@@ -139,6 +139,10 @@ Examples:
     )]
     Claude(ClaudeCommand),
 
+    /// Internal hook handlers (invoked from git hooks inside containers)
+    #[command(subcommand, hide = true)]
+    Hook(HookSubcommand),
+
     /// Run the rumpelpod daemon (internal)
     #[command(hide = true)]
     Daemon,
@@ -369,4 +373,16 @@ pub struct ImageFetchCommand {
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum HookSubcommand {
+    /// Handle git reference-transaction hook events
+    ReferenceTransaction(ReferenceTransactionCommand),
+}
+
+#[derive(Args)]
+pub struct ReferenceTransactionCommand {
+    /// Transaction state: "prepared", "committed", or "aborted"
+    pub state: String,
 }
