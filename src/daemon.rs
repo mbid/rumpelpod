@@ -300,6 +300,73 @@ fn get_image_user(docker: &Docker, image: &str) -> Result<Option<String>> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerArch {
+    Amd64,
+    Arm64,
+}
+
+impl ContainerArch {
+    fn from_docker(s: &str) -> Result<Self> {
+        match s {
+            "amd64" => Ok(Self::Amd64),
+            "arm64" => Ok(Self::Arm64),
+            other => anyhow::bail!("unsupported container architecture '{}'", other),
+        }
+    }
+
+    fn musl_triple(self) -> &'static str {
+        match self {
+            Self::Amd64 => "x86_64-unknown-linux-musl",
+            Self::Arm64 => "aarch64-unknown-linux-musl",
+        }
+    }
+
+    /// True when the host can natively run binaries for this architecture.
+    fn matches_host(self) -> bool {
+        if cfg!(target_os = "macos") {
+            return false;
+        }
+        match std::env::consts::ARCH {
+            "x86_64" => self == Self::Amd64,
+            "aarch64" => self == Self::Arm64,
+            _ => false,
+        }
+    }
+
+    /// Filename for the cross-arch binary, e.g. "rumpel-linux-amd64".
+    fn binary_name(self) -> &'static str {
+        match self {
+            Self::Amd64 => "rumpel-linux-amd64",
+            Self::Arm64 => "rumpel-linux-arm64",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildProfile {
+    Debug,
+    Release,
+}
+
+impl BuildProfile {
+    fn dir_name(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Release => "release",
+        }
+    }
+}
+
+fn get_image_architecture(docker: &Docker, image: &str) -> Result<Option<ContainerArch>> {
+    let inspect = block_on(docker.inspect_image(image))
+        .with_context(|| format!("Failed to inspect image '{}'", image))?;
+    inspect
+        .architecture
+        .map(|s| ContainerArch::from_docker(&s))
+        .transpose()
+}
+
 /// Resolve the user for a pod.
 ///
 /// If `user` is provided, it is used directly.
@@ -1984,15 +2051,80 @@ fn write_file_via_stdin(
     Ok(())
 }
 
-/// Copy the host rumpel binary into the container so hook shims can invoke it.
+/// Walk up from the exe path looking for a parent named "target".
+/// Returns None for system-installed binaries (e.g. /usr/local/bin/rumpel).
+fn find_target_dir(exe: &Path) -> Option<PathBuf> {
+    let mut dir = exe.parent()?;
+    loop {
+        if dir.file_name().map(|n| n == "target").unwrap_or(false) {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+fn detect_build_profile(exe: &Path) -> Result<BuildProfile> {
+    match exe.parent().and_then(|p| p.file_name()) {
+        Some(n) if n == "release" => Ok(BuildProfile::Release),
+        Some(n) if n == "debug" => Ok(BuildProfile::Debug),
+        _ => anyhow::bail!(
+            "cannot detect build profile from {} -- \
+             expected parent directory to be 'release' or 'debug'",
+            exe.display()
+        ),
+    }
+}
+
+/// Pick the right rumpel binary for the container architecture.
 ///
-/// This assumes the host binary is a Linux ELF that can run inside the
-/// container.  When building on macOS for a Linux Docker host, we would
-/// need to cross-compile a Linux binary (e.g. via build.rs + Docker)
-/// and embed it instead.
-fn copy_rumpel_binary(docker: &Docker, container_id: &str) -> Result<()> {
+/// When the container arch matches (or is unknown), returns the running
+/// binary. Otherwise looks for `rumpel-linux-{arch}` next to the
+/// running executable (production flat layout), or under
+/// `target/<triple>/<profile>/` (dev layout).
+fn resolve_rumpel_binary(container_arch: Option<ContainerArch>) -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolving own binary path")?;
-    let data = std::fs::read(&exe).with_context(|| format!("reading {}", exe.display()))?;
+
+    let arch = match container_arch {
+        None => return Ok(exe),
+        Some(a) if a.matches_host() => return Ok(exe),
+        Some(a) => a,
+    };
+
+    // Production layout: cross binary sitting next to the running binary
+    let exe_dir = exe.parent().context("resolving executable directory")?;
+    let sibling = exe_dir.join(arch.binary_name());
+    if sibling.exists() {
+        return Ok(sibling);
+    }
+
+    // Dev layout: target/<triple>/<profile>/rumpel
+    if let Some(target_dir) = find_target_dir(&exe) {
+        let profile = detect_build_profile(&exe)?;
+        let cross_bin = target_dir
+            .join(arch.musl_triple())
+            .join(profile.dir_name())
+            .join("rumpel");
+        if cross_bin.exists() {
+            return Ok(cross_bin);
+        }
+    }
+
+    anyhow::bail!(
+        "cross-arch binary '{}' not found -- \
+         build with: cargo build --target {}",
+        arch.binary_name(),
+        arch.musl_triple()
+    );
+}
+
+/// Copy the rumpel binary into the container so hook shims can invoke it.
+///
+/// Inspects the container image architecture and, when it differs from
+/// the host, resolves a cross-compiled musl binary from target/.
+fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Result<()> {
+    let container_arch = get_image_architecture(docker, image)?;
+    let bin = resolve_rumpel_binary(container_arch)?;
+    let data = std::fs::read(&bin).with_context(|| format!("reading {}", bin.display()))?;
 
     exec_command(
         docker,
@@ -2506,7 +2638,7 @@ impl Daemon for DaemonServer {
 
             // The rumpel binary must be present before git operations
             // that trigger the reference-transaction hook shim.
-            copy_rumpel_binary(&docker, &container_id.0)?;
+            copy_rumpel_binary(&docker, &container_id.0, &image.0)?;
 
             ensure_repo_initialized(
                 &docker,
