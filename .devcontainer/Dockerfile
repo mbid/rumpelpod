@@ -31,8 +31,36 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         kubectl \
         kind \
         screen \
-        musl-tools \
         skopeo
+
+# Cross-compiler for the non-native architecture.
+RUN export DEBIAN_FRONTEND=noninteractive && \
+    dpkg_arch=$(dpkg --print-architecture) && \
+    if [ "$dpkg_arch" = "amd64" ]; then \
+        apt-get install --yes gcc-aarch64-linux-gnu; \
+    elif [ "$dpkg_arch" = "arm64" ]; then \
+        apt-get install --yes gcc-x86-64-linux-gnu; \
+    fi
+
+# Build musl from source for both x86_64 and aarch64.
+# Debian's musl-tools only provides musl for the native architecture.
+# CROSS_COMPILE sets the toolchain prefix so musl finds the right gcc/ar/ranlib.
+# Even for native builds we use the full triplet prefix (e.g. x86_64-linux-gnu-)
+# because musl's configure overrides an empty CROSS_COMPILE with "${target}-".
+RUN curl -fsSL https://musl.libc.org/releases/musl-1.2.5.tar.gz | tar xz -C /tmp && \
+    for target_arch in x86_64 aarch64; do \
+        if [ "$target_arch" = "x86_64" ]; then \
+            cross=x86_64-linux-gnu-; \
+        else \
+            cross=aarch64-linux-gnu-; \
+        fi && \
+        mkdir /tmp/musl-build-$target_arch && cd /tmp/musl-build-$target_arch && \
+        CROSS_COMPILE="$cross" /tmp/musl-1.2.5/configure \
+            --prefix=/opt/musl/$target_arch --target=$target_arch && \
+        make -j$(nproc) && make install && \
+        cp /opt/musl/$target_arch/bin/musl-gcc /usr/local/bin/${target_arch}-linux-musl-gcc; \
+    done && \
+    rm -rf /tmp/musl-1.2.5 /tmp/musl-build-*
 
 RUN echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
     && systemctl mask \
@@ -76,7 +104,18 @@ USER ${USER}
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
 RUN rustup component add rust-analyzer \
-    && rustup target add x86_64-unknown-linux-musl
+    && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+# Set default target to native architecture. Cargo merges this with the
+# project's .cargo/config.toml which has per-target linker settings.
+RUN dpkg_arch=$(dpkg --print-architecture) && \
+    if [ "$dpkg_arch" = "amd64" ]; then \
+        default_target=x86_64-unknown-linux-musl; \
+    else \
+        default_target=aarch64-unknown-linux-musl; \
+    fi && \
+    mkdir -p ~/.cargo && \
+    printf '[build]\ntarget = "%s"\n' "$default_target" > ~/.cargo/config.toml
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
