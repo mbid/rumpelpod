@@ -60,6 +60,10 @@ pub enum PodStatus {
     Gone,
     /// Remote pod where we don't have a connection to check actual status
     Disconnected,
+    /// Container is being deleted in the background
+    Deleting,
+    /// Background deletion failed after all retries
+    Broken,
 }
 
 /// Information about a pod.

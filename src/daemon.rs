@@ -5,7 +5,7 @@ pub mod ssh_forward;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use bollard::query_parameters::{
@@ -126,7 +126,7 @@ pub fn socket_path() -> Result<PathBuf> {
 
 struct DaemonServer {
     /// SQLite connection for conversation history.
-    db: Mutex<Connection>,
+    db: Arc<Mutex<Connection>>,
     /// Shared state for the git HTTP server (maps tokens to pod info).
     git_server_state: SharedGitServerState,
     /// Port the bridge network git HTTP server is listening on.
@@ -139,9 +139,9 @@ struct DaemonServer {
     localhost_server_port: u16,
     /// Active tokens for each pod: (repo_path, pod_name) -> token
     /// Used to clean up tokens when pods are deleted.
-    active_tokens: Mutex<BTreeMap<(PathBuf, String), String>>,
+    active_tokens: Arc<Mutex<BTreeMap<(PathBuf, String), String>>>,
     /// SSH forward manager for remote Docker hosts.
-    ssh_forward: SshForwardManager,
+    ssh_forward: Arc<SshForwardManager>,
     /// Path to the Unix socket for the git HTTP server (used for remote forwarding).
     git_unix_socket: PathBuf,
 }
@@ -1491,6 +1491,57 @@ fn get_container_status_via_socket(
     Ok(status_map)
 }
 
+/// Stop and remove a Docker container by name, connecting to the right host.
+/// Returns Ok if the container was removed or already gone (404).
+fn try_remove_container(
+    ssh_forward: &SshForwardManager,
+    host_str: &Option<String>,
+    container_name: &str,
+) -> Result<()> {
+    use bollard::errors::Error as BollardError;
+
+    let docker = if let Some(host) = host_str {
+        let host = DockerHost::from_db_string(host)?;
+        if let DockerHost::Ssh { .. } = &host {
+            let socket_path = ssh_forward.get_socket(&host)?;
+            Docker::connect_with_socket(
+                socket_path.to_string_lossy().as_ref(),
+                120,
+                bollard::API_DEFAULT_VERSION,
+            )
+            .context("connecting to remote Docker daemon")?
+        } else {
+            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
+        }
+    } else {
+        Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
+    };
+
+    // Stop the container with immediate SIGKILL (-t 0) because containers typically
+    // run `sleep infinity` which won't handle SIGTERM gracefully anyway.
+    let stop_options = StopContainerOptions {
+        t: Some(0),
+        ..Default::default()
+    };
+    let _ = block_on(docker.stop_container(container_name, Some(stop_options)));
+
+    // Remove the container (force in case it's still running)
+    let remove_options = RemoveContainerOptions {
+        force: true,
+        ..Default::default()
+    };
+    match block_on(docker.remove_container(container_name, Some(remove_options))) {
+        Ok(()) => Ok(()),
+        // Ignore "No such container" errors (already deleted)
+        Err(BollardError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Ok(()),
+        Err(e) => {
+            anyhow::bail!("docker rm failed: {}", e);
+        }
+    }
+}
+
 /// Parse null-delimited `env -0` output into a HashMap.
 fn parse_null_delimited_env(data: &[u8]) -> HashMap<String, String> {
     let text = String::from_utf8_lossy(data);
@@ -2771,78 +2822,79 @@ impl Daemon for DaemonServer {
     }
 
     fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
-        use bollard::errors::Error as BollardError;
-
-        // Retrieve pod info to determine host
+        // Mark pod as deleting in DB so it shows up in `list`
         let conn = self.db.lock().unwrap();
         let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
+        if let Some(ref record) = pod_record {
+            db::update_pod_status(&conn, record.id, db::PodStatus::Deleting)?;
+        }
+        let host_str = pod_record.map(|r| r.host);
         drop(conn);
 
-        let docker = if let Some(record) = pod_record {
-            let host = DockerHost::from_db_string(&record.host)?;
-            if let DockerHost::Ssh { .. } = &host {
-                let socket_path = self.ssh_forward.get_socket(&host)?;
-                Docker::connect_with_socket(
-                    socket_path.to_string_lossy().as_ref(),
-                    120,
-                    bollard::API_DEFAULT_VERSION,
-                )
-                .context("connecting to remote Docker daemon")?
-            } else {
-                Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
+        let container_name = docker_name(&repo_path, &pod_name);
+        let pod_name_str = pod_name.0;
+
+        // Clone Arc handles for the background thread
+        let db = self.db.clone();
+        let active_tokens = self.active_tokens.clone();
+        let git_server_state = self.git_server_state.clone();
+        let ssh_forward = self.ssh_forward.clone();
+
+        // NOTE: The background deletion with retries is untested. Docker overlay
+        // unmounts sometimes take a while on busy systems, and containers can
+        // disappear on their own after an initial delete failure, so retries
+        // help cover transient issues.
+        std::thread::spawn(move || {
+            let delays_secs = [0, 10, 60];
+
+            for (attempt, &delay) in delays_secs.iter().enumerate() {
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(delay));
+                }
+
+                match try_remove_container(&ssh_forward, &host_str, &container_name) {
+                    Ok(()) => {
+                        // Unregister pod from git HTTP server
+                        if let Some(token) = active_tokens
+                            .lock()
+                            .unwrap()
+                            .remove(&(repo_path.clone(), pod_name_str.clone()))
+                        {
+                            git_server_state.unregister(&token);
+                        }
+
+                        // Clean up gateway refs for this pod
+                        if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
+                            cleanup_pod_refs(
+                                &gateway_path,
+                                &repo_path,
+                                &PodName(pod_name_str.clone()),
+                            );
+                        }
+
+                        // Delete pod from database (cascades to conversations)
+                        let conn = db.lock().unwrap();
+                        let _ = db::delete_pod(&conn, &repo_path, &pod_name_str);
+                        return;
+                    }
+                    Err(e) => {
+                        error!(
+                            "delete attempt {} for pod '{}' failed: {}",
+                            attempt + 1,
+                            pod_name_str,
+                            e
+                        );
+                    }
+                }
             }
-        } else {
-            // Pod not found in DB. Fallback to local.
-            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
-        };
 
-        let name = docker_name(&repo_path, &pod_name);
-
-        // Stop the container with immediate SIGKILL (-t 0) because containers typically
-        // run `sleep infinity` which won't handle SIGTERM gracefully anyway.
-        // TODO: For sysbox/systemd containers that don't invoke the provided run command,
-        // we should allow a graceful shutdown period.
-        let stop_options = StopContainerOptions {
-            t: Some(0),
-            ..Default::default()
-        };
-        let _ = block_on(docker.stop_container(&name, Some(stop_options)));
-
-        // Remove the container (force in case it's still running)
-        let remove_options = RemoveContainerOptions {
-            force: true,
-            ..Default::default()
-        };
-        match block_on(docker.remove_container(&name, Some(remove_options))) {
-            Ok(()) => {}
-            // Ignore "No such container" errors (already deleted)
-            Err(BollardError::DockerResponseServerError {
-                status_code: 404, ..
-            }) => {}
-            Err(e) => {
-                error!("docker rm failed: {}", e);
-                anyhow::bail!("docker rm failed: {}", e);
+            // All retries exhausted
+            error!("all delete attempts failed for pod '{}'", pod_name_str);
+            let conn = db.lock().unwrap();
+            if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name_str) {
+                let _ = db::update_pod_status(&conn, record.id, db::PodStatus::DeleteFailed);
             }
-        }
-
-        // Unregister pod from git HTTP server
-        if let Some(token) = self
-            .active_tokens
-            .lock()
-            .unwrap()
-            .remove(&(repo_path.clone(), pod_name.0.clone()))
-        {
-            self.git_server_state.unregister(&token);
-        }
-
-        // Clean up gateway refs for this pod
-        if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
-            cleanup_pod_refs(&gateway_path, &repo_path, &pod_name);
-        }
-
-        // Delete pod from database (cascades to conversations)
-        let conn = self.db.lock().unwrap();
-        db::delete_pod(&conn, &repo_path, &pod_name.0)?;
+        });
 
         Ok(())
     }
@@ -2888,25 +2940,35 @@ impl Daemon for DaemonServer {
                     .and_then(|status_map| status_map.get(&pod.name))
             };
 
-            let status = match container_info {
-                Some(info) => info.status.clone(),
-                None => {
-                    if is_remote
-                        && remote_status_maps
-                            .get(&pod.host)
-                            .is_none_or(|m| m.is_none())
-                    {
-                        // No connection to remote -- we can't determine the actual status
-                        PodStatus::Disconnected
-                    } else {
-                        // Container doesn't exist locally or on the remote
-                        match pod.status {
-                            db::PodStatus::Ready => PodStatus::Gone,
-                            db::PodStatus::Initializing => PodStatus::Stopped,
-                            db::PodStatus::Error => PodStatus::Stopped,
+            let status = match pod.status {
+                // DB status takes precedence during deletion
+                db::PodStatus::Deleting => PodStatus::Deleting,
+                db::PodStatus::DeleteFailed => PodStatus::Broken,
+                _ => match container_info {
+                    Some(info) => info.status.clone(),
+                    None => {
+                        if is_remote
+                            && remote_status_maps
+                                .get(&pod.host)
+                                .is_none_or(|m| m.is_none())
+                        {
+                            // No connection to remote -- can't determine actual status
+                            PodStatus::Disconnected
+                        } else {
+                            // Container doesn't exist locally or on the remote
+                            match pod.status {
+                                db::PodStatus::Ready => PodStatus::Gone,
+                                db::PodStatus::Initializing | db::PodStatus::Error => {
+                                    PodStatus::Stopped
+                                }
+                                // Already handled in outer match
+                                db::PodStatus::Deleting | db::PodStatus::DeleteFailed => {
+                                    unreachable!()
+                                }
+                            }
                         }
                     }
-                }
+                },
             };
 
             let container_id = container_info.and_then(|info| info.container_id.clone());
@@ -3097,13 +3159,13 @@ pub fn run_daemon() -> Result<()> {
     };
 
     let daemon = DaemonServer {
-        db: Mutex::new(db_conn),
+        db: Arc::new(Mutex::new(db_conn)),
         git_server_state,
         bridge_server_port: bridge_server.port,
         bridge_container_ip,
         localhost_server_port: localhost_server.port,
-        active_tokens: Mutex::new(BTreeMap::new()),
-        ssh_forward,
+        active_tokens: Arc::new(Mutex::new(BTreeMap::new())),
+        ssh_forward: Arc::new(ssh_forward),
         git_unix_socket,
     };
 

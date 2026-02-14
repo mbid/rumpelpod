@@ -30,6 +30,8 @@ pub fn list() -> Result<()> {
             PodStatus::Stopped => "stopped",
             PodStatus::Gone => "gone",
             PodStatus::Disconnected => "disconnected",
+            PodStatus::Deleting => "deleting",
+            PodStatus::Broken => "broken",
         };
         let repo_state = pod.repo_state.as_deref().unwrap_or("");
         let header = "CONTAINER ID";
