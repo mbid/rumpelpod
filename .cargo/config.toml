@@ -1,8 +1,13 @@
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-linux-musl-gcc"
+# Since Rust 1.59, musl targets default to static-pie, but musl-gcc wrappers
+# don't support it: Scrt1.o runs dynamic-linker relocation code that segfaults.
+# See https://github.com/rust-lang/rust/issues/95926
+rustflags = ["-C", "relocation-model=static"]
 
 [target.aarch64-unknown-linux-musl]
 linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "relocation-model=static"]
 
 [env]
 CC_x86_64_unknown_linux_musl = "x86_64-linux-musl-gcc"
