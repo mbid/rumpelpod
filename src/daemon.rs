@@ -40,14 +40,27 @@ use ssh_forward::SshForwardManager;
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";
 
-/// The default Docker socket path.
-const DEFAULT_DOCKER_SOCKET: &str = "/var/run/docker.sock";
-
-/// Returns the default Docker socket path.
-/// For now, this always returns the local socket path, but will change
-/// in the future to support remote Docker hosts via SSH forwarding.
+/// Returns the local Docker socket path.
+/// Checks DOCKER_HOST first, then probes standard socket locations.
 fn default_docker_socket() -> PathBuf {
-    PathBuf::from(DEFAULT_DOCKER_SOCKET)
+    if let Ok(host) = std::env::var("DOCKER_HOST") {
+        if let Some(path) = host.strip_prefix("unix://") {
+            return PathBuf::from(path);
+        }
+    }
+    let mut candidates = vec![PathBuf::from("/var/run/docker.sock")];
+    if let Some(home) = dirs::home_dir() {
+        // Docker Desktop (macOS 4.13+)
+        candidates.push(home.join(".docker/run/docker.sock"));
+        // Colima
+        candidates.push(home.join(".colima/default/docker.sock"));
+        // Rancher Desktop
+        candidates.push(home.join(".rd/docker.sock"));
+    }
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"))
 }
 
 fn get_created_files_from_patch(patch: &[u8]) -> Result<Vec<String>> {
