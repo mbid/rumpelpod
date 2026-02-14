@@ -257,6 +257,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         docker_socket,
         image_built: _,
         probed_env,
+        user_shell,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 
@@ -280,16 +281,10 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
-        // Interactive shell: launch with probe flags so init files are sourced
-        match effective_probe.shell_flags_interactive() {
-            Some(flags) => {
-                command.push("bash".to_string());
-                command.push(flags.to_string());
-            }
-            None => {
-                let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                command.push(shell);
-            }
+        command.push(user_shell);
+        // Launch with probe flags so init files are sourced
+        if let Some(flags) = effective_probe.shell_flags_interactive() {
+            command.push(flags.to_string());
         }
     }
     // Non-interactive commands get probed env via -e flags (below), so no

@@ -1517,6 +1517,33 @@ fn probe_user_env(
         .collect()
 }
 
+/// Query the container user's login shell from `/etc/passwd`.
+fn get_user_shell(docker: &Docker, container_id: &str, user: &str) -> String {
+    // `getent passwd <user>` returns a colon-delimited line whose last
+    // field is the login shell, e.g. "testuser:x:1000:1000::/home/testuser:/bin/bash".
+    match exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["getent", "passwd", user],
+    ) {
+        Ok(output) => {
+            let line = String::from_utf8_lossy(&output);
+            line.trim()
+                .rsplit_once(':')
+                .map(|(_, shell)| shell.to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/bin/sh".to_string())
+        }
+        Err(e) => {
+            log::warn!("failed to get user shell from container: {e}");
+            "/bin/sh".to_string()
+        }
+    }
+}
+
 /// Execute a single lifecycle command inside a container.
 ///
 /// Supports the three devcontainer command formats:
@@ -2292,12 +2319,15 @@ impl Daemon for DaemonServer {
                 )?;
             }
 
+            let user_shell = get_user_shell(&docker, &state.id, &user);
+
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
                 docker_socket,
                 image_built,
                 probed_env,
+                user_shell,
             });
         }
 
@@ -2510,12 +2540,15 @@ impl Daemon for DaemonServer {
             }
         }
 
+        let user_shell = get_user_shell(&docker, &container_id.0, &user);
+
         Ok(LaunchResult {
             container_id,
             user,
             docker_socket,
             image_built,
             probed_env,
+            user_shell,
         })
     }
 

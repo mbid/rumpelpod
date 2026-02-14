@@ -42,6 +42,9 @@ pub struct LaunchResult {
     /// Environment variables captured by probing the user's shell init files.
     /// Only contains vars that differ from the base container environment.
     pub probed_env: HashMap<String, String>,
+    /// The container user's login shell (e.g. "/bin/bash", "/bin/zsh").
+    /// Falls back to "/bin/sh" if it cannot be determined.
+    pub user_shell: String,
 }
 
 /// Human-readable pod name to distinguish multiple pods for the same repo.
@@ -113,6 +116,7 @@ struct PodLaunchResponse {
     image_built: bool,
     /// Environment variables captured by probing the user's shell init files.
     probed_env: HashMap<String, String>,
+    user_shell: String,
 }
 
 /// Request body for stop_pod endpoint.
@@ -336,6 +340,7 @@ impl Daemon for DaemonClient {
                 docker_socket: body.docker_socket,
                 image_built: body.image_built,
                 probed_env: body.probed_env,
+                user_shell: body.user_shell,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -365,6 +370,7 @@ impl Daemon for DaemonClient {
                 docker_socket: body.docker_socket,
                 image_built: body.image_built,
                 probed_env: body.probed_env,
+                user_shell: body.user_shell,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -604,6 +610,7 @@ async fn launch_pod_handler<D: Daemon>(
             docker_socket: launch_result.docker_socket,
             image_built: launch_result.image_built,
             probed_env: launch_result.probed_env,
+            user_shell: launch_result.user_shell,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -628,6 +635,7 @@ async fn recreate_pod_handler<D: Daemon>(
             docker_socket: res.docker_socket,
             image_built: res.image_built,
             probed_env: res.probed_env,
+            user_shell: res.user_shell,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -866,6 +874,7 @@ mod tests {
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
                 image_built: false,
                 probed_env: HashMap::new(),
+                user_shell: "/bin/sh".to_string(),
             })
         }
 
@@ -882,6 +891,7 @@ mod tests {
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
                 image_built: false,
                 probed_env: HashMap::new(),
+                user_shell: "/bin/sh".to_string(),
             })
         }
 

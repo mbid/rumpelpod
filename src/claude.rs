@@ -71,6 +71,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         docker_socket,
         image_built: _,
         probed_env,
+        user_shell: _,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 

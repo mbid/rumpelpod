@@ -6,8 +6,9 @@ use indoc::indoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{
-    build_test_image, build_test_image_without_user, pod_command, write_test_pod_config,
-    write_test_pod_config_with_user, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+    build_docker_image, build_test_image, build_test_image_without_user, pod_command,
+    write_test_pod_config, write_test_pod_config_with_user, DockerBuild, TestDaemon, TestRepo,
+    TEST_REPO_PATH, TEST_USER, TEST_USER_UID,
 };
 
 #[test]
@@ -355,5 +356,44 @@ fn enter_sets_hostname_to_pod_name() {
         "my-pod",
         "Hostname should be the pod name, got: {}",
         stdout.trim()
+    );
+}
+
+#[test]
+fn enter_uses_container_shell_not_host_shell() {
+    // Install a custom "shell" that prints a marker and exits.
+    // If enter uses the container user's shell, we see the marker.
+    // If it leaks the host's $SHELL or hardcodes bash, we don't.
+    let repo = TestRepo::new();
+    let image_id = build_docker_image(DockerBuild {
+        dockerfile: format!(
+            "FROM debian:13\n\
+             RUN apt-get update && apt-get install -y git\n\
+             RUN printf '#!/bin/sh\\necho CUSTOM_SHELL_OK\\n' > /usr/local/bin/myshell \
+                 && chmod +x /usr/local/bin/myshell\n\
+             RUN useradd -m -u {TEST_USER_UID} -s /usr/local/bin/myshell {TEST_USER}\n\
+             COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}\n\
+             USER {TEST_USER}\n"
+        ),
+        build_context: Some(repo.path().to_path_buf()),
+    })
+    .expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // The custom shell just prints and exits, so no PTY needed.
+    // Set host SHELL to something bogus -- the old code would try to exec this.
+    let stdout = pod_command(&repo, &daemon)
+        .env("SHELL", "/nonexistent/host-shell")
+        .args(["enter", "shell-test"])
+        .success()
+        .expect("rumpel enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert!(
+        stdout.contains("CUSTOM_SHELL_OK"),
+        "enter should have launched the container user's custom shell.\n\
+         stdout: {stdout}"
     );
 }
