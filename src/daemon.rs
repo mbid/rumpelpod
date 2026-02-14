@@ -140,6 +140,58 @@ const CONTAINER_REPO_PATH_LABEL: &str = "dev.rumpelpod.container_repo_path";
 /// Label key used to store the pod name on containers.
 const POD_NAME_LABEL: &str = "dev.rumpelpod.name";
 
+/// Replace characters that Docker does not allow in container names.
+/// Docker names must match `[a-zA-Z0-9][a-zA-Z0-9_.-]+`.
+fn sanitize_docker_name(s: &str) -> String {
+    let sanitized: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // Strip leading chars that are not alphanumeric (Docker requires
+    // the first character to be [a-zA-Z0-9]).
+    let trimmed = sanitized.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+
+    if trimmed.is_empty() {
+        // All characters were invalid; fall back so callers always get
+        // a non-empty string.
+        "pod".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Sanitize a string for use as a container hostname (RFC 1123):
+/// alphanumeric and hyphens only, max 63 chars, cannot start/end with hyphen.
+fn sanitize_hostname(s: &str) -> String {
+    let sanitized: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    let trimmed = sanitized.trim_matches('-');
+
+    if trimmed.is_empty() {
+        "pod".to_string()
+    } else if trimmed.len() > 63 {
+        trimmed[..63].trim_end_matches('-').to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Generate a unique docker container name from repo path and pod name.
 /// Format: "<repo_dir>-<pod_name>-<hash_prefix>"
 /// where hash is sha256(repo_path + pod_name) truncated to 12 hex chars.
@@ -157,7 +209,7 @@ fn docker_name(repo_path: &Path, pod_name: &PodName) -> String {
     let hash = hex::encode(hasher.finalize());
     let hash_prefix = &hash[..12];
 
-    format!("{}-{}-{}", repo_dir, pod_name.0, hash_prefix)
+    sanitize_docker_name(&format!("{}-{}-{}", repo_dir, pod_name.0, hash_prefix))
 }
 
 /// Resolve daemon-side variables: `${containerWorkspaceFolder}`,
@@ -1061,7 +1113,7 @@ fn create_container(
 
     let config = ContainerCreateBody {
         image: Some(image.0.clone()),
-        hostname: Some(pod_name.0.clone()),
+        hostname: Some(sanitize_hostname(&pod_name.0)),
         labels: Some(labels),
         env: env_vec,
         cmd: if override_command {

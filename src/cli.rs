@@ -4,6 +4,25 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::config::Model;
 
+/// Validate that a pod name contains only Docker/git-safe characters:
+/// ASCII alphanumeric, hyphens, underscores, and dots.
+fn validate_pod_name(name: &str) -> Result<String, String> {
+    if name.is_empty() {
+        return Err("pod name must not be empty".to_string());
+    }
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && *c != '-' && *c != '_' && *c != '.')
+    {
+        return Err(format!(
+            "invalid character '{}' in pod name -- \
+             only ASCII letters, digits, hyphens, underscores, and dots are allowed",
+            bad
+        ));
+    }
+    Ok(name.to_string())
+}
+
 #[derive(Parser)]
 #[command(name = "rumpelpod")]
 #[command(version = env!("RUMPELPOD_VERSION_INFO"))]
@@ -167,7 +186,7 @@ Stops the daemon and removes it from the system service manager. Existing pod co
 #[derive(Args)]
 pub struct EnterCommand {
     /// Name for this pod instance
-    #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')")]
+    #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
@@ -183,21 +202,21 @@ pub struct EnterCommand {
 #[derive(Args)]
 pub struct StopCommand {
     /// Name of the pod to stop
-    #[arg(help = "Name of the pod to stop")]
+    #[arg(help = "Name of the pod to stop", value_parser = validate_pod_name)]
     pub name: String,
 }
 
 #[derive(Args)]
 pub struct DeleteCommand {
     /// Name of the pod to delete
-    #[arg(help = "Name of the pod to delete")]
+    #[arg(help = "Name of the pod to delete", value_parser = validate_pod_name)]
     pub name: String,
 }
 
 #[derive(Args)]
 pub struct RecreateCommand {
     /// Name of the pod to recreate
-    #[arg(help = "Name of the pod to recreate")]
+    #[arg(help = "Name of the pod to recreate", value_parser = validate_pod_name)]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
@@ -209,13 +228,14 @@ pub struct RecreateCommand {
 #[derive(Args)]
 pub struct PortsCommand {
     /// Name of the pod
+    #[arg(value_parser = validate_pod_name)]
     pub name: String,
 }
 
 #[derive(Args)]
 pub struct ReviewCommand {
     /// Name of the pod to review
-    #[arg(help = "Name of the pod to review")]
+    #[arg(help = "Name of the pod to review", value_parser = validate_pod_name)]
     pub name: String,
 
     /// Skip prompting before opening each file
@@ -230,7 +250,7 @@ pub struct ReviewCommand {
 #[derive(Args)]
 pub struct AgentCommand {
     /// Name of the pod to use
-    #[arg(help = "Name of the pod to use")]
+    #[arg(help = "Name of the pod to use", value_parser = validate_pod_name)]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
@@ -289,7 +309,7 @@ pub struct AgentCommand {
 #[derive(Args)]
 pub struct ClaudeCommand {
     /// Name for this pod instance
-    #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')")]
+    #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
     pub name: String,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
