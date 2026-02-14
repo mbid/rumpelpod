@@ -153,8 +153,13 @@ pub struct TestRepo {
 
 impl TestRepo {
     pub fn new() -> Self {
-        let dir =
-            TempDir::with_prefix("rumpelpod-test-repo-").expect("Failed to create temp directory");
+        Self::new_with_prefix("rumpelpod-test-repo-")
+    }
+
+    /// Create a test repo whose temp directory name starts with `prefix`.
+    /// Useful for testing behavior when the repo path contains special characters.
+    pub fn new_with_prefix(prefix: &str) -> Self {
+        let dir = TempDir::with_prefix(prefix).expect("Failed to create temp directory");
 
         // Initialize as a git repository with an initial commit
         Command::new("git")
