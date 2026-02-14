@@ -5,8 +5,8 @@ use clap::{Args, Parser, Subcommand};
 use crate::config::Model;
 
 #[derive(Parser)]
-#[command(name = "rumpel")]
-#[command(version)]
+#[command(name = "rumpelpod")]
+#[command(version = env!("RUMPELPOD_VERSION_INFO"))]
 #[command(about = "Pod management tool for LLM agents")]
 #[command(long_about = "Pod management tool for LLM agents.
 

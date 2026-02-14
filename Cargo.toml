@@ -54,6 +54,10 @@ bollard = ">= 0"
 tokio-stream = ">= 0"
 comfy-table = ">= 0"
 
+[build-dependencies]
+sha2 = ">= 0"
+hex = ">= 0"
+
 [dev-dependencies]
 assert_cmd = ">= 0"
 portable-pty = ">= 0"

@@ -24,3 +24,5 @@ mod review;
 mod ssh;
 #[path = "cli/systemd.rs"]
 mod systemd;
+#[path = "cli/version.rs"]
+mod version;
