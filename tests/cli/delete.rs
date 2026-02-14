@@ -83,9 +83,9 @@ fn delete_then_recreate_same_name() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Delete pod
+    // Delete pod (--wait so the container is fully gone before re-entering)
     let output = pod_command(&repo, &daemon)
-        .args(["delete", "recyclable"])
+        .args(["delete", "--wait", "recyclable"])
         .output()
         .expect("Failed to run rumpel delete command");
     assert!(
@@ -158,9 +158,9 @@ fn delete_pod_clears_conversation_history() {
         String::from_utf8_lossy(&output1.stderr)
     );
 
-    // Delete the pod
+    // Delete the pod (--wait so history is cleared before re-entering)
     let output = pod_command(&repo, &daemon)
-        .args(["delete", "history-test"])
+        .args(["delete", "--wait", "history-test"])
         .output()
         .expect("Failed to run rumpel delete command");
     assert!(
@@ -238,9 +238,9 @@ fn ssh_remote_pod_delete() {
         "pod should exist before delete"
     );
 
-    // Delete the pod
+    // Delete the pod (--wait so it's fully gone before checking list)
     let output = pod_command(&repo, &daemon)
-        .args(["delete", pod_name])
+        .args(["delete", "--wait", pod_name])
         .output()
         .expect("rumpel delete failed to execute");
 

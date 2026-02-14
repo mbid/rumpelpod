@@ -211,6 +211,10 @@ pub struct DeleteCommand {
     /// Name of the pod to delete
     #[arg(help = "Name of the pod to delete", value_parser = validate_pod_name)]
     pub name: String,
+
+    /// Block until the container is fully removed
+    #[arg(long)]
+    pub wait: bool,
 }
 
 #[derive(Args)]

@@ -11,7 +11,7 @@ pub fn delete(cmd: &DeleteCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    client.delete_pod(PodName(cmd.name.clone()), repo_path)?;
+    client.delete_pod(PodName(cmd.name.clone()), repo_path, cmd.wait)?;
 
     Ok(())
 }

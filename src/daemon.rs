@@ -2739,9 +2739,8 @@ impl Daemon for DaemonServer {
                 }
             }
 
-            // 2. Delete the container
-            // We use the internal deletion logic
-            self.delete_pod(pod_name.clone(), repo_path.clone())?;
+            // 2. Delete the container synchronously so launch_pod can reuse the name
+            self.delete_pod(pod_name.clone(), repo_path.clone(), true)?;
         }
 
         // 3. Create new pod
@@ -2821,8 +2820,7 @@ impl Daemon for DaemonServer {
         Ok(())
     }
 
-    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
-        // Mark pod as deleting in DB so it shows up in `list`
+    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let conn = self.db.lock().unwrap();
         let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
         if let Some(ref record) = pod_record {
@@ -2832,69 +2830,72 @@ impl Daemon for DaemonServer {
         drop(conn);
 
         let container_name = docker_name(&repo_path, &pod_name);
-        let pod_name_str = pod_name.0;
 
-        // Clone Arc handles for the background thread
-        let db = self.db.clone();
-        let active_tokens = self.active_tokens.clone();
-        let git_server_state = self.git_server_state.clone();
-        let ssh_forward = self.ssh_forward.clone();
+        if wait {
+            try_remove_container(&self.ssh_forward, &host_str, &container_name)?;
 
-        // NOTE: The background deletion with retries is untested. Docker overlay
-        // unmounts sometimes take a while on busy systems, and containers can
-        // disappear on their own after an initial delete failure, so retries
-        // help cover transient issues.
-        std::thread::spawn(move || {
-            let delays_secs = [0, 10, 60];
-
-            for (attempt, &delay) in delays_secs.iter().enumerate() {
-                if delay > 0 {
-                    std::thread::sleep(std::time::Duration::from_secs(delay));
-                }
-
-                match try_remove_container(&ssh_forward, &host_str, &container_name) {
-                    Ok(()) => {
-                        // Unregister pod from git HTTP server
-                        if let Some(token) = active_tokens
-                            .lock()
-                            .unwrap()
-                            .remove(&(repo_path.clone(), pod_name_str.clone()))
-                        {
-                            git_server_state.unregister(&token);
+            if let Some(token) = self
+                .active_tokens
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()))
+            {
+                self.git_server_state.unregister(&token);
+            }
+            if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
+                cleanup_pod_refs(&gateway_path, &repo_path, &pod_name);
+            }
+            let conn = self.db.lock().unwrap();
+            db::delete_pod(&conn, &repo_path, &pod_name.0)?;
+        } else {
+            // Docker overlay unmounts sometimes take a while on busy systems.
+            // Run removal in the background with retries so the CLI returns
+            // immediately.
+            let db = self.db.clone();
+            let active_tokens = self.active_tokens.clone();
+            let git_server_state = self.git_server_state.clone();
+            let ssh_forward = self.ssh_forward.clone();
+            let repo_path = repo_path.clone();
+            let pod_name = pod_name.clone();
+            std::thread::spawn(move || {
+                let delays_secs = [0, 10, 60];
+                for (attempt, &delay) in delays_secs.iter().enumerate() {
+                    if delay > 0 {
+                        std::thread::sleep(std::time::Duration::from_secs(delay));
+                    }
+                    match try_remove_container(&ssh_forward, &host_str, &container_name) {
+                        Ok(()) => {
+                            if let Some(token) = active_tokens
+                                .lock()
+                                .unwrap()
+                                .remove(&(repo_path.clone(), pod_name.0.clone()))
+                            {
+                                git_server_state.unregister(&token);
+                            }
+                            if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
+                                cleanup_pod_refs(&gateway_path, &repo_path, &pod_name);
+                            }
+                            let conn = db.lock().unwrap();
+                            let _ = db::delete_pod(&conn, &repo_path, &pod_name.0);
+                            return;
                         }
-
-                        // Clean up gateway refs for this pod
-                        if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
-                            cleanup_pod_refs(
-                                &gateway_path,
-                                &repo_path,
-                                &PodName(pod_name_str.clone()),
+                        Err(e) => {
+                            error!(
+                                "delete attempt {} for pod '{}' failed: {}",
+                                attempt + 1,
+                                pod_name.0,
+                                e
                             );
                         }
-
-                        // Delete pod from database (cascades to conversations)
-                        let conn = db.lock().unwrap();
-                        let _ = db::delete_pod(&conn, &repo_path, &pod_name_str);
-                        return;
-                    }
-                    Err(e) => {
-                        error!(
-                            "delete attempt {} for pod '{}' failed: {}",
-                            attempt + 1,
-                            pod_name_str,
-                            e
-                        );
                     }
                 }
-            }
-
-            // All retries exhausted
-            error!("all delete attempts failed for pod '{}'", pod_name_str);
-            let conn = db.lock().unwrap();
-            if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name_str) {
-                let _ = db::update_pod_status(&conn, record.id, db::PodStatus::DeleteFailed);
-            }
-        });
+                error!("all delete attempts failed for pod '{}'", pod_name.0);
+                let conn = db.lock().unwrap();
+                if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
+                    let _ = db::update_pod_status(&conn, record.id, db::PodStatus::DeleteFailed);
+                }
+            });
+        }
 
         Ok(())
     }

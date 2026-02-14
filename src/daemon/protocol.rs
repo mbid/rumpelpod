@@ -141,6 +141,7 @@ struct StopPodResponse {
 struct DeletePodRequest {
     pod_name: PodName,
     repo_path: PathBuf,
+    wait: bool,
 }
 
 /// Response body for delete_pod endpoint.
@@ -251,8 +252,9 @@ pub trait Daemon: Send + Sync + 'static {
     fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()>;
 
     // DELETE /pod
-    // Stops and removes a pod container.
-    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()>;
+    // Stops and removes a pod container.  When wait is true, blocks until the
+    // container is fully removed; otherwise returns immediately.
+    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()>;
 
     // GET /pod
     // Lists all pods for a given repository.
@@ -408,11 +410,12 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
+    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let url = self.url.join("/pod")?;
         let request = DeletePodRequest {
             pod_name,
             repo_path,
+            wait,
         };
 
         let response = self
@@ -673,7 +676,8 @@ async fn delete_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<DeletePodRequest>,
 ) -> Result<Json<DeletePodResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.delete_pod(request.pod_name, request.repo_path));
+    let result =
+        block_in_place(|| daemon.delete_pod(request.pod_name, request.repo_path, request.wait));
 
     match result {
         Ok(()) => Ok(Json(DeletePodResponse { deleted: true })),
@@ -903,7 +907,7 @@ mod tests {
             Ok(())
         }
 
-        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
+        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf, _wait: bool) -> Result<()> {
             Ok(())
         }
 
@@ -1046,7 +1050,7 @@ mod tests {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
+        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf, _wait: bool) -> Result<()> {
             unimplemented!("not needed for conversation tests")
         }
 

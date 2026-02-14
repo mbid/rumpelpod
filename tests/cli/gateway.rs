@@ -1877,9 +1877,9 @@ fn gateway_alias_deleted_with_pod() {
         "Alias ref should exist before deletion"
     );
 
-    // Delete the pod
+    // Delete the pod (--wait so refs are cleaned up before checking)
     pod_command(&repo, &daemon)
-        .args(["delete", pod_name])
+        .args(["delete", "--wait", pod_name])
         .success()
         .expect("Failed to delete pod");
 
