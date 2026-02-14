@@ -283,7 +283,7 @@ fn systemd_install_enter_delete_uninstall() {
     );
 
     // ---- delete the pod ----
-    user.shell_in(&repo_dir, &format!("{rumpel} delete systemd-test"))
+    user.shell_in(&repo_dir, &format!("{rumpel} delete --wait systemd-test"))
         .success()
         .expect("rumpel delete failed");
 

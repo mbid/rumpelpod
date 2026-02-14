@@ -30,7 +30,7 @@ fn delete_smoke_test() {
 
     // Now delete the pod
     let output = pod_command(&repo, &daemon)
-        .args(["delete", "test-delete"])
+        .args(["delete", "--wait", "test-delete"])
         .output()
         .expect("Failed to run rumpel delete command");
 

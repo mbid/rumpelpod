@@ -207,14 +207,27 @@ impl Drop for TestRepo {
 
         // Try to clean up any Docker containers created for this repo.
         if let Some(name) = self.dir.path().file_name().and_then(|n| n.to_str()) {
+            // Container names are sanitized (non-ASCII replaced with '-'),
+            // so we must search using the sanitized form to match.
+            let sanitized: String = name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+
             // Find containers associated with this repo.
-            // Container names start with the repo directory name.
+            // Container names start with the (sanitized) repo directory name.
             let output = Command::new("docker")
                 .args([
                     "ps",
                     "-a",
                     "--filter",
-                    &format!("name={}", name),
+                    &format!("name={}", sanitized),
                     "--format",
                     "{{.Names}}",
                 ])
@@ -225,7 +238,7 @@ impl Drop for TestRepo {
                 let containers: Vec<&str> = stdout
                     .lines()
                     .map(|l| l.trim())
-                    .filter(|line| line.starts_with(name))
+                    .filter(|line| line.starts_with(&sanitized))
                     .collect();
 
                 if !containers.is_empty() {
