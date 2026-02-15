@@ -232,9 +232,7 @@ pub fn run_agent_interactive_model_args_env(
         })
         .expect("Failed to create PTY");
 
-    let rumpel_bin = crate::common::rumpel_bin();
-
-    let mut cmd = CommandBuilder::new(rumpel_bin);
+    let mut cmd = CommandBuilder::new("rumpel");
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",
@@ -383,9 +381,7 @@ pub fn run_agent_expecting_picker(
         })
         .expect("Failed to create PTY");
 
-    let rumpel_bin = crate::common::rumpel_bin();
-
-    let mut cmd = CommandBuilder::new(rumpel_bin);
+    let mut cmd = CommandBuilder::new("rumpel");
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",

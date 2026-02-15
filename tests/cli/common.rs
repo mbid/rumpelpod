@@ -17,13 +17,6 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 
-/// Return the rumpel binary path set by `cargo xtest`.
-pub fn rumpel_bin() -> PathBuf {
-    std::env::var_os("RUMPEL_BIN")
-        .map(PathBuf::from)
-        .expect("RUMPEL_BIN not set -- use `cargo xtest` instead of `cargo test`")
-}
-
 /// Standard test user name used in test images.
 pub const TEST_USER: &str = "testuser";
 
@@ -95,7 +88,7 @@ impl TestDaemon {
         std::fs::create_dir_all(runtime_dir.join("rumpelpod"))
             .expect("Failed to create runtime dir");
 
-        let mut cmd = Command::new(rumpel_bin());
+        let mut cmd = Command::new("rumpel");
         cmd.env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
             .env("XDG_RUNTIME_DIR", &runtime_dir)
@@ -276,7 +269,7 @@ pub fn create_commit(repo_path: &Path, message: &str) {
 
 /// Create a Command for the rumpel binary, pre-configured for testing.
 pub fn pod_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
-    let mut cmd = Command::new(rumpel_bin());
+    let mut cmd = Command::new("rumpel");
     cmd.current_dir(repo.path())
         .env(SOCKET_PATH_ENV, &daemon.socket_path);
 

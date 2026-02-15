@@ -315,25 +315,6 @@ impl ContainerArch {
         }
     }
 
-    fn musl_triple(self) -> &'static str {
-        match self {
-            Self::Amd64 => "x86_64-unknown-linux-musl",
-            Self::Arm64 => "aarch64-unknown-linux-musl",
-        }
-    }
-
-    /// True when the host can natively run binaries for this architecture.
-    fn matches_host(self) -> bool {
-        if cfg!(target_os = "macos") {
-            return false;
-        }
-        match std::env::consts::ARCH {
-            "x86_64" => self == Self::Amd64,
-            "aarch64" => self == Self::Arm64,
-            _ => false,
-        }
-    }
-
     /// Filename for the cross-arch binary, e.g. "rumpel-linux-amd64".
     fn binary_name(self) -> &'static str {
         match self {
@@ -2038,35 +2019,32 @@ fn write_file_via_stdin(
 
 /// Pick the right rumpel binary for the container architecture.
 ///
-/// When the container arch matches (or is unknown), returns the running
-/// binary. Otherwise looks for `rumpel-linux-{arch}` next to the
-/// running executable.
+/// When the container arch is unknown, returns the running binary.
+/// Otherwise looks for `rumpel-linux-{arch}` next to the running
+/// executable.
 fn resolve_rumpel_binary(container_arch: Option<ContainerArch>) -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolving own binary path")?;
 
     let arch = match container_arch {
         None => return Ok(exe),
-        Some(a) if a.matches_host() => return Ok(exe),
         Some(a) => a,
     };
 
     let exe_dir = exe.parent().context("resolving executable directory")?;
-    let cross_bin = exe_dir.join(arch.binary_name());
+    let bin = exe_dir.join(arch.binary_name());
     anyhow::ensure!(
-        cross_bin.exists(),
-        "cross-arch binary '{}' not found next to {} -- \
-         build with: cargo build --target {}",
+        bin.exists(),
+        "binary '{}' not found next to {}",
         arch.binary_name(),
         exe.display(),
-        arch.musl_triple()
     );
-    Ok(cross_bin)
+    Ok(bin)
 }
 
 /// Copy the rumpel binary into the container so hook shims can invoke it.
 ///
 /// Inspects the container image architecture and, when it differs from
-/// the host, resolves a cross-compiled musl binary from target/.
+/// the host, resolves the arch-specific binary from the same directory.
 fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Result<()> {
     let container_arch = get_image_architecture(docker, image)?;
     let bin = resolve_rumpel_binary(container_arch)?;

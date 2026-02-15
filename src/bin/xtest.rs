@@ -5,8 +5,12 @@
 //!
 //! Usage: cargo xtest [args for cargo test...]
 
+use std::os::unix::fs::symlink;
 use std::path::Path;
-use std::process::{self, Command};
+use std::process::{Command, ExitCode};
+
+use anyhow::{Context, Result};
+use rumpelpod::CommandExt;
 
 /// (cargo target triple, binary name in flat layout)
 const LINUX_TARGETS: &[(&str, &str)] = &[
@@ -14,16 +18,20 @@ const LINUX_TARGETS: &[(&str, &str)] = &[
     ("aarch64-unknown-linux-musl", "rumpel-linux-arm64"),
 ];
 
-fn main() {
-    let code = run();
-    process::exit(code);
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
-fn run() -> i32 {
+fn run() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut targets: Vec<(&str, &str)> = Vec::new();
-
     if cfg!(target_os = "macos") {
         targets.push(("aarch64-apple-darwin", "rumpel-darwin-arm64"));
     }
@@ -31,32 +39,14 @@ fn run() -> i32 {
 
     for (triple, _) in &targets {
         eprint!("Building rumpel for {triple}... ");
-        let status = Command::new("cargo")
+        Command::new("cargo")
             .args(["build", "--bin", "rumpel", "--target", triple])
-            .status()
-            .unwrap_or_else(|e| {
-                eprintln!("failed to run cargo build: {e}");
-                process::exit(1);
-            });
-        if !status.success() {
-            return status.code().unwrap_or(1);
-        }
+            .success()
+            .with_context(|| format!("building rumpel for {triple}"))?;
         eprintln!("ok");
     }
 
-    // Flat binary directory matching the production layout
-    let tmp = tempfile::tempdir().unwrap_or_else(|e| {
-        eprintln!("failed to create temp dir: {e}");
-        process::exit(1);
-    });
-
-    let native_triple = if cfg!(target_os = "macos") {
-        "aarch64-apple-darwin"
-    } else if cfg!(target_arch = "x86_64") {
-        "x86_64-unknown-linux-musl"
-    } else {
-        "aarch64-unknown-linux-musl"
-    };
+    let tmp = tempfile::tempdir().context("creating temp dir")?;
 
     for (triple, name) in &targets {
         let src = Path::new("target")
@@ -64,33 +54,33 @@ fn run() -> i32 {
             .join("debug")
             .join("rumpel");
         let dst = tmp.path().join(name);
-        std::fs::copy(&src, &dst).unwrap_or_else(|e| {
-            eprintln!("failed to copy {} -> {}: {e}", src.display(), dst.display());
-            process::exit(1);
-        });
+        std::fs::copy(&src, &dst)
+            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
 
-    // The test helpers invoke "rumpel" by name
-    let native_src = Path::new("target")
-        .join(native_triple)
-        .join("debug")
-        .join("rumpel");
-    let rumpel = tmp.path().join("rumpel");
-    std::fs::copy(&native_src, &rumpel).unwrap_or_else(|e| {
-        eprintln!("failed to copy native binary: {e}");
-        process::exit(1);
-    });
+    let native_name = if cfg!(target_os = "macos") {
+        "rumpel-darwin-arm64"
+    } else if cfg!(target_arch = "x86_64") {
+        "rumpel-linux-amd64"
+    } else {
+        "rumpel-linux-arm64"
+    };
+    symlink(native_name, tmp.path().join("rumpel"))
+        .context("symlinking rumpel to native binary")?;
+
+    let path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{path}", tmp.path().display());
 
     let status = Command::new("cargo")
         .arg("test")
         .args(&args)
-        .env("RUMPEL_BIN", &rumpel)
+        .env("PATH", &path)
         .status()
-        .unwrap_or_else(|e| {
-            eprintln!("failed to run cargo test: {e}");
-            process::exit(1);
-        });
+        .context("running cargo test")?;
 
-    // tmp is dropped here, cleaning up the copies
-    status.code().unwrap_or(1)
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }

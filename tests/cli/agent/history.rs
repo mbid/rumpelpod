@@ -200,9 +200,7 @@ fn agent_interactive_resume_shows_history() {
         })
         .expect("Failed to create PTY");
 
-    let rumpel_bin = crate::common::rumpel_bin();
-
-    let mut cmd = CommandBuilder::new(rumpel_bin);
+    let mut cmd = CommandBuilder::new("rumpel");
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",

@@ -76,7 +76,7 @@ fn write_devcontainer_with_image(repo: &TestRepo, image: &str) {
 /// `image build` and `image fetch` call Docker directly, so no daemon socket
 /// is required.
 fn rumpel_cmd(repo: &TestRepo) -> Command {
-    let mut cmd = Command::new(crate::common::rumpel_bin());
+    let mut cmd = Command::new("rumpel");
     cmd.current_dir(repo.path());
     cmd
 }

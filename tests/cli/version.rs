@@ -1,10 +1,8 @@
 use std::process::Command;
 
-use super::common::rumpel_bin;
-
 #[test]
 fn version_output_format() {
-    let output = Command::new(rumpel_bin())
+    let output = Command::new("rumpel")
         .arg("--version")
         .output()
         .expect("failed to run rumpel --version");

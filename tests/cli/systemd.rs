@@ -172,28 +172,47 @@ fn systemd_install_enter_delete_uninstall() {
 
     let user = TestUser::create();
 
-    // Build our debug binary path.
-    let rumpel_bin = super::common::rumpel_bin();
-    let rumpel_bin = rumpel_bin.to_string_lossy();
+    let rumpel_bin = Command::new("which")
+        .arg("rumpel")
+        .success()
+        .expect("rumpel not in PATH");
+    let rumpel_bin = std::str::from_utf8(&rumpel_bin)
+        .expect("non-utf8 path")
+        .trim();
+    let bin_dir = std::path::Path::new(rumpel_bin)
+        .parent()
+        .expect("rumpel has no parent dir");
 
-    // ---- install the binary into the test user's PATH ----
+    // ---- install binaries into the test user's PATH ----
+    // Copy all rumpel-* siblings to match the production flat layout.
     let cargo_bin_dir = format!("{}/.cargo/bin", user.home);
     Command::new("sudo")
         .args(["-u", &user.name, "mkdir", "-p", &cargo_bin_dir])
         .success()
         .expect("mkdir .cargo/bin failed");
-    Command::new("sudo")
-        .args(["cp", &rumpel_bin, &format!("{cargo_bin_dir}/rumpel")])
-        .success()
-        .expect("cp rumpel binary failed");
+    for name in ["rumpel", "rumpel-linux-amd64", "rumpel-linux-arm64"] {
+        let src = bin_dir.join(name);
+        if !src.exists() {
+            continue;
+        }
+        Command::new("sudo")
+            .args([
+                "cp",
+                &src.to_string_lossy(),
+                &format!("{cargo_bin_dir}/{name}"),
+            ])
+            .success()
+            .unwrap_or_else(|_| panic!("cp {name} failed"));
+    }
     Command::new("sudo")
         .args([
             "chown",
+            "-R",
             &format!("{}:{}", user.name, user.name),
-            &format!("{cargo_bin_dir}/rumpel"),
+            &cargo_bin_dir,
         ])
         .success()
-        .expect("chown rumpel binary failed");
+        .expect("chown cargo bin dir failed");
 
     // ---- create a test repo as the test user ----
     let repo_dir = format!("{}/test-repo", user.home);
