@@ -32,7 +32,7 @@ fn run() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut targets: Vec<(&str, &str)> = Vec::new();
-    if cfg!(target_os = "macos") {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         targets.push(("aarch64-apple-darwin", "rumpel-darwin-arm64"));
     }
     targets.extend_from_slice(LINUX_TARGETS);
@@ -58,12 +58,18 @@ fn run() -> Result<ExitCode> {
             .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
     }
 
-    let native_name = if cfg!(target_os = "macos") {
+    let native_name = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "rumpel-darwin-arm64"
-    } else if cfg!(target_arch = "x86_64") {
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         "rumpel-linux-amd64"
-    } else {
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         "rumpel-linux-arm64"
+    } else {
+        anyhow::bail!(
+            "unsupported host platform: {}/{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
     };
     symlink(native_name, tmp.path().join("rumpel"))
         .context("symlinking rumpel to native binary")?;

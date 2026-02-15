@@ -16,3 +16,6 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
   Prefer integration tests/ over unit tests.
 - Use `cargo xtest` instead of `cargo test`.
   It builds cross-architecture binaries and sets up the test environment.
+- Never fall through to a "default" when matching known variants.
+  Be explicit about every case and fail hard on unknown values rather
+  than silently continuing in a potentially invalid state.
