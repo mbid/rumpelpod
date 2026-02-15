@@ -87,6 +87,7 @@ impl TestUser {
             "-u",
             &self.name,
             "env",
+            &format!("PATH={}", std::env::var("PATH").unwrap_or_default()),
             &format!("XDG_RUNTIME_DIR=/run/user/{}", self.uid()),
             &format!("HOME={}", self.home),
             program,
@@ -103,6 +104,7 @@ impl TestUser {
             "-u",
             &self.name,
             "env",
+            &format!("PATH={}", std::env::var("PATH").unwrap_or_default()),
             &format!("XDG_RUNTIME_DIR=/run/user/{}", self.uid()),
             &format!("HOME={}", self.home),
             "sh",
@@ -172,48 +174,6 @@ fn systemd_install_enter_delete_uninstall() {
 
     let user = TestUser::create();
 
-    let rumpel_bin = Command::new("which")
-        .arg("rumpel")
-        .success()
-        .expect("rumpel not in PATH");
-    let rumpel_bin = std::str::from_utf8(&rumpel_bin)
-        .expect("non-utf8 path")
-        .trim();
-    let bin_dir = std::path::Path::new(rumpel_bin)
-        .parent()
-        .expect("rumpel has no parent dir");
-
-    // ---- install binaries into the test user's PATH ----
-    // Copy all rumpel-* siblings to match the production flat layout.
-    let cargo_bin_dir = format!("{}/.cargo/bin", user.home);
-    Command::new("sudo")
-        .args(["-u", &user.name, "mkdir", "-p", &cargo_bin_dir])
-        .success()
-        .expect("mkdir .cargo/bin failed");
-    for name in ["rumpel", "rumpel-linux-amd64", "rumpel-linux-arm64"] {
-        let src = bin_dir.join(name);
-        if !src.exists() {
-            continue;
-        }
-        Command::new("sudo")
-            .args([
-                "cp",
-                &src.to_string_lossy(),
-                &format!("{cargo_bin_dir}/{name}"),
-            ])
-            .success()
-            .unwrap_or_else(|_| panic!("cp {name} failed"));
-    }
-    Command::new("sudo")
-        .args([
-            "chown",
-            "-R",
-            &format!("{}:{}", user.name, user.name),
-            &cargo_bin_dir,
-        ])
-        .success()
-        .expect("chown cargo bin dir failed");
-
     // ---- create a test repo as the test user ----
     let repo_dir = format!("{}/test-repo", user.home);
     user.cmd("mkdir")
@@ -261,10 +221,8 @@ fn systemd_install_enter_delete_uninstall() {
     );
     write_as_user(&user, &format!("{repo_dir}/.rumpelpod.toml"), "\n");
 
-    let rumpel = format!("{cargo_bin_dir}/rumpel");
-
     // ---- system-install ----
-    user.cmd(&rumpel)
+    user.cmd("rumpel")
         .arg("system-install")
         .success()
         .expect("system-install failed");
@@ -285,7 +243,7 @@ fn systemd_install_enter_delete_uninstall() {
     let enter_out = user
         .shell_in(
             &repo_dir,
-            &format!("{rumpel} enter systemd-test -- echo hello-from-pod"),
+            "rumpel enter systemd-test -- echo hello-from-pod",
         )
         .output()
         .expect("rumpel enter failed to spawn");
@@ -302,12 +260,12 @@ fn systemd_install_enter_delete_uninstall() {
     );
 
     // ---- delete the pod ----
-    user.shell_in(&repo_dir, &format!("{rumpel} delete --wait systemd-test"))
+    user.shell_in(&repo_dir, "rumpel delete --wait systemd-test")
         .success()
         .expect("rumpel delete failed");
 
     // ---- system-uninstall ----
-    user.cmd(&rumpel)
+    user.cmd("rumpel")
         .arg("system-uninstall")
         .success()
         .expect("system-uninstall failed");
