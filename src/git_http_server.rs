@@ -683,7 +683,13 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
 pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
     use crate::async_runtime::block_on;
 
-    let docker = Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?;
+    let socket = crate::daemon::default_docker_socket();
+    let docker = Docker::connect_with_socket(
+        socket.to_string_lossy().as_ref(),
+        120,
+        bollard::API_DEFAULT_VERSION,
+    )
+    .context("connecting to Docker daemon")?;
 
     let network =
         block_on(docker.inspect_network(network_name, None)).context("inspecting network")?;

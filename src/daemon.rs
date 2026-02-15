@@ -42,7 +42,7 @@ pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";
 
 /// Returns the local Docker socket path.
 /// Checks DOCKER_HOST first, then probes standard socket locations.
-fn default_docker_socket() -> PathBuf {
+pub fn default_docker_socket() -> PathBuf {
     if let Ok(host) = std::env::var("DOCKER_HOST") {
         if let Some(path) = host.strip_prefix("unix://") {
             return PathBuf::from(path);
@@ -1533,22 +1533,21 @@ fn try_remove_container(
 ) -> Result<()> {
     use bollard::errors::Error as BollardError;
 
-    let docker = if let Some(host) = host_str {
+    let socket_path = if let Some(host) = host_str {
         let host = DockerHost::from_db_string(host)?;
-        if let DockerHost::Ssh { .. } = &host {
-            let socket_path = ssh_forward.get_socket(&host)?;
-            Docker::connect_with_socket(
-                socket_path.to_string_lossy().as_ref(),
-                120,
-                bollard::API_DEFAULT_VERSION,
-            )
-            .context("connecting to remote Docker daemon")?
-        } else {
-            Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
+        match &host {
+            DockerHost::Ssh { .. } => ssh_forward.get_socket(&host)?,
+            DockerHost::Localhost => default_docker_socket(),
         }
     } else {
-        Docker::connect_with_socket_defaults().context("connecting to Docker daemon")?
+        default_docker_socket()
     };
+    let docker = Docker::connect_with_socket(
+        socket_path.to_string_lossy().as_ref(),
+        120,
+        bollard::API_DEFAULT_VERSION,
+    )
+    .context("connecting to Docker daemon")?;
 
     // Stop the container with immediate SIGKILL (-t 0) because containers typically
     // run `sleep infinity` which won't handle SIGTERM gracefully anyway.

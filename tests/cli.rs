@@ -24,6 +24,7 @@ mod network;
 mod review;
 #[path = "cli/ssh/mod.rs"]
 mod ssh;
+#[cfg(target_os = "linux")]
 #[path = "cli/systemd.rs"]
 mod systemd;
 #[path = "cli/version.rs"]
