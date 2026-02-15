@@ -20,7 +20,7 @@ echo "✓ No running docker containers"
 
 echo ""
 echo "=== Running tests ==="
-cargo test
+cargo xtest
 
 echo ""
 echo "=== Running clippy (no warnings) ==="

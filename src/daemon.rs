@@ -343,21 +343,6 @@ impl ContainerArch {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BuildProfile {
-    Debug,
-    Release,
-}
-
-impl BuildProfile {
-    fn dir_name(self) -> &'static str {
-        match self {
-            Self::Debug => "debug",
-            Self::Release => "release",
-        }
-    }
-}
-
 fn get_image_architecture(docker: &Docker, image: &str) -> Result<Option<ContainerArch>> {
     let inspect = block_on(docker.inspect_image(image))
         .with_context(|| format!("Failed to inspect image '{}'", image))?;
@@ -2051,36 +2036,11 @@ fn write_file_via_stdin(
     Ok(())
 }
 
-/// Walk up from the exe path looking for a parent named "target".
-/// Returns None for system-installed binaries (e.g. /usr/local/bin/rumpel).
-fn find_target_dir(exe: &Path) -> Option<PathBuf> {
-    let mut dir = exe.parent()?;
-    loop {
-        if dir.file_name().map(|n| n == "target").unwrap_or(false) {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-}
-
-fn detect_build_profile(exe: &Path) -> Result<BuildProfile> {
-    match exe.parent().and_then(|p| p.file_name()) {
-        Some(n) if n == "release" => Ok(BuildProfile::Release),
-        Some(n) if n == "debug" => Ok(BuildProfile::Debug),
-        _ => anyhow::bail!(
-            "cannot detect build profile from {} -- \
-             expected parent directory to be 'release' or 'debug'",
-            exe.display()
-        ),
-    }
-}
-
 /// Pick the right rumpel binary for the container architecture.
 ///
 /// When the container arch matches (or is unknown), returns the running
 /// binary. Otherwise looks for `rumpel-linux-{arch}` next to the
-/// running executable (production flat layout), or under
-/// `target/<triple>/<profile>/` (dev layout).
+/// running executable.
 fn resolve_rumpel_binary(container_arch: Option<ContainerArch>) -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolving own binary path")?;
 
@@ -2090,31 +2050,17 @@ fn resolve_rumpel_binary(container_arch: Option<ContainerArch>) -> Result<PathBu
         Some(a) => a,
     };
 
-    // Production layout: cross binary sitting next to the running binary
     let exe_dir = exe.parent().context("resolving executable directory")?;
-    let sibling = exe_dir.join(arch.binary_name());
-    if sibling.exists() {
-        return Ok(sibling);
-    }
-
-    // Dev layout: target/<triple>/<profile>/rumpel
-    if let Some(target_dir) = find_target_dir(&exe) {
-        let profile = detect_build_profile(&exe)?;
-        let cross_bin = target_dir
-            .join(arch.musl_triple())
-            .join(profile.dir_name())
-            .join("rumpel");
-        if cross_bin.exists() {
-            return Ok(cross_bin);
-        }
-    }
-
-    anyhow::bail!(
-        "cross-arch binary '{}' not found -- \
+    let cross_bin = exe_dir.join(arch.binary_name());
+    anyhow::ensure!(
+        cross_bin.exists(),
+        "cross-arch binary '{}' not found next to {} -- \
          build with: cargo build --target {}",
         arch.binary_name(),
+        exe.display(),
         arch.musl_triple()
     );
+    Ok(cross_bin)
 }
 
 /// Copy the rumpel binary into the container so hook shims can invoke it.

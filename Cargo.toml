@@ -11,6 +11,11 @@ path = "src/lib.rs"
 name = "rumpel"
 path = "src/main.rs"
 
+[[bin]]
+name = "xtest"
+path = "src/bin/xtest.rs"
+test = false
+
 [dependencies]
 anyhow = ">= 0"
 thiserror = ">= 0"

@@ -3,7 +3,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use assert_cmd::cargo;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
@@ -48,7 +47,7 @@ fn test_editor_opens_immediately() {
         })
         .expect("Failed to create PTY");
 
-    let rumpel_bin = cargo::cargo_bin!("rumpel");
+    let rumpel_bin = crate::common::rumpel_bin();
 
     let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());

@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use assert_cmd::cargo;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
@@ -233,7 +232,7 @@ pub fn run_agent_interactive_model_args_env(
         })
         .expect("Failed to create PTY");
 
-    let rumpel_bin = cargo::cargo_bin!("rumpel");
+    let rumpel_bin = crate::common::rumpel_bin();
 
     let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());
@@ -384,7 +383,7 @@ pub fn run_agent_expecting_picker(
         })
         .expect("Failed to create PTY");
 
-    let rumpel_bin = cargo::cargo_bin!("rumpel");
+    let rumpel_bin = crate::common::rumpel_bin();
 
     let mut cmd = CommandBuilder::new(rumpel_bin);
     cmd.cwd(repo.path());

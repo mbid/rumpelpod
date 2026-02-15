@@ -173,7 +173,7 @@ fn systemd_install_enter_delete_uninstall() {
     let user = TestUser::create();
 
     // Build our debug binary path.
-    let rumpel_bin = assert_cmd::cargo::cargo_bin!("rumpel");
+    let rumpel_bin = super::common::rumpel_bin();
     let rumpel_bin = rumpel_bin.to_string_lossy();
 
     // ---- install the binary into the test user's PATH ----
