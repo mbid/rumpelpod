@@ -19,3 +19,5 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
 - Never fall through to a "default" when matching known variants.
   Be explicit about every case and fail hard on unknown values rather
   than silently continuing in a potentially invalid state.
+- For changes that require testing on macos, log onto a macbook via `ssh macos` and clone your checkout to /tmp/<your-hostname>/rumpelpod.
+  If you can't log on but your change should be tested on macos, report to the user.
