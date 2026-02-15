@@ -74,7 +74,7 @@ fn run() -> Result<ExitCode> {
     symlink(native_name, tmp.path().join("rumpel"))
         .context("symlinking rumpel to native binary")?;
 
-    let path = std::env::var("PATH").unwrap_or_default();
+    let path = std::env::var("PATH").context("PATH not set")?;
     let path = format!("{}:{path}", tmp.path().display());
 
     let status = Command::new("cargo")
