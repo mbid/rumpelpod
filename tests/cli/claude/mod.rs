@@ -4,6 +4,7 @@
 //! communicate with the host via a caching HTTP proxy, producing
 //! deterministic, offline-reproducible results.
 
+pub(super) mod common;
 pub(super) mod proxy;
 
 mod smoke;
