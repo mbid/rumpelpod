@@ -78,6 +78,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use log::error;
 use sha2::{Digest, Sha256};
 
 use crate::command_ext::CommandExt;
@@ -132,11 +133,11 @@ pub struct SubmoduleInfo {
 /// WARNING: this resets submodule working trees to the commits recorded by
 /// their parents, so only call it during initial gateway setup (when the
 /// gateway directory does not yet exist).
-pub fn init_submodules_recursive(repo_path: &Path) {
+pub fn init_submodules_recursive(repo_path: &Path) -> Result<()> {
     if !repo_path.join(".gitmodules").exists() {
-        return;
+        return Ok(());
     }
-    let _ = Command::new("git")
+    Command::new("git")
         .args([
             "-c",
             "protocol.file.allow=always",
@@ -146,7 +147,9 @@ pub fn init_submodules_recursive(repo_path: &Path) {
             "--recursive",
         ])
         .current_dir(repo_path)
-        .output();
+        .success()
+        .context("git submodule update --init --recursive failed")?;
+    Ok(())
 }
 
 /// Detect submodules in the host repo by running `git submodule foreach --recursive`.
@@ -164,7 +167,7 @@ pub fn detect_submodules(repo_path: &Path) -> Vec<SubmoduleInfo> {
 
     // Use tab as delimiter so paths/names containing spaces are handled.
     // $displaypath is the path relative to the top-level repo.
-    let output = Command::new("git")
+    let output = match Command::new("git")
         .args([
             "submodule",
             "foreach",
@@ -173,10 +176,22 @@ pub fn detect_submodules(repo_path: &Path) -> Vec<SubmoduleInfo> {
             "printf '%s\\t%s\\t%s\\n' \"$name\" \"$sm_path\" \"$displaypath\"",
         ])
         .current_dir(repo_path)
-        .output();
-    let output = match output {
+        .output()
+    {
         Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            error!(
+                "git submodule foreach failed (exit {}): {}",
+                o.status.code().unwrap_or(-1),
+                stderr.trim()
+            );
+            return Vec::new();
+        }
+        Err(e) => {
+            error!("failed to run git submodule foreach: {e}");
+            return Vec::new();
+        }
     };
     let mut subs: Vec<SubmoduleInfo> = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -398,7 +413,7 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     // Only safe during initial gateway creation because it resets submodule
     // working trees to the commits recorded by their parents.
     if is_first_setup {
-        init_submodules_recursive(repo_path);
+        init_submodules_recursive(repo_path)?;
     }
 
     // Set up gateways for each submodule
