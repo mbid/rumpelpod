@@ -10,11 +10,11 @@
         "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
         "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
         "MACOS_SSH_PRIVATE_KEY": "${localEnv:MACOS_SSH_PRIVATE_KEY}",
-        "MACOS_SSH_HOST": "${localEnv:MACOS_SSH_HOST}",
-        "MACOS_SSH_USER": "${localEnv:MACOS_SSH_USER}",
+        "MACOS_SSH_CONFIG": "${localEnv:MACOS_SSH_CONFIG}",
+        "MACOS_SSH_KNOWN_HOSTS": "${localEnv:MACOS_SSH_KNOWN_HOSTS}",
         "RUMPELPOD_TEST_SYSTEMD": "1"
     },
-    "postStartCommand": "if [ -n \"$MACOS_SSH_PRIVATE_KEY\" ]; then mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s' \"$MACOS_SSH_PRIVATE_KEY\" | base64 -d > ~/.ssh/macos_id && chmod 600 ~/.ssh/macos_id && printf 'Host macos\\n  HostName %s\\n  User %s\\n  IdentityFile ~/.ssh/macos_id\\n  StrictHostKeyChecking no\\n' \"$MACOS_SSH_HOST\" \"$MACOS_SSH_USER\" >> ~/.ssh/config; fi",
+    "postStartCommand": "if [ -n \"$MACOS_SSH_PRIVATE_KEY\" ]; then mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo \"$MACOS_SSH_PRIVATE_KEY\" | base64 -d > ~/.ssh/macos_id && chmod 600 ~/.ssh/macos_id && echo \"$MACOS_SSH_CONFIG\" | base64 -d >> ~/.ssh/config && echo \"$MACOS_SSH_KNOWN_HOSTS\" | base64 -d >> ~/.ssh/known_hosts; fi",
     "runArgs": [
         "--runtime=sysbox-runc"
     ],
