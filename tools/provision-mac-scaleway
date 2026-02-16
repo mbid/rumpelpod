@@ -118,19 +118,15 @@ if [[ "${WRITE_CONFIG,,}" == "y" ]]; then
     mkdir -p "$SSH_CONFIG_DIR"
     echo "$SSH_HOST_BLOCK" > "$SSH_CONFIG_FILE"
     chmod 600 "$SSH_CONFIG_FILE"
+    echo "    Wrote $SSH_CONFIG_FILE"
+fi
 
-    # Ensure ~/.ssh/config pulls in the config.d directory
-    if [[ ! -f "$HOME/.ssh/config" ]] || ! grep -qF "Include config.d/*" "$HOME/.ssh/config"; then
-        # Include must appear before any Host/Match blocks to apply globally
-        if [[ -f "$HOME/.ssh/config" ]]; then
-            EXISTING=$(cat "$HOME/.ssh/config")
-            printf 'Include config.d/*\n\n%s\n' "$EXISTING" > "$HOME/.ssh/config"
-        else
-            printf 'Include config.d/*\n' > "$HOME/.ssh/config"
-        fi
-        echo "    Added 'Include config.d/*' to ~/.ssh/config"
-    fi
-    echo "    Wrote $SSH_CONFIG_FILE -- 'ssh macos' should work now."
+# Check whether ~/.ssh/config already includes config.d
+if [[ ! -f "$HOME/.ssh/config" ]] || ! grep -qF "Include config.d/*" "$HOME/.ssh/config"; then
+    echo ""
+    echo " NOTE: Add this line to the TOP of ~/.ssh/config:"
+    echo ""
+    echo "   Include config.d/*"
 fi
 
 echo ""
