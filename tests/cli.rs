@@ -2,6 +2,8 @@
 mod agent;
 #[path = "cli/anthropic_url.rs"]
 mod anthropic_url;
+#[path = "cli/claude/mod.rs"]
+mod claude;
 #[path = "cli/common.rs"]
 mod common;
 #[path = "cli/container_name.rs"]
