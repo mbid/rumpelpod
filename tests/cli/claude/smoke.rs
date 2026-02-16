@@ -2,28 +2,56 @@
 //! container, gets a response via the caching proxy, and exits cleanly.
 
 use std::io::Read;
+use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::common::{build_test_image, TestDaemon, TestRepo, TEST_REPO_PATH};
+use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH};
 
 use super::proxy::claude_proxy;
 
-/// Extra Dockerfile lines to install claude CLI, screen, and faketime.
-/// Runs after `USER testuser` from build_test_image, so we switch to root
-/// for package installation, then back.
-const CLAUDE_IMAGE_EXTRA: &str = "\
-USER root
-RUN apt-get update && apt-get install -y screen faketime curl
-USER testuser
-RUN curl -fsSL https://cli.anthropic.com/install.sh | sh
-ENV PATH=\"/home/testuser/.claude/bin:$PATH\"
-";
+/// Resolve the host's claude CLI binary to its real path (following symlinks).
+fn find_claude_binary() -> PathBuf {
+    let output = Command::new("which")
+        .arg("claude")
+        .output()
+        .expect("run `which claude`");
 
-fn write_claude_test_config(repo: &TestRepo, image_id: &crate::common::ImageId) {
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert!(
+        !path.is_empty(),
+        "claude binary not found on host -- install Claude CLI first"
+    );
+
+    std::fs::canonicalize(&path).expect("resolve claude binary symlinks")
+}
+
+/// Build the test image with claude CLI, screen, and faketime.
+///
+/// Copies the host's claude binary into the build context rather than
+/// downloading it (Docker builds in this environment lack DNS).
+fn build_claude_test_image(repo: &TestRepo) -> ImageId {
+    let claude_binary = find_claude_binary();
+    let claude_dest = repo.path().join("claude-cli-binary");
+    std::fs::copy(&claude_binary, &claude_dest).expect("copy claude binary into build context");
+
+    // Extra lines run after `USER testuser` from build_test_image.
+    // Switch to root for package install + binary placement, then back.
+    let extra = "\
+USER root
+RUN apt-get update && apt-get install -y screen faketime
+RUN mv /home/testuser/workspace/claude-cli-binary /usr/local/bin/claude \
+    && chmod +x /usr/local/bin/claude
+USER testuser";
+
+    build_test_image(repo.path(), extra).expect("build claude test image")
+}
+
+fn write_claude_test_config(repo: &TestRepo, image_id: &ImageId) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer dir");
 
@@ -55,8 +83,7 @@ fn claude_smoke() {
     let proxy = claude_proxy();
 
     let repo = TestRepo::new();
-    let image_id =
-        build_test_image(repo.path(), CLAUDE_IMAGE_EXTRA).expect("build claude test image");
+    let image_id = build_claude_test_image(&repo);
     write_claude_test_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
@@ -93,7 +120,7 @@ fn claude_smoke() {
         "--no-dangerously-skip-permissions",
         "--",
         "--print",
-        "What is 2+2? Reply with just the number.",
+        "What is the capital of France? Reply with just the city name, nothing else.",
         "--no-session-persistence",
         "--session-id",
         "00000000-0000-0000-0000-000000000001",
@@ -153,8 +180,8 @@ fn claude_smoke() {
     }
 
     assert!(
-        output.contains("4"),
-        "Claude should respond with 4 to 'What is 2+2?'.\nFull output:\n{}",
+        output.contains("Paris"),
+        "Claude should respond with 'Paris'.\nFull output:\n{}",
         output
     );
 }

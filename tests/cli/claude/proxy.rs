@@ -123,13 +123,64 @@ fn cache_dir() -> PathBuf {
         .join("claude-cli")
 }
 
+/// Normalize the request body to strip fields that vary between runs but
+/// don't affect the semantics of the response (container-specific user IDs,
+/// config hashes, auto-memory state).
+fn normalize_body(body: &[u8]) -> Vec<u8> {
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.to_vec();
+    };
+
+    // metadata.user_id contains a per-container hash
+    if let Some(meta) = json.get_mut("metadata").and_then(|m| m.as_object_mut()) {
+        meta.remove("user_id");
+    }
+
+    // system[0] is the billing header with a per-run cch hash
+    if let Some(system) = json.get_mut("system") {
+        if let Some(arr) = system.as_array_mut() {
+            // Strip billing header entry (first element, contains cch=)
+            if arr
+                .first()
+                .and_then(|v| v.get("text"))
+                .and_then(|t| t.as_str())
+                .is_some_and(|s| s.contains("x-anthropic-billing-header"))
+            {
+                arr.remove(0);
+            }
+            // Strip auto-memory section from system prompt text
+            for entry in arr.iter_mut() {
+                if let Some(text) = entry.get_mut("text") {
+                    if let Some(s) = text.as_str() {
+                        if let Some(pos) = s.find("\n# auto memory\n") {
+                            // Cut auto memory up to the next top-level heading or env block
+                            let after = &s[pos + 1..];
+                            let end = after
+                                .find("\nHere is useful information about the environment")
+                                .map(|i| pos + 1 + i)
+                                .unwrap_or(s.len());
+                            let mut cleaned = s[..pos].to_string();
+                            cleaned.push_str(&s[end..]);
+                            *text = serde_json::Value::String(cleaned);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deterministic serialization
+    serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec())
+}
+
 fn compute_cache_key(method: &str, path_and_query: &str, body: &[u8]) -> String {
+    let normalized = normalize_body(body);
     let mut hasher = Sha256::new();
     hasher.update(method.as_bytes());
     hasher.update(b"\n");
     hasher.update(path_and_query.as_bytes());
     hasher.update(b"\n");
-    hasher.update(body);
+    hasher.update(&normalized);
     hex::encode(hasher.finalize())
 }
 
@@ -190,8 +241,8 @@ fn cache_put(key: &str, response: &CachedResponse) {
 
 fn is_offline_mode() -> bool {
     std::env::var("RUMPELPOD_TEST_LLM_OFFLINE")
-        .map(|s| s != "0" && s.to_lowercase() != "false")
-        .unwrap_or(true)
+        .map(|s| s == "1" || s.to_lowercase() == "true")
+        .unwrap_or(false)
 }
 
 async fn handle_request(req: Request<Body>) -> Response {
@@ -225,6 +276,7 @@ async fn handle_request(req: Request<Body>) -> Response {
 
     // Lock-free cache lookup (files are immutable once written)
     if let Some(cached) = cache_get(&cache_key) {
+        eprintln!("claude proxy: cache hit {method} {path_and_query}");
         return cached.into_response();
     }
 
