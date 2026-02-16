@@ -1771,6 +1771,48 @@ fn gateway_host_head_works_in_detached_state() {
 }
 
 #[test]
+fn gateway_setup_works_with_detached_head() {
+    // Detach HEAD before the first `rumpel enter` so that setup_gateway
+    // runs push_all_branches with zero local branches.  HEAD must still
+    // be pushed to the gateway.
+    let repo = TestRepo::new();
+
+    create_commit(repo.path(), "First commit");
+    let commit = get_branch_commit(repo.path(), "HEAD").unwrap();
+
+    // Detach HEAD and delete the only branch.
+    Command::new("git")
+        .args(["checkout", "--detach"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git checkout --detach failed");
+    Command::new("git")
+        .args(["branch", "-D", "master"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git branch -D master failed");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "detached-setup", "--", "echo", "ok"])
+        .success()
+        .expect("Failed to run rumpel enter on detached HEAD repo");
+
+    let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
+
+    // HEAD commit must be reachable in the gateway even with no branches.
+    assert_eq!(
+        get_branch_commit(&gateway, "host/HEAD"),
+        Some(commit),
+        "host/HEAD should be pushed even when repo has no branches"
+    );
+}
+
+#[test]
 fn gateway_primary_branch_alias_works_on_host() {
     // Test that rumpelpod/<name> resolves to the same commit as rumpelpod/<name>@<name>
     // For the alias to be created, the pod must be on a branch with the same name
