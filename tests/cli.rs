@@ -16,7 +16,7 @@ mod delete;
 mod devcontainer;
 #[path = "cli/enter.rs"]
 mod enter;
-#[path = "cli/gateway.rs"]
+#[path = "cli/gateway/mod.rs"]
 mod gateway;
 #[path = "cli/list.rs"]
 mod list;
