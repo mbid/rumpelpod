@@ -6,6 +6,8 @@ STATE_FILE="$HOME/.scaleway-mac-server"
 ZONE="fr-par-1"
 TYPE="M2-M"  # cheapest available: 8-core M2, 16GB, 256GB SSD, EUR0.17/hr
 MACOS_KEY="$HOME/.ssh/id_ed25519_macos"
+SSH_CONFIG_DIR="$HOME/.ssh/config.d"
+SSH_CONFIG_FILE="$SSH_CONFIG_DIR/macos"
 
 if [[ -f "$STATE_FILE" ]]; then
     echo "Error: A server state file already exists at $STATE_FILE"
@@ -98,6 +100,41 @@ ssh "m1@$SERVER_IP" 'source "$HOME/.cargo/env" && rustup target add x86_64-unkno
 echo "==> Setting default git branch to master..."
 ssh "m1@$SERVER_IP" 'git config --global init.defaultBranch master'
 
+# Set up local SSH config so `ssh macos` works on the host
+SSH_HOST_BLOCK="Host macos
+  HostName $SERVER_IP
+  User m1
+  IdentityFile $MACOS_KEY
+  StrictHostKeyChecking no"
+
+WRITE_CONFIG=y
+if [[ -f "$SSH_CONFIG_FILE" ]]; then
+    echo ""
+    echo "==> SSH config already exists at $SSH_CONFIG_FILE:"
+    cat "$SSH_CONFIG_FILE"
+    echo ""
+    read -rp "Overwrite? [y/N] " WRITE_CONFIG
+fi
+
+if [[ "${WRITE_CONFIG,,}" == "y" ]]; then
+    mkdir -p "$SSH_CONFIG_DIR"
+    echo "$SSH_HOST_BLOCK" > "$SSH_CONFIG_FILE"
+    chmod 600 "$SSH_CONFIG_FILE"
+
+    # Ensure ~/.ssh/config pulls in the config.d directory
+    if [[ ! -f "$HOME/.ssh/config" ]] || ! grep -qF "Include config.d/*" "$HOME/.ssh/config"; then
+        # Include must appear before any Host/Match blocks to apply globally
+        if [[ -f "$HOME/.ssh/config" ]]; then
+            EXISTING=$(cat "$HOME/.ssh/config")
+            printf 'Include config.d/*\n\n%s\n' "$EXISTING" > "$HOME/.ssh/config"
+        else
+            printf 'Include config.d/*\n' > "$HOME/.ssh/config"
+        fi
+        echo "    Added 'Include config.d/*' to ~/.ssh/config"
+    fi
+    echo "    Wrote $SSH_CONFIG_FILE -- 'ssh macos' should work now."
+fi
+
 echo ""
 echo "============================================"
 echo " Mac mini ready!"
@@ -109,7 +146,7 @@ echo " Type      : $TYPE"
 echo " Commitment: 24h (auto-delete scheduled)"
 echo ""
 echo " SSH:"
-echo "   ssh m1@$SERVER_IP"
+echo "   ssh macos"
 echo ""
 echo " VNC (Remmina):"
 if [[ -n "$VNC_URL" ]]; then
