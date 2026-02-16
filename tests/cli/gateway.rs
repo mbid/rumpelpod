@@ -1879,7 +1879,7 @@ fn gateway_alias_deleted_with_pod() {
 
     // Delete the pod (--wait so refs are cleaned up before checking)
     pod_command(&repo, &daemon)
-        .args(["delete", "--wait", pod_name])
+        .args(["delete", "--wait", "--force", pod_name])
         .success()
         .expect("Failed to delete pod");
 

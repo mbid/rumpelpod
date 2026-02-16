@@ -42,8 +42,7 @@ fn delete_smoke_test() {
 }
 
 #[test]
-fn delete_nonexistent_pod_succeeds() {
-    // Deleting a pod that doesn't exist should succeed (idempotent)
+fn delete_unknown_pod_fails() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
     write_test_pod_config(&repo, &image_id);
@@ -56,9 +55,97 @@ fn delete_nonexistent_pod_succeeds() {
         .expect("Failed to run rumpel delete command");
 
     assert!(
+        !output.status.success(),
+        "rumpel delete of unknown pod should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "Expected 'not found' in stderr: {}",
+        stderr
+    );
+}
+
+/// Helper: create a pod and make a commit inside it so it becomes "ahead 1".
+fn create_ahead_pod(repo: &TestRepo, daemon: &TestDaemon, name: &str) {
+    let output = pod_command(repo, daemon)
+        .args(["enter", name, "--", "touch", "newfile"])
+        .output()
+        .expect("Failed to touch file");
+    assert!(output.status.success(), "touch failed");
+
+    let output = pod_command(repo, daemon)
+        .args(["enter", name, "--", "git", "add", "newfile"])
+        .output()
+        .expect("Failed to git add");
+    assert!(output.status.success(), "git add failed");
+
+    let output = pod_command(repo, daemon)
+        .args(["enter", name, "--", "git", "commit", "-m", "new file"])
+        .output()
+        .expect("Failed to git commit");
+    assert!(output.status.success(), "git commit failed");
+}
+
+#[test]
+fn delete_unmerged_pod_fails_without_tty() {
+    // In non-tty mode (piped output), deleting an unmerged pod should fail
+    // with a helpful error message.
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    create_ahead_pod(&repo, &daemon, "unmerged");
+
+    // pod_command pipes stdout/stderr, so this is non-tty
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "unmerged"])
+        .output()
+        .expect("Failed to run rumpel delete command");
+
+    assert!(
+        !output.status.success(),
+        "delete of unmerged pod should fail without --force"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unmerged commits") && stderr.contains("--force"),
+        "Expected 'unmerged commits' and '--force' hint in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn delete_unmerged_pod_succeeds_with_force() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    create_ahead_pod(&repo, &daemon, "force-del");
+
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "--force", "force-del"])
+        .output()
+        .expect("Failed to run rumpel delete command");
+
+    assert!(
         output.status.success(),
-        "rumpel delete of nonexistent pod failed: {}",
+        "delete with --force should succeed: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify pod is gone
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("force-del"),
+        "pod should be gone after forced delete: {}",
+        stdout
     );
 }
 

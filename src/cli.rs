@@ -215,6 +215,10 @@ pub struct DeleteCommand {
     /// Block until the container is fully removed
     #[arg(long)]
     pub wait: bool,
+
+    /// Delete even if the pod has unmerged commits
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args)]
