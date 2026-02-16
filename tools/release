@@ -68,14 +68,12 @@ fi
 
 # -- Package as tar.gz and upload ------------------------------------------
 
-ASSETS=()
-for name in rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64; do
-    echo "==> Packaging $name.tar.gz..."
-    tar -C "$STAGING" -czf "$STAGING/$name.tar.gz" "$name"
-    ASSETS+=("$STAGING/$name.tar.gz")
-done
+TARBALL="$STAGING/rumpel-$TAG.tar.gz"
+echo "==> Packaging rumpel-$TAG.tar.gz..."
+tar -C "$STAGING" -czf "$TARBALL" \
+    rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64
 
 echo "==> Creating GitHub release $TAG..."
-gh release create "$TAG" "${ASSETS[@]}" --title "$TAG"
+gh release create "$TAG" "$TARBALL" --title "$TAG"
 
 echo "==> Done: $TAG released."
