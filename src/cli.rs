@@ -321,6 +321,10 @@ pub struct ClaudeCommand {
     #[arg(long)]
     pub host: Option<String>,
 
+    /// Disable --dangerously-skip-permissions (which is on by default)
+    #[arg(long)]
+    pub no_dangerously_skip_permissions: bool,
+
     /// Arguments forwarded to `claude` CLI
     #[arg(last = true, value_name = "ARGS")]
     pub args: Vec<String>,

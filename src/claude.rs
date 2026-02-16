@@ -150,8 +150,10 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             "claude",
             "--",
             "claude",
-            "--dangerously-skip-permissions",
         ]);
+        if !cmd.no_dangerously_skip_permissions {
+            docker_cmd.arg("--dangerously-skip-permissions");
+        }
         docker_cmd.args(&cmd.args);
     }
 
