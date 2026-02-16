@@ -8,6 +8,7 @@ TYPE="M2-M"  # cheapest available: 8-core M2, 16GB, 256GB SSD, EUR0.17/hr
 MACOS_KEY="$HOME/.ssh/id_ed25519_macos"
 SSH_CONFIG_DIR="$HOME/.ssh/config.d"
 SSH_CONFIG_FILE="$SSH_CONFIG_DIR/macos"
+SSH_KNOWN_HOSTS="$SSH_CONFIG_DIR/macos_known_hosts"
 
 if [[ -f "$STATE_FILE" ]]; then
     echo "Error: A server state file already exists at $STATE_FILE"
@@ -44,68 +45,69 @@ echo "==> Scheduling auto-deletion (server will be deleted once 24h lease expire
     schedule-deletion=true \
     zone="$ZONE" > /dev/null
 
-# Add SSH known host
-echo "==> Adding server to SSH known_hosts..."
+# Collect host key into a dedicated known_hosts file
+echo "==> Waiting for SSH to become available..."
+mkdir -p "$SSH_CONFIG_DIR"
 for i in $(seq 1 30); do
     if ssh-keyscan -T 5 "$SERVER_IP" 2>/dev/null | grep -q .; then
-        ssh-keyscan -T 5 "$SERVER_IP" 2>/dev/null >> "$HOME/.ssh/known_hosts"
-        # Deduplicate
-        sort -u -o "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts"
-        echo "    Known host added."
+        ssh-keyscan -T 5 "$SERVER_IP" 2>/dev/null > "$SSH_KNOWN_HOSTS"
+        echo "    Host key saved to $SSH_KNOWN_HOSTS"
         break
     fi
-    echo "    Waiting for SSH to become available (attempt $i/30)..."
+    echo "    Waiting (attempt $i/30)..."
     sleep 10
 done
+
+SSH_OPTS=(-o "UserKnownHostsFile=$SSH_KNOWN_HOSTS" -i "$MACOS_KEY")
 
 # Extract password from VNC URL for sudo (format: vnc://user:pass@host:port)
 VNC_PASS=$(echo "$VNC_URL" | sed -n 's|vnc://[^:]*:\([^@]*\)@.*|\1|p')
 
 # Enable passwordless sudo
 echo "==> Enabling passwordless sudo..."
-ssh "m1@$SERVER_IP" "echo '$VNC_PASS' | sudo -S bash -c 'echo \"m1 ALL=(ALL) NOPASSWD: ALL\" > /etc/sudoers.d/m1'"
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" "echo '$VNC_PASS' | sudo -S bash -c 'echo \"m1 ALL=(ALL) NOPASSWD: ALL\" > /etc/sudoers.d/m1'"
 
 # Add macos public key to authorized_keys
 echo "==> Adding macos public key to server..."
-ssh "m1@$SERVER_IP" "cat >> ~/.ssh/scw_authorized_keys" < "${MACOS_KEY}.pub"
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" "cat >> ~/.ssh/scw_authorized_keys" < "${MACOS_KEY}.pub"
 
 # Install Rust via rustup
 echo "==> Installing Rust via rustup..."
-ssh "m1@$SERVER_IP" "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
 
 # Install Homebrew
 echo "==> Installing Homebrew..."
-ssh "m1@$SERVER_IP" 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
 
 # .zprofile is only sourced by login shells; non-interactive SSH commands
 # (ssh host 'cmd') run as non-login shells that only source .zshenv.
 echo "==> Adding Homebrew to PATH in .zshenv..."
-ssh "m1@$SERVER_IP" 'echo '\''eval "$(/opt/homebrew/bin/brew shellenv)"'\'' >> ~/.zshenv'
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" 'echo '\''eval "$(/opt/homebrew/bin/brew shellenv)"'\'' >> ~/.zshenv'
 
 # All subsequent ssh invocations pick up brew from .zshenv automatically.
 
 echo "==> Installing Docker via Colima..."
-ssh "m1@$SERVER_IP" 'brew install colima docker docker-compose && colima start --cpu 4 --memory 8'
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" 'brew install colima docker docker-compose && colima start --cpu 4 --memory 8'
 
 echo "==> Installing git-lfs..."
-ssh "m1@$SERVER_IP" 'brew install git-lfs'
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" 'brew install git-lfs'
 
 echo "==> Installing musl cross-compilation toolchain..."
-ssh "m1@$SERVER_IP" 'brew install FiloSottile/musl-cross/musl-cross'
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" 'brew install FiloSottile/musl-cross/musl-cross'
 
 echo "==> Adding Rust musl targets..."
-ssh "m1@$SERVER_IP" 'source "$HOME/.cargo/env" && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl'
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" 'source "$HOME/.cargo/env" && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl'
 
 # Tests create git repos and expect "master" as the default branch
 echo "==> Setting default git branch to master..."
-ssh "m1@$SERVER_IP" 'git config --global init.defaultBranch master'
+ssh "${SSH_OPTS[@]}" "m1@$SERVER_IP" 'git config --global init.defaultBranch master'
 
 # Set up local SSH config so `ssh macos` works on the host
 SSH_HOST_BLOCK="Host macos
   HostName $SERVER_IP
   User m1
   IdentityFile $MACOS_KEY
-  StrictHostKeyChecking no"
+  UserKnownHostsFile $SSH_KNOWN_HOSTS"
 
 WRITE_CONFIG=y
 if [[ -f "$SSH_CONFIG_FILE" ]]; then
@@ -117,7 +119,6 @@ if [[ -f "$SSH_CONFIG_FILE" ]]; then
 fi
 
 if [[ "${WRITE_CONFIG,,}" == "y" ]]; then
-    mkdir -p "$SSH_CONFIG_DIR"
     echo "$SSH_HOST_BLOCK" > "$SSH_CONFIG_FILE"
     chmod 600 "$SSH_CONFIG_FILE"
 
