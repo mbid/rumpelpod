@@ -116,45 +116,105 @@ pub fn gateway_path(repo_path: &Path) -> Result<PathBuf> {
 
 /// Info about a submodule discovered in the host repo.
 pub struct SubmoduleInfo {
+    /// Name in the immediate parent's `.gitmodules`.
     pub name: String,
+    /// Path relative to the immediate parent worktree.
     pub path: String,
+    /// Path relative to the top-level repo (includes parent prefixes for nested submodules).
+    pub displaypath: String,
 }
 
-/// Detect submodules in the host repo by running `git submodule foreach`.
+/// Ensure all submodules (including nested ones) are checked out on the host.
+///
+/// `git submodule foreach --recursive` can only enumerate submodules that are
+/// already initialized and checked out. This function ensures that is the case.
+///
+/// WARNING: this resets submodule working trees to the commits recorded by
+/// their parents, so only call it during initial gateway setup (when the
+/// gateway directory does not yet exist).
+pub fn init_submodules_recursive(repo_path: &Path) {
+    if !repo_path.join(".gitmodules").exists() {
+        return;
+    }
+    let _ = Command::new("git")
+        .args([
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ])
+        .current_dir(repo_path)
+        .output();
+}
+
+/// Detect submodules in the host repo by running `git submodule foreach --recursive`.
+/// Returns submodules sorted by depth (parents before children) so that
+/// level-by-level init works correctly for nested submodules.
 /// Returns an empty vec when `.gitmodules` is absent or on any error.
+///
+/// Only enumerates submodules that are already initialized and checked out.
+/// Call `init_submodules_recursive` first if nested submodules might not
+/// be checked out yet.
 pub fn detect_submodules(repo_path: &Path) -> Vec<SubmoduleInfo> {
     if !repo_path.join(".gitmodules").exists() {
         return Vec::new();
     }
+
+    // Use tab as delimiter so paths/names containing spaces are handled.
+    // $displaypath is the path relative to the top-level repo.
     let output = Command::new("git")
-        .args(["submodule", "foreach", "--quiet", "echo $name $sm_path"])
+        .args([
+            "submodule",
+            "foreach",
+            "--recursive",
+            "--quiet",
+            "printf '%s\\t%s\\t%s\\n' \"$name\" \"$sm_path\" \"$displaypath\"",
+        ])
         .current_dir(repo_path)
         .output();
     let output = match output {
         Ok(o) if o.status.success() => o,
         _ => return Vec::new(),
     };
-    String::from_utf8_lossy(&output.stdout)
+    let mut subs: Vec<SubmoduleInfo> = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            let (name, path) = line.split_once(' ')?;
+            let mut parts = line.splitn(3, '\t');
+            let name = parts.next()?.to_string();
+            let path = parts.next()?.to_string();
+            let displaypath = parts.next()?.to_string();
             Some(SubmoduleInfo {
-                name: name.to_string(),
-                path: path.to_string(),
+                name,
+                path,
+                displaypath,
             })
         })
-        .collect()
+        .collect();
+
+    // Sort by depth so parents come before children.
+    subs.sort_by_key(|s| s.displaypath.matches('/').count());
+    subs
 }
 
 /// Get the path to the submodule gateway repository.
-pub fn submodule_gateway_path(repo_path: &Path, name: &str) -> Result<PathBuf> {
+///
+/// `displaypath` is the submodule path relative to the top-level repo.
+/// For nested submodules it contains `/` separators (e.g. "outer/inner")
+/// which become directory levels under `submodules/`.
+pub fn submodule_gateway_path(repo_path: &Path, displaypath: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !displaypath.split('/').any(|c| c == ".."),
+        "submodule displaypath must not contain '..': {displaypath}"
+    );
     let state_dir = get_state_dir()?;
     let hash = repo_path_hash(repo_path);
-    Ok(state_dir
-        .join(&hash)
-        .join("submodules")
-        .join(name)
-        .join("gateway.git"))
+    let mut path = state_dir.join(&hash).join("submodules");
+    for component in displaypath.split('/') {
+        path = path.join(component);
+    }
+    Ok(path.join("gateway.git"))
 }
 
 /// Resolve the actual git directory for a worktree, handling gitlink files
@@ -259,9 +319,10 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     }
 
     let gateway = gateway_path(repo_path)?;
+    let is_first_setup = !gateway.exists();
 
     // Create gateway directory and initialize bare repo if needed
-    if !gateway.exists() {
+    if is_first_setup {
         fs::create_dir_all(&gateway).with_context(|| {
             format!("Failed to create gateway directory: {}", gateway.display())
         })?;
@@ -333,6 +394,13 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     // Push all existing branches to the gateway
     push_all_branches(repo_path)?;
 
+    // Ensure nested submodules are checked out before enumerating them.
+    // Only safe during initial gateway creation because it resets submodule
+    // working trees to the commits recorded by their parents.
+    if is_first_setup {
+        init_submodules_recursive(repo_path);
+    }
+
     // Set up gateways for each submodule
     for sub in detect_submodules(repo_path) {
         setup_submodule_gateway(repo_path, &sub, &rumpel_exe)?;
@@ -350,10 +418,14 @@ fn setup_submodule_gateway(
     submodule: &SubmoduleInfo,
     rumpel_exe: &str,
 ) -> Result<()> {
-    let sub_workdir = repo_path.join(&submodule.path);
-    let gateway = submodule_gateway_path(repo_path, &submodule.name)?;
-    let sub_git_dir = resolve_git_dir(&sub_workdir)
-        .with_context(|| format!("resolving git dir for submodule '{}'", submodule.name))?;
+    let sub_workdir = repo_path.join(&submodule.displaypath);
+    let gateway = submodule_gateway_path(repo_path, &submodule.displaypath)?;
+    let sub_git_dir = resolve_git_dir(&sub_workdir).with_context(|| {
+        format!(
+            "resolving git dir for submodule '{}'",
+            submodule.displaypath
+        )
+    })?;
 
     // Create bare gateway if needed
     if !gateway.exists() {

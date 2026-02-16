@@ -447,9 +447,9 @@ fn cleanup_pod_refs(gateway_path: &Path, repo_path: &Path, pod_name: &PodName) {
 
     // Also clean up refs in each submodule gateway
     for sub in gateway::detect_submodules(repo_path) {
-        if let Ok(sub_gateway) = gateway::submodule_gateway_path(repo_path, &sub.name) {
+        if let Ok(sub_gateway) = gateway::submodule_gateway_path(repo_path, &sub.displaypath) {
             if sub_gateway.exists() {
-                let sub_workdir = repo_path.join(&sub.path);
+                let sub_workdir = repo_path.join(&sub.displaypath);
                 cleanup_pod_refs_in_gateway(&sub_gateway, &sub_workdir, pod_name);
             }
         }
@@ -926,29 +926,40 @@ fn setup_pod_submodules(
         return Ok(());
     }
 
-    let repo_path_str = container_repo_path.to_string_lossy().to_string();
-
     // Only clone submodules on first entry. On re-entry they are already
     // present and `git submodule update` would destructively reset them to
     // the parent's recorded gitlink, discarding any pod-side work.
+    //
+    // Submodules are sorted by depth so parents are cloned before children.
+    // Each submodule is initialized and updated level-by-level via its
+    // immediate parent, which handles nested submodules correctly.
     if is_first_entry {
+        let base_url = git_http_url.trim_end_matches("/gateway.git");
         let mut init_script = String::from("set -e\n");
-        init_script.push_str(&format!("cd \"{repo_path_str}\"\n"));
-        init_script.push_str("git submodule init\n");
+
         for sub in submodules {
-            let sub_url = format!(
-                "{}/submodules/{}/gateway.git",
-                git_http_url.trim_end_matches("/gateway.git"),
-                sub.name
-            );
+            // The parent directory inside the container is the displaypath
+            // minus the trailing path component (i.e. the immediate parent repo).
+            let parent_dir = if let Some(parent) = Path::new(&sub.displaypath).parent() {
+                container_repo_path.join(parent)
+            } else {
+                container_repo_path.to_path_buf()
+            };
+            let parent_dir_str = parent_dir.to_string_lossy();
+
+            let sub_url = format!("{}/submodules/{}/gateway.git", base_url, sub.displaypath);
+
+            init_script.push_str(&format!("cd \"{parent_dir_str}\"\n"));
+            init_script.push_str(&format!("git submodule init \"{}\"\n", sub.path));
             init_script.push_str(&format!(
                 "git config submodule.{}.url \"{}\"\n",
                 sub.name, sub_url
             ));
+            init_script.push_str(&format!(
+                "git -c http.extraHeader=\"Authorization: Bearer {token}\" submodule update \"{}\"\n",
+                sub.path
+            ));
         }
-        init_script.push_str(&format!(
-            "git -c http.extraHeader=\"Authorization: Bearer {token}\" submodule update\n"
-        ));
 
         exec_command(
             docker,
@@ -962,14 +973,11 @@ fn setup_pod_submodules(
     }
 
     // Configure each submodule's remotes, hooks, and branch
+    let base_url = git_http_url.trim_end_matches("/gateway.git");
     for sub in submodules {
-        let sub_path = container_repo_path.join(&sub.path);
+        let sub_path = container_repo_path.join(&sub.displaypath);
         let sub_path_str = sub_path.to_string_lossy().to_string();
-        let sub_url = format!(
-            "{}/submodules/{}/gateway.git",
-            git_http_url.trim_end_matches("/gateway.git"),
-            sub.name
-        );
+        let sub_url = format!("{}/submodules/{}/gateway.git", base_url, sub.displaypath);
 
         let push_refspec = format!("+refs/heads/*:refs/heads/rumpelpod/*@{}", pod_name.0);
 
@@ -1022,7 +1030,7 @@ fn setup_pod_submodules(
             None,
             vec!["sh", "-c", &setup_script],
         )
-        .with_context(|| format!("configuring submodule '{}' remotes", sub.name))?;
+        .with_context(|| format!("configuring submodule '{}' remotes", sub.displaypath))?;
 
         // Install reference-transaction hook in the submodule (resolve
         // gitdir since .git is a gitlink file in absorbed submodules).
@@ -1051,7 +1059,7 @@ fn setup_pod_submodules(
             None,
             vec!["sh", "-c", &hook_script],
         )
-        .with_context(|| format!("installing hook in submodule '{}'", sub.name))?;
+        .with_context(|| format!("installing hook in submodule '{}'", sub.displaypath))?;
 
         // Create and checkout pod branch from host/HEAD on first entry
         if is_first_entry {
@@ -1078,7 +1086,7 @@ fn setup_pod_submodules(
             .with_context(|| {
                 format!(
                     "creating branch '{}' in submodule '{}'",
-                    branch_name, sub.name
+                    branch_name, sub.displaypath
                 )
             })?;
         }
@@ -3143,7 +3151,7 @@ impl Daemon for DaemonServer {
                 Some(&launch_result.user),
                 Some(&repo_path_str),
                 None,
-                vec!["git", "submodule", "update"],
+                vec!["git", "submodule", "update", "--recursive"],
             );
         }
 
