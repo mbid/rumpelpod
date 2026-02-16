@@ -6,6 +6,15 @@ use anyhow::{bail, Result};
 use crate::cli::{PostCheckoutCommand, ReferenceTransactionCommand};
 use crate::CommandExt;
 
+// -- Claude Code hooks -------------------------------------------------------
+
+/// Auto-approve all tool use by outputting a JSON "approve" decision.
+/// Invoked as a Claude Code PreToolUse hook.
+pub fn claude_pre_tool_use() -> Result<()> {
+    println!(r#"{{"decision":"approve"}}"#);
+    Ok(())
+}
+
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 
 /// Read stdin lines in the git hook format: `oldvalue newvalue refname`.

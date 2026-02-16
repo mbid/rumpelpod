@@ -96,6 +96,9 @@ pub fn run() -> Result<()> {
             HookSubcommand::GatewayPostReceive => {
                 hook::gateway_post_receive()?;
             }
+            HookSubcommand::ClaudePreToolUse => {
+                hook::claude_pre_tool_use()?;
+            }
         },
     }
 

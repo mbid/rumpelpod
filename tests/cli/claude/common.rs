@@ -105,6 +105,18 @@ pub fn run_claude_print(
     prompt: &str,
     model: &str,
 ) -> ClaudeOutput {
+    run_claude_print_with_flags(repo, daemon, proxy, prompt, model, &[])
+}
+
+/// Like `run_claude_print` but accepts extra rumpel flags inserted before `--`.
+pub fn run_claude_print_with_flags(
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+    proxy: &ClaudeTestProxy,
+    prompt: &str,
+    model: &str,
+    extra_flags: &[&str],
+) -> ClaudeOutput {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -131,10 +143,9 @@ pub fn run_claude_print(
         cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
     }
 
+    cmd.args(["claude", "test", "--no-dangerously-skip-permissions"]);
+    cmd.args(extra_flags);
     cmd.args([
-        "claude",
-        "test",
-        "--no-dangerously-skip-permissions",
         "--",
         "--print",
         prompt,
