@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Build release binaries for all platforms and upload them to a GitHub release.
+#
+# Must be run from a clean checkout of a git tag. Builds linux-amd64 and
+# linux-arm64 locally, and darwin-arm64 either locally (on mac) or via
+# ssh macos (on linux).
+
+TAG=$(git describe --tags --exact-match HEAD 2>/dev/null) || {
+    echo "Error: HEAD is not a tagged commit."
+    echo "Check out a tag first: git checkout v1.2.3"
+    exit 1
+}
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "Error: Working tree has uncommitted changes."
+    exit 1
+fi
+
+if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+    echo "Error: Working tree has untracked files."
+    exit 1
+fi
+
+echo "==> Releasing $TAG"
+
+TARGETS=(
+    "x86_64-unknown-linux-musl   rumpel-linux-amd64"
+    "aarch64-unknown-linux-musl  rumpel-linux-arm64"
+)
+
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+
+# -- Linux builds (always local) ------------------------------------------
+
+for entry in "${TARGETS[@]}"; do
+    read -r triple name <<< "$entry"
+    echo "==> Building $name ($triple)..."
+    cargo build --release --bin rumpel --target "$triple"
+    cp "target/$triple/release/rumpel" "$STAGING/$name"
+done
+
+# -- macOS build -----------------------------------------------------------
+
+DARWIN_TRIPLE="aarch64-apple-darwin"
+DARWIN_NAME="rumpel-darwin-arm64"
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    echo "==> Building $DARWIN_NAME ($DARWIN_TRIPLE) locally..."
+    cargo build --release --bin rumpel --target "$DARWIN_TRIPLE"
+    cp "target/$DARWIN_TRIPLE/release/rumpel" "$STAGING/$DARWIN_NAME"
+else
+    echo "==> Building $DARWIN_NAME ($DARWIN_TRIPLE) on remote mac..."
+    REMOTE_DIR="/tmp/$(hostname)/rumpelpod"
+
+    # Clone the local repo to the mac (wipe any stale checkout first)
+    ssh macos "rm -rf '$REMOTE_DIR' && mkdir -p '$REMOTE_DIR'"
+    git clone --no-local --branch "$TAG" . "$STAGING/clone-for-mac"
+    tar -C "$STAGING/clone-for-mac" -cf - . | ssh macos "tar -C '$REMOTE_DIR' -xf -"
+    rm -rf "$STAGING/clone-for-mac"
+
+    ssh macos "cd '$REMOTE_DIR' && source \"\$HOME/.cargo/env\" && cargo build --release --bin rumpel --target $DARWIN_TRIPLE"
+    scp "macos:$REMOTE_DIR/target/$DARWIN_TRIPLE/release/rumpel" "$STAGING/$DARWIN_NAME"
+    ssh macos "rm -rf '$REMOTE_DIR'"
+fi
+
+# -- Package as tar.gz and upload ------------------------------------------
+
+ASSETS=()
+for name in rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64; do
+    echo "==> Packaging $name.tar.gz..."
+    tar -C "$STAGING" -czf "$STAGING/$name.tar.gz" "$name"
+    ASSETS+=("$STAGING/$name.tar.gz")
+done
+
+echo "==> Creating GitHub release $TAG..."
+gh release create "$TAG" "${ASSETS[@]}" --title "$TAG"
+
+echo "==> Done: $TAG released."
