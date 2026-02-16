@@ -1854,13 +1854,31 @@ fn copy_claude_config(
         container_repo_path,
     )?;
 
+    // Copy the global input history (filtered to this project) so up-arrow
+    // recall works for prior prompts.
+    copy_claude_history(
+        docker,
+        container_id,
+        user,
+        &host_home,
+        &container_home,
+        repo_path,
+        container_repo_path,
+    )?;
+
     Ok(())
 }
 
 /// Claude stores per-project data under ~/.claude/projects/<dir-name> where
-/// <dir-name> is the absolute repo path with `/` replaced by `-`.
+/// <dir-name> is the absolute path with every non-alphanumeric character
+/// replaced by `-`.  This matches Claude Code's JS implementation:
+///   path.replace(/[^a-zA-Z0-9]/g, "-")
 fn claude_project_dir_name(repo_path: &Path) -> String {
-    repo_path.to_string_lossy().replace('/', "-")
+    repo_path
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Copy the host's project-specific claude data (conversation history, memory)
@@ -1924,6 +1942,64 @@ fn copy_claude_project_dir(
         )
         .context("extracting claude project data into container")?;
     }
+
+    Ok(())
+}
+
+/// Copy ~/.claude/history.jsonl into the container, keeping only entries for
+/// this project and rewriting the project path so up-arrow input recall works.
+fn copy_claude_history(
+    docker: &Docker,
+    container_id: &str,
+    user: &str,
+    host_home: &Path,
+    container_home: &str,
+    repo_path: &Path,
+    container_repo_path: &Path,
+) -> Result<()> {
+    let history_path = host_home.join(".claude/history.jsonl");
+    let data = match std::fs::read(&history_path) {
+        Ok(d) => d,
+        Err(_) => return Ok(()),
+    };
+
+    let host_project = repo_path.to_string_lossy();
+    let container_project = container_repo_path.to_string_lossy();
+
+    let mut filtered = Vec::new();
+    for line in data.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(mut obj) =
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(line)
+        else {
+            continue;
+        };
+        let matches = obj
+            .get("project")
+            .and_then(|v| v.as_str())
+            .is_some_and(|p| p == &*host_project);
+        if !matches {
+            continue;
+        }
+        obj.insert(
+            "project".to_string(),
+            serde_json::Value::String(container_project.to_string()),
+        );
+        if let Ok(serialized) = serde_json::to_vec(&obj) {
+            filtered.extend_from_slice(&serialized);
+            filtered.push(b'\n');
+        }
+    }
+
+    if filtered.is_empty() {
+        return Ok(());
+    }
+
+    let dest = format!("{}/.claude/history.jsonl", container_home);
+    write_file_via_stdin(docker, container_id, user, &dest, &filtered)
+        .context("writing .claude/history.jsonl")?;
 
     Ok(())
 }
