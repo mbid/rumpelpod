@@ -397,12 +397,12 @@ fn start_container(docker: &Docker, container_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clean up gateway refs for a deleted pod.
+/// Clean up pod refs in a single gateway repo.
 ///
-/// Removes all refs matching `rumpelpod/*@<pod_name>` from both the gateway
-/// and host repos, including the alias symref `rumpelpod/<pod_name>`.
-fn cleanup_pod_refs(gateway_path: &Path, repo_path: &Path, pod_name: &PodName) {
-    // Find all refs matching rumpelpod/*@<pod_name> in gateway
+/// Removes all refs matching `rumpelpod/*@<pod_name>` from the gateway
+/// and corresponding remote-tracking refs from `host_repo_path`, including
+/// the alias symref `rumpelpod/<pod_name>`.
+fn cleanup_pod_refs_in_gateway(gateway_path: &Path, host_repo_path: &Path, pod_name: &PodName) {
     let pattern = format!("refs/heads/rumpelpod/*@{}", pod_name.0);
     if let Ok(output) = Command::new("git")
         .args(["for-each-ref", "--format=%(refname)", &pattern])
@@ -412,35 +412,48 @@ fn cleanup_pod_refs(gateway_path: &Path, repo_path: &Path, pod_name: &PodName) {
         if output.status.success() {
             let refs = String::from_utf8_lossy(&output.stdout);
             for ref_name in refs.lines().filter(|s| !s.is_empty()) {
-                // Delete from gateway
                 let _ = Command::new("git")
                     .args(["update-ref", "-d", ref_name])
                     .current_dir(gateway_path)
                     .output();
 
-                // Delete corresponding remote-tracking ref from host
                 let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
                 let _ = Command::new("git")
                     .args(["update-ref", "-d", &format!("refs/remotes/{}", branch)])
-                    .current_dir(repo_path)
+                    .current_dir(host_repo_path)
                     .output();
             }
         }
     }
 
-    // Delete the alias symref (rumpelpod/<name> -> rumpelpod/<name>@<name>)
     let alias_ref = format!("refs/heads/rumpelpod/{}", pod_name.0);
     let _ = Command::new("git")
         .args(["symbolic-ref", "--delete", &alias_ref])
         .current_dir(gateway_path)
         .output();
 
-    // Delete the alias remote-tracking ref from host
     let alias_remote_ref = format!("refs/remotes/rumpelpod/{}", pod_name.0);
     let _ = Command::new("git")
         .args(["update-ref", "-d", &alias_remote_ref])
-        .current_dir(repo_path)
+        .current_dir(host_repo_path)
         .output();
+}
+
+/// Clean up gateway refs for a deleted pod.
+///
+/// Cleans up the parent gateway and all submodule gateways.
+fn cleanup_pod_refs(gateway_path: &Path, repo_path: &Path, pod_name: &PodName) {
+    cleanup_pod_refs_in_gateway(gateway_path, repo_path, pod_name);
+
+    // Also clean up refs in each submodule gateway
+    for sub in gateway::detect_submodules(repo_path) {
+        if let Ok(sub_gateway) = gateway::submodule_gateway_path(repo_path, &sub.name) {
+            if sub_gateway.exists() {
+                let sub_workdir = repo_path.join(&sub.path);
+                cleanup_pod_refs_in_gateway(&sub_gateway, &sub_workdir, pod_name);
+            }
+        }
+    }
 }
 
 /// Check that the .git directory inside the container is owned by the expected user.
@@ -890,6 +903,188 @@ fn install_pod_reference_transaction_hook(
 
     // First installation - this is the first entry
     Ok(true)
+}
+
+/// Set up submodule repositories inside the pod container.
+///
+/// For each host submodule: init, rewrite URL to the submodule gateway,
+/// clone from gateway, configure remotes and hooks, fetch host refs,
+/// and create+checkout a pod branch from host/HEAD.
+#[allow(clippy::too_many_arguments)]
+fn setup_pod_submodules(
+    docker: &Docker,
+    container_id: &str,
+    git_http_url: &str,
+    token: &str,
+    container_repo_path: &Path,
+    pod_name: &PodName,
+    user: &str,
+    submodules: &[gateway::SubmoduleInfo],
+    is_first_entry: bool,
+) -> Result<()> {
+    if submodules.is_empty() {
+        return Ok(());
+    }
+
+    let repo_path_str = container_repo_path.to_string_lossy().to_string();
+
+    // Only clone submodules on first entry. On re-entry they are already
+    // present and `git submodule update` would destructively reset them to
+    // the parent's recorded gitlink, discarding any pod-side work.
+    if is_first_entry {
+        let mut init_script = String::from("set -e\n");
+        init_script.push_str(&format!("cd \"{repo_path_str}\"\n"));
+        init_script.push_str("git submodule init\n");
+        for sub in submodules {
+            let sub_url = format!(
+                "{}/submodules/{}/gateway.git",
+                git_http_url.trim_end_matches("/gateway.git"),
+                sub.name
+            );
+            init_script.push_str(&format!(
+                "git config submodule.{}.url \"{}\"\n",
+                sub.name, sub_url
+            ));
+        }
+        init_script.push_str(&format!(
+            "git -c http.extraHeader=\"Authorization: Bearer {token}\" submodule update\n"
+        ));
+
+        exec_command(
+            docker,
+            container_id,
+            Some(user),
+            None,
+            None,
+            vec!["sh", "-c", &init_script],
+        )
+        .context("initializing submodules")?;
+    }
+
+    // Configure each submodule's remotes, hooks, and branch
+    for sub in submodules {
+        let sub_path = container_repo_path.join(&sub.path);
+        let sub_path_str = sub_path.to_string_lossy().to_string();
+        let sub_url = format!(
+            "{}/submodules/{}/gateway.git",
+            git_http_url.trim_end_matches("/gateway.git"),
+            sub.name
+        );
+
+        let push_refspec = format!("+refs/heads/*:refs/heads/rumpelpod/*@{}", pod_name.0);
+
+        let setup_script = if is_direct_git_config_mode()? {
+            // Resolve the gitdir inside the container since .git is a gitlink
+            formatdoc! {r#"
+                set -e
+                cd "{sub_path_str}"
+                git_dir=$(git rev-parse --git-dir)
+
+                cat >> "$git_dir/config" <<'GIT_CONFIG_EOF'
+                [http]
+                	extraHeader = Authorization: Bearer {token}
+                [remote "host"]
+                	url = {sub_url}
+                	fetch = +refs/heads/host/*:refs/remotes/host/*
+                	pushurl = PUSH_DISABLED
+                [remote "rumpelpod"]
+                	url = {sub_url}
+                	push = {push_refspec}
+                GIT_CONFIG_EOF
+
+                git fetch host
+            "#}
+        } else {
+            formatdoc! {r#"
+                set -e
+                cd "{sub_path_str}"
+
+                git config http.extraHeader "Authorization: Bearer {token}"
+
+                git remote add host "{sub_url}" 2>/dev/null \
+                    || git remote set-url host "{sub_url}"
+                git config remote.host.fetch '+refs/heads/host/*:refs/remotes/host/*'
+                git config remote.host.pushurl PUSH_DISABLED
+
+                git remote add rumpelpod "{sub_url}" 2>/dev/null \
+                    || git remote set-url rumpelpod "{sub_url}"
+                git config remote.rumpelpod.push '{push_refspec}'
+
+                git fetch host
+            "#}
+        };
+
+        exec_command(
+            docker,
+            container_id,
+            Some(user),
+            None,
+            None,
+            vec!["sh", "-c", &setup_script],
+        )
+        .with_context(|| format!("configuring submodule '{}' remotes", sub.name))?;
+
+        // Install reference-transaction hook in the submodule (resolve
+        // gitdir since .git is a gitlink file in absorbed submodules).
+        let hook_script = formatdoc! {r#"
+            set -e
+            cd "{sub_path_str}"
+            git_dir=$(git rev-parse --git-dir)
+            mkdir -p "$git_dir/hooks"
+            hook_path="$git_dir/hooks/reference-transaction"
+            if [ -f "$hook_path" ] && grep -q "Installed by rumpelpod" "$hook_path"; then
+                exit 0
+            fi
+            cat > "$hook_path" <<'HOOK_EOF'
+            #!/bin/sh
+            # Installed by rumpelpod to sync branch updates to the gateway repository.
+            exec /opt/rumpelpod/bin/rumpel hook reference-transaction "$@"
+            HOOK_EOF
+            chmod +x "$hook_path"
+        "#};
+
+        exec_command(
+            docker,
+            container_id,
+            Some(user),
+            None,
+            None,
+            vec!["sh", "-c", &hook_script],
+        )
+        .with_context(|| format!("installing hook in submodule '{}'", sub.name))?;
+
+        // Create and checkout pod branch from host/HEAD on first entry
+        if is_first_entry {
+            let branch_name = &pod_name.0;
+            let branch_script = formatdoc! {r#"
+                set -e
+                cd "{sub_path_str}"
+                if git show-ref --verify --quiet "refs/heads/{branch_name}"; then
+                    git branch -f --no-track "{branch_name}" host/HEAD
+                else
+                    git branch --no-track "{branch_name}" host/HEAD
+                fi
+                git checkout "{branch_name}"
+            "#};
+
+            exec_command(
+                docker,
+                container_id,
+                Some(user),
+                None,
+                None,
+                vec!["sh", "-c", &branch_script],
+            )
+            .with_context(|| {
+                format!(
+                    "creating branch '{}' in submodule '{}'",
+                    branch_name, sub.name
+                )
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Parsed docker run arguments extracted from devcontainer.json `runArgs`.
@@ -2352,6 +2547,7 @@ impl Daemon for DaemonServer {
 
         // Set up gateway for git synchronization (idempotent)
         gateway::setup_gateway(&repo_path)?;
+        let submodules = gateway::detect_submodules(&repo_path);
 
         let name = docker_name(&repo_path, &pod_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
@@ -2466,6 +2662,19 @@ impl Daemon for DaemonServer {
                 &pod_name,
                 &user,
                 None,
+            )?;
+
+            // Set up submodule repos (re-entry: is_first_entry = false)
+            setup_pod_submodules(
+                &docker,
+                &state.id,
+                &url,
+                &token,
+                &container_repo_path,
+                &pod_name,
+                &user,
+                &submodules,
+                false,
             )?;
 
             // Probe user env from shell init files
@@ -2657,6 +2866,19 @@ impl Daemon for DaemonServer {
                 &pod_name,
                 &user,
                 host_branch.as_deref(),
+            )?;
+
+            // Set up submodule repos (new container: is_first_entry = true)
+            setup_pod_submodules(
+                &docker,
+                &container_id.0,
+                &url,
+                &token,
+                &container_repo_path,
+                &pod_name,
+                &user,
+                &submodules,
+                true,
             )?;
 
             Ok(container_id)
@@ -2911,6 +3133,18 @@ impl Daemon for DaemonServer {
                 Some(&patch_content),
             )
             .context("applying snapshot patch")?;
+
+            // Sync submodule working trees with the gitlinks restored by the
+            // patch.  Best-effort: uncommitted changes inside submodules are
+            // lost on recreate since git add -A only captures gitlink changes.
+            let _ = exec_command(
+                &docker,
+                &launch_result.container_id.0,
+                Some(&launch_result.user),
+                Some(&repo_path_str),
+                None,
+                vec!["git", "submodule", "update"],
+            );
         }
 
         Ok(launch_result)

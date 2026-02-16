@@ -114,6 +114,117 @@ pub fn gateway_path(repo_path: &Path) -> Result<PathBuf> {
     Ok(state_dir.join(&hash).join("gateway.git"))
 }
 
+/// Info about a submodule discovered in the host repo.
+pub struct SubmoduleInfo {
+    pub name: String,
+    pub path: String,
+}
+
+/// Detect submodules in the host repo by running `git submodule foreach`.
+/// Returns an empty vec when `.gitmodules` is absent or on any error.
+pub fn detect_submodules(repo_path: &Path) -> Vec<SubmoduleInfo> {
+    if !repo_path.join(".gitmodules").exists() {
+        return Vec::new();
+    }
+    let output = Command::new("git")
+        .args(["submodule", "foreach", "--quiet", "echo $name $sm_path"])
+        .current_dir(repo_path)
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (name, path) = line.split_once(' ')?;
+            Some(SubmoduleInfo {
+                name: name.to_string(),
+                path: path.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Get the path to the submodule gateway repository.
+pub fn submodule_gateway_path(repo_path: &Path, name: &str) -> Result<PathBuf> {
+    let state_dir = get_state_dir()?;
+    let hash = repo_path_hash(repo_path);
+    Ok(state_dir
+        .join(&hash)
+        .join("submodules")
+        .join(name)
+        .join("gateway.git"))
+}
+
+/// Resolve the actual git directory for a worktree, handling gitlink files
+/// used by absorbed submodules (where `.git` is a file containing
+/// `gitdir: <path>` rather than a directory).
+fn resolve_git_dir(path: &Path) -> Result<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(path)
+        .success()
+        .context("git rev-parse --git-dir failed")?;
+    let git_dir = String::from_utf8_lossy(&output).trim().to_string();
+    let git_dir_path = PathBuf::from(&git_dir);
+    if git_dir_path.is_absolute() {
+        Ok(git_dir_path)
+    } else {
+        Ok(path.join(git_dir_path))
+    }
+}
+
+/// Install the reference-transaction hook in an explicit git directory.
+/// Like `install_reference_transaction_hook` but targets a specific git dir
+/// rather than assuming `<path>/.git/hooks`.
+fn install_reference_transaction_hook_in_git_dir(git_dir: &Path, rumpel_exe: &str) -> Result<()> {
+    let hooks_dir = git_dir.join("hooks");
+    let hook_path = hooks_dir.join("reference-transaction");
+
+    let signature = "Installed by rumpelpod to sync branch updates";
+    let shim = hook_shim(rumpel_exe, signature, "host-reference-transaction", false);
+
+    fs::create_dir_all(&hooks_dir)
+        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+
+    if hook_path.exists() {
+        let existing = fs::read_to_string(&hook_path)
+            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+
+        if existing.contains(signature) {
+            return Ok(());
+        }
+
+        let combined = format!("{}\n\n{}", existing.trim_end(), shim);
+        fs::write(&hook_path, combined)
+            .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
+    } else {
+        fs::write(&hook_path, shim)
+            .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+    }
+
+    let mut perms = fs::metadata(&hook_path)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&hook_path, perms)?;
+
+    Ok(())
+}
+
+/// Append raw config text to a git directory's `config` file.
+/// Works for both bare repos (git_dir == repo) and non-bare repos
+/// (git_dir == repo/.git or an absorbed submodule path).
+fn append_git_config_to_git_dir(git_dir: &Path, content: &str) -> Result<()> {
+    let config_path = git_dir.join("config");
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("failed to open {}", config_path.display()))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write to {}", config_path.display()))?;
+    Ok(())
+}
+
 /// Check if the given path is inside a git repository.
 fn is_git_repo(path: &Path) -> bool {
     Command::new("git")
@@ -221,6 +332,84 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
 
     // Push all existing branches to the gateway
     push_all_branches(repo_path)?;
+
+    // Set up gateways for each submodule
+    for sub in detect_submodules(repo_path) {
+        setup_submodule_gateway(repo_path, &sub, &rumpel_exe)?;
+    }
+
+    Ok(())
+}
+
+/// Set up a gateway bare repo for a single submodule.
+///
+/// Creates the bare gateway, configures remotes and hooks, and pushes
+/// the submodule's branches/HEAD so pods can clone from it.
+fn setup_submodule_gateway(
+    repo_path: &Path,
+    submodule: &SubmoduleInfo,
+    rumpel_exe: &str,
+) -> Result<()> {
+    let sub_workdir = repo_path.join(&submodule.path);
+    let gateway = submodule_gateway_path(repo_path, &submodule.name)?;
+    let sub_git_dir = resolve_git_dir(&sub_workdir)
+        .with_context(|| format!("resolving git dir for submodule '{}'", submodule.name))?;
+
+    // Create bare gateway if needed
+    if !gateway.exists() {
+        fs::create_dir_all(&gateway).with_context(|| {
+            format!(
+                "Failed to create submodule gateway directory: {}",
+                gateway.display()
+            )
+        })?;
+
+        Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&gateway)
+            .success()
+            .context("git init --bare for submodule gateway failed")?;
+    }
+
+    // Configure gateway and submodule remotes
+    if is_direct_git_config_mode()? {
+        append_git_config(
+            &gateway,
+            &format!(
+                "[http]\n\treceivepack = true\n\
+                 [remote \"{}\"]\n\turl = {}\n",
+                HOST_REMOTE,
+                sub_workdir.to_string_lossy(),
+            ),
+        )?;
+        append_git_config_to_git_dir(
+            &sub_git_dir,
+            &format!(
+                "[remote \"{}\"]\n\turl = {}\n",
+                RUMPELPOD_REMOTE,
+                gateway.to_string_lossy(),
+            ),
+        )?;
+    } else {
+        Command::new("git")
+            .args(["config", "http.receivepack", "true"])
+            .current_dir(&gateway)
+            .success()
+            .context("enabling http.receivepack for submodule gateway failed")?;
+
+        ensure_remote(&sub_workdir, RUMPELPOD_REMOTE, &gateway)?;
+        ensure_remote(&gateway, HOST_REMOTE, &sub_workdir)?;
+    }
+
+    // Install gateway hooks
+    install_gateway_pre_receive_hook(&gateway, rumpel_exe)?;
+    install_gateway_post_receive_hook(&gateway, rumpel_exe)?;
+
+    // Install reference-transaction hook in the submodule's actual git dir
+    install_reference_transaction_hook_in_git_dir(&sub_git_dir, rumpel_exe)?;
+
+    // Push submodule branches/HEAD to its gateway
+    push_all_branches(&sub_workdir)?;
 
     Ok(())
 }
@@ -451,10 +640,6 @@ fn push_all_branches(repo_path: &Path) -> Result<()> {
 
     let output_str = String::from_utf8_lossy(&output);
     let branches: Vec<&str> = output_str.lines().filter(|s| !s.is_empty()).collect();
-
-    if branches.is_empty() {
-        return Ok(());
-    }
 
     // Build refspecs for all branches: branch:host/branch
     let mut refspecs: Vec<String> = branches
