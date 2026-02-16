@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCW="$HOME/.local/bin/scw"
+STATE_FILE="$HOME/.scaleway-mac-server"
+ZONE="fr-par-1"
+TYPE="M2-M"  # cheapest available: 8-core M2, 16GB, 256GB SSD, EUR0.17/hr
+MACOS_KEY="$HOME/.ssh/id_ed25519_macos"
+
+if [[ -f "$STATE_FILE" ]]; then
+    echo "Error: A server state file already exists at $STATE_FILE"
+    echo "Run deprovision-mac-scaleway first, or remove the file if the server is already gone."
+    exit 1
+fi
+
+# Generate macos keypair if it doesn't exist
+if [[ ! -f "$MACOS_KEY" ]]; then
+    echo "==> Generating macos ed25519 keypair..."
+    ssh-keygen -t ed25519 -f "$MACOS_KEY" -N "" -C "$USER@macos"
+fi
+
+echo "==> Creating Apple Silicon server (type=$TYPE, zone=$ZONE)..."
+SERVER_JSON=$("$SCW" apple-silicon server create \
+    type="$TYPE" \
+    zone="$ZONE" \
+    commitment-type=duration_24h \
+    -o json \
+    -w)
+
+SERVER_ID=$(echo "$SERVER_JSON" | jq -r '.id')
+SERVER_IP=$(echo "$SERVER_JSON" | jq -r '.ip')
+VNC_URL=$(echo "$SERVER_JSON" | jq -r '.vnc_url // empty')
+
+echo "$SERVER_JSON" > "$STATE_FILE"
+
+echo "==> Server created: $SERVER_ID"
+echo "    IP: $SERVER_IP"
+
+# Schedule auto-deletion after the 24h minimum lease
+echo "==> Scheduling auto-deletion (server will be deleted once 24h lease expires)..."
+"$SCW" apple-silicon server update "$SERVER_ID" \
+    schedule-deletion=true \
+    zone="$ZONE" > /dev/null
+
+# Add SSH known host
+echo "==> Adding server to SSH known_hosts..."
+for i in $(seq 1 30); do
+    if ssh-keyscan -T 5 "$SERVER_IP" 2>/dev/null | grep -q .; then
+        ssh-keyscan -T 5 "$SERVER_IP" 2>/dev/null >> "$HOME/.ssh/known_hosts"
+        # Deduplicate
+        sort -u -o "$HOME/.ssh/known_hosts" "$HOME/.ssh/known_hosts"
+        echo "    Known host added."
+        break
+    fi
+    echo "    Waiting for SSH to become available (attempt $i/30)..."
+    sleep 10
+done
+
+# Extract password from VNC URL for sudo (format: vnc://user:pass@host:port)
+VNC_PASS=$(echo "$VNC_URL" | sed -n 's|vnc://[^:]*:\([^@]*\)@.*|\1|p')
+
+# Enable passwordless sudo
+echo "==> Enabling passwordless sudo..."
+ssh "m1@$SERVER_IP" "echo '$VNC_PASS' | sudo -S bash -c 'echo \"m1 ALL=(ALL) NOPASSWD: ALL\" > /etc/sudoers.d/m1'"
+
+# Add macos public key to authorized_keys
+echo "==> Adding macos public key to server..."
+ssh "m1@$SERVER_IP" "cat >> ~/.ssh/scw_authorized_keys" < "${MACOS_KEY}.pub"
+
+# Install Rust via rustup
+echo "==> Installing Rust via rustup..."
+ssh "m1@$SERVER_IP" "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
+
+# Install Homebrew
+echo "==> Installing Homebrew..."
+ssh "m1@$SERVER_IP" 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+# .zprofile is only sourced by login shells; non-interactive SSH commands
+# (ssh host 'cmd') run as non-login shells that only source .zshenv.
+echo "==> Adding Homebrew to PATH in .zshenv..."
+ssh "m1@$SERVER_IP" 'echo '\''eval "$(/opt/homebrew/bin/brew shellenv)"'\'' >> ~/.zshenv'
+
+# All subsequent ssh invocations pick up brew from .zshenv automatically.
+
+echo "==> Installing Docker via Colima..."
+ssh "m1@$SERVER_IP" 'brew install colima docker docker-compose && colima start --cpu 4 --memory 8'
+
+echo "==> Installing git-lfs..."
+ssh "m1@$SERVER_IP" 'brew install git-lfs'
+
+echo "==> Installing musl cross-compilation toolchain..."
+ssh "m1@$SERVER_IP" 'brew install FiloSottile/musl-cross/musl-cross'
+
+echo "==> Adding Rust musl targets..."
+ssh "m1@$SERVER_IP" 'source "$HOME/.cargo/env" && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl'
+
+# Tests create git repos and expect "master" as the default branch
+echo "==> Setting default git branch to master..."
+ssh "m1@$SERVER_IP" 'git config --global init.defaultBranch master'
+
+echo ""
+echo "============================================"
+echo " Mac mini ready!"
+echo "============================================"
+echo " Server ID : $SERVER_ID"
+echo " IP        : $SERVER_IP"
+echo " Zone      : $ZONE"
+echo " Type      : $TYPE"
+echo " Commitment: 24h (auto-delete scheduled)"
+echo ""
+echo " SSH:"
+echo "   ssh m1@$SERVER_IP"
+echo ""
+echo " VNC (Remmina):"
+if [[ -n "$VNC_URL" ]]; then
+    echo "   $VNC_URL"
+else
+    echo "   Get VNC details with:"
+    echo "     $SCW apple-silicon server get $SERVER_ID zone=$ZONE -o json | jq '{vnc_url, ip}'"
+    echo "   Then in Remmina: create VNC connection to the IP:port shown."
+    echo "   The VNC password is shown in the Scaleway console overview page."
+fi
+echo " State saved to: $STATE_FILE"
+echo " To deprovision: deprovision-mac-scaleway"
+echo ""
+echo " To pass into a devcontainer, paste into your shell:"
+echo ""
+echo "   export MACOS_SSH_IP=$SERVER_IP"
+echo "   export MACOS_SSH_USER=m1"
+printf '   export MACOS_SSH_PRIVATE_KEY="%s"\n' "$(cat "$MACOS_KEY")"
