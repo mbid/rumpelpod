@@ -13,6 +13,11 @@ use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env};
 use crate::git::get_repo_root;
 
 const SCREENRC_PATH: &str = "/tmp/rumpelpod-screenrc";
+// Wrapper that lowers the fd limit before exec'ing screen.
+// screen iterates all possible fds at startup to close leaked ones,
+// and containers often have ulimit -n in the billions, making that
+// loop take 10+ seconds.
+const SCREEN_WRAPPER_PATH: &str = "/tmp/rumpelpod-screen";
 
 struct ScreenState {
     available: bool,
@@ -24,7 +29,10 @@ struct ScreenState {
 fn prepare_screen(docker_host: &str, container_id: &str, user: &str) -> Result<ScreenState> {
     let script = format!(
         "which screen >/dev/null 2>&1 || {{ echo SCREEN_MISSING; exit 0; }}; \
+         ulimit -n 65536; \
          printf 'termcapinfo xterm* ti@:te@\\ndefscrollback 50000\\n' > {SCREENRC_PATH}; \
+         printf '#!/bin/sh\\nulimit -n 65536\\nexec screen \"$@\"\\n' > {SCREEN_WRAPPER_PATH} \
+         && chmod +x {SCREEN_WRAPPER_PATH}; \
          screen -ls claude 2>/dev/null | grep -q '\\.claude' && echo SESSION_EXISTS || echo SESSION_NEW"
     );
 
@@ -138,11 +146,19 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     if screen_state.session_exists {
         // Reattach to existing session
-        docker_cmd.args(["screen", "-c", SCREENRC_PATH, "-U", "-d", "-R", "claude"]);
+        docker_cmd.args([
+            SCREEN_WRAPPER_PATH,
+            "-c",
+            SCREENRC_PATH,
+            "-U",
+            "-d",
+            "-R",
+            "claude",
+        ]);
     } else {
         // Create new screen session running claude
         docker_cmd.args([
-            "screen",
+            SCREEN_WRAPPER_PATH,
             "-c",
             SCREENRC_PATH,
             "-U",
