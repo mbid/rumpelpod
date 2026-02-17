@@ -8,10 +8,12 @@ use crate::CommandExt;
 
 // -- Claude Code hooks -------------------------------------------------------
 
-/// Auto-approve all tool use by outputting a JSON "approve" decision.
-/// Invoked as a Claude Code PreToolUse hook.
-pub fn claude_pre_tool_use() -> Result<()> {
-    println!(r#"{{"decision":"approve"}}"#);
+/// Auto-approve all tool use by outputting a JSON allow decision.
+/// Invoked as a Claude Code PermissionRequest hook.
+pub fn claude_permission_request() -> Result<()> {
+    println!(
+        r#"{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"allow"}}}}}}"#
+    );
     Ok(())
 }
 

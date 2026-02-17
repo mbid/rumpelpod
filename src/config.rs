@@ -251,11 +251,11 @@ pub struct TomlConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ClaudeConfig {
-    /// Install PreToolUse hooks that auto-approve all tool use instead of
-    /// relying on --dangerously-skip-permissions (which some Claude
-    /// installations lack).
+    /// Install PermissionRequest hooks that auto-approve all tool use
+    /// instead of relying on --dangerously-skip-permissions (which some
+    /// Claude installations lack).
     #[serde(default)]
-    pub skip_permissions_workaround: bool,
+    pub dangerously_skip_permissions_workaround: bool,
 }
 
 /// Load `.rumpelpod.toml` from the given repo root, if present.

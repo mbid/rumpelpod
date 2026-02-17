@@ -143,7 +143,12 @@ pub fn run_claude_print_with_flags(
         cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
     }
 
-    cmd.args(["claude", "test", "--no-dangerously-skip-permissions"]);
+    cmd.args(["claude", "test"]);
+    // The workaround replaces --dangerously-skip-permissions with hooks,
+    // so --no-dangerously-skip-permissions is redundant (and conflicts).
+    if !extra_flags.contains(&"--dangerously-skip-permissions-workaround") {
+        cmd.arg("--no-dangerously-skip-permissions");
+    }
     cmd.args(extra_flags);
     cmd.args([
         "--",
