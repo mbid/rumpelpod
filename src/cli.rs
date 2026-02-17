@@ -158,9 +158,13 @@ Examples:
     )]
     Claude(ClaudeCommand),
 
-    /// Internal hook handlers (invoked from git hooks inside containers)
+    /// Internal git hook handlers (invoked from git hooks inside containers)
     #[command(subcommand, hide = true)]
-    Hook(HookSubcommand),
+    GitHook(GitHookSubcommand),
+
+    /// Internal Claude Code hook handlers
+    #[command(subcommand, hide = true)]
+    ClaudeHook(ClaudeHookSubcommand),
 
     /// Run the rumpelpod daemon (internal)
     #[command(hide = true)]
@@ -408,7 +412,7 @@ pub struct ImageFetchCommand {
 }
 
 #[derive(Subcommand)]
-pub enum HookSubcommand {
+pub enum GitHookSubcommand {
     /// Handle git reference-transaction hook events (pod repo)
     ReferenceTransaction(ReferenceTransactionCommand),
 
@@ -423,9 +427,12 @@ pub enum HookSubcommand {
 
     /// Handle git post-receive hook events (gateway repo)
     GatewayPostReceive,
+}
 
-    /// Claude Code PermissionRequest hook (auto-approve permission dialogs)
-    ClaudePermissionRequest,
+#[derive(Subcommand)]
+pub enum ClaudeHookSubcommand {
+    /// Auto-approve permission dialogs
+    PermissionRequest,
 }
 
 #[derive(Args)]

@@ -90,14 +90,14 @@ const RUMPELPOD_REMOTE: &str = "rumpelpod";
 /// Name of the remote added to the gateway pointing to the host repo.
 const HOST_REMOTE: &str = "host";
 
-/// Generate a shim script that delegates to `rumpel hook <subcommand>`.
+/// Generate a shim script that delegates to `rumpel git-hook <subcommand>`.
 /// The rumpel binary path is resolved at install time and embedded in the shim.
 fn hook_shim(rumpel_path: &str, signature: &str, subcommand: &str, use_exec: bool) -> String {
     let invoke = if use_exec { "exec " } else { "" };
     format!(
         "#!/bin/sh\n\
          # {signature}\n\
-         {invoke}{rumpel_path} hook {subcommand} \"$@\"\n"
+         {invoke}{rumpel_path} git-hook {subcommand} \"$@\"\n"
     )
 }
 

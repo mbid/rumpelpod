@@ -819,7 +819,7 @@ fn setup_git_remotes(
 const POD_REFERENCE_TRANSACTION_HOOK: &str = indoc::indoc! {r#"
     #!/bin/sh
     # Installed by rumpelpod to sync branch updates to the gateway repository.
-    exec /opt/rumpelpod/bin/rumpel hook reference-transaction "$@"
+    exec /opt/rumpelpod/bin/rumpel git-hook reference-transaction "$@"
 "#};
 
 /// Install the reference-transaction hook in the pod repository.
@@ -1046,7 +1046,7 @@ fn setup_pod_submodules(
             cat > "$hook_path" <<'HOOK_EOF'
             #!/bin/sh
             # Installed by rumpelpod to sync branch updates to the gateway repository.
-            exec /opt/rumpelpod/bin/rumpel hook reference-transaction "$@"
+            exec /opt/rumpelpod/bin/rumpel git-hook reference-transaction "$@"
             HOOK_EOF
             chmod +x "$hook_path"
         "#};
@@ -2297,7 +2297,7 @@ fn inject_hooks(data: &[u8]) -> Vec<u8> {
         return data.to_vec();
     };
 
-    let command = format!("{} hook claude-permission-request", RUMPEL_CONTAINER_BIN);
+    let command = format!("{} claude-hook permission-request", RUMPEL_CONTAINER_BIN);
     let hook_entry = serde_json::json!({
         "matcher": "",
         "hooks": [
@@ -3616,7 +3616,7 @@ mod tests {
         assert_eq!(inner.len(), 1);
         assert_eq!(
             inner[0]["command"],
-            format!("{} hook claude-permission-request", RUMPEL_CONTAINER_BIN)
+            format!("{} claude-hook permission-request", RUMPEL_CONTAINER_BIN)
         );
     }
 

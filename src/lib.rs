@@ -30,7 +30,7 @@ mod stop;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Command, HookSubcommand, ImageSubcommand};
+use cli::{ClaudeHookSubcommand, Cli, Command, GitHookSubcommand, ImageSubcommand};
 
 pub fn run() -> Result<()> {
     env_logger::init();
@@ -80,23 +80,25 @@ pub fn run() -> Result<()> {
         Command::Claude(ref cmd) => {
             claude::claude(cmd)?;
         }
-        Command::Hook(ref sub) => match sub {
-            HookSubcommand::ReferenceTransaction(ref cmd) => {
+        Command::GitHook(ref sub) => match sub {
+            GitHookSubcommand::ReferenceTransaction(ref cmd) => {
                 hook::reference_transaction(cmd)?;
             }
-            HookSubcommand::HostReferenceTransaction(ref cmd) => {
+            GitHookSubcommand::HostReferenceTransaction(ref cmd) => {
                 hook::host_reference_transaction(cmd)?;
             }
-            HookSubcommand::HostPostCheckout(ref cmd) => {
+            GitHookSubcommand::HostPostCheckout(ref cmd) => {
                 hook::host_post_checkout(cmd)?;
             }
-            HookSubcommand::GatewayPreReceive => {
+            GitHookSubcommand::GatewayPreReceive => {
                 hook::gateway_pre_receive()?;
             }
-            HookSubcommand::GatewayPostReceive => {
+            GitHookSubcommand::GatewayPostReceive => {
                 hook::gateway_post_receive()?;
             }
-            HookSubcommand::ClaudePermissionRequest => {
+        },
+        Command::ClaudeHook(ref sub) => match sub {
+            ClaudeHookSubcommand::PermissionRequest => {
                 hook::claude_permission_request()?;
             }
         },
