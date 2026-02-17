@@ -2231,6 +2231,7 @@ fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) 
         "hasCompletedOnboarding",
         "lastOnboardingVersion",
         "oauthAccount",
+        "primaryApiKey",
         "bypassPermissionsModeAccepted",
         "customApiKeyResponses",
     ];
