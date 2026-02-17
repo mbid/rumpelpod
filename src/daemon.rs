@@ -1992,7 +1992,6 @@ fn copy_claude_config(
     repo_path: &Path,
     container_repo_path: &Path,
     pod_name: &str,
-    dangerously_skip_permissions_workaround: bool,
 ) -> Result<()> {
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
 
@@ -2011,54 +2010,53 @@ fn copy_claude_config(
     // Build a minimal .claude.json with only the keys needed to suppress
     // warnings and onboarding prompts. Everything else (tips history,
     // per-project stats, other projects' settings) is left out.
-    if let Ok(data) = std::fs::read(host_home.join(".claude.json")) {
-        let minimal = strip_claude_json(&data, repo_path, container_repo_path);
-        let dest = format!("{}/.claude.json", container_home);
-        write_file_via_stdin(docker, container_id, user, &dest, &minimal)
-            .context("writing .claude.json")?;
+    match std::fs::read(host_home.join(".claude.json")) {
+        Ok(data) => {
+            let minimal = strip_claude_json(&data, repo_path, container_repo_path);
+            let dest = format!("{}/.claude.json", container_home);
+            write_file_via_stdin(docker, container_id, user, &dest, &minimal)
+                .context("writing .claude.json")?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude.json")),
     }
 
-    // Create ~/.claude/ and copy config files.
-    // Always create the directory when dangerously_skip_permissions_workaround is set
-    // (we may need to write settings.json even without a host ~/.claude/).
+    // We always need ~/.claude/settings.json for the PermissionRequest
+    // hook, so create the directory unconditionally.
     let claude_dir = host_home.join(".claude");
-    let need_claude_dir = claude_dir.is_dir() || dangerously_skip_permissions_workaround;
-    if need_claude_dir {
-        exec_command(
-            docker,
-            container_id,
-            Some(user),
-            None,
-            None,
-            vec!["mkdir", "-p", &format!("{}/.claude", container_home)],
-        )
-        .context("creating .claude directory")?;
+    exec_command(
+        docker,
+        container_id,
+        Some(user),
+        None,
+        None,
+        vec!["mkdir", "-p", &format!("{}/.claude", container_home)],
+    )
+    .context("creating .claude directory")?;
 
-        // Copy credentials if present.
-        let creds_src = claude_dir.join(".credentials.json");
-        if let Ok(data) = std::fs::read(&creds_src) {
+    // Copy credentials if present.
+    match std::fs::read(claude_dir.join(".credentials.json")) {
+        Ok(data) => {
             let dest = format!("{}/.claude/.credentials.json", container_home);
             write_file_via_stdin(docker, container_id, user, &dest, &data)
                 .context("writing .claude/.credentials.json")?;
         }
-
-        // Build settings.json: start from host copy or empty object,
-        // then layer on statusline and (optionally) hooks.
-        let settings_src = claude_dir.join("settings.json");
-        let base_data = std::fs::read(&settings_src).ok();
-        let need_settings = base_data.is_some() || dangerously_skip_permissions_workaround;
-        if need_settings {
-            let empty = b"{}".to_vec();
-            let data = base_data.as_deref().unwrap_or(&empty);
-            let mut data = inject_statusline(data, pod_name);
-            if dangerously_skip_permissions_workaround {
-                data = inject_hooks(&data);
-            }
-            let dest = format!("{}/.claude/settings.json", container_home);
-            write_file_via_stdin(docker, container_id, user, &dest, &data)
-                .context("writing .claude/settings.json")?;
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
     }
+
+    // Build settings.json: start from host copy or empty object,
+    // then layer on statusline and the PermissionRequest hook.
+    let base_data = match std::fs::read(claude_dir.join("settings.json")) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
+        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/settings.json")),
+    };
+    let data = inject_statusline(&base_data, pod_name);
+    let data = inject_hooks(&data);
+    let dest = format!("{}/.claude/settings.json", container_home);
+    write_file_via_stdin(docker, container_id, user, &dest, &data)
+        .context("writing .claude/settings.json")?;
 
     // Copy project-specific conversation history and memory so claude inside
     // the sandbox can see prior context for the same project.
@@ -2289,34 +2287,35 @@ fn inject_statusline(data: &[u8], pod_name: &str) -> Vec<u8> {
     serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| data.to_vec())
 }
 
-/// Inject PreToolUse and PermissionRequest hooks that auto-approve all
-/// tool use via the rumpel binary.  PreToolUse pre-approves every tool
-/// call before the permission system evaluates it; PermissionRequest
-/// catches any remaining permission dialogs.  Together they replace
-/// --dangerously-skip-permissions.
+const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
+
+/// Inject a PermissionRequest hook that auto-approves all permission
+/// dialogs via the rumpel binary inside the container.
 fn inject_hooks(data: &[u8]) -> Vec<u8> {
     let Ok(mut obj) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
     else {
         return data.to_vec();
     };
 
-    let entries = [
-        ("PreToolUse", "rumpel hook claude-pre-tool-use"),
-        ("PermissionRequest", "rumpel hook claude-permission-request"),
-    ];
+    let command = format!("{} hook claude-permission-request", RUMPEL_CONTAINER_BIN);
+    let hook_entry = serde_json::json!({
+        "matcher": "",
+        "hooks": [
+            { "type": "command", "command": command }
+        ]
+    });
+
     let hooks_obj = obj
         .entry("hooks")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let serde_json::Value::Object(hooks_map) = hooks_obj {
-        for (event, command) in entries {
-            let hook = serde_json::json!({ "type": "command", "command": command });
-            let arr = hooks_map
-                .entry(event)
-                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-            if let serde_json::Value::Array(vec) = arr {
-                if !vec.iter().any(|v| v == &hook) {
-                    vec.push(hook);
-                }
+        let arr = hooks_map
+            .entry("PermissionRequest")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if let serde_json::Value::Array(vec) = arr {
+            let dominated = vec.iter().any(|v| v == &hook_entry);
+            if !dominated {
+                vec.push(hook_entry);
             }
         }
     }
@@ -3502,7 +3501,6 @@ impl Daemon for DaemonServer {
             &request.repo_path,
             &request.container_repo_path,
             &request.pod_name.0,
-            request.dangerously_skip_permissions_workaround,
         )?;
 
         // Mark as copied only after the full copy succeeds.
@@ -3611,13 +3609,14 @@ mod tests {
         let input = b"{}";
         let result = inject_hooks(input);
         let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        let hooks = obj["hooks"]["PermissionRequest"].as_array().unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0]["matcher"], "");
+        let inner = hooks[0]["hooks"].as_array().unwrap();
+        assert_eq!(inner.len(), 1);
         assert_eq!(
-            obj["hooks"]["PreToolUse"][0]["command"],
-            "rumpel hook claude-pre-tool-use"
-        );
-        assert_eq!(
-            obj["hooks"]["PermissionRequest"][0]["command"],
-            "rumpel hook claude-permission-request"
+            inner[0]["command"],
+            format!("{} hook claude-permission-request", RUMPEL_CONTAINER_BIN)
         );
     }
 
@@ -3627,10 +3626,7 @@ mod tests {
         let result = inject_hooks(input);
         let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(obj["statusLine"]["command"], "echo hi");
-        assert_eq!(
-            obj["hooks"]["PreToolUse"][0]["command"],
-            "rumpel hook claude-pre-tool-use"
-        );
+        assert!(obj["hooks"]["PermissionRequest"].as_array().unwrap().len() == 1);
     }
 
     #[test]
@@ -3638,11 +3634,11 @@ mod tests {
         let input = br#"{"hooks":{"PreToolUse":[{"type":"command","command":"other"}]}}"#;
         let result = inject_hooks(input);
         let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
-        let hooks = obj["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(hooks.len(), 2);
-        assert_eq!(hooks[0]["command"], "other");
-        assert_eq!(hooks[1]["command"], "rumpel hook claude-pre-tool-use");
-        // PermissionRequest was also added
+        // Existing PreToolUse entry is untouched
+        let pre = obj["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(pre.len(), 1);
+        assert_eq!(pre[0]["command"], "other");
+        // PermissionRequest was added
         assert_eq!(
             obj["hooks"]["PermissionRequest"].as_array().unwrap().len(),
             1
@@ -3655,11 +3651,6 @@ mod tests {
         let once = inject_hooks(input);
         let twice = inject_hooks(&once);
         let obj: serde_json::Value = serde_json::from_slice(&twice).unwrap();
-        assert_eq!(
-            obj["hooks"]["PreToolUse"].as_array().unwrap().len(),
-            1,
-            "should not duplicate PreToolUse"
-        );
         assert_eq!(
             obj["hooks"]["PermissionRequest"].as_array().unwrap().len(),
             1,

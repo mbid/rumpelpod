@@ -232,10 +232,6 @@ pub struct EnsureClaudeConfigRequest {
     pub container_id: ContainerId,
     pub user: String,
     pub docker_socket: PathBuf,
-    /// Install PermissionRequest hooks that auto-approve all tool use
-    /// instead of relying on --dangerously-skip-permissions.
-    #[serde(default)]
-    pub dangerously_skip_permissions_workaround: bool,
 }
 
 /// Error response body.

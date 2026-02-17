@@ -7,5 +7,4 @@
 pub(super) mod common;
 pub(super) mod proxy;
 
-mod skip_permissions;
 mod smoke;

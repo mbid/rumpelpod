@@ -8,15 +8,8 @@ use crate::CommandExt;
 
 // -- Claude Code hooks -------------------------------------------------------
 
-/// Pre-approve all tool calls before the permission system evaluates them.
-/// Invoked as a Claude Code PreToolUse hook.
-pub fn claude_pre_tool_use() -> Result<()> {
-    println!(r#"{{"hookSpecificOutput":{{"permissionDecision":"allow"}}}}"#);
-    Ok(())
-}
-
-/// Auto-approve permission dialogs that still appear.
-/// Invoked as a Claude Code PermissionRequest hook.
+/// Auto-approve permission dialogs so Claude Code can run tools without
+/// manual confirmation.  Invoked as a Claude Code PermissionRequest hook.
 pub fn claude_permission_request() -> Result<()> {
     println!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"allow"}}}}}}"#

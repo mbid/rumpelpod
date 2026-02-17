@@ -240,22 +240,8 @@ pub struct TomlConfig {
     #[serde(default)]
     pub agent: AgentConfig,
 
-    #[serde(default)]
-    pub claude: ClaudeConfig,
-
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     pub host: Option<String>,
-}
-
-/// Claude Code settings.
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct ClaudeConfig {
-    /// Install PermissionRequest hooks that auto-approve all tool use
-    /// instead of relying on --dangerously-skip-permissions (which some
-    /// Claude installations lack).
-    #[serde(default)]
-    pub dangerously_skip_permissions_workaround: bool,
 }
 
 /// Load `.rumpelpod.toml` from the given repo root, if present.

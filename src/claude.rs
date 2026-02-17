@@ -5,7 +5,6 @@ use anyhow::{bail, Context, Result};
 use log::trace;
 
 use crate::cli::ClaudeCommand;
-use crate::config::load_toml_config;
 use crate::daemon;
 use crate::daemon::protocol::{
     ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, LaunchResult, PodName,
@@ -66,10 +65,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
     trace!("get_repo_root: {:?}", t.elapsed());
 
-    let toml_config = load_toml_config(&repo_root)?;
-    let dangerously_skip_permissions_workaround = cmd.dangerously_skip_permissions_workaround
-        || toml_config.claude.dangerously_skip_permissions_workaround;
-
     let t = Instant::now();
     let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
     trace!("load_and_resolve: {:?}", t.elapsed());
@@ -105,7 +100,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
                 container_id: ContainerId(container_id.0.clone()),
                 user: user.clone(),
                 docker_socket: docker_socket.clone(),
-                dangerously_skip_permissions_workaround,
             });
             trace!("ensure_claude_config: {:?}", tc.elapsed());
             result
@@ -173,10 +167,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             "--",
             "claude",
         ]);
-        // The hooks workaround replaces --dangerously-skip-permissions
-        let use_skip_permissions =
-            !cmd.no_dangerously_skip_permissions && !dangerously_skip_permissions_workaround;
-        if use_skip_permissions {
+        if !cmd.no_dangerously_skip_permissions {
             docker_cmd.arg("--dangerously-skip-permissions");
         }
         docker_cmd.args(&cmd.args);

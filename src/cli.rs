@@ -329,11 +329,6 @@ pub struct ClaudeCommand {
     #[arg(long)]
     pub no_dangerously_skip_permissions: bool,
 
-    /// Use hooks to auto-approve tool use instead of
-    /// --dangerously-skip-permissions (for Claude installations that lack it)
-    #[arg(long, hide = true, conflicts_with = "no_dangerously_skip_permissions")]
-    pub dangerously_skip_permissions_workaround: bool,
-
     /// Arguments forwarded to `claude` CLI
     #[arg(last = true, value_name = "ARGS")]
     pub args: Vec<String>,
@@ -428,9 +423,6 @@ pub enum HookSubcommand {
 
     /// Handle git post-receive hook events (gateway repo)
     GatewayPostReceive,
-
-    /// Claude Code PreToolUse hook (pre-approve all tool calls)
-    ClaudePreToolUse,
 
     /// Claude Code PermissionRequest hook (auto-approve permission dialogs)
     ClaudePermissionRequest,
