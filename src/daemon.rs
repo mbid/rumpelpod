@@ -2289,29 +2289,34 @@ fn inject_statusline(data: &[u8], pod_name: &str) -> Vec<u8> {
     serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| data.to_vec())
 }
 
-/// Inject a PermissionRequest hook that auto-approves all tool use via
-/// the rumpel binary.  This is the workaround for Claude installations
-/// that lack --dangerously-skip-permissions.
+/// Inject PreToolUse and PermissionRequest hooks that auto-approve all
+/// tool use via the rumpel binary.  PreToolUse pre-approves every tool
+/// call before the permission system evaluates it; PermissionRequest
+/// catches any remaining permission dialogs.  Together they replace
+/// --dangerously-skip-permissions.
 fn inject_hooks(data: &[u8]) -> Vec<u8> {
     let Ok(mut obj) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
     else {
         return data.to_vec();
     };
 
-    let hook = serde_json::json!({
-        "type": "command",
-        "command": "rumpel hook claude-permission-request"
-    });
+    let entries = [
+        ("PreToolUse", "rumpel hook claude-pre-tool-use"),
+        ("PermissionRequest", "rumpel hook claude-permission-request"),
+    ];
     let hooks_obj = obj
         .entry("hooks")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     if let serde_json::Value::Object(hooks_map) = hooks_obj {
-        let arr = hooks_map
-            .entry("PermissionRequest")
-            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        if let serde_json::Value::Array(vec) = arr {
-            if !vec.iter().any(|v| v == &hook) {
-                vec.push(hook);
+        for (event, command) in entries {
+            let hook = serde_json::json!({ "type": "command", "command": command });
+            let arr = hooks_map
+                .entry(event)
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            if let serde_json::Value::Array(vec) = arr {
+                if !vec.iter().any(|v| v == &hook) {
+                    vec.push(hook);
+                }
             }
         }
     }
@@ -3606,9 +3611,14 @@ mod tests {
         let input = b"{}";
         let result = inject_hooks(input);
         let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
-        let hook = &obj["hooks"]["PermissionRequest"][0];
-        assert_eq!(hook["type"], "command");
-        assert_eq!(hook["command"], "rumpel hook claude-permission-request");
+        assert_eq!(
+            obj["hooks"]["PreToolUse"][0]["command"],
+            "rumpel hook claude-pre-tool-use"
+        );
+        assert_eq!(
+            obj["hooks"]["PermissionRequest"][0]["command"],
+            "rumpel hook claude-permission-request"
+        );
     }
 
     #[test]
@@ -3618,20 +3628,25 @@ mod tests {
         let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(obj["statusLine"]["command"], "echo hi");
         assert_eq!(
-            obj["hooks"]["PermissionRequest"][0]["command"],
-            "rumpel hook claude-permission-request"
+            obj["hooks"]["PreToolUse"][0]["command"],
+            "rumpel hook claude-pre-tool-use"
         );
     }
 
     #[test]
     fn inject_hooks_preserves_existing_hooks() {
-        let input = br#"{"hooks":{"PermissionRequest":[{"type":"command","command":"other"}]}}"#;
+        let input = br#"{"hooks":{"PreToolUse":[{"type":"command","command":"other"}]}}"#;
         let result = inject_hooks(input);
         let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
-        let hooks = obj["hooks"]["PermissionRequest"].as_array().unwrap();
+        let hooks = obj["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(hooks.len(), 2);
         assert_eq!(hooks[0]["command"], "other");
-        assert_eq!(hooks[1]["command"], "rumpel hook claude-permission-request");
+        assert_eq!(hooks[1]["command"], "rumpel hook claude-pre-tool-use");
+        // PermissionRequest was also added
+        assert_eq!(
+            obj["hooks"]["PermissionRequest"].as_array().unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -3640,8 +3655,16 @@ mod tests {
         let once = inject_hooks(input);
         let twice = inject_hooks(&once);
         let obj: serde_json::Value = serde_json::from_slice(&twice).unwrap();
-        let hooks = obj["hooks"]["PermissionRequest"].as_array().unwrap();
-        assert_eq!(hooks.len(), 1, "should not duplicate the hook");
+        assert_eq!(
+            obj["hooks"]["PreToolUse"].as_array().unwrap().len(),
+            1,
+            "should not duplicate PreToolUse"
+        );
+        assert_eq!(
+            obj["hooks"]["PermissionRequest"].as_array().unwrap().len(),
+            1,
+            "should not duplicate PermissionRequest"
+        );
     }
 
     #[test]

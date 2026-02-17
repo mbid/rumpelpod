@@ -429,7 +429,10 @@ pub enum HookSubcommand {
     /// Handle git post-receive hook events (gateway repo)
     GatewayPostReceive,
 
-    /// Claude Code PermissionRequest hook (auto-approve all tool use)
+    /// Claude Code PreToolUse hook (pre-approve all tool calls)
+    ClaudePreToolUse,
+
+    /// Claude Code PermissionRequest hook (auto-approve permission dialogs)
     ClaudePermissionRequest,
 }
 
