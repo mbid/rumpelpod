@@ -17,7 +17,7 @@ Designed for running LLM coding agents.
 
 ## What Is This?
 
-Rumpelpod manages named, independent workspaces ("pods") of your repository inside Docker containers.
+Rumpelpod manages named, independent workspaces ("pods") of a repository inside Docker containers.
 Each pod gets its own working copy synced via git, so multiple agents (or humans) can work on the same repository concurrently without interfering with each other or the host.
 
 Containers can run on the local Docker daemon or on a remote host via SSH.
@@ -28,24 +28,24 @@ The typical workflow:
 
 1. Launch Claude Code in a pod with `rumpel claude my-task`.
 2. The agent works autonomously inside its container.
-3. You review the changes with `rumpel review my-task` (opens your configured git difftool) and merge what you want.
+3. Review the changes with `rumpel review my-task` (opens the configured git difftool) and merge what is useful.
 
 There is also a minimal built-in agent (`rumpel agent`) that talks directly to the Anthropic, Gemini, and xAI APIs.
 
 Rumpelpod piggy-backs on existing tooling: containers are configured with standard `devcontainer.json` files and built with Docker.
-If your project already has a dev container configuration, rumpelpod can use it directly.
+Projects that already have a dev container configuration can use it directly.
 
 ## Installation
 
-Download the latest tarball from [GitHub Releases](https://github.com/mbid/rumpelpod/releases) and extract all binaries into a directory on your PATH:
+Download the latest tarball from [GitHub Releases](https://github.com/mbid/rumpelpod/releases) and extract all binaries into a directory on PATH:
 
 ```bash
 tar xzf rumpel-v*.tar.gz -C ~/.local/bin/
 ```
 
 The tarball contains statically linked binaries for Linux amd64, Linux arm64, and macOS arm64.
-All of them must be in the same directory; rumpelpod copies the matching Linux binary into containers for git hooks, so both Linux architectures are needed even if your host is only one of them.
-Symlink `rumpel` to the one matching your host platform:
+All of them must be in the same directory; rumpelpod copies the matching Linux binary into containers for git hooks, so both Linux architectures are needed even if the host is only one of them.
+Symlink `rumpel` to the one matching the host platform:
 
 ```bash
 ln -sf rumpel-linux-amd64 ~/.local/bin/rumpel    # on x86_64 Linux
@@ -67,7 +67,7 @@ Requirements:
 
 ## Getting Started
 
-Create a `.devcontainer/devcontainer.json` in your project:
+Create a `.devcontainer/devcontainer.json` in the project:
 
 ```json
 {
@@ -135,7 +135,7 @@ Agents read this file for context about the project's conventions, architecture,
 | `rumpel claude <name>` | Launch Claude Code in a persistent screen session inside a pod |
 | `rumpel enter <name>` | Enter a pod interactively, or run a command with `[-- CMD]` |
 | `rumpel list` | List pods for the current repository |
-| `rumpel review <name>` | Review changes using your configured git difftool |
+| `rumpel review <name>` | Review changes using the configured git difftool |
 | `rumpel cp <src> <dest>` | Copy files between host and pod (`pod:path` syntax) |
 | `rumpel stop <name>` | Stop a pod without removing it |
 | `rumpel delete <name>` | Delete a pod (refuses if unmerged commits exist unless `--force`) |
@@ -160,8 +160,8 @@ Because the workspace is cloned via git rather than bind-mounted, gitignored and
 Lifecycle commands like `npm install` regenerate them, but for faster pod creation it helps to bake a checkout and warm build cache into the Docker image:
 
 ```dockerfile
-RUN git clone https://github.com/you/your-project /workspaces/your-project
-WORKDIR /workspaces/your-project
+RUN git clone https://github.com/example/project /workspaces/project
+WORKDIR /workspaces/project
 RUN cargo build; true
 ```
 
@@ -172,17 +172,17 @@ Cached build artifacts in `target/` will survive into the pod.
 Rumpelpod creates standard Docker containers.
 It does not enforce a particular isolation level.
 That is a property of the container runtime and the Docker host.
-You can use `runArgs` in your `devcontainer.json` to select a runtime that fits your security requirements, for example [gVisor](https://gvisor.dev/) (`--runtime=runsc`), [Kata Containers](https://katacontainers.io/) (`--runtime=kata-runtime`), or [Sysbox](https://github.com/nestybox/sysbox) (`--runtime=sysbox-runc`).
+The `runArgs` field in `devcontainer.json` can be used to select a runtime, for example [gVisor](https://gvisor.dev/) (`--runtime=runsc`), [Kata Containers](https://katacontainers.io/) (`--runtime=kata-runtime`), or [Sysbox](https://github.com/nestybox/sysbox) (`--runtime=sysbox-runc`).
 
-Running pods on a dedicated remote host provides physical separation from your development machine.
+Running pods on a dedicated remote host provides physical separation from the development machine.
 Rumpelpod handles SSH tunneling for the Docker API and port forwarding for services running inside pods.
 
 ## Comparison With Other Tools
 
 Cloud platforms like [Devin](https://devin.ai/), [Codex](https://openai.com/codex/) (OpenAI), [Copilot Coding Agent](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-coding-agent), and [Ona](https://ona.com/) (formerly Gitpod) run coding agents in hosted environments, typically triggered through GitHub.
-They manage the infrastructure for you, but agents interact with your code through the forge: pull requests, issue comments, CI checks.
-With rumpelpod, pods run on your own machines (local or remote) and you use your normal local tools.
-There is no forge in the loop.
+They manage the infrastructure, but agents interact with the code through the forge: pull requests, issue comments, CI checks.
+With rumpelpod, pods run on local or remote machines and the normal local tooling stays in the loop.
+There is no forge involved.
 
 [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (Docker Desktop) runs agents in microVMs with file synchronization between host and sandbox.
 Rumpelpod uses git-based sync instead, supports multiple concurrent named pods per repository, and works on headless Linux servers without Docker Desktop.
