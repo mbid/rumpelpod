@@ -240,6 +240,9 @@ pub struct TomlConfig {
     #[serde(default)]
     pub agent: AgentConfig,
 
+    #[serde(default)]
+    pub claude: ClaudeConfig,
+
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     pub host: Option<String>,
 }
@@ -288,6 +291,15 @@ pub struct AgentConfig {
     /// Thinking budget in tokens.
     /// If set, enables thinking mode for supported models (e.g., Claude Opus 4.5).
     pub thinking_budget: Option<u32>,
+}
+
+/// Configuration for `rumpel claude`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct ClaudeConfig {
+    /// Use a PermissionRequest hook instead of --dangerously-skip-permissions.
+    #[serde(default)]
+    pub dangerously_skip_permissions_hook: bool,
 }
 
 /// Get the state directory for rumpelpod data.

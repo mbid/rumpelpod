@@ -134,7 +134,7 @@ pub fn run_claude_print(
     cmd.args([
         "claude",
         "test",
-        "--no-dangerously-skip-permissions",
+        "--dangerously-skip-permissions-hook",
         "--",
         "--print",
         prompt,

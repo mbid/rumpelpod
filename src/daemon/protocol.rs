@@ -232,6 +232,8 @@ pub struct EnsureClaudeConfigRequest {
     pub container_id: ContainerId,
     pub user: String,
     pub docker_socket: PathBuf,
+    /// Install a Claude PermissionRequest hook that auto-approves all tool use.
+    pub auto_approve_hook: bool,
 }
 
 /// Error response body.

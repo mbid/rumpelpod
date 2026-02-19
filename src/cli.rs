@@ -330,8 +330,12 @@ pub struct ClaudeCommand {
     pub host: Option<String>,
 
     /// Disable --dangerously-skip-permissions (which is on by default)
-    #[arg(long)]
+    #[arg(long, conflicts_with = "dangerously_skip_permissions_hook")]
     pub no_dangerously_skip_permissions: bool,
+
+    /// Use a PermissionRequest hook instead of --dangerously-skip-permissions
+    #[arg(long, hide = true)]
+    pub dangerously_skip_permissions_hook: bool,
 
     /// Arguments forwarded to `claude` CLI
     #[arg(last = true, value_name = "ARGS")]

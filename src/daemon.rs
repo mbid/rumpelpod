@@ -1992,6 +1992,7 @@ fn copy_claude_config(
     repo_path: &Path,
     container_repo_path: &Path,
     pod_name: &str,
+    auto_approve_hook: bool,
 ) -> Result<()> {
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
 
@@ -2021,8 +2022,8 @@ fn copy_claude_config(
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude.json")),
     }
 
-    // We always need ~/.claude/settings.json for the PermissionRequest
-    // hook, so create the directory unconditionally.
+    // We always need ~/.claude/settings.json for the statusline,
+    // so create the directory unconditionally.
     let claude_dir = host_home.join(".claude");
     exec_command(
         docker,
@@ -2046,14 +2047,18 @@ fn copy_claude_config(
     }
 
     // Build settings.json: start from host copy or empty object,
-    // then layer on statusline and the PermissionRequest hook.
+    // then layer on statusline (and optionally the PermissionRequest hook).
     let base_data = match std::fs::read(claude_dir.join("settings.json")) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/settings.json")),
     };
     let data = inject_statusline(&base_data, pod_name);
-    let data = inject_hooks(&data);
+    let data = if auto_approve_hook {
+        inject_hooks(&data)
+    } else {
+        data
+    };
     let dest = format!("{}/.claude/settings.json", container_home);
     write_file_via_stdin(docker, container_id, user, &dest, &data)
         .context("writing .claude/settings.json")?;
@@ -3502,6 +3507,7 @@ impl Daemon for DaemonServer {
             &request.repo_path,
             &request.container_repo_path,
             &request.pod_name.0,
+            request.auto_approve_hook,
         )?;
 
         // Mark as copied only after the full copy succeeds.
