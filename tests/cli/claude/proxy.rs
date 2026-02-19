@@ -123,112 +123,107 @@ fn cache_dir() -> PathBuf {
         .join("claude-cli")
 }
 
-/// Normalize the request body to strip fields that vary between runs but
-/// don't affect the semantics of the response (container-specific user IDs,
-/// config hashes, auto-memory state).
-fn normalize_body(body: &[u8]) -> Vec<u8> {
-    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
+/// Extract only the fields that determine API response semantics.
+/// Everything else (system prompts, tools, metadata, temperature, etc.)
+/// is excluded so the cache survives Claude CLI version changes.
+fn extract_cache_fields(body: &[u8]) -> Vec<u8> {
+    let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
         return body.to_vec();
     };
 
-    // metadata.user_id contains a per-container hash
-    if let Some(meta) = json.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-        meta.remove("user_id");
-    }
-
-    // system[0] is the billing header with a per-run cch hash
-    if let Some(system) = json.get_mut("system") {
-        if let Some(arr) = system.as_array_mut() {
-            // Strip billing header entry (first element, contains cch=)
-            if arr
-                .first()
-                .and_then(|v| v.get("text"))
-                .and_then(|t| t.as_str())
-                .is_some_and(|s| s.contains("x-anthropic-billing-header"))
-            {
-                arr.remove(0);
-            }
-            // Strip auto-memory section from system prompt text
-            for entry in arr.iter_mut() {
-                if let Some(text) = entry.get_mut("text") {
-                    if let Some(s) = text.as_str() {
-                        if let Some(pos) = s.find("\n# auto memory\n") {
-                            // Cut auto memory up to the next top-level heading or env block
-                            let after = &s[pos + 1..];
-                            let end = after
-                                .find("\nHere is useful information about the environment")
-                                .map(|i| pos + 1 + i)
-                                .unwrap_or(s.len());
-                            let mut cleaned = s[..pos].to_string();
-                            cleaned.push_str(&s[end..]);
-                            *text = serde_json::Value::String(cleaned);
-                        }
-                    }
-                }
-            }
+    let mut key_fields = serde_json::Map::new();
+    for field in ["model", "messages", "stream"] {
+        if let Some(val) = json.get(field) {
+            key_fields.insert(field.to_string(), val.clone());
         }
     }
 
-    // Deterministic serialization
-    serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec())
+    serde_json::to_vec(&serde_json::Value::Object(key_fields)).unwrap_or_else(|_| body.to_vec())
 }
 
 fn compute_cache_key(method: &str, path_and_query: &str, body: &[u8]) -> String {
-    let normalized = normalize_body(body);
+    let cache_fields = extract_cache_fields(body);
     let mut hasher = Sha256::new();
     hasher.update(method.as_bytes());
     hasher.update(b"\n");
     hasher.update(path_and_query.as_bytes());
     hasher.update(b"\n");
-    hasher.update(&normalized);
+    hasher.update(&cache_fields);
     hex::encode(hasher.finalize())
 }
 
-/// On-disk format for cached API responses.
+/// Stored alongside the response so developers can inspect what was sent
+/// when debugging cache misses. Not used for cache key computation.
 #[derive(Serialize, Deserialize)]
-struct CachedResponse {
+struct CachedRequest {
+    method: String,
+    path: String,
+    body: serde_json::Value,
+}
+
+/// On-disk format: request (for debugging) + response (for replay).
+#[derive(Serialize, Deserialize)]
+struct CachedEntry {
+    request: CachedRequest,
+    response: CachedResponseData,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedResponseData {
     status: u16,
     content_type: String,
     /// Base64-encoded raw response body (may be SSE event stream).
     body: String,
 }
 
-impl CachedResponse {
-    fn from_parts(status: u16, content_type: &str, body: &[u8]) -> Self {
+impl CachedEntry {
+    fn new(
+        method: &str,
+        path: &str,
+        request_body: &[u8],
+        status: u16,
+        content_type: &str,
+        response_body: &[u8],
+    ) -> Self {
+        let body_json = serde_json::from_slice::<serde_json::Value>(request_body)
+            .unwrap_or(serde_json::Value::Null);
         Self {
-            status,
-            content_type: content_type.to_string(),
-            body: base64::engine::general_purpose::STANDARD.encode(body),
+            request: CachedRequest {
+                method: method.to_string(),
+                path: path.to_string(),
+                body: body_json,
+            },
+            response: CachedResponseData {
+                status,
+                content_type: content_type.to_string(),
+                body: base64::engine::general_purpose::STANDARD.encode(response_body),
+            },
         }
     }
 
-    fn body_bytes(&self) -> Vec<u8> {
-        base64::engine::general_purpose::STANDARD
-            .decode(&self.body)
-            .expect("invalid base64 in cached response")
-    }
-
     fn into_response(self) -> Response {
-        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::OK);
-        let body = self.body_bytes();
+        let status = StatusCode::from_u16(self.response.status).unwrap_or(StatusCode::OK);
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(&self.response.body)
+            .expect("invalid base64 in cached response");
         Response::builder()
             .status(status)
-            .header(header::CONTENT_TYPE, &self.content_type)
+            .header(header::CONTENT_TYPE, &self.response.content_type)
             .body(Body::from(body))
             .unwrap()
     }
 }
 
-fn cache_get(key: &str) -> Option<CachedResponse> {
+fn cache_get(key: &str) -> Option<CachedEntry> {
     let path = cache_dir().join(format!("{key}.json"));
     let data = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&data).ok()
 }
 
-fn cache_put(key: &str, response: &CachedResponse) {
+fn cache_put(key: &str, entry: &CachedEntry) {
     let dir = cache_dir();
     let final_path = dir.join(format!("{key}.json"));
-    let data = serde_json::to_string_pretty(response).expect("serialize cached response");
+    let data = serde_json::to_string_pretty(entry).expect("serialize cached entry");
 
     let temp = tempfile::Builder::new()
         .prefix("cache-")
@@ -349,12 +344,19 @@ async fn handle_request(req: Request<Body>) -> Response {
             .to_string();
         let response_body = response.bytes().expect("read forwarded response body");
 
-        let cached = CachedResponse::from_parts(status, &content_type, &response_body);
-        cache_put(&cache_key, &cached);
+        let entry = CachedEntry::new(
+            &method,
+            &path_and_query,
+            &body_bytes,
+            status,
+            &content_type,
+            &response_body,
+        );
+        cache_put(&cache_key, &entry);
 
         eprintln!("claude proxy: cached response {} {}", status, cache_key);
 
-        cached
+        entry
     })
     .await
     .expect("API forwarding task panicked");
