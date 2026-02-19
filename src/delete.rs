@@ -23,36 +23,52 @@ pub fn delete(cmd: &DeleteCommand) -> Result<()> {
     let client = DaemonClient::new_unix(&socket_path);
 
     let pods = client.list_pods(repo_path.clone())?;
-    let pod = pods.iter().find(|p| p.name == cmd.name);
 
-    let Some(pod) = pod else {
-        bail!("pod '{}' not found", cmd.name);
-    };
+    let mut failed = 0u32;
 
-    if !cmd.force && is_ahead(pod.repo_state.as_deref()) {
-        let state = pod.repo_state.as_deref().unwrap_or("");
-        if io::stdin().is_terminal() && io::stderr().is_terminal() {
-            eprint!(
-                "pod '{}' has unmerged commits ({}), delete anyway? [y/N] ",
-                cmd.name, state
-            );
-            io::stderr().flush()?;
+    for name in &cmd.names {
+        let pod = pods.iter().find(|p| p.name == *name);
 
-            let mut answer = String::new();
-            io::stdin().read_line(&mut answer)?;
-            if !answer.trim().eq_ignore_ascii_case("y") {
-                bail!("aborted");
+        let Some(pod) = pod else {
+            eprintln!("pod '{}' not found", name);
+            failed += 1;
+            continue;
+        };
+
+        if !cmd.force && is_ahead(pod.repo_state.as_deref()) {
+            let state = pod.repo_state.as_deref().unwrap_or("");
+            if io::stdin().is_terminal() && io::stderr().is_terminal() {
+                eprint!(
+                    "pod '{}' has unmerged commits ({}), delete anyway? [y/N] ",
+                    name, state
+                );
+                io::stderr().flush()?;
+
+                let mut answer = String::new();
+                io::stdin().read_line(&mut answer)?;
+                if !answer.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("skipping pod '{}'", name);
+                    continue;
+                }
+            } else {
+                eprintln!(
+                    "pod '{}' has unmerged commits ({}); use --force to delete",
+                    name, state
+                );
+                failed += 1;
+                continue;
             }
-        } else {
-            bail!(
-                "pod '{}' has unmerged commits ({}); use --force to delete",
-                cmd.name,
-                state
-            );
+        }
+
+        if let Err(e) = client.delete_pod(PodName(name.clone()), repo_path.clone(), cmd.wait) {
+            eprintln!("failed to delete pod '{}': {}", name, e);
+            failed += 1;
         }
     }
 
-    client.delete_pod(PodName(cmd.name.clone()), repo_path, cmd.wait)?;
+    if failed > 0 {
+        bail!("{} pod(s) could not be deleted", failed);
+    }
 
     Ok(())
 }

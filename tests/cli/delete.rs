@@ -282,6 +282,162 @@ fn delete_pod_clears_conversation_history() {
 }
 
 #[test]
+fn delete_multiple_pods() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Create three pods
+    for name in ["multi-a", "multi-b", "multi-c"] {
+        let output = pod_command(&repo, &daemon)
+            .args(["enter", name, "--", "true"])
+            .output()
+            .expect("Failed to run rumpel enter");
+        assert!(
+            output.status.success(),
+            "creating pod '{}' failed: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Delete all three in one command
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "multi-a", "multi-b", "multi-c"])
+        .output()
+        .expect("Failed to run rumpel delete");
+    assert!(
+        output.status.success(),
+        "multi-delete failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify all are gone
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for name in ["multi-a", "multi-b", "multi-c"] {
+        assert!(
+            !stdout.contains(name),
+            "pod '{}' should be gone after multi-delete: {}",
+            name,
+            stdout
+        );
+    }
+}
+
+#[test]
+fn delete_multiple_continues_past_missing() {
+    // When one pod in a multi-delete does not exist, the others should
+    // still be deleted and the command should report the failure.
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Create two pods, leave a gap for a nonexistent one
+    for name in ["surv-a", "surv-c"] {
+        let output = pod_command(&repo, &daemon)
+            .args(["enter", name, "--", "true"])
+            .output()
+            .expect("Failed to run rumpel enter");
+        assert!(output.status.success());
+    }
+
+    // Delete with a nonexistent pod in the middle
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "surv-a", "no-such-pod", "surv-c"])
+        .output()
+        .expect("Failed to run rumpel delete");
+
+    // Command should fail overall because one pod was missing
+    assert!(
+        !output.status.success(),
+        "should fail when a pod is missing"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "should mention the missing pod: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("1 pod(s) could not be deleted"),
+        "should report failure count: {}",
+        stderr
+    );
+
+    // The other two should still have been deleted
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("surv-a") && !stdout.contains("surv-c"),
+        "existing pods should be deleted despite the missing one: {}",
+        stdout
+    );
+}
+
+#[test]
+fn delete_multiple_skips_unmerged_without_tty() {
+    // In non-tty mode, unmerged pods are skipped with an error but
+    // the remaining pods are still deleted.
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Create a clean pod and an ahead pod
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "clean-pod", "--", "true"])
+        .output()
+        .expect("Failed to run rumpel enter");
+    assert!(output.status.success());
+
+    create_ahead_pod(&repo, &daemon, "ahead-pod");
+
+    // Try to delete both (non-tty, no --force)
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "clean-pod", "ahead-pod"])
+        .output()
+        .expect("Failed to run rumpel delete");
+
+    // Should fail overall because the ahead pod could not be deleted
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unmerged commits"),
+        "should warn about unmerged pod: {}",
+        stderr
+    );
+
+    // The clean pod should be deleted, the ahead pod should remain
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("clean-pod"),
+        "clean pod should be deleted: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("ahead-pod"),
+        "ahead pod should remain: {}",
+        stdout
+    );
+}
+
+#[test]
 fn ssh_remote_pod_delete() {
     let repo = TestRepo::new();
 

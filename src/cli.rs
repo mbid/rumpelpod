@@ -212,9 +212,9 @@ pub struct StopCommand {
 
 #[derive(Args)]
 pub struct DeleteCommand {
-    /// Name of the pod to delete
-    #[arg(help = "Name of the pod to delete", value_parser = validate_pod_name)]
-    pub name: String,
+    /// Names of pods to delete
+    #[arg(required = true, num_args = 1.., value_parser = validate_pod_name)]
+    pub names: Vec<String>,
 
     /// Block until the container is fully removed
     #[arg(long)]
