@@ -1,10 +1,10 @@
 # Rumpelpod
 
-Run LLM coding agents in isolated containers.
+Manage multiple independent workspaces of a repository in Docker containers, on local or remote hosts.
+Designed for running LLM coding agents.
 
 ## Table of Contents
 
-- [Status](#status)
 - [What Is This?](#what-is-this)
 - [Installation](#installation)
 - [Getting Started](#getting-started)
@@ -12,53 +12,57 @@ Run LLM coding agents in isolated containers.
 - [Commands](#commands)
 - [How It Works](#how-it-works)
   - [Git Synchronization](#git-synchronization)
-  - [Isolation](#isolation)
-  - [Agent Autonomy](#agent-autonomy)
-- [Supported Models](#supported-models)
+  - [Containers and Isolation](#containers-and-isolation)
 - [Comparison With Other Tools](#comparison-with-other-tools)
-
-## Status
-
-Rumpelpod is in active development and used daily by its authors. The
-interface is subject to change.
 
 ## What Is This?
 
-Rumpelpod spawns isolated Docker containers ("pods") for running LLM coding
-agents against your repositories. Each pod gets its own working copy of
-your code, synced via git. The agent can execute commands, edit files, and
-install packages freely -- safety comes from the container isolation, not
-from permission dialogs.
+Rumpelpod manages named, independent workspaces ("pods") of your repository inside Docker containers.
+Each pod gets its own working copy synced via git, so multiple agents (or humans) can work on the same repository concurrently without interfering with each other or the host.
 
+Containers can run on the local Docker daemon or on a remote host via SSH.
+Rumpelpod handles git synchronization, port forwarding, and container lifecycle across both.
+
+This is mainly used for running LLM coding agents.
 The typical workflow:
 
-1. You give the agent a task.
-2. The agent works autonomously inside its pod.
-3. You review the changes with `rumpel review` and merge what you want.
+1. Launch Claude Code in a pod with `rumpel claude my-task`.
+2. The agent works autonomously inside its container.
+3. You review the changes with `rumpel review my-task` (opens your configured git difftool) and merge what you want.
 
-Multiple pods can run concurrently against the same repository on separate
-branches.
+There is also a minimal built-in agent (`rumpel agent`) that talks directly to the Anthropic, Gemini, and xAI APIs.
+
+Rumpelpod piggy-backs on existing tooling: containers are configured with standard `devcontainer.json` files and built with Docker.
+If your project already has a dev container configuration, rumpelpod can use it directly.
 
 ## Installation
 
-Build from source:
+Download the latest tarball from [GitHub Releases](https://github.com/mbid/rumpelpod/releases) and extract all binaries into a directory on your PATH:
 
 ```bash
-cargo install --path .
+tar xzf rumpel-v*.tar.gz -C ~/.local/bin/
 ```
 
-Install the background daemon:
+The tarball contains statically linked binaries for Linux amd64, Linux arm64, and macOS arm64.
+All of them must be in the same directory; rumpelpod copies the matching Linux binary into containers for git hooks, so both Linux architectures are needed even if your host is only one of them.
+Symlink `rumpel` to the one matching your host platform:
+
+```bash
+ln -sf rumpel-linux-amd64 ~/.local/bin/rumpel    # on x86_64 Linux
+ln -sf rumpel-darwin-arm64 ~/.local/bin/rumpel    # on Apple Silicon
+```
+
+Then install the background daemon:
 
 ```bash
 rumpel system-install
 ```
 
-The daemon manages pod lifecycle and git synchronization. It runs as a
-systemd service on Linux and a launchd agent on macOS.
+The daemon manages pod lifecycle and git synchronization.
+It runs as a systemd user service on Linux and a launchd user agent on macOS.
 
 Requirements:
-- Docker with gVisor runtime (`runsc`). Alternative runtimes: `runc`,
-  `sysbox-runc`.
+- Docker (local or remote via SSH)
 - Git
 
 ## Getting Started
@@ -69,15 +73,14 @@ Create a `.devcontainer/devcontainer.json` in your project:
 {
     "image": "my-project-dev:latest",
     "workspaceFolder": "/home/dev/my-project",
-    "containerUser": "dev",
-    "runArgs": ["--runtime=runsc"]
+    "containerUser": "dev"
 }
 ```
 
-Run an LLM agent in a pod:
+Launch Claude Code in a pod:
 
 ```bash
-rumpel agent my-task
+rumpel claude my-task
 ```
 
 Or enter a pod interactively:
@@ -86,21 +89,19 @@ Or enter a pod interactively:
 rumpel enter my-shell
 ```
 
-Or launch Claude Code inside a pod:
-
-```bash
-rumpel claude my-pod
-```
-
 Review the agent's changes:
 
 ```bash
 rumpel review my-task
 ```
 
-## Configuration
+To run pods on a remote Docker host, pass `--host`:
 
-Pod behavior is configured with two files:
+```bash
+rumpel claude my-task --host ssh://user@build-server
+```
+
+## Configuration
 
 ### `.devcontainer/devcontainer.json`
 
@@ -120,46 +121,21 @@ The following fields are supported:
 | `overrideCommand` | Whether to replace the image CMD with `sleep infinity` |
 | Lifecycle commands | `onCreateCommand`, `postCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand` |
 
-Intentionally unsupported: Features, Docker Compose, `initializeCommand`,
-`workspaceMount`. See `docs/devcontainer.md` for a detailed comparison with
-the official specification.
-
-### `.rumpelpod.toml`
-
-Optional. Agent and pod-specific settings:
-
-```toml
-host = "ssh://user@host"
-
-[agent]
-model = "claude-sonnet-4-5"
-thinking-budget = 10000
-anthropic-websearch = true
-```
-
-| Field | Description |
-|-------|-------------|
-| `host` | Remote Docker host (`ssh://user@host:port`) |
-| `agent.model` | Default model for `rumpel agent` |
-| `agent.thinking-budget` | Thinking budget in tokens |
-| `agent.anthropic-websearch` | Enable web search for Anthropic models |
-| `agent.anthropic-base-url` | Custom API endpoint for Anthropic |
 
 ### `AGENTS.md`
 
-Project-specific instructions for LLM agents. Placed in the repository
-root. Agents read this file for context about the project's conventions,
-architecture, and how to run tests.
+Project-specific instructions for LLM agents.
+Placed in the repository root.
+Agents read this file for context about the project's conventions, architecture, and how to run tests.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `rumpel enter <name>` | Enter a pod interactively, or run a command with `-- CMD` |
-| `rumpel agent <name>` | Run an LLM agent in a pod |
 | `rumpel claude <name>` | Launch Claude Code in a persistent screen session inside a pod |
+| `rumpel enter <name>` | Enter a pod interactively, or run a command with `[-- CMD]` |
 | `rumpel list` | List pods for the current repository |
-| `rumpel review <name>` | Review changes using git difftool |
+| `rumpel review <name>` | Review changes using your configured git difftool |
 | `rumpel cp <src> <dest>` | Copy files between host and pod (`pod:path` syntax) |
 | `rumpel stop <name>` | Stop a pod without removing it |
 | `rumpel delete <name>` | Delete a pod (refuses if unmerged commits exist unless `--force`) |
@@ -170,105 +146,48 @@ architecture, and how to run tests.
 | `rumpel system-install` | Install the background daemon |
 | `rumpel system-uninstall` | Uninstall the background daemon |
 
+Most commands accept `--host ssh://user@host` to target a remote Docker daemon.
+
 ## How It Works
 
 ### Git Synchronization
 
-Rumpelpod uses a three-repository architecture:
+Host branches are automatically synced into pods via git hooks.
+Inside each pod, the host branches appear as the `host` remote.
+Each pod works on its own branch, and pod branches are pushed back to the host as `rumpelpod/<branch>@<pod>`.
 
+Because the workspace is cloned via git rather than bind-mounted, gitignored and untracked files are not present inside pods.
+Lifecycle commands like `npm install` regenerate them, but for faster pod creation it helps to bake a checkout and warm build cache into the Docker image:
+
+```dockerfile
+RUN git clone https://github.com/you/your-project /workspaces/your-project
+WORKDIR /workspaces/your-project
+RUN cargo build; true
 ```
-Host repo  --->  Gateway repo (bare)  <--->  Pod repos
-              refs/heads/host/*             refs/heads/rumpelpod/<branch>@<pod>
-```
 
-Your host branches are pushed to a gateway bare repository via git hooks.
-Pods clone from the gateway through a built-in HTTP server. Pod branches
-are namespaced (`rumpelpod/<branch>@<pod>`) so multiple pods can work
-on separate branches without conflicts.
+Cached build artifacts in `target/` will survive into the pod.
 
-Because the workspace is cloned via git rather than bind-mounted,
-gitignored and untracked files are not present inside pods. Lifecycle
-commands like `npm install` regenerate them.
+### Containers and Isolation
 
-### Isolation
+Rumpelpod creates standard Docker containers.
+It does not enforce a particular isolation level.
+That is a property of the container runtime and the Docker host.
+You can use `runArgs` in your `devcontainer.json` to select a runtime that fits your security requirements, for example [gVisor](https://gvisor.dev/) (`--runtime=runsc`), [Kata Containers](https://katacontainers.io/) (`--runtime=kata-runtime`), or [Sysbox](https://github.com/nestybox/sysbox) (`--runtime=sysbox-runc`).
 
-Containers run with gVisor (`runsc`) by default, which intercepts syscalls
-at the kernel boundary. The pod filesystem is an overlay -- changes inside
-the pod do not affect the host. If the agent breaks something, delete the
-pod and start over.
-
-Network, process, and filesystem isolation are provided by Docker.
-Remote Docker hosts are supported via SSH, with automatic port forwarding
-for services running inside pods.
-
-### Agent Autonomy
-
-The built-in agent (`rumpel agent`) and the Claude Code integration
-(`rumpel claude`) both run without permission prompts. The agent has
-access to bash, file editing, and file creation tools. For Claude Code,
-`--dangerously-skip-permissions` is enabled by default with a hook that
-auto-approves tool use.
-
-This is the core design choice: rather than mediating every action through
-a permission dialog, rumpelpod relies on the container boundary for safety.
-The agent can do anything it wants inside the pod; you review the result.
-
-## Supported Models
-
-Rumpelpod's built-in agent (`rumpel agent`) supports multiple providers:
-
-**Anthropic** (requires `ANTHROPIC_API_KEY`):
-- `claude-opus-4-5` (default), `claude-opus-4-6`, `claude-sonnet-4-5`,
-  `claude-haiku-4-5`
-
-**Google Gemini** (requires `GEMINI_API_KEY`):
-- `gemini-2.5-flash`, `gemini-3-flash-preview`, `gemini-3-pro-preview`
-
-**xAI** (requires `XAI_API_KEY`):
-- `grok-4-1-fast-reasoning`, `grok-4-1-fast-non-reasoning`
-
-Custom model strings can be passed with `--custom-anthropic-model`,
-`--custom-gemini-model`, or `--custom-xai-model`.
-
-The Claude Code integration (`rumpel claude`) uses whatever model you
-configure in Claude Code itself.
+Running pods on a dedicated remote host provides physical separation from your development machine.
+Rumpelpod handles SSH tunneling for the Docker API and port forwarding for services running inside pods.
 
 ## Comparison With Other Tools
 
-Rumpelpod is a local CLI tool for developers who want to run coding agents
-against their repositories with container isolation and git-based change
-management. Here is how it compares to other approaches:
+Cloud platforms like [Devin](https://devin.ai/), [Codex](https://openai.com/codex/) (OpenAI), [Copilot Coding Agent](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-coding-agent), and [Ona](https://ona.com/) (formerly Gitpod) run coding agents in hosted environments, typically triggered through GitHub.
+They manage the infrastructure for you, but agents interact with your code through the forge: pull requests, issue comments, CI checks.
+With rumpelpod, pods run on your own machines (local or remote) and you use your normal local tools.
+There is no forge in the loop.
 
-**Git worktrees** are the simplest way to run multiple agents in parallel.
-Each agent gets its own worktree on a separate branch. The downside is that
-agents run directly on the host with no isolation -- they can access your
-filesystem, network, and other processes.
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (Docker Desktop) runs agents in microVMs with file synchronization between host and sandbox.
+Rumpelpod uses git-based sync instead, supports multiple concurrent named pods per repository, and works on headless Linux servers without Docker Desktop.
 
-**Dev Container CLI** provides container lifecycle management from
-`devcontainer.json` files. Rumpelpod builds on the same configuration
-format but adds git synchronization, named pod management, and an
-integrated agent runner. The Dev Container CLI is a building block;
-rumpelpod is the full workflow.
+The [Dev Container CLI](https://github.com/devcontainers/cli) provides container lifecycle management from `devcontainer.json` files.
+Rumpelpod builds on the same configuration format but adds git synchronization, named pod management, remote Docker support, and agent integration.
 
-**Docker Sandboxes** (Docker Desktop) runs coding agents in microVMs with
-network allow/deny lists. It focuses on single-agent use and mounts your
-workspace directly. Rumpelpod uses git-based sync instead of bind mounts,
-supports multiple concurrent named pods, and runs on Linux servers without
-Docker Desktop.
-
-**E2B**, **Daytona**, **Runloop**, and similar cloud platforms provide
-hosted sandboxed environments for AI agents, typically accessed via API or
-SDK. They target platform builders integrating agent execution into their
-products. Rumpelpod is self-hosted and designed for individual developers
-working from their terminal.
-
-**AgentFS** (Turso) provides a copy-on-write overlay filesystem backed by
-SQLite. It isolates file changes but does not provide process or network
-isolation. Rumpelpod uses Docker's overlay filesystem combined with gVisor
-for full container isolation.
-
-**Anthropic's sandbox-runtime** enforces filesystem and network
-restrictions at the OS level using bubblewrap (Linux) or seatbelt (macOS)
-without containers. It is lighter weight but provides less isolation than
-gVisor, and does not manage working copies or multiple concurrent
-instances.
+Git worktrees are the simplest way to run multiple agents in parallel, but agents run directly on the host with no isolation, and managing many worktrees by hand gets tedious.
