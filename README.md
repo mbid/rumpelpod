@@ -28,7 +28,8 @@ The typical workflow:
 
 1. Launch Claude Code in a pod with `rumpel claude my-task`.
 2. The agent works autonomously inside its container.
-3. Review the changes with `rumpel review my-task` (opens the configured git difftool) and merge what is useful.
+3. Review the changes with `rumpel review my-task` (opens the configured git difftool).
+4. Merge with `git merge rumpelpod/my-task`.
 
 There is also a minimal built-in agent (`rumpel agent`) that talks directly to the Anthropic, Gemini, and xAI APIs.
 
@@ -121,12 +122,6 @@ The following fields are supported:
 | `overrideCommand` | Whether to replace the image CMD with `sleep infinity` |
 | Lifecycle commands | `onCreateCommand`, `postCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand` |
 
-
-### `AGENTS.md`
-
-Project-specific instructions for LLM agents.
-Placed in the repository root.
-Agents read this file for context about the project's conventions, architecture, and how to run tests.
 
 ## Commands
 
