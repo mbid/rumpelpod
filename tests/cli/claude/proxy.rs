@@ -19,7 +19,6 @@ use axum::extract::Request;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Router;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -70,7 +69,8 @@ pub fn claude_proxy() -> &'static ClaudeTestProxy {
             .expect("get proxy local addr")
             .port();
 
-        std::fs::create_dir_all(cache_dir()).expect("create claude-cli cache dir");
+        std::fs::create_dir_all(response_dir()).expect("create claude-cli response dir");
+        std::fs::create_dir_all(request_dir()).expect("create claude-cli request dir");
 
         let runtime = Runtime::new().expect("create tokio runtime for claude proxy");
 
@@ -117,10 +117,18 @@ fn get_bridge_gateway_ip() -> String {
     ip
 }
 
-fn cache_dir() -> PathBuf {
+fn response_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("llm-cache")
         .join("claude-cli")
+        .join("response")
+}
+
+fn request_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("llm-cache")
+        .join("claude-cli")
+        .join("request")
 }
 
 /// Extract only the fields that determine API response semantics.
@@ -152,86 +160,57 @@ fn compute_cache_key(method: &str, path_and_query: &str, body: &[u8]) -> String 
     hex::encode(hasher.finalize())
 }
 
-/// Stored alongside the response so developers can inspect what was sent
-/// when debugging cache misses. Not used for cache key computation.
+/// Response file on-disk header (first line, before the raw body).
 #[derive(Serialize, Deserialize)]
-struct CachedRequest {
-    method: String,
-    path: String,
-    body: serde_json::Value,
-}
-
-/// On-disk format: request (for debugging) + response (for replay).
-#[derive(Serialize, Deserialize)]
-struct CachedEntry {
-    request: CachedRequest,
-    response: CachedResponseData,
-}
-
-#[derive(Serialize, Deserialize)]
-struct CachedResponseData {
+struct ResponseMeta {
     status: u16,
     content_type: String,
-    /// Base64-encoded raw response body (may be SSE event stream).
-    body: String,
 }
 
-impl CachedEntry {
-    fn new(
-        method: &str,
-        path: &str,
-        request_body: &[u8],
-        status: u16,
-        content_type: &str,
-        response_body: &[u8],
-    ) -> Self {
-        let body_json = serde_json::from_slice::<serde_json::Value>(request_body)
-            .unwrap_or(serde_json::Value::Null);
-        Self {
-            request: CachedRequest {
-                method: method.to_string(),
-                path: path.to_string(),
-                body: body_json,
-            },
-            response: CachedResponseData {
-                status,
-                content_type: content_type.to_string(),
-                body: base64::engine::general_purpose::STANDARD.encode(response_body),
-            },
-        }
-    }
+/// Read a cached response: JSON metadata line, newline, raw body bytes.
+fn cache_get(key: &str) -> Option<(ResponseMeta, Vec<u8>)> {
+    let data = std::fs::read(response_dir().join(key)).ok()?;
+    let nl = data.iter().position(|&b| b == b'\n')?;
+    let meta: ResponseMeta = serde_json::from_slice(&data[..nl]).ok()?;
+    Some((meta, data[nl + 1..].to_vec()))
+}
 
-    fn into_response(self) -> Response {
-        let status = StatusCode::from_u16(self.response.status).unwrap_or(StatusCode::OK);
-        let body = base64::engine::general_purpose::STANDARD
-            .decode(&self.response.body)
-            .expect("invalid base64 in cached response");
-        Response::builder()
-            .status(status)
-            .header(header::CONTENT_TYPE, &self.response.content_type)
-            .body(Body::from(body))
-            .unwrap()
+/// Write response file (JSON metadata + newline + raw body) and request
+/// file (pretty-printed JSON of the request body, for debugging).
+fn cache_put(key: &str, meta: &ResponseMeta, response_body: &[u8], request_body: &[u8]) {
+    // Response: checked in, metadata header + raw body
+    let resp_path = response_dir().join(key);
+    let mut resp_data = serde_json::to_string(meta).expect("serialize response meta");
+    resp_data.push('\n');
+    let resp_bytes = [resp_data.as_bytes(), response_body].concat();
+    atomic_write(&response_dir(), &resp_path, &resp_bytes);
+
+    // Request: gitignored, pretty-printed JSON for easy inspection
+    let req_path = request_dir().join(key);
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(request_body) {
+        let pretty = serde_json::to_string_pretty(&json).unwrap_or_default();
+        atomic_write(&request_dir(), &req_path, pretty.as_bytes());
+    } else {
+        atomic_write(&request_dir(), &req_path, request_body);
     }
 }
 
-fn cache_get(key: &str) -> Option<CachedEntry> {
-    let path = cache_dir().join(format!("{key}.json"));
-    let data = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&data).ok()
-}
-
-fn cache_put(key: &str, entry: &CachedEntry) {
-    let dir = cache_dir();
-    let final_path = dir.join(format!("{key}.json"));
-    let data = serde_json::to_string_pretty(entry).expect("serialize cached entry");
-
+fn atomic_write(dir: &PathBuf, final_path: &PathBuf, data: &[u8]) {
     let temp = tempfile::Builder::new()
         .prefix("cache-")
-        .suffix(".json")
-        .tempfile_in(&dir)
+        .tempfile_in(dir)
         .expect("create temp file for claude cache");
-    std::fs::write(temp.path(), &data).expect("write temp claude cache file");
+    std::fs::write(temp.path(), data).expect("write temp claude cache file");
     temp.persist(final_path).expect("persist claude cache file");
+}
+
+fn build_response(meta: ResponseMeta, body: Vec<u8>) -> Response {
+    let status = StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK);
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, &meta.content_type)
+        .body(Body::from(body))
+        .unwrap()
 }
 
 fn is_offline_mode() -> bool {
@@ -270,9 +249,9 @@ async fn handle_request(req: Request<Body>) -> Response {
     let cache_key = compute_cache_key(&method, &path_and_query, &body_bytes);
 
     // Lock-free cache lookup (files are immutable once written)
-    if let Some(cached) = cache_get(&cache_key) {
+    if let Some((meta, body)) = cache_get(&cache_key) {
         eprintln!("claude proxy: cache hit {method} {path_and_query}");
-        return cached.into_response();
+        return build_response(meta, body);
     }
 
     if is_offline_mode() {
@@ -291,12 +270,12 @@ async fn handle_request(req: Request<Body>) -> Response {
     }
 
     // Forward to real API, serialized to prevent duplicate API calls
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         let _guard = API_FORWARD_LOCK.lock().unwrap();
 
         // Double-check after acquiring lock (another thread may have populated it)
-        if let Some(cached) = cache_get(&cache_key) {
-            return cached;
+        if let Some((meta, body)) = cache_get(&cache_key) {
+            return build_response(meta, body);
         }
 
         let real_api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -344,22 +323,16 @@ async fn handle_request(req: Request<Body>) -> Response {
             .to_string();
         let response_body = response.bytes().expect("read forwarded response body");
 
-        let entry = CachedEntry::new(
-            &method,
-            &path_and_query,
-            &body_bytes,
+        let meta = ResponseMeta {
             status,
-            &content_type,
-            &response_body,
-        );
-        cache_put(&cache_key, &entry);
+            content_type: content_type.clone(),
+        };
+        cache_put(&cache_key, &meta, &response_body, &body_bytes);
 
         eprintln!("claude proxy: cached response {} {}", status, cache_key);
 
-        entry
+        build_response(meta, response_body.to_vec())
     })
     .await
-    .expect("API forwarding task panicked");
-
-    result.into_response()
+    .expect("API forwarding task panicked")
 }

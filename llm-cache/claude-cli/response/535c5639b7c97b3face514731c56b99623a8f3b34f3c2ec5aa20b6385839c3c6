@@ -1,0 +1,73 @@
+{"status":200,"content_type":"text/event-stream; charset=utf-8"}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01JsWEq5wBGa9GekqG7DY6gc","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":5554,"cache_read_input_tokens":13887,"cache_creation":{"ephemeral_5m_input_tokens":5554,"ephemeral_1h_input_tokens":0},"output_tokens":5,"service_tier":"standard","inference_geo":"not_available"}}       }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}           }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking for"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the capital of France an"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"d wants just the city name,"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" nothing else."}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\nThe"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" capital"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" of France is Paris."}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\nThis is a straightforward factual"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" question that doesn't require any tool usage"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":". I should simply"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" provide"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the answer as"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" requested."}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqADCkYICxgCKkCzfXx+MKTVT7NsKvXda08AVGFCmf4BwdsIc2ds05JBFJAjuh6SA1URdRL86wN0ZtOP0JDNAMj3TuAERjKXCy4uEgwMXvKpTZF7lMRKORAaDFn6x6jn067nGOe8FCIwCytIiaSWmRyRu0IQmiVBwuTnPbToHc5Dwp92J3aHsVDHKBUcdt4y8+2q6kjAmHaWKocCIkoe41pdXUHqUDK+j8iVDflK6vUq1LYe4aPo38sBi7NRqZNoyvDbc7jsfkjLM+feb7FOc59yiOx6CnthGTq7xAvYUiL6qqFpopx3ENRQ8YWKIa3L+gtIU3702QhHNtgqBVTXrepXbqj5fZFrt82INiZSuoDkrgmLCRMbQnMNDiA66Iggw2SZ0y7mt4sS8+TxYAgyLTX87liRfGDKqehlbQ95XysuduPgITw8YS1kR6AcphGJ5TABkPwCv96L71PcAh2pmjTXkgWsnEs9ojNXP1j+o7wUUpp5B0dnh5EHK0Aslay+YPNjgrlzCU6iDY+EpDjQIP6PmfhrzVIyG2R2HtMXtEfQ8xQYAQ=="}   }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0            }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Paris"}               }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":5554,"cache_read_input_tokens":13887,"output_tokens":65} }
+
+event: message_stop
+data: {"type":"message_stop"    }
+
