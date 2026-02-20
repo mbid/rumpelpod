@@ -23,7 +23,7 @@ Each pod gets its own working copy synced via git, so multiple agents (or humans
 Containers can run on the local Docker daemon or on a remote host via SSH.
 Rumpelpod handles git synchronization, port forwarding, and container lifecycle across both.
 
-This is mainly used for running LLM coding agents.
+The main use case is running LLM coding agents.
 The typical workflow:
 
 1. Launch Claude Code in a pod with `rumpel claude my-task`.
@@ -33,8 +33,7 @@ The typical workflow:
 
 There is also a minimal built-in agent (`rumpel agent`) that talks directly to the Anthropic, Gemini, and xAI APIs.
 
-Rumpelpod piggy-backs on existing tooling: containers are configured with standard `devcontainer.json` files and built with Docker.
-Projects that already have a dev container configuration can use it directly.
+Rumpelpod builds on existing tooling: containers are configured with standard `devcontainer.json` files and built with Docker, so projects with an existing dev container configuration work without further setup.
 
 ## Installation
 
@@ -164,9 +163,7 @@ Cached build artifacts in `target/` will survive into the pod.
 
 ### Containers and Isolation
 
-Rumpelpod creates standard Docker containers.
-It does not enforce a particular isolation level.
-That is a property of the container runtime and the Docker host.
+Rumpelpod creates standard Docker containers but does not enforce a particular isolation level; that is a property of the container runtime and the Docker host.
 The `runArgs` field in `devcontainer.json` can be used to select a runtime, for example [gVisor](https://gvisor.dev/) (`--runtime=runsc`), [Kata Containers](https://katacontainers.io/) (`--runtime=kata-runtime`), or [Sysbox](https://github.com/nestybox/sysbox) (`--runtime=sysbox-runc`).
 
 Running pods on a dedicated remote host provides physical separation from the development machine.
@@ -176,8 +173,7 @@ Rumpelpod handles SSH tunneling for the Docker API and port forwarding for servi
 
 Cloud platforms like [Devin](https://devin.ai/), [Codex](https://openai.com/codex/) (OpenAI), [Copilot Coding Agent](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-coding-agent), and [Ona](https://ona.com/) (formerly Gitpod) run coding agents in hosted environments, typically triggered through GitHub.
 They manage the infrastructure, but agents interact with the code through the forge: pull requests, issue comments, CI checks.
-With rumpelpod, pods run on local or remote machines and the normal local tooling stays in the loop.
-There is no forge involved.
+Rumpelpod runs pods on local or remote machines instead, and the usual local development workflow applies without a forge in between.
 
 [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) (Docker Desktop) runs agents in microVMs with file synchronization between host and sandbox.
 Rumpelpod uses git-based sync instead, supports multiple concurrent named pods per repository, and works on headless Linux servers without Docker Desktop.
@@ -185,4 +181,4 @@ Rumpelpod uses git-based sync instead, supports multiple concurrent named pods p
 The [Dev Container CLI](https://github.com/devcontainers/cli) provides container lifecycle management from `devcontainer.json` files.
 Rumpelpod builds on the same configuration format but adds git synchronization, named pod management, remote Docker support, and agent integration.
 
-Git worktrees are the simplest way to run multiple agents in parallel, but agents run directly on the host with no isolation, and managing many worktrees by hand gets tedious.
+Git worktrees are the simplest way to run multiple agents in parallel, but agents run directly on the host with no isolation, and managing many worktrees by hand becomes tedious.
