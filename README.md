@@ -37,7 +37,14 @@ Rumpelpod builds on existing tooling: containers are configured with standard `d
 
 ## Installation
 
-Download the latest tarball from [GitHub Releases](https://github.com/mbid/rumpelpod/releases) and extract all binaries into a directory on PATH:
+Yolo install:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mbid/rumpelpod/master/install.sh | sh
+rumpel --version
+```
+
+Or explicitly, download the latest tarball from [GitHub Releases](https://github.com/mbid/rumpelpod/releases) and extract all binaries into a directory on PATH:
 
 ```bash
 tar xzf rumpel-v*.tar.gz -C ~/.local/bin/
