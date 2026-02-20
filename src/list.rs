@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+
 use anyhow::Result;
 use comfy_table::presets::NOTHING;
 use comfy_table::Table;
@@ -12,7 +14,14 @@ pub fn list() -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    let pods = client.list_pods(repo_path)?;
+    let mut pods = client.list_pods(repo_path)?;
+    // Running pods first, then by most recent commit on the pod's primary branch.
+    pods.sort_by_key(|pod| {
+        (
+            pod.status != PodStatus::Running,
+            Reverse(pod.last_commit_time),
+        )
+    });
 
     let mut table = Table::new();
     table.load_preset(NOTHING).set_header(vec![

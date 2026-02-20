@@ -1633,10 +1633,17 @@ struct PodContainerInfo {
     container_id: Option<String>,
 }
 
+struct PodGitInfo {
+    /// e.g. "ahead 2, behind 3" or "up to date"
+    repo_state: String,
+    /// Committer timestamp (unix seconds) of the tip of the pod's primary branch.
+    last_commit_time: i64,
+}
+
 /// Compute the git status of the pod's primary branch vs the currently checked out commit.
-/// Returns a string like "ahead 2, behind 3" or "up to date" or None if the ref doesn't exist.
+/// Returns None if the ref doesn't exist.
 /// "ahead N" means the pod is N commits ahead of the host HEAD.
-fn compute_git_status(repo_path: &Path, pod_name: &str) -> Option<String> {
+fn compute_git_info(repo_path: &Path, pod_name: &str) -> Option<PodGitInfo> {
     use git2::Repository;
 
     let repo = Repository::open(repo_path).ok()?;
@@ -1650,21 +1657,28 @@ fn compute_git_status(repo_path: &Path, pod_name: &str) -> Option<String> {
     let remote_ref = repo.find_reference(&remote_ref_name).ok()?;
     let pod_oid = remote_ref.target()?;
 
-    // If they're the same, we're up to date
-    if host_oid == pod_oid {
-        return Some("up to date".to_string());
-    }
+    let commit = repo.find_commit(pod_oid).ok()?;
+    let last_commit_time = commit.committer().when().seconds();
 
-    // Count ahead/behind from pod's perspective
-    // (ahead, behind) = how many commits pod is ahead/behind host
-    let (ahead, behind) = repo.graph_ahead_behind(pod_oid, host_oid).ok()?;
+    let repo_state = if host_oid == pod_oid {
+        "up to date".to_string()
+    } else {
+        // Count ahead/behind from pod's perspective
+        // (ahead, behind) = how many commits pod is ahead/behind host
+        let (ahead, behind) = repo.graph_ahead_behind(pod_oid, host_oid).ok()?;
 
-    match (ahead, behind) {
-        (0, 0) => Some("up to date".to_string()),
-        (a, 0) => Some(format!("ahead {}", a)),
-        (0, b) => Some(format!("behind {}", b)),
-        (a, b) => Some(format!("ahead {}, behind {}", a, b)),
-    }
+        match (ahead, behind) {
+            (0, 0) => "up to date".to_string(),
+            (a, 0) => format!("ahead {}", a),
+            (0, b) => format!("behind {}", b),
+            (a, b) => format!("ahead {}, behind {}", a, b),
+        }
+    };
+
+    Some(PodGitInfo {
+        repo_state,
+        last_commit_time,
+    })
 }
 
 /// List all pod containers for a given repository path.
@@ -3403,7 +3417,7 @@ impl Daemon for DaemonServer {
             let container_id = container_info.and_then(|info| info.container_id.clone());
 
             // Compute git status on the host by comparing HEAD to rumpelpod/<pod_name>
-            let repo_state = compute_git_status(&repo_path, &pod.name);
+            let git_info = compute_git_info(&repo_path, &pod.name);
 
             // Display using DockerHost::Display to normalize the format
             // (e.g. strip default port 22 from old DB entries).
@@ -3416,8 +3430,9 @@ impl Daemon for DaemonServer {
                 status,
                 created: pod.created_at.format("%Y-%m-%d %H:%M").to_string(),
                 host: display_host,
-                repo_state,
+                repo_state: git_info.as_ref().map(|g| g.repo_state.clone()),
                 container_id,
+                last_commit_time: git_info.map(|g| g.last_commit_time),
             });
         }
 

@@ -78,6 +78,8 @@ pub struct PodInfo {
     pub repo_state: Option<String>,
     /// Docker container ID of the pod (short 12-char hex), if known.
     pub container_id: Option<String>,
+    /// Committer timestamp (unix seconds) of the tip of the pod's primary branch on the host.
+    pub last_commit_time: Option<i64>,
 }
 
 /// Information about a forwarded port.
