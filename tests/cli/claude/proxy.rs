@@ -9,6 +9,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,7 +17,7 @@ use std::sync::{Mutex, OnceLock};
 
 use axum::body::Body;
 use axum::extract::Request;
-use axum::http::{header, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -164,7 +165,8 @@ fn compute_cache_key(method: &str, path_and_query: &str, body: &[u8]) -> String 
 #[derive(Serialize, Deserialize)]
 struct ResponseMeta {
     status: u16,
-    content_type: String,
+    path: String,
+    headers: BTreeMap<String, String>,
 }
 
 /// Read a cached response: JSON metadata line, newline, raw body bytes.
@@ -204,13 +206,13 @@ fn atomic_write(dir: &PathBuf, final_path: &PathBuf, data: &[u8]) {
     temp.persist(final_path).expect("persist claude cache file");
 }
 
-fn build_response(meta: ResponseMeta, body: Vec<u8>) -> Response {
+fn build_response(meta: &ResponseMeta, body: Vec<u8>) -> Response {
     let status = StatusCode::from_u16(meta.status).unwrap_or(StatusCode::OK);
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, &meta.content_type)
-        .body(Body::from(body))
-        .unwrap()
+    let mut builder = Response::builder().status(status);
+    for (name, value) in &meta.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    builder.body(Body::from(body)).unwrap()
 }
 
 fn is_offline_mode() -> bool {
@@ -251,7 +253,7 @@ async fn handle_request(req: Request<Body>) -> Response {
     // Lock-free cache lookup (files are immutable once written)
     if let Some((meta, body)) = cache_get(&cache_key) {
         eprintln!("claude proxy: cache hit {method} {path_and_query}");
-        return build_response(meta, body);
+        return build_response(&meta, body);
     }
 
     if is_offline_mode() {
@@ -275,7 +277,7 @@ async fn handle_request(req: Request<Body>) -> Response {
 
         // Double-check after acquiring lock (another thread may have populated it)
         if let Some((meta, body)) = cache_get(&cache_key) {
-            return build_response(meta, body);
+            return build_response(&meta, body);
         }
 
         let real_api_key = std::env::var("ANTHROPIC_API_KEY")
@@ -315,23 +317,28 @@ async fn handle_request(req: Request<Body>) -> Response {
 
         let response = request.send().expect("forward request to Anthropic API");
         let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/json")
-            .to_string();
+        let mut resp_headers = BTreeMap::new();
+        for (name, value) in response.headers() {
+            let n = name.as_str();
+            if n == "connection" || n == "transfer-encoding" {
+                continue;
+            }
+            if let Ok(v) = value.to_str() {
+                resp_headers.insert(n.to_string(), v.to_string());
+            }
+        }
         let response_body = response.bytes().expect("read forwarded response body");
 
         let meta = ResponseMeta {
             status,
-            content_type: content_type.clone(),
+            path: path_and_query.clone(),
+            headers: resp_headers,
         };
         cache_put(&cache_key, &meta, &response_body, &body_bytes);
 
         eprintln!("claude proxy: cached response {} {}", status, cache_key);
 
-        build_response(meta, response_body.to_vec())
+        build_response(&meta, response_body.to_vec())
     })
     .await
     .expect("API forwarding task panicked")
