@@ -9,6 +9,10 @@ echo "=== Building (with tests, no warnings) ==="
 RUSTFLAGS="-D warnings" cargo build --all-targets
 
 echo ""
+echo "=== Running clippy (no warnings) ==="
+RUSTFLAGS="-D warnings" cargo clippy --all-targets
+
+echo ""
 echo "=== Checking for running docker containers ==="
 running_containers=$(docker ps -q 2>/dev/null)
 if [ -n "$running_containers" ]; then
@@ -21,10 +25,6 @@ echo "✓ No running docker containers"
 echo ""
 echo "=== Running tests ==="
 cargo xtest
-
-echo ""
-echo "=== Running clippy (no warnings) ==="
-RUSTFLAGS="-D warnings" cargo clippy --all-targets
 
 echo ""
 echo "=== Checking git status ==="
