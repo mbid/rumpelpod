@@ -20,6 +20,8 @@ mod enter;
 mod gateway;
 #[path = "cli/list.rs"]
 mod list;
+#[path = "cli/merge.rs"]
+mod merge;
 #[path = "cli/network.rs"]
 mod network;
 #[path = "cli/review.rs"]

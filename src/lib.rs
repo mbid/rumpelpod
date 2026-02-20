@@ -21,6 +21,7 @@ pub(crate) mod image;
 mod image_cmd;
 mod list;
 mod llm;
+mod merge;
 mod ports;
 mod recreate;
 mod review;
@@ -70,6 +71,9 @@ pub fn run() -> Result<()> {
         },
         Command::Review(ref cmd) => {
             review::review(cmd)?;
+        }
+        Command::Merge(ref cmd) => {
+            merge::merge(cmd)?;
         }
         Command::Agent(ref cmd) => {
             agent::agent(cmd)?;

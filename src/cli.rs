@@ -106,6 +106,10 @@ Examples:
 ")]
     Review(ReviewCommand),
 
+    /// Merge a pod's branch into the current branch and stop the pod
+    #[command(trailing_var_arg = true)]
+    Merge(MergeCommand),
+
     /// Show forwarded ports for a pod
     Ports(PortsCommand),
 
@@ -257,6 +261,18 @@ pub struct ReviewCommand {
         help = "Skip prompting before opening each file"
     )]
     pub yes: bool,
+}
+
+#[derive(Args)]
+#[command(trailing_var_arg = true)]
+pub struct MergeCommand {
+    /// Name of the pod to merge
+    #[arg(help = "Name of the pod to merge", value_parser = validate_pod_name)]
+    pub name: String,
+
+    /// Arguments passed through to git merge (e.g. --no-ff, --squash)
+    #[arg(allow_hyphen_values = true)]
+    pub git_args: Vec<String>,
 }
 
 #[derive(Args)]
