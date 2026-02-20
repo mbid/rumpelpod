@@ -1410,14 +1410,25 @@ fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) 
 
     obj.retain(|k, _| KEEP_KEYS.contains(&k.as_str()));
 
-    // Re-insert the project entry under the container path so claude in the
-    // sandbox inherits trust-dialog acceptance, onboarding state, etc.
-    if let Some(entry) = project_entry {
-        let container_key = container_repo_path.to_string_lossy().to_string();
-        let mut projects = serde_json::Map::new();
-        projects.insert(container_key, entry);
-        obj.insert("projects".to_string(), serde_json::Value::Object(projects));
-    }
+    // Build the project entry for the container workspace.  Start from the
+    // host entry (if any) so per-project settings carry over, then force
+    // trust-dialog and project-onboarding to accepted -- showing these
+    // inside an already-sandboxed container is pointless friction.
+    let container_key = container_repo_path.to_string_lossy().to_string();
+    let mut entry = project_entry
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    entry.insert(
+        "hasTrustDialogAccepted".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    entry.insert(
+        "hasCompletedProjectOnboarding".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    let mut projects = serde_json::Map::new();
+    projects.insert(container_key, serde_json::Value::Object(entry));
+    obj.insert("projects".to_string(), serde_json::Value::Object(projects));
 
     serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| b"{}".to_vec())
 }

@@ -66,4 +66,5 @@ hex = ">= 0"
 [dev-dependencies]
 assert_cmd = ">= 0"
 portable-pty = ">= 0"
+vt100 = ">= 0"
 walkdir = ">= 0"

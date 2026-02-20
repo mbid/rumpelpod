@@ -31,7 +31,7 @@ fn prepare_screen(docker_host: &str, container_id: &str, user: &str) -> Result<S
     let script = format!(
         "which screen >/dev/null 2>&1 || {{ echo SCREEN_MISSING; exit 0; }}; \
          ulimit -n 65536; \
-         printf 'termcapinfo xterm* ti@:te@\\ndefscrollback 50000\\n' > {SCREENRC_PATH}; \
+         printf 'startup_message off\\ndefscrollback 50000\\n' > {SCREENRC_PATH}; \
          printf '#!/bin/sh\\nulimit -n 65536\\nexec screen \"$@\"\\n' > {SCREEN_WRAPPER_PATH} \
          && chmod +x {SCREEN_WRAPPER_PATH}; \
          screen -ls claude 2>/dev/null | grep -q '\\.claude' && echo SESSION_EXISTS || echo SESSION_NEW"
