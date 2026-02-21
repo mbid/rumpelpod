@@ -94,6 +94,15 @@ This stops the container if running and removes all pod state. Any uncommitted c
 ")]
     Delete(DeleteCommand),
 
+    /// Remove all stopped pods
+    #[command(
+        long_about = "Remove all stopped, gone, and broken pods for the current repository.
+
+Clean pods are deleted without prompting. Pods with unmerged commits require interactive confirmation or --force.
+"
+    )]
+    Prune(PruneCommand),
+
     /// Review changes in a pod using git difftool
     #[command(long_about = "Review changes in a pod using git difftool.
 
@@ -225,6 +234,13 @@ pub struct DeleteCommand {
     pub wait: bool,
 
     /// Delete even if the pod has unmerged commits
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args)]
+pub struct PruneCommand {
+    /// Delete even if pods have unmerged commits
     #[arg(long)]
     pub force: bool,
 }

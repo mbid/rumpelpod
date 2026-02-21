@@ -24,6 +24,8 @@ mod list;
 mod merge;
 #[path = "cli/network.rs"]
 mod network;
+#[path = "cli/prune.rs"]
+mod prune;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/ssh/mod.rs"]

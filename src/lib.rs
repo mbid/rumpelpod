@@ -23,6 +23,7 @@ mod list;
 mod llm;
 mod merge;
 mod ports;
+mod prune;
 mod recreate;
 mod review;
 mod service;
@@ -58,6 +59,9 @@ pub fn run() -> Result<()> {
         }
         Command::Delete(ref cmd) => {
             delete::delete(cmd)?;
+        }
+        Command::Prune(ref cmd) => {
+            prune::prune(cmd)?;
         }
         Command::Ports(ref cmd) => {
             ports::ports(cmd)?;
