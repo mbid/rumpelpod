@@ -235,6 +235,113 @@ fn submodule_pod_commit_mirrored_to_host() {
     );
 }
 
+/// Create a parent TestRepo that contains a git submodule whose path lives
+/// inside a subdirectory (e.g. "libs/child-sub").  The subdirectory itself is
+/// NOT a submodule -- just a regular directory that happens to be part of the
+/// submodule path.  This exercises the case where `displaypath` (and `name`)
+/// contain a slash without actually being a nested submodule.
+/// Returns (parent, child, submodule_name).
+fn create_test_repo_with_subdir_submodule() -> (TestRepo, TestRepo, String) {
+    let child = TestRepo::new();
+    create_commit(child.path(), "Child initial");
+
+    let parent = TestRepo::new();
+
+    let sub_name = "libs/child-sub";
+
+    Command::new("git")
+        .args([
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &child.path().to_string_lossy(),
+            sub_name,
+        ])
+        .current_dir(parent.path())
+        .success()
+        .expect("git submodule add failed");
+
+    Command::new("git")
+        .args(["commit", "-m", "Add submodule in subdirectory"])
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00+00:00")
+        .current_dir(parent.path())
+        .success()
+        .expect("git commit (submodule add) failed");
+
+    (parent, child, sub_name.to_string())
+}
+
+#[test]
+fn subdir_submodule_pod_commit_syncs_to_host() {
+    let (parent, _child, sub_name) = create_test_repo_with_subdir_submodule();
+
+    let image_id = build_test_image(parent.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&parent, &image_id);
+
+    let daemon = TestDaemon::start();
+    let pod_name = "subdir-commit-test";
+
+    // Launch pod -- sets up parent and submodule gateways
+    pod_command(&parent, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run rumpel enter");
+
+    // Create a commit inside the pod's submodule
+    let commit_script = format!(
+        "cd {sub_name} && \
+         git config user.email test@example.com && \
+         git config user.name TestUser && \
+         git commit --allow-empty -m 'Pod subdir submodule commit'"
+    );
+    pod_command(&parent, &daemon)
+        .args(["enter", pod_name, "--", "sh", "-c", &commit_script])
+        .success()
+        .expect("Failed to create commit in pod subdir submodule");
+
+    // Get the commit hash from the pod's submodule
+    let pod_sub_commit = pod_command(&parent, &daemon)
+        .args([
+            "enter",
+            pod_name,
+            "--",
+            "git",
+            "-C",
+            &sub_name,
+            "rev-parse",
+            "HEAD",
+        ])
+        .success()
+        .expect("Failed to get pod subdir submodule commit");
+    let pod_sub_commit = String::from_utf8_lossy(&pod_sub_commit).trim().to_string();
+
+    // Derive the submodule gateway path from the actual parent gateway
+    let parent_gateway = get_gateway_path(parent.path()).expect("parent gateway should exist");
+    let sub_gateway = parent_gateway
+        .parent()
+        .unwrap()
+        .join("submodules")
+        .join("libs")
+        .join("child-sub")
+        .join("gateway.git");
+    assert!(
+        sub_gateway.exists(),
+        "Submodule gateway should exist at {}",
+        sub_gateway.display()
+    );
+
+    let expected_branch = format!("rumpelpod/{}@{}", pod_name, pod_name);
+    let gateway_commit = get_branch_commit(&sub_gateway, &expected_branch);
+    assert_eq!(
+        gateway_commit,
+        Some(pod_sub_commit),
+        "Submodule gateway should have branch '{}' with pod's commit",
+        expected_branch
+    );
+}
+
 /// Create a three-level hierarchy: grandparent -> outer-sub -> inner-sub.
 /// Returns (grandparent, outer_child, inner_child, outer_name, inner_displaypath).
 fn create_test_repo_with_nested_submodules() -> (TestRepo, TestRepo, TestRepo, String, String) {

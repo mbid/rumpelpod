@@ -938,12 +938,21 @@ fn setup_pod_submodules(
         let mut init_script = String::from("set -e\n");
 
         for sub in submodules {
-            // The parent directory inside the container is the displaypath
-            // minus the trailing path component (i.e. the immediate parent repo).
-            let parent_dir = if let Some(parent) = Path::new(&sub.displaypath).parent() {
-                container_repo_path.join(parent)
-            } else {
+            // The parent worktree is found by stripping `path` (which is
+            // relative to the immediate parent) from `displaypath` (which is
+            // relative to the top-level repo).  Using displaypath.parent()
+            // would be wrong for submodules whose path contains slashes
+            // (e.g. "libs/child-sub") -- those live in a subdirectory but
+            // are still direct children of the top-level repo.
+            let parent_prefix = sub
+                .displaypath
+                .strip_suffix(&sub.path)
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let parent_dir = if parent_prefix.is_empty() {
                 container_repo_path.to_path_buf()
+            } else {
+                container_repo_path.join(parent_prefix)
             };
             let parent_dir_str = parent_dir.to_string_lossy();
 
