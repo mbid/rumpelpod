@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::async_runtime::block_on;
 
-pub const PORT: u16 = 7890;
+pub const DEFAULT_PORT: u16 = 7890;
 
 // ---------------------------------------------------------------------------
 // Shared request/response types (also used by PodClient)
@@ -217,7 +217,7 @@ struct ErrorResponse {
 // Server entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_container_server() -> ! {
+pub fn run_container_server(port: u16) -> ! {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/fs/read", post(fs_read_handler))
@@ -237,7 +237,7 @@ pub fn run_container_server() -> ! {
         .route("/run", post(run_handler));
 
     block_on(async {
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{PORT}"))
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
             .await
             .expect("failed to bind container server port");
         axum::serve(listener, app).await.unwrap();

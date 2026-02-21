@@ -185,7 +185,11 @@ Examples:
 
     /// Run the in-container HTTP server (internal, started by daemon)
     #[command(hide = true)]
-    ContainerServe,
+    ContainerServe {
+        /// Port to listen on (defaults to 7890)
+        #[arg(long, default_value_t = crate::container_serve::DEFAULT_PORT)]
+        port: u16,
+    },
 
     /// Install the rumpelpod daemon as a system service
     #[command(long_about = "Install the rumpelpod daemon as a system service.

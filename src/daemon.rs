@@ -2235,39 +2235,66 @@ fn get_container_bridge_ip(docker: &Docker, container_id: &str) -> Result<Option
         .map(String::from))
 }
 
+/// Container URL and the port the server should bind inside the container.
+struct ContainerEndpoint {
+    /// URL reachable from the daemon (may go through SSH tunnel).
+    url: String,
+    /// Port the server should bind inside the container's network namespace.
+    container_port: u16,
+}
+
 /// Construct the URL at which the in-container HTTP server is reachable.
 ///
 /// For local Docker this is the container's bridge IP.
-/// For host network mode this is localhost.
+/// For host network mode this is localhost with a dynamic port.
 /// For remote Docker (SSH) this sets up an SSH local forward through
 /// the existing SSH connection and returns a localhost URL.
-fn get_container_url(
+fn get_container_endpoint(
     docker: &Docker,
     container_id: &str,
     docker_host: &DockerHost,
     ssh_forward: &SshForwardManager,
-) -> Result<String> {
-    let port = crate::container_serve::PORT;
+) -> Result<ContainerEndpoint> {
+    let default_port = crate::container_serve::DEFAULT_PORT;
 
     match get_container_bridge_ip(docker, container_id)? {
         None => {
-            // Host network mode: server listens on 127.0.0.1 (or the
-            // remote host's loopback when Docker is remote).
+            // Host network mode: container shares the host's network namespace,
+            // so we pick a dynamic port to avoid conflicts between concurrent
+            // host-network containers.
+            let container_port = allocate_ephemeral_port()?;
             match docker_host {
-                DockerHost::Localhost => Ok(format!("http://127.0.0.1:{}", port)),
+                DockerHost::Localhost => Ok(ContainerEndpoint {
+                    url: format!("http://127.0.0.1:{}", container_port),
+                    container_port,
+                }),
                 DockerHost::Ssh { .. } => {
                     let local_port = allocate_ephemeral_port()?;
-                    ssh_forward.add_local_forward(docker_host, local_port, "127.0.0.1", port)?;
-                    Ok(format!("http://127.0.0.1:{}", local_port))
+                    ssh_forward.add_local_forward(
+                        docker_host,
+                        local_port,
+                        "127.0.0.1",
+                        container_port,
+                    )?;
+                    Ok(ContainerEndpoint {
+                        url: format!("http://127.0.0.1:{}", local_port),
+                        container_port,
+                    })
                 }
             }
         }
         Some(ip) => match docker_host {
-            DockerHost::Localhost => Ok(format!("http://{}:{}", ip, port)),
+            DockerHost::Localhost => Ok(ContainerEndpoint {
+                url: format!("http://{}:{}", ip, default_port),
+                container_port: default_port,
+            }),
             DockerHost::Ssh { .. } => {
                 let local_port = allocate_ephemeral_port()?;
-                ssh_forward.add_local_forward(docker_host, local_port, &ip, port)?;
-                Ok(format!("http://127.0.0.1:{}", local_port))
+                ssh_forward.add_local_forward(docker_host, local_port, &ip, default_port)?;
+                Ok(ContainerEndpoint {
+                    url: format!("http://127.0.0.1:{}", local_port),
+                    container_port: default_port,
+                })
             }
         },
     }
@@ -2285,9 +2312,15 @@ fn allocate_ephemeral_port() -> Result<u16> {
 /// Start the in-container HTTP server via detached docker exec.
 /// Does nothing if the server is already running (health check succeeds).
 ///
-/// `container_url` is the URL at which the server will be reachable
+/// `container_url` is the URL at which the server will be reachable from the daemon
 /// (already accounts for SSH forwarding, host network mode, etc).
-fn start_container_server(docker: &Docker, container_id: &str, container_url: &str) -> Result<()> {
+/// `container_port` is the port the server should bind inside the container.
+fn start_container_server(
+    docker: &Docker,
+    container_id: &str,
+    container_url: &str,
+    container_port: u16,
+) -> Result<()> {
     use bollard::exec::StartExecOptions;
     use bollard::secret::ExecConfig;
 
@@ -2308,6 +2341,8 @@ fn start_container_server(docker: &Docker, container_id: &str, container_url: &s
         cmd: Some(vec![
             RUMPEL_CONTAINER_BIN.to_string(),
             "container-serve".to_string(),
+            "--port".to_string(),
+            container_port.to_string(),
         ]),
         user: Some("root".to_string()),
         ..Default::default()
@@ -2765,11 +2800,12 @@ impl Daemon for DaemonServer {
             }
 
             // Get the container URL (sets up SSH forward if remote)
-            let container_url =
-                get_container_url(&docker, &state.id, &docker_host, &self.ssh_forward)?;
+            let endpoint =
+                get_container_endpoint(&docker, &state.id, &docker_host, &self.ssh_forward)?;
+            let container_url = endpoint.url;
 
             // Ensure the in-container HTTP server is running
-            start_container_server(&docker, &state.id, &container_url)?;
+            start_container_server(&docker, &state.id, &container_url, endpoint.container_port)?;
 
             // Ensure pod record exists in database
             let pod_id = {
@@ -2999,9 +3035,15 @@ impl Daemon for DaemonServer {
             copy_rumpel_binary(&docker, &container_id.0, &image.0)?;
 
             // Get container URL and start the in-container HTTP server
-            let container_url_inner =
-                get_container_url(&docker, &container_id.0, &docker_host, &ssh_forward)?;
-            start_container_server(&docker, &container_id.0, &container_url_inner)?;
+            let endpoint_inner =
+                get_container_endpoint(&docker, &container_id.0, &docker_host, &ssh_forward)?;
+            let container_url_inner = endpoint_inner.url;
+            start_container_server(
+                &docker,
+                &container_id.0,
+                &container_url_inner,
+                endpoint_inner.container_port,
+            )?;
             let pod_inner = PodClient::new(&container_url_inner);
             let direct_config = is_direct_git_config_mode()?;
 
@@ -3080,8 +3122,9 @@ impl Daemon for DaemonServer {
 
         // The server was started inside do_create_and_setup; derive its URL
         // and build a client for the remaining setup steps.
-        let container_url =
-            get_container_url(&docker, &container_id.0, &docker_host, &self.ssh_forward)?;
+        let endpoint =
+            get_container_endpoint(&docker, &container_id.0, &docker_host, &self.ssh_forward)?;
+        let container_url = endpoint.url;
         let pod = PodClient::new(&container_url);
 
         // Probe user env from shell init files
@@ -3217,10 +3260,10 @@ impl Daemon for DaemonServer {
         if let Some(state) = inspect_container(&docker, &name)? {
             if state.status == "running" {
                 // Use the in-container HTTP server to snapshot
-                if let Ok(container_url) =
-                    get_container_url(&docker, &state.id, docker_host, &self.ssh_forward)
+                if let Ok(endpoint) =
+                    get_container_endpoint(&docker, &state.id, docker_host, &self.ssh_forward)
                 {
-                    let old_pod = PodClient::new(&container_url);
+                    let old_pod = PodClient::new(&endpoint.url);
                     // Ensure server is running (may have been stopped)
                     if old_pod
                         .wait_ready(std::time::Duration::from_secs(2))
