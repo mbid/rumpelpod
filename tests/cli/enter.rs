@@ -1,6 +1,8 @@
 //! Integration tests for the `rumpel enter` subcommand.
 
 use std::fs;
+use std::io::Write;
+use std::process::Stdio;
 
 use indoc::indoc;
 use rumpelpod::CommandExt;
@@ -395,5 +397,41 @@ fn enter_uses_container_shell_not_host_shell() {
         stdout.contains("CUSTOM_SHELL_OK"),
         "enter should have launched the container user's custom shell.\n\
          stdout: {stdout}"
+    );
+}
+
+#[test]
+fn enter_forwards_piped_stdin() {
+    // Piped stdin must reach the command running inside the container.
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    let mut cmd = pod_command(&repo, &daemon);
+    cmd.args(["enter", "stdin-test", "--", "cat"]);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("Failed to spawn rumpel enter");
+
+    let stdin = child.stdin.as_mut().expect("Failed to open stdin");
+    writeln!(stdin, "hello from stdin").expect("Failed to write to stdin");
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().expect("Failed to wait for child");
+    assert!(
+        output.status.success(),
+        "rumpel enter should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "hello from stdin",
+        "cat should echo back what was piped through stdin"
     );
 }

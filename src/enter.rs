@@ -307,8 +307,9 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         docker_cmd.args(["-e", &format!("{}={}", key, value)]);
     }
 
+    docker_cmd.arg("-i");
     if std::io::stdin().is_terminal() {
-        docker_cmd.args(["-it"]);
+        docker_cmd.arg("-t");
     }
     docker_cmd.arg(&container_id.0);
     docker_cmd.args(&command);
