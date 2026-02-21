@@ -17,6 +17,7 @@ use crate::llm::types::xai::{
     FunctionCall, Message, MessageContent, MessageContentPart, Model, ResponseInput,
     ResponseInputItem, ResponseOutputItem, ResponseRequest, Role, Tool, ToolCall, ToolCallType,
 };
+use crate::pod_client::PodClient;
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_pod, execute_edit_in_pod,
@@ -143,13 +144,14 @@ pub fn run_grok_agent(
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
     let docker_socket = &launch_result.docker_socket;
+    let pod = PodClient::new(&launch_result.container_url);
 
     // Resolve ${containerEnv:VAR} now that the container is running
     let remote_env = resolve_remote_env(&remote_env, docker_socket, container_name);
     let remote_env = merge_env(launch_result.probed_env.clone(), remote_env);
 
     // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
+    let agents_md = read_agents_md(&pod, repo_path);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
     // If we have legacy history without a response_id, we can't really "resume" the server-side session.
@@ -318,10 +320,10 @@ pub fn run_grok_agent(
                                     args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                                 println!("$ {command}");
                                 let (out, ok) = execute_bash_in_pod(
-                                    container_name,
+                                    &pod,
+                                    pod_name,
                                     user,
                                     repo_path,
-                                    docker_socket,
                                     &remote_env,
                                     command,
                                 )?;
@@ -342,14 +344,7 @@ pub fn run_grok_agent(
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
                                 let (out, ok) = execute_edit_in_pod(
-                                    container_name,
-                                    user,
-                                    repo_path,
-                                    docker_socket,
-                                    &remote_env,
-                                    file_path,
-                                    old_string,
-                                    new_string,
+                                    &pod, repo_path, file_path, old_string, new_string,
                                 )?;
                                 if ok {
                                     println!("[edit] {file_path}");
@@ -364,15 +359,8 @@ pub fn run_grok_agent(
                                     args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
                                 let content =
                                     args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                                let (out, ok) = execute_write_in_pod(
-                                    container_name,
-                                    user,
-                                    repo_path,
-                                    docker_socket,
-                                    &remote_env,
-                                    file_path,
-                                    content,
-                                )?;
+                                let (out, ok) =
+                                    execute_write_in_pod(&pod, repo_path, file_path, content)?;
                                 if ok {
                                     println!("[write] {file_path}");
                                 } else {

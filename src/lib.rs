@@ -5,6 +5,7 @@ mod claude;
 mod cli;
 mod command_ext;
 pub mod config;
+pub mod container_serve;
 mod cp;
 pub mod devcontainer;
 mod docker_exec;
@@ -22,6 +23,7 @@ mod image_cmd;
 mod list;
 mod llm;
 mod merge;
+pub mod pod_client;
 mod ports;
 mod prune;
 mod recreate;
@@ -41,6 +43,9 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Daemon => {
             daemon::run_daemon()?;
+        }
+        Command::ContainerServe => {
+            container_serve::run_container_server();
         }
         Command::SystemInstall => {
             service::system_install()?;

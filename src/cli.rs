@@ -183,6 +183,10 @@ Examples:
     #[command(hide = true)]
     Daemon,
 
+    /// Run the in-container HTTP server (internal, started by daemon)
+    #[command(hide = true)]
+    ContainerServe,
+
     /// Install the rumpelpod daemon as a system service
     #[command(long_about = "Install the rumpelpod daemon as a system service.
 

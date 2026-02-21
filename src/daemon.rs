@@ -16,7 +16,6 @@ use bollard::secret::{
     PortBinding,
 };
 use bollard::Docker;
-use indoc::formatdoc;
 use listenfd::ListenFd;
 use log::error;
 use rusqlite::Connection;
@@ -28,7 +27,7 @@ use crate::devcontainer::{
     self, compute_devcontainer_id, shell_escape, substitute_vars, DevContainer, LifecycleCommand,
     Port, PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
 };
-use crate::docker_exec::{exec_check, exec_command, exec_with_stdin};
+use crate::docker_exec::{exec_command, exec_with_stdin};
 use crate::gateway;
 use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
 use protocol::{
@@ -36,6 +35,9 @@ use protocol::{
     Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
 };
 use ssh_forward::SshForwardManager;
+
+use crate::container_serve::SubmoduleEntry;
+use crate::pod_client::PodClient;
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";
@@ -1811,206 +1813,6 @@ fn try_remove_container(
     }
 }
 
-/// Parse null-delimited `env -0` output into a HashMap.
-fn parse_null_delimited_env(data: &[u8]) -> HashMap<String, String> {
-    let text = String::from_utf8_lossy(data);
-    let mut map = HashMap::new();
-    for entry in text.split('\0') {
-        if let Some((key, value)) = entry.split_once('=') {
-            if !key.is_empty() {
-                map.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-    map
-}
-
-/// Probe the user's shell init files to discover environment variables
-/// that tools like nvm/pyenv/cargo add to PATH via .bashrc/.profile.
-///
-/// Returns only variables that differ from the base container environment.
-fn probe_user_env(
-    docker: &Docker,
-    container_id: &str,
-    user: &str,
-    probe: &UserEnvProbe,
-) -> HashMap<String, String> {
-    let flags = match probe.shell_flags_exec() {
-        Some(f) => f,
-        None => return HashMap::new(),
-    };
-
-    // Check if bash is available
-    let has_bash = match exec_check(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        vec!["which", "bash"],
-    ) {
-        Ok(ok) => ok,
-        Err(e) => {
-            log::warn!("userEnvProbe: failed to check for bash: {e}");
-            return HashMap::new();
-        }
-    };
-    if !has_bash {
-        log::warn!("userEnvProbe: bash not found, skipping probe");
-        return HashMap::new();
-    }
-
-    // Get base environment (no shell init files)
-    let base_output = match exec_command(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        None,
-        vec!["env", "-0"],
-    ) {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!("userEnvProbe: failed to get base env: {e}");
-            return HashMap::new();
-        }
-    };
-
-    // Get probed environment (with shell init files)
-    let probed_output = match exec_command(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        None,
-        vec!["bash", flags, "env -0"],
-    ) {
-        Ok(o) => o,
-        Err(e) => {
-            log::warn!("userEnvProbe: failed to probe env: {e}");
-            return HashMap::new();
-        }
-    };
-
-    let base = parse_null_delimited_env(&base_output);
-    let probed = parse_null_delimited_env(&probed_output);
-
-    // Only keep variables that are new or changed
-    let skip = ["_", "SHLVL", "BASH_EXECUTION_STRING"];
-    probed
-        .into_iter()
-        .filter(|(key, value)| !skip.contains(&key.as_str()) && base.get(key) != Some(value))
-        .collect()
-}
-
-/// Query the container user's login shell from `/etc/passwd`.
-fn get_user_shell(docker: &Docker, container_id: &str, user: &str) -> String {
-    // `getent passwd <user>` returns a colon-delimited line whose last
-    // field is the login shell, e.g. "testuser:x:1000:1000::/home/testuser:/bin/bash".
-    match exec_command(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        None,
-        vec!["getent", "passwd", user],
-    ) {
-        Ok(output) => {
-            let line = String::from_utf8_lossy(&output);
-            line.trim()
-                .rsplit_once(':')
-                .map(|(_, shell)| shell.to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "/bin/sh".to_string())
-        }
-        Err(e) => {
-            log::warn!("failed to get user shell from container: {e}");
-            "/bin/sh".to_string()
-        }
-    }
-}
-
-/// Execute a single lifecycle command inside a container.
-///
-/// Supports the three devcontainer command formats:
-/// - String: run via shell (`sh -c "command"`)
-/// - Array: run directly without shell
-/// - Object: run each named command in parallel, wait for all to finish
-fn run_lifecycle_command(
-    docker: &Docker,
-    container_id: &str,
-    user: &str,
-    workdir: &Path,
-    command: &LifecycleCommand,
-    env: Option<Vec<&str>>,
-) -> Result<()> {
-    let workdir_str = workdir.to_string_lossy();
-
-    match command {
-        LifecycleCommand::String(s) => {
-            exec_command(
-                docker,
-                container_id,
-                Some(user),
-                Some(&workdir_str),
-                env,
-                vec!["sh", "-c", s],
-            )?;
-        }
-        LifecycleCommand::Array(args) => {
-            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            exec_command(
-                docker,
-                container_id,
-                Some(user),
-                Some(&workdir_str),
-                env,
-                args_ref,
-            )?;
-        }
-        LifecycleCommand::Object(map) => {
-            // Run all named commands in parallel using threads (we're already
-            // in a synchronous context). Collect results and fail if any fail.
-            let env_owned: Option<Vec<String>> =
-                env.map(|v| v.into_iter().map(String::from).collect());
-            let handles: Vec<_> = map
-                .iter()
-                .map(|(name, cmd_value)| {
-                    let cmd_args: Vec<String> = match cmd_value {
-                        StringOrArray::String(s) => {
-                            vec!["sh".into(), "-c".into(), s.clone()]
-                        }
-                        StringOrArray::Array(a) => a.clone(),
-                    };
-                    let docker = docker.clone();
-                    let cid = container_id.to_string();
-                    let u = user.to_string();
-                    let wd = workdir_str.to_string();
-                    let task_name = name.clone();
-                    let thread_env = env_owned.clone();
-
-                    std::thread::spawn(move || {
-                        let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-                        let env_ref = thread_env
-                            .as_ref()
-                            .map(|v| v.iter().map(|s| s.as_str()).collect());
-                        exec_command(&docker, &cid, Some(&u), Some(&wd), env_ref, args_ref)
-                            .with_context(|| format!("lifecycle command '{}' failed", task_name))
-                    })
-                })
-                .collect();
-
-            for handle in handles {
-                let result = handle
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("lifecycle command thread panicked"))?;
-                result?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Copy only the minimal Claude Code config files needed to authenticate and
 /// run inside a container. Avoids leaking conversation history, telemetry,
 /// stats, and other projects' data into untrusted pods.
@@ -2019,9 +1821,8 @@ fn run_lifecycle_command(
 ///   ~/.claude/.credentials.json  -- OAuth tokens (needed unless ANTHROPIC_API_KEY is set)
 ///   ~/.claude/settings.json      -- user preferences (model, mode, attribution)
 ///   ~/.claude.json               -- stripped to only essential keys
-fn copy_claude_config(
-    docker: &Docker,
-    container_id: &str,
+fn copy_claude_config_via_pod(
+    pod: &PodClient,
     user: &str,
     repo_path: &Path,
     container_repo_path: &Path,
@@ -2031,16 +1832,8 @@ fn copy_claude_config(
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
 
     // Determine the container user's home directory
-    let home_output = exec_command(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        None,
-        vec!["sh", "-c", "echo $HOME"],
-    )
-    .context("determining container home directory")?;
-    let container_home = String::from_utf8_lossy(&home_output).trim().to_string();
+    let user_info = pod.user_info(user)?;
+    let container_home = user_info.home;
 
     // Build a minimal .claude.json with only the keys needed to suppress
     // warnings and onboarding prompts. Everything else (tips history,
@@ -2049,7 +1842,7 @@ fn copy_claude_config(
         Ok(data) => {
             let minimal = strip_claude_json(&data, repo_path, container_repo_path);
             let dest = format!("{}/.claude.json", container_home);
-            write_file_via_stdin(docker, container_id, user, &dest, &minimal)
+            pod.fs_write(Path::new(&dest), &minimal, Some(user), true)
                 .context("writing .claude.json")?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2059,21 +1852,15 @@ fn copy_claude_config(
     // We always need ~/.claude/settings.json for the statusline,
     // so create the directory unconditionally.
     let claude_dir = host_home.join(".claude");
-    exec_command(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        None,
-        vec!["mkdir", "-p", &format!("{}/.claude", container_home)],
-    )
-    .context("creating .claude directory")?;
+    let container_claude_dir = format!("{}/.claude", container_home);
+    pod.fs_mkdir(Path::new(&container_claude_dir), Some(user))
+        .context("creating .claude directory")?;
 
     // Copy credentials if present.
     match std::fs::read(claude_dir.join(".credentials.json")) {
         Ok(data) => {
             let dest = format!("{}/.claude/.credentials.json", container_home);
-            write_file_via_stdin(docker, container_id, user, &dest, &data)
+            pod.fs_write(Path::new(&dest), &data, Some(user), false)
                 .context("writing .claude/.credentials.json")?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -2094,14 +1881,13 @@ fn copy_claude_config(
         data
     };
     let dest = format!("{}/.claude/settings.json", container_home);
-    write_file_via_stdin(docker, container_id, user, &dest, &data)
+    pod.fs_write(Path::new(&dest), &data, Some(user), false)
         .context("writing .claude/settings.json")?;
 
     // Copy project-specific conversation history and memory so claude inside
     // the sandbox can see prior context for the same project.
-    copy_claude_project_dir(
-        docker,
-        container_id,
+    copy_claude_project_dir_via_pod(
+        pod,
         user,
         &host_home,
         &container_home,
@@ -2111,9 +1897,8 @@ fn copy_claude_config(
 
     // Copy the global input history (filtered to this project) so up-arrow
     // recall works for prior prompts.
-    copy_claude_history(
-        docker,
-        container_id,
+    copy_claude_history_via_pod(
+        pod,
         user,
         &host_home,
         &container_home,
@@ -2139,9 +1924,8 @@ fn claude_project_dir_name(repo_path: &Path) -> String {
 /// Copy the host's project-specific claude data (conversation history, memory)
 /// into the container, remapping the directory name to match the container's
 /// repo path.
-fn copy_claude_project_dir(
-    docker: &Docker,
-    container_id: &str,
+fn copy_claude_project_dir_via_pod(
+    pod: &PodClient,
     user: &str,
     host_home: &Path,
     container_home: &str,
@@ -2159,17 +1943,10 @@ fn copy_claude_project_dir(
     let container_project_dir =
         format!("{}/.claude/projects/{}", container_home, container_dir_name);
 
-    exec_command(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        None,
-        vec!["mkdir", "-p", &container_project_dir],
-    )
-    .context("creating claude project directory")?;
+    pod.fs_mkdir(Path::new(&container_project_dir), Some(user))
+        .context("creating claude project directory")?;
 
-    // Stream the whole directory via tar to avoid one docker exec per file.
+    // Stream the whole directory via tar to avoid one HTTP call per file.
     let tar_output = Command::new("tar")
         .arg("-c")
         .arg("-C")
@@ -2186,16 +1963,18 @@ fn copy_claude_project_dir(
     }
 
     if !tar_output.stdout.is_empty() {
-        exec_with_stdin(
-            docker,
-            container_id,
+        let result = pod.run(
+            &["tar", "-x", "-C", &container_project_dir],
             Some(user),
             None,
-            None,
-            vec!["tar", "-x", "-C", &container_project_dir],
+            &[],
             Some(&tar_output.stdout),
-        )
-        .context("extracting claude project data into container")?;
+            None,
+        )?;
+        if result.exit_code != 0 {
+            let stderr = base64_decode_lossy(&result.stderr);
+            anyhow::bail!("extracting claude project data: {}", stderr);
+        }
     }
 
     Ok(())
@@ -2203,9 +1982,8 @@ fn copy_claude_project_dir(
 
 /// Copy ~/.claude/history.jsonl into the container, keeping only entries for
 /// this project and rewriting the project path so up-arrow input recall works.
-fn copy_claude_history(
-    docker: &Docker,
-    container_id: &str,
+fn copy_claude_history_via_pod(
+    pod: &PodClient,
     user: &str,
     host_home: &Path,
     container_home: &str,
@@ -2253,7 +2031,7 @@ fn copy_claude_history(
     }
 
     let dest = format!("{}/.claude/history.jsonl", container_home);
-    write_file_via_stdin(docker, container_id, user, &dest, &filtered)
+    pod.fs_write(Path::new(&dest), &filtered, Some(user), false)
         .context("writing .claude/history.jsonl")?;
 
     Ok(())
@@ -2363,27 +2141,6 @@ fn inject_hooks(data: &[u8]) -> Vec<u8> {
     serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| data.to_vec())
 }
 
-/// Write file contents into a container by piping data through `cat`.
-fn write_file_via_stdin(
-    docker: &Docker,
-    container_id: &str,
-    user: &str,
-    dest_path: &str,
-    data: &[u8],
-) -> Result<()> {
-    let cmd = format!("cat > {}", shell_escape(dest_path));
-    exec_with_stdin(
-        docker,
-        container_id,
-        Some(user),
-        None,
-        None,
-        vec!["sh", "-c", &cmd],
-        Some(data),
-    )?;
-    Ok(())
-}
-
 /// Pick the right rumpel binary for the container architecture.
 ///
 /// When the container arch is unknown, returns the running binary.
@@ -2452,6 +2209,138 @@ fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Resul
     Ok(())
 }
 
+/// Get the container's bridge IP.
+fn get_container_bridge_ip(docker: &Docker, container_id: &str) -> Result<Option<String>> {
+    let inspect = block_on(docker.inspect_container(container_id, None))
+        .context("inspecting container for IP address")?;
+
+    // In host network mode there is no per-container IP.
+    let host_mode = inspect
+        .host_config
+        .as_ref()
+        .and_then(|hc| hc.network_mode.as_deref())
+        == Some("host");
+
+    if host_mode {
+        return Ok(None);
+    }
+
+    Ok(inspect
+        .network_settings
+        .as_ref()
+        .and_then(|ns| ns.networks.as_ref())
+        .and_then(|nets| nets.get("bridge").or_else(|| nets.values().next()))
+        .and_then(|net| net.ip_address.as_deref())
+        .filter(|ip| !ip.is_empty())
+        .map(String::from))
+}
+
+/// Construct the URL at which the in-container HTTP server is reachable.
+///
+/// For local Docker this is the container's bridge IP.
+/// For host network mode this is localhost.
+/// For remote Docker (SSH) this sets up an SSH local forward through
+/// the existing SSH connection and returns a localhost URL.
+fn get_container_url(
+    docker: &Docker,
+    container_id: &str,
+    docker_host: &DockerHost,
+    ssh_forward: &SshForwardManager,
+) -> Result<String> {
+    let port = crate::container_serve::PORT;
+
+    match get_container_bridge_ip(docker, container_id)? {
+        None => {
+            // Host network mode: server listens on 127.0.0.1 (or the
+            // remote host's loopback when Docker is remote).
+            match docker_host {
+                DockerHost::Localhost => Ok(format!("http://127.0.0.1:{}", port)),
+                DockerHost::Ssh { .. } => {
+                    let local_port = allocate_ephemeral_port()?;
+                    ssh_forward.add_local_forward(docker_host, local_port, "127.0.0.1", port)?;
+                    Ok(format!("http://127.0.0.1:{}", local_port))
+                }
+            }
+        }
+        Some(ip) => match docker_host {
+            DockerHost::Localhost => Ok(format!("http://{}:{}", ip, port)),
+            DockerHost::Ssh { .. } => {
+                let local_port = allocate_ephemeral_port()?;
+                ssh_forward.add_local_forward(docker_host, local_port, &ip, port)?;
+                Ok(format!("http://127.0.0.1:{}", local_port))
+            }
+        },
+    }
+}
+
+/// Bind port 0 to get an OS-allocated ephemeral port.
+fn allocate_ephemeral_port() -> Result<u16> {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").context("allocating ephemeral port")?;
+    let port = listener.local_addr()?.port();
+    // Drop the listener; the port may be reused, but SSH will bind it next.
+    Ok(port)
+}
+
+/// Start the in-container HTTP server via detached docker exec.
+/// Does nothing if the server is already running (health check succeeds).
+///
+/// `container_url` is the URL at which the server will be reachable
+/// (already accounts for SSH forwarding, host network mode, etc).
+fn start_container_server(docker: &Docker, container_id: &str, container_url: &str) -> Result<()> {
+    use bollard::exec::StartExecOptions;
+    use bollard::secret::ExecConfig;
+
+    let url = container_url;
+    let poll_client = reqwest::blocking::Client::builder()
+        .timeout(Some(std::time::Duration::from_secs(1)))
+        .build()
+        .unwrap();
+    if poll_client
+        .get(format!("{}/health", url))
+        .send()
+        .is_ok_and(|r| r.status().is_success())
+    {
+        return Ok(());
+    }
+
+    let config = ExecConfig {
+        cmd: Some(vec![
+            RUMPEL_CONTAINER_BIN.to_string(),
+            "container-serve".to_string(),
+        ]),
+        user: Some("root".to_string()),
+        ..Default::default()
+    };
+
+    let exec = block_on(docker.create_exec(container_id, config))
+        .context("creating container-serve exec")?;
+    block_on(docker.start_exec(
+        &exec.id,
+        Some(StartExecOptions {
+            detach: true,
+            ..Default::default()
+        }),
+    ))
+    .context("starting container-serve")?;
+
+    // Wait for the server to become ready
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if poll_client
+            .get(format!("{}/health", url))
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("container server did not become ready within 10 seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 /// These commands run at most once per pod lifetime, tracked via the
 /// database. Order: onCreateCommand -> updateContentCommand -> postCreateCommand.
 /// If any command fails, later commands in the chain are skipped and marked as
@@ -2461,16 +2350,209 @@ fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Resul
 /// they are returned for background execution so the enter can complete
 /// without waiting.
 #[allow(clippy::too_many_arguments)]
-fn run_once_lifecycle_commands(
-    docker: &Docker,
-    container_id: &str,
+/// Ensure a git repo exists inside the container, using the in-container
+/// HTTP server instead of docker exec shell scripts.
+fn ensure_repo_initialized_via_pod(
+    pod: &PodClient,
+    git_http_url: &str,
+    token: &str,
+    container_repo_path: &Path,
+    user: &str,
+) -> Result<()> {
+    let git_dir = container_repo_path.join(".git");
+    let stat = pod.fs_stat(&git_dir)?;
+
+    if stat.exists && stat.is_dir {
+        // On first entry the image may have left the repo in a broken state.
+        // Detect first entry by the absence of our hook.
+        let hook_path = container_repo_path.join(".git/hooks/reference-transaction");
+        let hook_stat = pod.fs_stat(&hook_path)?;
+        if !hook_stat.exists {
+            pod.git_sanitize(container_repo_path, Some(user))?;
+        }
+        return Ok(());
+    }
+
+    // Ensure parent directories exist
+    let parent = container_repo_path.parent().unwrap_or(container_repo_path);
+    pod.fs_mkdir(parent, None)?;
+    pod.fs_chown(&[parent], user)?;
+
+    // Clone from the git-http bridge with auth header
+    let auth_header = format!("Authorization: Bearer {}", token);
+    pod.git_clone(
+        git_http_url,
+        container_repo_path,
+        Some(&auth_header),
+        true,
+        Some(user),
+    )?;
+
+    Ok(())
+}
+
+/// Check that the .git directory is owned by the expected user.
+fn check_git_ownership_via_pod(
+    pod: &PodClient,
+    container_repo_path: &Path,
+    user: &str,
+) -> Result<()> {
+    let git_dir = container_repo_path.join(".git");
+    let stat = pod.fs_stat(&git_dir)?;
+    let expected_user = user.split(':').next().unwrap_or(user);
+
+    if let Some(ref owner) = stat.owner {
+        if owner != expected_user {
+            anyhow::bail!(
+                "Git directory {} is owned by '{}', but pod is configured to run as '{}'.\n\
+                 Please ensure the repository inside the container is owned by the configured user.\n\
+                 You can fix this by running: chown -R {} {}",
+                git_dir.display(),
+                owner,
+                expected_user,
+                user,
+                container_repo_path.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Probe user env via the in-container server.
+fn probe_user_env_via_pod(
+    pod: &PodClient,
+    user: &str,
+    probe: &UserEnvProbe,
+) -> HashMap<String, String> {
+    let flags = match probe.shell_flags_exec() {
+        Some(f) => f,
+        None => return HashMap::new(),
+    };
+
+    pod.probe_env(user, flags).unwrap_or_else(|e| {
+        log::warn!("userEnvProbe via pod failed: {e}");
+        HashMap::new()
+    })
+}
+
+/// Execute a single lifecycle command via the in-container HTTP server.
+fn run_lifecycle_command_via_pod(
+    pod: &PodClient,
+    user: &str,
+    workdir: &Path,
+    command: &LifecycleCommand,
+    env: &[String],
+) -> Result<()> {
+    match command {
+        LifecycleCommand::String(s) => {
+            let result = pod.run(&["sh", "-c", s], Some(user), Some(workdir), env, None, None)?;
+            if result.exit_code != 0 {
+                let stderr = base64_decode_lossy(&result.stderr);
+                anyhow::bail!(
+                    "lifecycle command failed (exit {}): {}",
+                    result.exit_code,
+                    stderr
+                );
+            }
+        }
+        LifecycleCommand::Array(args) => {
+            let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let result = pod.run(&args_ref, Some(user), Some(workdir), env, None, None)?;
+            if result.exit_code != 0 {
+                let stderr = base64_decode_lossy(&result.stderr);
+                anyhow::bail!(
+                    "lifecycle command failed (exit {}): {}",
+                    result.exit_code,
+                    stderr
+                );
+            }
+        }
+        LifecycleCommand::Object(map) => {
+            let handles: Vec<_> = map
+                .iter()
+                .map(|(name, cmd_value)| {
+                    let cmd_args: Vec<String> = match cmd_value {
+                        StringOrArray::String(s) => {
+                            vec!["sh".into(), "-c".into(), s.clone()]
+                        }
+                        StringOrArray::Array(a) => a.clone(),
+                    };
+                    let pod_url = pod.url().to_string();
+                    let u = user.to_string();
+                    let wd = workdir.to_path_buf();
+                    let task_name = name.clone();
+                    let thread_env = env.to_vec();
+
+                    std::thread::spawn(move || {
+                        let pod = PodClient::new(&pod_url);
+                        let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+                        let result =
+                            pod.run(&args_ref, Some(&u), Some(&wd), &thread_env, None, None)?;
+                        if result.exit_code != 0 {
+                            let stderr = base64_decode_lossy(&result.stderr);
+                            anyhow::bail!(
+                                "lifecycle command '{}' failed (exit {}): {}",
+                                task_name,
+                                result.exit_code,
+                                stderr
+                            );
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+
+            for handle in handles {
+                let result = handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("lifecycle command thread panicked"))?;
+                result?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn base64_decode_lossy(s: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map(|b| String::from_utf8_lossy(&b).to_string())
+        .unwrap_or_else(|_| s.to_string())
+}
+
+/// Spawn lifecycle commands in background via the in-container HTTP server.
+fn spawn_background_lifecycle_commands_via_pod(
+    container_url: String,
+    user: String,
+    workdir: PathBuf,
+    commands: Vec<(String, LifecycleCommand)>,
+    env: Vec<String>,
+) {
+    std::thread::spawn(move || {
+        let pod = PodClient::new(&container_url);
+        for (label, cmd) in &commands {
+            if let Err(e) = run_lifecycle_command_via_pod(&pod, &user, &workdir, cmd, &env) {
+                error!("background {} failed: {:#}", label, e);
+                break;
+            }
+        }
+    });
+}
+
+/// Run one-time lifecycle commands (onCreate, updateContent, postCreate)
+/// via the in-container HTTP server, respecting the waitFor target.
+/// Returns any commands that should be deferred to background execution.
+fn run_once_lifecycle_commands_via_pod(
+    pod: &PodClient,
     user: &str,
     workdir: &Path,
     dc: &DevContainer,
     pod_id: db::PodId,
     db_mutex: &Mutex<rusqlite::Connection>,
     wait_for: &WaitFor,
-    env: Option<Vec<&str>>,
+    env: &[String],
 ) -> Result<Vec<(String, LifecycleCommand)>> {
     let mut background = Vec::new();
 
@@ -2482,9 +2564,7 @@ fn run_once_lifecycle_commands(
     if !on_create_ran {
         if let Some(cmd) = &dc.on_create_command {
             if *wait_for >= WaitFor::OnCreateCommand {
-                if let Err(e) =
-                    run_lifecycle_command(docker, container_id, user, workdir, cmd, env.clone())
-                {
+                if let Err(e) = run_lifecycle_command_via_pod(pod, user, workdir, cmd, env) {
                     // Mark both as ran to prevent retries and skip postCreate
                     let conn = db_mutex.lock().unwrap();
                     db::mark_on_create_ran(&conn, pod_id)?;
@@ -2501,9 +2581,7 @@ fn run_once_lifecycle_commands(
 
     if let Some(cmd) = &dc.update_content_command {
         if *wait_for >= WaitFor::UpdateContentCommand {
-            if let Err(e) =
-                run_lifecycle_command(docker, container_id, user, workdir, cmd, env.clone())
-            {
+            if let Err(e) = run_lifecycle_command_via_pod(pod, user, workdir, cmd, env) {
                 // Skip postCreateCommand on failure
                 let conn = db_mutex.lock().unwrap();
                 db::mark_post_create_ran(&conn, pod_id)?;
@@ -2522,9 +2600,7 @@ fn run_once_lifecycle_commands(
     if !post_create_ran {
         if let Some(cmd) = &dc.post_create_command {
             if *wait_for >= WaitFor::PostCreateCommand {
-                if let Err(e) =
-                    run_lifecycle_command(docker, container_id, user, workdir, cmd, env.clone())
-                {
+                if let Err(e) = run_lifecycle_command_via_pod(pod, user, workdir, cmd, env) {
                     let conn = db_mutex.lock().unwrap();
                     db::mark_post_create_ran(&conn, pod_id)?;
                     return Err(e.context("postCreateCommand failed"));
@@ -2538,30 +2614,6 @@ fn run_once_lifecycle_commands(
     }
 
     Ok(background)
-}
-
-/// Run lifecycle commands in a background thread.  Errors are logged but
-/// do not propagate, so the user's session is unaffected by background
-/// failures.
-fn spawn_background_lifecycle_commands(
-    docker: Docker,
-    container_id: String,
-    user: String,
-    workdir: PathBuf,
-    commands: Vec<(String, LifecycleCommand)>,
-    env: Option<Vec<String>>,
-) {
-    std::thread::spawn(move || {
-        for (label, cmd) in &commands {
-            let env_refs = env.as_ref().map(|v| v.iter().map(|s| s.as_str()).collect());
-            if let Err(e) =
-                run_lifecycle_command(&docker, &container_id, &user, &workdir, cmd, env_refs)
-            {
-                error!("background {} failed: {:#}", label, e);
-                break;
-            }
-        }
-    });
 }
 
 impl Daemon for DaemonServer {
@@ -2712,6 +2764,13 @@ impl Daemon for DaemonServer {
                 start_container(&docker, &name)?;
             }
 
+            // Get the container URL (sets up SSH forward if remote)
+            let container_url =
+                get_container_url(&docker, &state.id, &docker_host, &self.ssh_forward)?;
+
+            // Ensure the in-container HTTP server is running
+            start_container_server(&docker, &state.id, &container_url)?;
+
             // Ensure pod record exists in database
             let pod_id = {
                 let conn = self.db.lock().unwrap();
@@ -2737,56 +2796,58 @@ impl Daemon for DaemonServer {
                 .insert((repo_path.clone(), pod_name.0.clone()), token.clone());
 
             let url = git_http_server::git_http_url(&server_ip, server_port);
+            let pod = PodClient::new(&container_url);
+            let direct_config = is_direct_git_config_mode()?;
 
             // Clone repo if not already present (e.g. devcontainer without COPY)
-            ensure_repo_initialized(
-                &docker,
-                &state.id,
-                &url,
-                &token,
-                &container_repo_path,
-                &user,
-            )?;
+            ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)?;
+
+            // Check .git ownership matches the pod user
+            check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
 
             // On re-entry, don't pass host_branch - we don't want to change
             // the upstream of an existing branch.
-            setup_git_remotes(
-                &docker,
-                &state.id,
+            pod.git_setup_remotes(
+                &container_repo_path,
                 &url,
                 &token,
-                &container_repo_path,
-                &pod_name,
-                &user,
+                &pod_name.0,
                 None,
-            )?;
+                direct_config,
+                Some(&user),
+            )
+            .context("configuring git remotes")?;
 
             // Set up submodule repos (re-entry: is_first_entry = false)
-            setup_pod_submodules(
-                &docker,
-                &state.id,
-                &url,
-                &token,
+            let sub_entries: Vec<SubmoduleEntry> = submodules
+                .iter()
+                .map(|s| SubmoduleEntry {
+                    name: s.name.clone(),
+                    path: s.path.clone(),
+                    displaypath: s.displaypath.clone(),
+                })
+                .collect();
+            let base_url = url.trim_end_matches("/gateway.git");
+            pod.git_setup_submodules(
                 &container_repo_path,
-                &pod_name,
-                &user,
-                &submodules,
+                &sub_entries,
+                base_url,
+                &token,
+                &pod_name.0,
                 false,
-            )?;
+                direct_config,
+                Some(&user),
+            )
+            .context("setting up submodules")?;
 
             // Probe user env from shell init files
             let effective_probe = devcontainer
                 .user_env_probe
                 .as_ref()
                 .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-            let probed_env = probe_user_env(&docker, &state.id, &user, effective_probe);
+            let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
             let env_strings: Vec<String> =
                 probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-            let env_refs: Option<Vec<&str>> = if env_strings.is_empty() {
-                None
-            } else {
-                Some(env_strings.iter().map(|s| s.as_str()).collect())
-            };
 
             // Run updateContentCommand, per-start, and per-attach lifecycle
             // commands, respecting the waitFor target for background execution.
@@ -2796,13 +2857,12 @@ impl Daemon for DaemonServer {
             // updateContentCommand runs on every re-entry after git sync
             if let Some(cmd) = &devcontainer.update_content_command {
                 if wait_for >= WaitFor::UpdateContentCommand {
-                    run_lifecycle_command(
-                        &docker,
-                        &state.id,
+                    run_lifecycle_command_via_pod(
+                        &pod,
                         &user,
                         &container_repo_path,
                         cmd,
-                        env_refs.clone(),
+                        &env_strings,
                     )?;
                 } else {
                     bg_commands.push(("updateContentCommand".to_string(), cmd.clone()));
@@ -2812,13 +2872,12 @@ impl Daemon for DaemonServer {
             if was_stopped {
                 if let Some(cmd) = &devcontainer.post_start_command {
                     if wait_for >= WaitFor::PostStartCommand {
-                        run_lifecycle_command(
-                            &docker,
-                            &state.id,
+                        run_lifecycle_command_via_pod(
+                            &pod,
                             &user,
                             &container_repo_path,
                             cmd,
-                            env_refs.clone(),
+                            &env_strings,
                         )?;
                     } else {
                         bg_commands.push(("postStartCommand".to_string(), cmd.clone()));
@@ -2828,13 +2887,12 @@ impl Daemon for DaemonServer {
 
             if let Some(cmd) = &devcontainer.post_attach_command {
                 if wait_for >= WaitFor::PostAttachCommand {
-                    run_lifecycle_command(
-                        &docker,
-                        &state.id,
+                    run_lifecycle_command_via_pod(
+                        &pod,
                         &user,
                         &container_repo_path,
                         cmd,
-                        env_refs.clone(),
+                        &env_strings,
                     )?;
                 } else {
                     bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
@@ -2842,17 +2900,12 @@ impl Daemon for DaemonServer {
             }
 
             if !bg_commands.is_empty() {
-                spawn_background_lifecycle_commands(
-                    docker.clone(),
-                    state.id.clone(),
+                spawn_background_lifecycle_commands_via_pod(
+                    container_url.clone(),
                     user.clone(),
                     container_repo_path.clone(),
                     bg_commands,
-                    if env_strings.is_empty() {
-                        None
-                    } else {
-                        Some(env_strings.clone())
-                    },
+                    env_strings.clone(),
                 );
             }
 
@@ -2872,7 +2925,15 @@ impl Daemon for DaemonServer {
                 )?;
             }
 
-            let user_shell = get_user_shell(&docker, &state.id, &user);
+            let user_info =
+                pod.user_info(&user)
+                    .unwrap_or_else(|_| crate::container_serve::UserInfoResponse {
+                        home: String::new(),
+                        shell: "/bin/sh".to_string(),
+                        uid: 0,
+                        gid: 0,
+                    });
+            let user_shell = user_info.shell;
 
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
@@ -2881,6 +2942,7 @@ impl Daemon for DaemonServer {
                 image_built,
                 probed_env,
                 user_shell,
+                container_url,
             });
         }
 
@@ -2915,6 +2977,7 @@ impl Daemon for DaemonServer {
         };
 
         let url = git_http_server::git_http_url(&server_ip, server_port);
+        let ssh_forward = &self.ssh_forward;
 
         // Create container and run initial git setup.  Closure used so we
         // can retry once on overlay2 filesystem errors (see below).
@@ -2931,52 +2994,65 @@ impl Daemon for DaemonServer {
                 &publish_ports,
             )?;
 
-            // Fix ownership of mount targets so the container user can write
-            // to them.  Docker creates volume/tmpfs mounts as root by default.
-            if !mounts.is_empty() {
-                let targets: Vec<&str> = mounts.iter().map(|m| m.target.as_str()).collect();
-                let mut args = vec!["chown", &user];
-                args.extend(targets);
-                exec_command(&docker, &container_id.0, Some("root"), None, None, args)
-                    .context("chown mount targets for container user")?;
-            }
-
             // The rumpel binary must be present before git operations
             // that trigger the reference-transaction hook shim.
             copy_rumpel_binary(&docker, &container_id.0, &image.0)?;
 
-            ensure_repo_initialized(
-                &docker,
-                &container_id.0,
-                &url,
-                &token,
-                &container_repo_path,
-                &user,
-            )?;
+            // Get container URL and start the in-container HTTP server
+            let container_url_inner =
+                get_container_url(&docker, &container_id.0, &docker_host, &ssh_forward)?;
+            start_container_server(&docker, &container_id.0, &container_url_inner)?;
+            let pod_inner = PodClient::new(&container_url_inner);
+            let direct_config = is_direct_git_config_mode()?;
 
-            setup_git_remotes(
-                &docker,
-                &container_id.0,
-                &url,
-                &token,
-                &container_repo_path,
-                &pod_name,
-                &user,
-                host_branch.as_deref(),
-            )?;
+            // Fix ownership of mount targets so the container user can write
+            // to them.  Docker creates volume/tmpfs mounts as root by default.
+            if !mounts.is_empty() {
+                let targets: Vec<&Path> = mounts.iter().map(|m| Path::new(&m.target)).collect();
+                pod_inner
+                    .fs_chown(&targets, &user)
+                    .context("chown mount targets for container user")?;
+            }
+
+            ensure_repo_initialized_via_pod(&pod_inner, &url, &token, &container_repo_path, &user)?;
+
+            // Check .git ownership matches the pod user
+            check_git_ownership_via_pod(&pod_inner, &container_repo_path, &user)?;
+
+            pod_inner
+                .git_setup_remotes(
+                    &container_repo_path,
+                    &url,
+                    &token,
+                    &pod_name.0,
+                    host_branch.as_deref(),
+                    direct_config,
+                    Some(&user),
+                )
+                .context("configuring git remotes")?;
 
             // Set up submodule repos (new container: is_first_entry = true)
-            setup_pod_submodules(
-                &docker,
-                &container_id.0,
-                &url,
-                &token,
-                &container_repo_path,
-                &pod_name,
-                &user,
-                &submodules,
-                true,
-            )?;
+            let sub_entries: Vec<SubmoduleEntry> = submodules
+                .iter()
+                .map(|s| SubmoduleEntry {
+                    name: s.name.clone(),
+                    path: s.path.clone(),
+                    displaypath: s.displaypath.clone(),
+                })
+                .collect();
+            let base_url = url.trim_end_matches("/gateway.git");
+            pod_inner
+                .git_setup_submodules(
+                    &container_repo_path,
+                    &sub_entries,
+                    base_url,
+                    &token,
+                    &pod_name.0,
+                    true,
+                    direct_config,
+                    Some(&user),
+                )
+                .context("setting up submodules")?;
 
             Ok(container_id)
         };
@@ -3002,18 +3078,19 @@ impl Daemon for DaemonServer {
             Err(e) => return Err(mark_error(e)),
         };
 
+        // The server was started inside do_create_and_setup; derive its URL
+        // and build a client for the remaining setup steps.
+        let container_url =
+            get_container_url(&docker, &container_id.0, &docker_host, &self.ssh_forward)?;
+        let pod = PodClient::new(&container_url);
+
         // Probe user env from shell init files
         let effective_probe = devcontainer
             .user_env_probe
             .as_ref()
             .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-        let probed_env = probe_user_env(&docker, &container_id.0, &user, effective_probe);
+        let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
         let env_strings: Vec<String> = probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        let env_refs: Option<Vec<&str>> = if env_strings.is_empty() {
-            None
-        } else {
-            Some(env_strings.iter().map(|s| s.as_str()).collect())
-        };
 
         // Run lifecycle commands for new container:
         // onCreateCommand -> updateContentCommand -> postCreateCommand ->
@@ -3022,30 +3099,22 @@ impl Daemon for DaemonServer {
         // the rest are handed off to a background thread.
         let wait_for = devcontainer.effective_wait_for();
 
-        let mut bg_commands = run_once_lifecycle_commands(
-            &docker,
-            &container_id.0,
+        let mut bg_commands = run_once_lifecycle_commands_via_pod(
+            &pod,
             &user,
             &container_repo_path,
             &devcontainer,
             pod_id,
             &self.db,
             &wait_for,
-            env_refs.clone(),
+            &env_strings,
         )
         .map_err(mark_error)?;
 
         if wait_for >= WaitFor::PostStartCommand {
             if let Some(cmd) = &devcontainer.post_start_command {
-                run_lifecycle_command(
-                    &docker,
-                    &container_id.0,
-                    &user,
-                    &container_repo_path,
-                    cmd,
-                    env_refs.clone(),
-                )
-                .map_err(mark_error)?;
+                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                    .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_start_command {
             bg_commands.push(("postStartCommand".to_string(), cmd.clone()));
@@ -3053,32 +3122,20 @@ impl Daemon for DaemonServer {
 
         if wait_for >= WaitFor::PostAttachCommand {
             if let Some(cmd) = &devcontainer.post_attach_command {
-                run_lifecycle_command(
-                    &docker,
-                    &container_id.0,
-                    &user,
-                    &container_repo_path,
-                    cmd,
-                    env_refs.clone(),
-                )
-                .map_err(mark_error)?;
+                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                    .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_attach_command {
             bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
         }
 
         if !bg_commands.is_empty() {
-            spawn_background_lifecycle_commands(
-                docker.clone(),
-                container_id.0.clone(),
+            spawn_background_lifecycle_commands_via_pod(
+                container_url.clone(),
                 user.clone(),
                 container_repo_path.clone(),
                 bg_commands,
-                if env_strings.is_empty() {
-                    None
-                } else {
-                    Some(env_strings)
-                },
+                env_strings,
             );
         }
 
@@ -3106,7 +3163,15 @@ impl Daemon for DaemonServer {
             }
         }
 
-        let user_shell = get_user_shell(&docker, &container_id.0, &user);
+        let user_info =
+            pod.user_info(&user)
+                .unwrap_or_else(|_| crate::container_serve::UserInfoResponse {
+                    home: String::new(),
+                    shell: "/bin/sh".to_string(),
+                    uid: 0,
+                    gid: 0,
+                });
+        let user_shell = user_info.shell;
 
         Ok(LaunchResult {
             container_id,
@@ -3115,6 +3180,7 @@ impl Daemon for DaemonServer {
             image_built,
             probed_env,
             user_shell,
+            container_url,
         })
     }
 
@@ -3127,12 +3193,7 @@ impl Daemon for DaemonServer {
         let pod_name = &params.pod_name;
         let repo_path = &params.repo_path;
         let docker_host = &params.docker_host;
-        // resolve_image here is only for resolve_user during snapshotting;
-        // the actual image_built flag comes from self.launch_pod below.
-        let image =
-            crate::image::resolve_image(&params.devcontainer, docker_host, repo_path)?.image;
         let container_repo_path = params.devcontainer.container_repo_path(repo_path);
-        let user = params.devcontainer.user().map(String::from);
 
         let name = docker_name(repo_path, pod_name);
 
@@ -3151,41 +3212,24 @@ impl Daemon for DaemonServer {
 
         // 1. Snapshot dirty files if container exists
         let mut patch: Option<Vec<u8>> = None;
-        let mut _old_user: Option<String> = None;
+        let snapshot_user = params.devcontainer.user().map(String::from);
 
         if let Some(state) = inspect_container(&docker, &name)? {
-            // Container exists
             if state.status == "running" {
-                let resolved_user = resolve_user(&docker, user.clone(), &image.0)?;
-                _old_user = Some(resolved_user.clone());
-
-                // Snapshot dirty files
-                let repo_path_str = container_repo_path.to_string_lossy().to_string();
-
-                // Add all changes including untracked files
-                exec_command(
-                    &docker,
-                    &state.id,
-                    Some(&resolved_user),
-                    Some(&repo_path_str),
-                    None,
-                    vec!["git", "add", "-A"],
-                )
-                .context("snapshotting: git add -A failed")?;
-
-                // Diff staged changes
-                let diff_output = exec_command(
-                    &docker,
-                    &state.id,
-                    Some(&resolved_user),
-                    Some(&repo_path_str),
-                    None,
-                    vec!["git", "diff", "--binary", "--cached"],
-                )
-                .context("snapshotting: git diff failed")?;
-
-                if !diff_output.is_empty() {
-                    patch = Some(diff_output);
+                // Use the in-container HTTP server to snapshot
+                if let Ok(container_url) =
+                    get_container_url(&docker, &state.id, docker_host, &self.ssh_forward)
+                {
+                    let old_pod = PodClient::new(&container_url);
+                    // Ensure server is running (may have been stopped)
+                    if old_pod
+                        .wait_ready(std::time::Duration::from_secs(2))
+                        .is_ok()
+                    {
+                        patch = old_pod
+                            .git_snapshot(&container_repo_path, snapshot_user.as_deref())
+                            .context("snapshotting dirty files")?;
+                    }
                 }
             }
 
@@ -3198,50 +3242,20 @@ impl Daemon for DaemonServer {
 
         // 4. Apply patch if we have one
         if let Some(patch_content) = patch {
-            // We need the resolved user from launch_result
-            let repo_path_str = container_repo_path.to_string_lossy().to_string();
+            let new_pod = PodClient::new(&launch_result.container_url);
 
-            // Parse patch to identify files being created that might already exist (e.g. from image)
-            // We do this best-effort; if parsing fails, we proceed without deletion.
-            if let Ok(created_files) = get_created_files_from_patch(&patch_content) {
-                for file in created_files {
-                    // Ignore errors (e.g. if file doesn't exist)
-                    let _ = exec_command(
-                        &docker,
-                        &launch_result.container_id.0,
-                        Some(&launch_result.user),
-                        Some(&repo_path_str),
-                        None,
-                        vec!["rm", "-f", &file],
-                    );
-                }
-            }
+            // Parse patch to identify files being created that might
+            // already exist (e.g. from image).  Best-effort.
+            let created_files = get_created_files_from_patch(&patch_content).unwrap_or_default();
 
-            use crate::docker_exec::exec_with_stdin;
-
-            // Apply the patch
-            exec_with_stdin(
-                &docker,
-                &launch_result.container_id.0,
-                Some(&launch_result.user),
-                Some(&repo_path_str),
-                None,
-                vec!["git", "apply", "-"],
-                Some(&patch_content),
-            )
-            .context("applying snapshot patch")?;
-
-            // Sync submodule working trees with the gitlinks restored by the
-            // patch.  Best-effort: uncommitted changes inside submodules are
-            // lost on recreate since git add -A only captures gitlink changes.
-            let _ = exec_command(
-                &docker,
-                &launch_result.container_id.0,
-                Some(&launch_result.user),
-                Some(&repo_path_str),
-                None,
-                vec!["git", "submodule", "update", "--recursive"],
-            );
+            new_pod
+                .git_apply_patch(
+                    &container_repo_path,
+                    &patch_content,
+                    &created_files,
+                    Some(&launch_result.user),
+                )
+                .context("applying snapshot patch")?;
         }
 
         Ok(launch_result)
@@ -3528,16 +3542,10 @@ impl Daemon for DaemonServer {
             pod_rec.id
         };
 
-        let docker = Docker::connect_with_socket(
-            request.docker_socket.to_string_lossy().as_ref(),
-            120,
-            bollard::API_DEFAULT_VERSION,
-        )
-        .context("connecting to Docker daemon")?;
+        let pod = PodClient::new(&request.container_url);
 
-        copy_claude_config(
-            &docker,
-            &request.container_id.0,
+        copy_claude_config_via_pod(
+            &pod,
             &request.user,
             &request.repo_path,
             &request.container_repo_path,

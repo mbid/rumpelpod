@@ -45,6 +45,8 @@ pub struct LaunchResult {
     /// The container user's login shell (e.g. "/bin/bash", "/bin/zsh").
     /// Falls back to "/bin/sh" if it cannot be determined.
     pub user_shell: String,
+    /// Base URL of the in-container HTTP server (e.g. "http://172.17.0.2:7890").
+    pub container_url: String,
 }
 
 /// Human-readable pod name to distinguish multiple pods for the same repo.
@@ -123,6 +125,7 @@ struct PodLaunchResponse {
     /// Environment variables captured by probing the user's shell init files.
     probed_env: HashMap<String, String>,
     user_shell: String,
+    container_url: String,
 }
 
 /// Request body for stop_pod endpoint.
@@ -234,6 +237,7 @@ pub struct EnsureClaudeConfigRequest {
     pub container_id: ContainerId,
     pub user: String,
     pub docker_socket: PathBuf,
+    pub container_url: String,
     /// Install a Claude PermissionRequest hook that auto-approves all tool use.
     pub auto_approve_hook: bool,
 }
@@ -351,6 +355,7 @@ impl Daemon for DaemonClient {
                 image_built: body.image_built,
                 probed_env: body.probed_env,
                 user_shell: body.user_shell,
+                container_url: body.container_url,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -381,6 +386,7 @@ impl Daemon for DaemonClient {
                 image_built: body.image_built,
                 probed_env: body.probed_env,
                 user_shell: body.user_shell,
+                container_url: body.container_url,
             })
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
@@ -622,6 +628,7 @@ async fn launch_pod_handler<D: Daemon>(
             image_built: launch_result.image_built,
             probed_env: launch_result.probed_env,
             user_shell: launch_result.user_shell,
+            container_url: launch_result.container_url,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -647,6 +654,7 @@ async fn recreate_pod_handler<D: Daemon>(
             image_built: res.image_built,
             probed_env: res.probed_env,
             user_shell: res.user_shell,
+            container_url: res.container_url,
         })),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -887,6 +895,7 @@ mod tests {
                 image_built: false,
                 probed_env: HashMap::new(),
                 user_shell: "/bin/sh".to_string(),
+                container_url: String::new(),
             })
         }
 
@@ -904,6 +913,7 @@ mod tests {
                 image_built: false,
                 probed_env: HashMap::new(),
                 user_shell: "/bin/sh".to_string(),
+                container_url: String::new(),
             })
         }
 

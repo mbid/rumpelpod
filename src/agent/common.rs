@@ -5,15 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
-use bollard::Docker;
 use indoc::formatdoc;
 use log::debug;
 use strum::{Display, EnumString};
 
 use crate::config::{get_runtime_dir, is_deterministic_test_mode, Model};
-use crate::docker_exec::{
-    exec_capture_with_timeout, exec_check, exec_command, exec_with_stdin, ExecResult,
-};
+use crate::pod_client::PodClient;
 use rand::{distr::Alphanumeric, RngExt};
 
 /// Starting PID for deterministic mode. We start at 1000 so PIDs are easy to
@@ -93,16 +90,6 @@ pub fn model_provider(model: Model) -> Provider {
         Model::Gemini25Flash | Model::Gemini3Flash | Model::Gemini3Pro => Provider::Gemini,
         Model::Grok41Fast | Model::Grok41FastNonReasoning => Provider::Xai,
     }
-}
-
-/// Create a Docker connection for executing commands in containers.
-fn docker_connect(docker_socket: &Path) -> Result<Docker> {
-    Docker::connect_with_socket(
-        docker_socket.to_string_lossy().as_ref(),
-        120,
-        bollard::API_DEFAULT_VERSION,
-    )
-    .context("connecting to Docker daemon")
 }
 
 pub const BASE_SYSTEM_PROMPT: &str = "You are a helpful assistant running inside a sandboxed environment. You can execute bash commands to help the user.";
@@ -201,28 +188,12 @@ impl ToolName {
 }
 
 /// Read AGENTS.md from the pod if it exists.
-pub fn read_agents_md(
-    container_name: &str,
-    user: &str,
-    repo_path: &Path,
-    docker_socket: &Path,
-) -> Option<String> {
+pub fn read_agents_md(pod: &PodClient, repo_path: &Path) -> Option<String> {
     debug!("Reading {} from pod", AGENTS_MD_PATH);
-    let docker = docker_connect(docker_socket).ok()?;
-    let workdir = repo_path.to_string_lossy().to_string();
-
-    let output = exec_command(
-        &docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        Some(vec!["GIT_EDITOR=false"]),
-        vec!["cat", AGENTS_MD_PATH],
-    )
-    .ok()?;
-
+    let agents_path = repo_path.join(AGENTS_MD_PATH);
+    let data = pod.fs_read(&agents_path).ok()?;
     debug!("{} loaded successfully", AGENTS_MD_PATH);
-    String::from_utf8(output).ok()
+    String::from_utf8(data).ok()
 }
 
 pub fn build_system_prompt(agents_md: Option<&str>) -> String {
@@ -232,34 +203,17 @@ pub fn build_system_prompt(agents_md: Option<&str>) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn execute_edit_in_pod(
-    container_name: &str,
-    user: &str,
+    pod: &PodClient,
     repo_path: &Path,
-    docker_socket: &Path,
-    remote_env: &[(String, String)],
     file_path: &str,
     old_string: &str,
     new_string: &str,
 ) -> Result<(String, bool)> {
-    let docker = docker_connect(docker_socket)?;
-    let workdir = repo_path.to_string_lossy().to_string();
-    let mut env: Vec<String> = vec!["GIT_EDITOR=false".to_string()];
-    for (k, v) in remote_env {
-        env.push(format!("{k}={v}"));
-    }
-    let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
+    let full_path = repo_path.join(file_path);
 
     debug!("Reading file for edit: {}", file_path);
-    let output = match exec_command(
-        &docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        Some(env.clone()),
-        vec!["cat", file_path],
-    ) {
+    let output = match pod.fs_read(&full_path) {
         Ok(output) => output,
         Err(e) => return Ok((format!("Error reading file: {e}"), false)),
     };
@@ -289,18 +243,7 @@ pub fn execute_edit_in_pod(
     let new_content = content.replacen(old_string, new_string, 1);
 
     debug!("Writing edited file: {}", file_path);
-    let escaped_path = file_path.replace('\'', "'\\''");
-    let write_cmd = format!("cat > '{escaped_path}'");
-
-    if let Err(e) = exec_with_stdin(
-        &docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        Some(env),
-        vec!["bash", "-c", &write_cmd],
-        Some(new_content.as_bytes()),
-    ) {
+    if let Err(e) = pod.fs_write(&full_path, new_content.as_bytes(), None, false) {
         return Ok((format!("Error writing file: {e}"), false));
     }
     debug!("Write completed");
@@ -309,65 +252,24 @@ pub fn execute_edit_in_pod(
 }
 
 pub fn execute_write_in_pod(
-    container_name: &str,
-    user: &str,
+    pod: &PodClient,
     repo_path: &Path,
-    docker_socket: &Path,
-    remote_env: &[(String, String)],
     file_path: &str,
     content: &str,
 ) -> Result<(String, bool)> {
-    let docker = docker_connect(docker_socket)?;
-    let workdir = repo_path.to_string_lossy().to_string();
-    let mut env: Vec<String> = vec!["GIT_EDITOR=false".to_string()];
-    for (k, v) in remote_env {
-        env.push(format!("{k}={v}"));
-    }
-    let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
+    let full_path = repo_path.join(file_path);
 
     debug!("Checking if file exists: {}", file_path);
-    let exists = exec_check(
-        &docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        vec!["test", "-e", file_path],
-    )
-    .context("Failed to check if file exists")?;
-
-    if exists {
-        return Ok((format!("File {file_path} already exists"), false));
-    }
-
-    if let Some(parent) = std::path::Path::new(file_path).parent() {
-        if !parent.as_os_str().is_empty() {
-            let escaped_parent = parent.display().to_string().replace('\'', "'\\''");
-            let mkdir_cmd = format!("mkdir -p '{escaped_parent}'");
-            debug!("Creating parent directories for: {}", file_path);
-            let _ = exec_command(
-                &docker,
-                container_name,
-                Some(user),
-                Some(&workdir),
-                Some(env.clone()),
-                vec!["bash", "-c", &mkdir_cmd],
-            );
+    match pod.fs_stat(&full_path) {
+        Ok(stat) if stat.exists => {
+            return Ok((format!("File {file_path} already exists"), false));
         }
+        _ => {}
     }
 
     debug!("Writing new file: {}", file_path);
-    let escaped_path = file_path.replace('\'', "'\\''");
-    let write_cmd = format!("cat > '{escaped_path}'");
-
-    if let Err(e) = exec_with_stdin(
-        &docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        Some(env),
-        vec!["bash", "-c", &write_cmd],
-        Some(content.as_bytes()),
-    ) {
+    // create_parents: true will create parent directories
+    if let Err(e) = pod.fs_write(&full_path, content.as_bytes(), None, true) {
         return Ok((format!("Error writing file: {e}"), false));
     }
     debug!("Write completed");
@@ -376,13 +278,15 @@ pub fn execute_write_in_pod(
 }
 
 pub fn execute_bash_in_pod(
-    container_name: &str,
+    pod: &PodClient,
+    pod_name: &str,
     user: &str,
     repo_path: &Path,
-    docker_socket: &Path,
     remote_env: &[(String, String)],
     command: &str,
 ) -> Result<(String, bool)> {
+    use base64::Engine;
+
     const MAX_OUTPUT_SIZE: usize = 30000;
 
     // Get timeout from env or default to 120s
@@ -390,20 +294,16 @@ pub fn execute_bash_in_pod(
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_BASH_TIMEOUT);
-    let timeout = std::time::Duration::from_secs(timeout_secs);
 
-    let docker = docker_connect(docker_socket)?;
-    let workdir = repo_path.to_string_lossy().to_string();
     let mut env: Vec<String> = vec!["GIT_EDITOR=false".to_string()];
     for (k, v) in remote_env {
         env.push(format!("{k}={v}"));
     }
-    let env: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
 
     // Generate ID for output file. In deterministic mode, we use the PID we're
     // about to assign to the command for a unique but predictable filename.
     let (id, deterministic_pid) = if is_deterministic_test_mode()? {
-        let pid = get_next_deterministic_pid(container_name)?;
+        let pid = get_next_deterministic_pid(pod_name)?;
         (pid.to_string(), Some(pid))
     } else {
         let random_id: String = rand::rng()
@@ -418,153 +318,144 @@ pub fn execute_bash_in_pod(
     debug!("Executing bash in pod: {}", command);
 
     // In test mode, set ns_last_pid to get a deterministic PID for this command.
-    // This requires the container to run in privileged mode (set by daemon when
-    // RUMPELPOD_TEST_DETERMINISTIC_IDS is enabled), which makes /proc/sys writable.
     if let Some(next_pid) = deterministic_pid {
         let ns_last_pid = next_pid - 1;
-        // Set ns_last_pid so the next process gets `next_pid`.
-        // We run this as root since writing to ns_last_pid requires CAP_SYS_ADMIN.
-        exec_command(
-            &docker,
-            container_name,
-            Some("root"),
-            None,
-            None,
-            vec![
+        pod.run(
+            &[
                 "sh",
                 "-c",
                 &format!("echo {ns_last_pid} > /proc/sys/kernel/ns_last_pid"),
             ],
+            Some("root"),
+            None,
+            &[],
+            None,
+            None,
         )
         .context("failed to set ns_last_pid for deterministic PIDs")?;
     }
 
     // Wrapper to print PID and redirect to file + tee
-    // echo $$ prints the PID of the shell.
-    // We use a subshell or block for the command so we can redirect its output.
-    // We use `set -o pipefail` so if the command fails, the pipeline fails (and we get the exit code).
-    // Use stdbuf to disable output buffering on tee, so the output file
-    // stays up to date even when tee's stdout is a pipe (not a TTY).
     let wrapped_command = format!(
         "mkdir -p /tmp/agent; echo $$; set -o pipefail; ( {command} ) 2>&1 | stdbuf -o0 tee {output_file}"
     );
 
-    let exec_result = exec_capture_with_timeout(
-        &docker,
-        container_name,
-        Some(user),
-        Some(&workdir),
-        Some(env),
-        vec!["bash", "-c", &wrapped_command],
-        timeout,
-    )
-    .context("Failed to execute command in pod")?;
+    let result = pod
+        .run(
+            &["bash", "-c", &wrapped_command],
+            Some(user),
+            Some(repo_path),
+            &env,
+            None,
+            Some(timeout_secs),
+        )
+        .context("Failed to execute command in pod")?;
 
-    match exec_result {
-        ExecResult::Completed(output) => {
-            debug!(
-                "Bash command completed with exit code: {}",
-                output.exit_code
-            );
+    let stdout = base64::engine::general_purpose::STANDARD
+        .decode(&result.stdout)
+        .unwrap_or_default();
+    let stderr = base64::engine::general_purpose::STANDARD
+        .decode(&result.stderr)
+        .unwrap_or_default();
 
-            let mut combined_bytes = output.stdout;
-            // Append any stderr just in case (though tee redirects to stdout)
-            if !output.stderr.is_empty() {
-                combined_bytes.push(b'\n');
-                combined_bytes.extend_from_slice(&output.stderr);
-            }
+    if result.timed_out {
+        debug!("Bash command timed out");
 
-            // Remove PID line (first line)
-            if let Some(idx) = combined_bytes.iter().position(|&b| b == b'\n') {
-                combined_bytes = combined_bytes[idx + 1..].to_vec();
-            } else {
-                // Only PID or empty?
-                combined_bytes.clear();
-            }
-
-            // Check if output exceeds limit
-            let len = combined_bytes.len();
-            if len > MAX_OUTPUT_SIZE {
-                return Ok((
-                    formatdoc! {r#"
-                        Output is too large ({len} bytes). Full output available at {output_file}.
-                        Use `tail -n 100 {output_file}` to see the end of the output, or `grep` to search.
-                    "#},
-                    false,
-                ));
-            }
-
-            // Validate UTF-8
-            let combined = match String::from_utf8(combined_bytes) {
-                Ok(s) => s,
-                Err(_) => {
-                    return Ok((
-                        format!(
-                            "Output is not valid UTF-8. Full output available at {output_file}"
-                        ),
-                        false,
-                    ));
-                }
-            };
-
-            let success = output.exit_code == 0;
-
-            // If command failed with no output, report the exit status
-            if !success && combined.is_empty() {
-                return Ok((format!("exited with status {}", output.exit_code), false));
-            }
-
-            Ok((combined, success))
+        let mut combined_bytes = stdout;
+        if !stderr.is_empty() {
+            combined_bytes.push(b'\n');
+            combined_bytes.extend_from_slice(&stderr);
         }
-        ExecResult::TimedOut { stdout, stderr } => {
-            debug!("Bash command timed out");
 
-            let mut combined_bytes = stdout;
-            if !stderr.is_empty() {
-                combined_bytes.push(b'\n');
-                combined_bytes.extend_from_slice(&stderr);
-            }
+        // Extract PID
+        let pid = if let Some(idx) = combined_bytes.iter().position(|&b| b == b'\n') {
+            let pid_str = String::from_utf8_lossy(&combined_bytes[..idx]).to_string();
+            combined_bytes = combined_bytes[idx + 1..].to_vec();
+            pid_str
+        } else {
+            "unknown".to_string()
+        };
 
-            // Extract PID
-            let pid = if let Some(idx) = combined_bytes.iter().position(|&b| b == b'\n') {
-                let pid_str = String::from_utf8_lossy(&combined_bytes[..idx]).to_string();
-                combined_bytes = combined_bytes[idx + 1..].to_vec();
-                pid_str
-            } else {
-                "unknown".to_string()
-            };
+        let len = combined_bytes.len();
+        let lines_so_far = combined_bytes.iter().filter(|&&b| b == b'\n').count();
+        let next_line = lines_so_far + 1;
+        let tail_cmd = format!("tail -n +{next_line} --pid={pid} -f {output_file}");
 
-            let len = combined_bytes.len();
-            let lines_so_far = combined_bytes.iter().filter(|&&b| b == b'\n').count();
-            let next_line = lines_so_far + 1;
-            let tail_cmd = format!("tail -n +{next_line} --pid={pid} -f {output_file}");
-
-            if len > MAX_OUTPUT_SIZE {
-                return Ok((
-                    formatdoc! {r#"
-                        Command timed out after {timeout_secs} seconds.
-                        Process is still running with PID {pid}.
-                        Output so far is too large ({len} bytes). Full output available at {output_file}.
-                        To get remaining output: `{tail_cmd}`
-                    "#},
-                    false,
-                ));
-            }
-
-            let combined = String::from_utf8_lossy(&combined_bytes).to_string();
-
-            Ok((
+        if len > MAX_OUTPUT_SIZE {
+            return Ok((
                 formatdoc! {r#"
                     Command timed out after {timeout_secs} seconds.
                     Process is still running with PID {pid}.
-                    Output so far (saved to {output_file}):
-                    {combined}
+                    Output so far is too large ({len} bytes). Full output available at {output_file}.
                     To get remaining output: `{tail_cmd}`
                 "#},
                 false,
-            ))
+            ));
         }
+
+        let combined = String::from_utf8_lossy(&combined_bytes).to_string();
+
+        return Ok((
+            formatdoc! {r#"
+                Command timed out after {timeout_secs} seconds.
+                Process is still running with PID {pid}.
+                Output so far (saved to {output_file}):
+                {combined}
+                To get remaining output: `{tail_cmd}`
+            "#},
+            false,
+        ));
     }
+
+    debug!(
+        "Bash command completed with exit code: {}",
+        result.exit_code
+    );
+
+    let mut combined_bytes = stdout;
+    if !stderr.is_empty() {
+        combined_bytes.push(b'\n');
+        combined_bytes.extend_from_slice(&stderr);
+    }
+
+    // Remove PID line (first line)
+    if let Some(idx) = combined_bytes.iter().position(|&b| b == b'\n') {
+        combined_bytes = combined_bytes[idx + 1..].to_vec();
+    } else {
+        combined_bytes.clear();
+    }
+
+    // Check if output exceeds limit
+    let len = combined_bytes.len();
+    if len > MAX_OUTPUT_SIZE {
+        return Ok((
+            formatdoc! {r#"
+                Output is too large ({len} bytes). Full output available at {output_file}.
+                Use `tail -n 100 {output_file}` to see the end of the output, or `grep` to search.
+            "#},
+            false,
+        ));
+    }
+
+    // Validate UTF-8
+    let combined = match String::from_utf8(combined_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok((
+                format!("Output is not valid UTF-8. Full output available at {output_file}"),
+                false,
+            ));
+        }
+    };
+
+    let success = result.exit_code == 0;
+
+    // If command failed with no output, report the exit status
+    if !success && combined.is_empty() {
+        return Ok((format!("exited with status {}", result.exit_code), false));
+    }
+
+    Ok((combined, success))
 }
 
 /// Prompts user to confirm exit when they submit empty input.

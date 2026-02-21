@@ -18,6 +18,7 @@ use crate::llm::types::anthropic::{
     Role, ServerTool, StopReason, SystemBlock, SystemPrompt, ThinkingConfig, Tool,
     WebSearchToolType,
 };
+use crate::pod_client::PodClient;
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_pod, execute_edit_in_pod,
@@ -163,13 +164,14 @@ pub fn run_claude_agent(
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
     let docker_socket = &launch_result.docker_socket;
+    let pod = PodClient::new(&launch_result.container_url);
 
     // Resolve ${containerEnv:VAR} now that the container is running
     let remote_env = resolve_remote_env(&remote_env, docker_socket, container_name);
     let remote_env = merge_env(launch_result.probed_env.clone(), remote_env);
 
     // Read AGENTS.md once at startup to include project-specific instructions
-    let agents_md = read_agents_md(container_name, user, repo_path, docker_socket);
+    let agents_md = read_agents_md(&pod, repo_path);
     let system_prompt = build_system_prompt(agents_md.as_deref());
 
     loop {
@@ -371,10 +373,10 @@ pub fn run_claude_agent(
                                 println!("$ {command}");
 
                                 let (output, success) = execute_bash_in_pod(
-                                    container_name,
+                                    &pod,
+                                    pod_name,
                                     user,
                                     repo_path,
-                                    docker_socket,
                                     &remote_env,
                                     command,
                                 )?;
@@ -400,14 +402,7 @@ pub fn run_claude_agent(
                                     .unwrap_or("");
 
                                 let (output, success) = execute_edit_in_pod(
-                                    container_name,
-                                    user,
-                                    repo_path,
-                                    docker_socket,
-                                    &remote_env,
-                                    file_path,
-                                    old_string,
-                                    new_string,
+                                    &pod, repo_path, file_path, old_string, new_string,
                                 )?;
 
                                 if success {
@@ -426,15 +421,8 @@ pub fn run_claude_agent(
                                 let content =
                                     input.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-                                let (output, success) = execute_write_in_pod(
-                                    container_name,
-                                    user,
-                                    repo_path,
-                                    docker_socket,
-                                    &remote_env,
-                                    file_path,
-                                    content,
-                                )?;
+                                let (output, success) =
+                                    execute_write_in_pod(&pod, repo_path, file_path, content)?;
 
                                 if success {
                                     println!("[write] {file_path}");
