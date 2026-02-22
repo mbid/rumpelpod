@@ -664,10 +664,20 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
     // Clone submodules on first entry
     if req.is_first_entry {
         for sub in &req.submodules {
-            let parent_dir = if let Some(parent) = Path::new(&sub.displaypath).parent() {
-                container_repo_path.join(parent)
-            } else {
+            // Derive the parent worktree by stripping `path` (relative to
+            // the immediate parent) from `displaypath` (relative to the
+            // top-level repo).  Using displaypath.parent() would be wrong
+            // for submodules whose path contains slashes (e.g.
+            // "libs/child-sub").
+            let parent_prefix = sub
+                .displaypath
+                .strip_suffix(&sub.path)
+                .unwrap_or("")
+                .trim_end_matches('/');
+            let parent_dir = if parent_prefix.is_empty() {
                 container_repo_path.to_path_buf()
+            } else {
+                container_repo_path.join(parent_prefix)
             };
 
             let sub_url = format!(

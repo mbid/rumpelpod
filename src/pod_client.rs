@@ -168,6 +168,7 @@ impl PodClient {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn git_setup_remotes(
         &self,
         repo_path: &Path,
@@ -202,6 +203,7 @@ impl PodClient {
         Ok(resp.first_install)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn git_setup_submodules(
         &self,
         repo_path: &Path,
