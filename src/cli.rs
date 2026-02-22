@@ -187,7 +187,7 @@ Examples:
     #[command(hide = true)]
     ContainerServe {
         /// Port to listen on (defaults to 7890)
-        #[arg(long, default_value_t = crate::container_serve::DEFAULT_PORT)]
+        #[arg(long, default_value_t = crate::pod::DEFAULT_PORT)]
         port: u16,
         /// Bearer token for authenticating POST requests
         #[arg(long)]

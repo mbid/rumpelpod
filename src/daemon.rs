@@ -38,8 +38,7 @@ use protocol::{
 };
 use ssh_forward::SshForwardManager;
 
-use crate::container_serve::SubmoduleEntry;
-use crate::pod_client::PodClient;
+use crate::pod::{PodClient, SubmoduleEntry};
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";
@@ -1598,7 +1597,7 @@ fn get_container_endpoint(
     docker_host: &DockerHost,
     ssh_forward: &SshForwardManager,
 ) -> Result<ContainerEndpoint> {
-    let default_port = crate::container_serve::DEFAULT_PORT;
+    let default_port = crate::pod::DEFAULT_PORT;
 
     match get_container_bridge_ip(docker, container_id)? {
         None => {
@@ -1683,7 +1682,7 @@ fn start_container_server(
             Some("root"),
             None,
             None,
-            vec!["cat", crate::container_serve::TOKEN_FILE],
+            vec!["cat", crate::pod::TOKEN_FILE],
         )
         .context("reading container server token")?;
         return Ok(String::from_utf8_lossy(&token_bytes).trim().to_string());
@@ -2339,14 +2338,14 @@ impl Daemon for DaemonServer {
                 )?;
             }
 
-            let user_info =
-                pod.user_info(&user)
-                    .unwrap_or_else(|_| crate::container_serve::UserInfoResponse {
-                        home: String::new(),
-                        shell: "/bin/sh".to_string(),
-                        uid: 0,
-                        gid: 0,
-                    });
+            let user_info = pod
+                .user_info(&user)
+                .unwrap_or_else(|_| crate::pod::UserInfoResponse {
+                    home: String::new(),
+                    shell: "/bin/sh".to_string(),
+                    uid: 0,
+                    gid: 0,
+                });
             let user_shell = user_info.shell;
 
             return Ok(LaunchResult {
@@ -2584,14 +2583,14 @@ impl Daemon for DaemonServer {
             }
         }
 
-        let user_info =
-            pod.user_info(&user)
-                .unwrap_or_else(|_| crate::container_serve::UserInfoResponse {
-                    home: String::new(),
-                    shell: "/bin/sh".to_string(),
-                    uid: 0,
-                    gid: 0,
-                });
+        let user_info = pod
+            .user_info(&user)
+            .unwrap_or_else(|_| crate::pod::UserInfoResponse {
+                home: String::new(),
+                shell: "/bin/sh".to_string(),
+                uid: 0,
+                gid: 0,
+            });
         let user_shell = user_info.shell;
 
         Ok(LaunchResult {

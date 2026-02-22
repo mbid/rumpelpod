@@ -17,7 +17,7 @@ use crate::llm::types::xai::{
     FunctionCall, Message, MessageContent, MessageContentPart, Model, ResponseInput,
     ResponseInputItem, ResponseOutputItem, ResponseRequest, Role, Tool, ToolCall, ToolCallType,
 };
-use crate::pod_client::PodClient;
+use crate::pod::PodClient;
 
 use super::common::{
     build_system_prompt, confirm_exit, execute_bash_in_pod, execute_edit_in_pod,

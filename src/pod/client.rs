@@ -9,21 +9,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
-use crate::container_serve::{
-    FsChownRequest, FsMkdirRequest, FsReadRequest, FsReadResponse, FsStatRequest, FsStatResponse,
-    FsWriteRequest, GitApplyPatchRequest, GitCloneRequest, GitInstallHookRequest,
-    GitInstallHookResponse, GitSanitizeRequest, GitSetupRemotesRequest, GitSetupSubmodulesRequest,
-    GitSnapshotRequest, GitSnapshotResponse, ProbeEnvRequest, ProbeEnvResponse, RunRequest,
-    RunResponse, SubmoduleEntry, UserInfoRequest, UserInfoResponse,
-};
+use super::types::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
     error: String,
 }
-
-use serde::{Deserialize, Serialize};
 
 pub struct PodClient {
     client: reqwest::blocking::Client,
@@ -356,16 +349,4 @@ impl PodClient {
         let _: serde_json::Value = self.post(path, body)?;
         Ok(())
     }
-}
-
-fn base64_encode(data: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(data)
-}
-
-fn base64_decode(s: &str) -> Result<Vec<u8>> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(s)
-        .context("base64 decode")
 }

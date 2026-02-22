@@ -10,7 +10,7 @@ use log::debug;
 use strum::{Display, EnumString};
 
 use crate::config::{get_runtime_dir, is_deterministic_test_mode, Model};
-use crate::pod_client::PodClient;
+use crate::pod::PodClient;
 use rand::{distr::Alphanumeric, RngExt};
 
 /// Starting PID for deterministic mode. We start at 1000 so PIDs are easy to
