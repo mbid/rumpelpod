@@ -1,0 +1,112 @@
+name: Build and Release
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # build.rs embeds version info from git history
+          fetch-depth: 0
+
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build musl toolchains
+        run: |
+          curl -fsSL https://musl.libc.org/releases/musl-1.2.5.tar.gz | tar xz -C /tmp
+          for target_arch in x86_64 aarch64; do
+            if [ "$target_arch" = "x86_64" ]; then
+              cross=x86_64-linux-gnu-
+            else
+              cross=aarch64-linux-gnu-
+            fi
+            mkdir /tmp/musl-build-$target_arch && cd /tmp/musl-build-$target_arch
+            CROSS_COMPILE="$cross" /tmp/musl-1.2.5/configure \
+              --prefix=/opt/musl/$target_arch --target=$target_arch
+            make -j$(nproc) && sudo make install
+            sudo cp /opt/musl/$target_arch/bin/musl-gcc /usr/local/bin/${target_arch}-linux-musl-gcc
+          done
+          rm -rf /tmp/musl-1.2.5 /tmp/musl-build-*
+
+      - name: Add Rust musl targets
+        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+      - name: Build linux-amd64
+        run: cargo build --release --bin rumpel --target x86_64-unknown-linux-musl
+
+      - name: Build linux-arm64
+        run: cargo build --release --bin rumpel --target aarch64-unknown-linux-musl
+
+      - name: Stage binaries
+        run: |
+          mkdir staging
+          cp target/x86_64-unknown-linux-musl/release/rumpel staging/rumpel-linux-amd64
+          cp target/aarch64-unknown-linux-musl/release/rumpel staging/rumpel-linux-arm64
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-binaries
+          path: staging/
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build darwin-arm64
+        run: cargo build --release --bin rumpel --target aarch64-apple-darwin
+
+      - name: Stage binary
+        run: |
+          mkdir staging
+          cp target/aarch64-apple-darwin/release/rumpel staging/rumpel-darwin-arm64
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: macos-binaries
+          path: staging/
+
+  release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: linux-binaries
+          path: staging/
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: macos-binaries
+          path: staging/
+
+      - name: Create tarball
+        run: |
+          tar -C staging -czf rumpel.tar.gz \
+            rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: release-tarball
+          path: rumpel.tar.gz
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" rumpel.tar.gz \
+            --title "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}"
