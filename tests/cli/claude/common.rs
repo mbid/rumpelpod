@@ -1,7 +1,7 @@
 //! Common utilities for claude integration tests.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use tempfile::TempDir;
 
 use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH};
 
@@ -77,15 +78,57 @@ pub fn write_claude_test_config(repo: &TestRepo, image_id: &ImageId) {
     std::fs::write(repo.path().join(".rumpelpod.toml"), "").expect("write .rumpelpod.toml");
 }
 
+/// Create a temp directory that acts as HOME for the test process.
+///
+/// Contains only the minimal config files needed for `copy_claude_config`
+/// in the daemon, so tests don't depend on the real user's Claude config.
+/// Includes fake OAuth credentials so the CLI considers the user "logged
+/// in" without needing the host's real tokens.
+fn create_controlled_home() -> TempDir {
+    let home =
+        TempDir::with_prefix("rumpelpod-claude-home-").expect("create controlled HOME temp dir");
+
+    // Minimal .claude.json: skip onboarding and accept bypass mode.
+    // strip_claude_json in the daemon will add per-project trust entries.
+    std::fs::write(
+        home.path().join(".claude.json"),
+        r#"{"hasCompletedOnboarding":true,"lastOnboardingVersion":"999.0.0","bypassPermissionsModeAccepted":true}"#,
+    )
+    .expect("write controlled .claude.json");
+
+    let claude_dir = home.path().join(".claude");
+    std::fs::create_dir(&claude_dir).expect("create controlled .claude dir");
+    std::fs::write(claude_dir.join("settings.json"), "{}").expect("write controlled settings.json");
+
+    // The Claude CLI refuses to make API calls unless it sees OAuth
+    // credentials (it shows "Not logged in" otherwise).  Provide fake
+    // tokens with a far-future expiry so the CLI skips token refresh.
+    // The proxy replaces the auth header before forwarding to the real
+    // API, so these dummy values never reach Anthropic.
+    std::fs::write(
+        claude_dir.join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-fake-test-token-AAAAAAAAAAAAAAAAAA-BBBBBBBBBBBBBBBBBBB-CCCCCCCCCCCCCCCCCCCCCCCC","refreshToken":"sk-ant-ort01-fake-test-token-AAAAAAAAAAAAAAAAAA-BBBBBBBBBBBBBBBBBBB-CCCCCCCCCCCCCCCCCCCCCCCC","expiresAt":4102444800000,"scopes":["user:inference"],"subscriptionType":"max","rateLimitTier":"default_claude_max_5x"}}"#,
+    )
+    .expect("write controlled .credentials.json");
+
+    home
+}
+
 /// Build the image, write config, and start a daemon -- everything needed
 /// before running a claude command.
-pub fn setup_claude_test_repo(proxy: &ClaudeTestProxy) -> (TestRepo, TestDaemon) {
+///
+/// Returns the controlled HOME temp dir alongside the repo and daemon so
+/// it is not dropped (and cleaned up) before the test finishes.
+pub fn setup_claude_test_repo(proxy: &ClaudeTestProxy) -> (TestRepo, TestDaemon, TempDir) {
     let _ = proxy; // used only to ensure the proxy is started first
     let repo = TestRepo::new();
     let image_id = build_claude_test_image(&repo);
     write_claude_test_config(&repo, &image_id);
-    let daemon = TestDaemon::start();
-    (repo, daemon)
+    // Create the controlled home before starting the daemon so
+    // copy_claude_config (which runs in the daemon) reads our files.
+    let fake_home = create_controlled_home();
+    let daemon = TestDaemon::start_with_home(fake_home.path());
+    (repo, daemon, fake_home)
 }
 
 // Tall enough to hold long responses without scrolling off, normal width.
@@ -121,6 +164,7 @@ impl ClaudeSession {
         repo: &TestRepo,
         daemon: &TestDaemon,
         proxy: &ClaudeTestProxy,
+        home: &Path,
         model: &str,
         claude_args: &[&str],
     ) -> Self {
@@ -140,6 +184,9 @@ impl ClaudeSession {
 
         let mut cmd = CommandBuilder::new("rumpel");
         cmd.cwd(repo.path());
+        // Isolate from the host user's Claude config so that
+        // copy_claude_config reads our controlled files instead.
+        cmd.env("HOME", home.to_str().unwrap());
         cmd.env(
             "RUMPELPOD_DAEMON_SOCKET",
             daemon.socket_path.to_str().unwrap(),

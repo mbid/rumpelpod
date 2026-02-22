@@ -53,7 +53,7 @@ const SSH_CONFIG_FILE_ENV: &str = "SSH_CONFIG_FILE";
 impl TestDaemon {
     /// Start a new test daemon with an isolated socket and state directory.
     pub fn start() -> Self {
-        Self::start_internal(None)
+        Self::start_internal(None, None)
     }
 
     /// Start a new test daemon with a custom SSH config file.
@@ -61,10 +61,18 @@ impl TestDaemon {
     /// This is used for testing SSH remote Docker functionality. The daemon
     /// will use the specified SSH config file for all SSH connections.
     pub fn start_with_ssh_config(ssh_config: &Path) -> Self {
-        Self::start_internal(Some(ssh_config))
+        Self::start_internal(Some(ssh_config), None)
     }
 
-    fn start_internal(ssh_config: Option<&Path>) -> Self {
+    /// Start a new test daemon with a custom HOME directory.
+    ///
+    /// This isolates the daemon from the host user's config files
+    /// (e.g. Claude's ~/.claude.json).
+    pub fn start_with_home(home: &Path) -> Self {
+        Self::start_internal(None, Some(home))
+    }
+
+    fn start_internal(ssh_config: Option<&Path>, home: Option<&Path>) -> Self {
         let temp_dir =
             TempDir::with_prefix("rumpelpod-test-").expect("Failed to create temp directory");
 
@@ -100,6 +108,10 @@ impl TestDaemon {
 
         if let Some(config_path) = ssh_config {
             cmd.env(SSH_CONFIG_FILE_ENV, config_path);
+        }
+
+        if let Some(home_path) = home {
+            cmd.env("HOME", home_path);
         }
 
         let process = cmd
