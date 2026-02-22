@@ -189,6 +189,9 @@ Examples:
         /// Port to listen on (defaults to 7890)
         #[arg(long, default_value_t = crate::container_serve::DEFAULT_PORT)]
         port: u16,
+        /// Bearer token for authenticating POST requests
+        #[arg(long)]
+        token: String,
     },
 
     /// Install the rumpelpod daemon as a system service

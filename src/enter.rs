@@ -259,6 +259,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         probed_env,
         user_shell,
         container_url: _,
+        container_token: _,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 

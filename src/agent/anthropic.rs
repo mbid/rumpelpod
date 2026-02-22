@@ -164,7 +164,7 @@ pub fn run_claude_agent(
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
     let docker_socket = &launch_result.docker_socket;
-    let pod = PodClient::new(&launch_result.container_url);
+    let pod = PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
 
     // Resolve ${containerEnv:VAR} now that the container is running
     let remote_env = resolve_remote_env(&remote_env, docker_socket, container_name);

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::async_runtime::block_on;
 
 pub const DEFAULT_PORT: u16 = 7890;
+pub const TOKEN_FILE: &str = "/tmp/rumpelpod-server-token";
 
 // ---------------------------------------------------------------------------
 // Shared request/response types (also used by PodClient)
@@ -217,9 +218,9 @@ struct ErrorResponse {
 // Server entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_container_server(port: u16) -> ! {
-    let app = Router::new()
-        .route("/health", get(health_handler))
+pub fn run_container_server(port: u16, token: String) -> ! {
+    // POST routes require bearer token authentication
+    let authenticated_routes = Router::new()
         .route("/fs/read", post(fs_read_handler))
         .route("/fs/write", post(fs_write_handler))
         .route("/fs/stat", post(fs_stat_handler))
@@ -234,16 +235,45 @@ pub fn run_container_server(port: u16) -> ! {
         .route("/git/apply-patch", post(git_apply_patch_handler))
         .route("/env/user-info", post(env_user_info_handler))
         .route("/env/probe", post(env_probe_handler))
-        .route("/run", post(run_handler));
+        .route("/run", post(run_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            token.clone(),
+            require_bearer_token,
+        ));
+
+    let app = Router::new()
+        .route("/health", get(health_handler))
+        .merge(authenticated_routes);
 
     block_on(async {
         let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
             .await
             .expect("failed to bind container server port");
+
+        // Persist token so the daemon can recover it after restart
+        std::fs::write(TOKEN_FILE, &token).expect("failed to write token file");
+
         axum::serve(listener, app).await.unwrap();
     });
 
     unreachable!("container server exited")
+}
+
+/// Middleware that rejects requests without a valid Bearer token.
+async fn require_bearer_token(
+    axum::extract::State(expected): axum::extract::State<String>,
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let auth = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    match auth {
+        Some(value) if value == format!("Bearer {}", expected) => Ok(next.run(req).await),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
 }
 
 // ---------------------------------------------------------------------------

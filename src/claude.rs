@@ -88,6 +88,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         probed_env,
         user_shell: _,
         container_url,
+        container_token,
     } = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 
@@ -109,6 +110,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
                 user: user.clone(),
                 docker_socket: docker_socket.clone(),
                 container_url: container_url.clone(),
+                container_token: container_token.clone(),
                 auto_approve_hook: skip_permissions_hook,
             });
             trace!("ensure_claude_config: {:?}", tc.elapsed());

@@ -18,6 +18,8 @@ use bollard::secret::{
 use bollard::Docker;
 use listenfd::ListenFd;
 use log::error;
+use rand::distr::Alphanumeric;
+use rand::RngExt;
 use rusqlite::Connection;
 use tokio::net::UnixListener;
 
@@ -2309,18 +2311,17 @@ fn allocate_ephemeral_port() -> Result<u16> {
     Ok(port)
 }
 
-/// Start the in-container HTTP server via detached docker exec.
-/// Does nothing if the server is already running (health check succeeds).
+/// Start the in-container HTTP server via detached docker exec and return
+/// the bearer token for authenticating subsequent requests.
 ///
-/// `container_url` is the URL at which the server will be reachable from the daemon
-/// (already accounts for SSH forwarding, host network mode, etc).
-/// `container_port` is the port the server should bind inside the container.
+/// If the server is already running (health check succeeds), reads the
+/// persisted token from the container instead of restarting.
 fn start_container_server(
     docker: &Docker,
     container_id: &str,
     container_url: &str,
     container_port: u16,
-) -> Result<()> {
+) -> Result<String> {
     use bollard::exec::StartExecOptions;
     use bollard::secret::ExecConfig;
 
@@ -2334,8 +2335,24 @@ fn start_container_server(
         .send()
         .is_ok_and(|r| r.status().is_success())
     {
-        return Ok(());
+        // Server already running -- recover its token from the container
+        let token_bytes = exec_command(
+            docker,
+            container_id,
+            Some("root"),
+            None,
+            None,
+            vec!["cat", crate::container_serve::TOKEN_FILE],
+        )
+        .context("reading container server token")?;
+        return Ok(String::from_utf8_lossy(&token_bytes).trim().to_string());
     }
+
+    let token: String = rand::rng()
+        .sample_iter(&Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
 
     let config = ExecConfig {
         cmd: Some(vec![
@@ -2343,6 +2360,8 @@ fn start_container_server(
             "container-serve".to_string(),
             "--port".to_string(),
             container_port.to_string(),
+            "--token".to_string(),
+            token.clone(),
         ]),
         user: Some("root".to_string()),
         ..Default::default()
@@ -2367,7 +2386,7 @@ fn start_container_server(
             .send()
             .is_ok_and(|r| r.status().is_success())
         {
-            return Ok(());
+            return Ok(token);
         }
         if std::time::Instant::now() >= deadline {
             anyhow::bail!("container server did not become ready within 10 seconds");
@@ -2514,13 +2533,14 @@ fn run_lifecycle_command_via_pod(
                         StringOrArray::Array(a) => a.clone(),
                     };
                     let pod_url = pod.url().to_string();
+                    let pod_token = pod.token().to_string();
                     let u = user.to_string();
                     let wd = workdir.to_path_buf();
                     let task_name = name.clone();
                     let thread_env = env.to_vec();
 
                     std::thread::spawn(move || {
-                        let pod = PodClient::new(&pod_url);
+                        let pod = PodClient::new(&pod_url, &pod_token)?;
                         let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
                         let result =
                             pod.run(&args_ref, Some(&u), Some(&wd), &thread_env, None, None)?;
@@ -2560,13 +2580,23 @@ fn base64_decode_lossy(s: &str) -> String {
 /// Spawn lifecycle commands in background via the in-container HTTP server.
 fn spawn_background_lifecycle_commands_via_pod(
     container_url: String,
+    container_token: String,
     user: String,
     workdir: PathBuf,
     commands: Vec<(String, LifecycleCommand)>,
     env: Vec<String>,
 ) {
     std::thread::spawn(move || {
-        let pod = PodClient::new(&container_url);
+        let pod = match PodClient::new(&container_url, &container_token) {
+            Ok(p) => p,
+            Err(e) => {
+                error!(
+                    "background lifecycle: failed to connect to container server: {:#}",
+                    e
+                );
+                return;
+            }
+        };
         for (label, cmd) in &commands {
             if let Err(e) = run_lifecycle_command_via_pod(&pod, &user, &workdir, cmd, &env) {
                 error!("background {} failed: {:#}", label, e);
@@ -2805,7 +2835,12 @@ impl Daemon for DaemonServer {
             let container_url = endpoint.url;
 
             // Ensure the in-container HTTP server is running
-            start_container_server(&docker, &state.id, &container_url, endpoint.container_port)?;
+            let container_token = start_container_server(
+                &docker,
+                &state.id,
+                &container_url,
+                endpoint.container_port,
+            )?;
 
             // Ensure pod record exists in database
             let pod_id = {
@@ -2832,7 +2867,7 @@ impl Daemon for DaemonServer {
                 .insert((repo_path.clone(), pod_name.0.clone()), token.clone());
 
             let url = git_http_server::git_http_url(&server_ip, server_port);
-            let pod = PodClient::new(&container_url);
+            let pod = PodClient::new(&container_url, &container_token)?;
             let direct_config = is_direct_git_config_mode()?;
 
             // Clone repo if not already present (e.g. devcontainer without COPY)
@@ -2938,6 +2973,7 @@ impl Daemon for DaemonServer {
             if !bg_commands.is_empty() {
                 spawn_background_lifecycle_commands_via_pod(
                     container_url.clone(),
+                    container_token.clone(),
                     user.clone(),
                     container_repo_path.clone(),
                     bg_commands,
@@ -2979,6 +3015,7 @@ impl Daemon for DaemonServer {
                 probed_env,
                 user_shell,
                 container_url,
+                container_token,
             });
         }
 
@@ -3017,7 +3054,7 @@ impl Daemon for DaemonServer {
 
         // Create container and run initial git setup.  Closure used so we
         // can retry once on overlay2 filesystem errors (see below).
-        let do_create_and_setup = || -> Result<ContainerId> {
+        let do_create_and_setup = || -> Result<(ContainerId, String, String)> {
             let container_id = create_container(
                 &docker,
                 &name,
@@ -3038,13 +3075,13 @@ impl Daemon for DaemonServer {
             let endpoint_inner =
                 get_container_endpoint(&docker, &container_id.0, &docker_host, &ssh_forward)?;
             let container_url_inner = endpoint_inner.url;
-            start_container_server(
+            let container_token_inner = start_container_server(
                 &docker,
                 &container_id.0,
                 &container_url_inner,
                 endpoint_inner.container_port,
             )?;
-            let pod_inner = PodClient::new(&container_url_inner);
+            let pod_inner = PodClient::new(&container_url_inner, &container_token_inner)?;
             let direct_config = is_direct_git_config_mode()?;
 
             // Fix ownership of mount targets so the container user can write
@@ -3096,14 +3133,14 @@ impl Daemon for DaemonServer {
                 )
                 .context("setting up submodules")?;
 
-            Ok(container_id)
+            Ok((container_id, container_token_inner, container_url_inner))
         };
 
         // Docker's overlay2 storage driver occasionally fails to make the
         // container filesystem visible right after creation.  Retry once
         // after removing the broken container.
-        let container_id = match do_create_and_setup() {
-            Ok(id) => id,
+        let (container_id, container_token, container_url) = match do_create_and_setup() {
+            Ok(triple) => triple,
             Err(first_err) if is_overlay2_setup_error(&first_err) => {
                 error!(
                     "overlay2 setup error, removing container and retrying: {:#}",
@@ -3120,12 +3157,10 @@ impl Daemon for DaemonServer {
             Err(e) => return Err(mark_error(e)),
         };
 
-        // The server was started inside do_create_and_setup; derive its URL
-        // and build a client for the remaining setup steps.
-        let endpoint =
-            get_container_endpoint(&docker, &container_id.0, &docker_host, &self.ssh_forward)?;
-        let container_url = endpoint.url;
-        let pod = PodClient::new(&container_url);
+        // Reuse the URL from do_create_and_setup rather than re-deriving it,
+        // because get_container_endpoint allocates a new ephemeral port each
+        // time in host-network mode.
+        let pod = PodClient::new(&container_url, &container_token)?;
 
         // Probe user env from shell init files
         let effective_probe = devcontainer
@@ -3175,6 +3210,7 @@ impl Daemon for DaemonServer {
         if !bg_commands.is_empty() {
             spawn_background_lifecycle_commands_via_pod(
                 container_url.clone(),
+                container_token.clone(),
                 user.clone(),
                 container_repo_path.clone(),
                 bg_commands,
@@ -3224,6 +3260,7 @@ impl Daemon for DaemonServer {
             probed_env,
             user_shell,
             container_url,
+            container_token,
         })
     }
 
@@ -3263,15 +3300,20 @@ impl Daemon for DaemonServer {
                 if let Ok(endpoint) =
                     get_container_endpoint(&docker, &state.id, docker_host, &self.ssh_forward)
                 {
-                    let old_pod = PodClient::new(&endpoint.url);
-                    // Ensure server is running (may have been stopped)
-                    if old_pod
-                        .wait_ready(std::time::Duration::from_secs(2))
-                        .is_ok()
-                    {
-                        patch = old_pod
-                            .git_snapshot(&container_repo_path, snapshot_user.as_deref())
-                            .context("snapshotting dirty files")?;
+                    // Try to connect; if the server is dead, PodClient::new
+                    // fails fast (connection refused) so the 10s timeout is not
+                    // a real delay.
+                    if let Ok(container_token) = start_container_server(
+                        &docker,
+                        &state.id,
+                        &endpoint.url,
+                        endpoint.container_port,
+                    ) {
+                        if let Ok(old_pod) = PodClient::new(&endpoint.url, &container_token) {
+                            patch = old_pod
+                                .git_snapshot(&container_repo_path, snapshot_user.as_deref())
+                                .context("snapshotting dirty files")?;
+                        }
                     }
                 }
             }
@@ -3285,7 +3327,8 @@ impl Daemon for DaemonServer {
 
         // 4. Apply patch if we have one
         if let Some(patch_content) = patch {
-            let new_pod = PodClient::new(&launch_result.container_url);
+            let new_pod =
+                PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
 
             // Parse patch to identify files being created that might
             // already exist (e.g. from image).  Best-effort.
@@ -3585,7 +3628,7 @@ impl Daemon for DaemonServer {
             pod_rec.id
         };
 
-        let pod = PodClient::new(&request.container_url);
+        let pod = PodClient::new(&request.container_url, &request.container_token)?;
 
         copy_claude_config_via_pod(
             &pod,

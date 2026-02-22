@@ -28,26 +28,38 @@ use serde::{Deserialize, Serialize};
 pub struct PodClient {
     client: reqwest::blocking::Client,
     url: String,
+    token: String,
 }
 
 impl PodClient {
-    pub fn new(url: &str) -> Self {
+    /// Connect to the container server, waiting up to 10s for it to become ready.
+    ///
+    /// Health checks are unauthenticated so this works before the caller
+    /// knows whether the server is alive.
+    pub fn new(url: &str, token: &str) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(None)
             .build()
             .expect("failed to build reqwest client");
-        Self {
+        let pod = Self {
             client,
             url: url.trim_end_matches('/').to_string(),
-        }
+            token: token.to_string(),
+        };
+        pod.wait_ready(Duration::from_secs(10))?;
+        Ok(pod)
     }
 
     pub fn url(&self) -> &str {
         &self.url
     }
 
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
     /// Block until the container server responds to /health, or timeout.
-    pub fn wait_ready(&self, timeout: Duration) -> Result<()> {
+    fn wait_ready(&self, timeout: Duration) -> Result<()> {
         let deadline = std::time::Instant::now() + timeout;
         let poll_client = reqwest::blocking::Client::builder()
             .timeout(Some(Duration::from_secs(2)))
@@ -321,6 +333,7 @@ impl PodClient {
         let response = self
             .client
             .post(&url)
+            .header("Authorization", format!("Bearer {}", self.token))
             .json(body)
             .send()
             .with_context(|| format!("sending request to {}", url))?;

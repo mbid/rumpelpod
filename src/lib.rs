@@ -44,8 +44,8 @@ pub fn run() -> Result<()> {
         Command::Daemon => {
             daemon::run_daemon()?;
         }
-        Command::ContainerServe { port } => {
-            container_serve::run_container_server(port);
+        Command::ContainerServe { port, ref token } => {
+            container_serve::run_container_server(port, token.clone());
         }
         Command::SystemInstall => {
             service::system_install()?;
