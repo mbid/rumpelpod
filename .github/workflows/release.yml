@@ -94,19 +94,19 @@ jobs:
 
       - name: Create tarball
         run: |
-          tar -C staging -czf rumpel.tar.gz \
+          tar -C staging -czf "rumpel-${{ github.ref_name }}.tar.gz" \
             rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64
 
       - uses: actions/upload-artifact@v6
         with:
           name: release-tarball
-          path: rumpel.tar.gz
+          path: "rumpel-${{ github.ref_name }}.tar.gz"
 
       - name: Create GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" rumpel.tar.gz \
+          gh release create "${{ github.ref_name }}" "rumpel-${{ github.ref_name }}.tar.gz" \
             --title "${{ github.ref_name }}" \
             --repo "${{ github.repository }}"

@@ -68,10 +68,8 @@ fi
 
 # -- Package and upload ----------------------------------------------------
 
-# Use a stable tarball name (no version) so /releases/latest/download/ works
-# with a fixed URL.
-TARBALL="$STAGING/rumpel.tar.gz"
-echo "==> Packaging rumpel.tar.gz..."
+TARBALL="$STAGING/rumpel-${TAG}.tar.gz"
+echo "==> Packaging rumpel-${TAG}.tar.gz..."
 tar -C "$STAGING" -czf "$TARBALL" \
     rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64
 
