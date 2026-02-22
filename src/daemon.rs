@@ -604,15 +604,26 @@ fn ensure_repo_initialized(
     .is_ok();
 
     if lfs_installed {
-        exec_command(
+        let has_lfs_files = exec_command(
             docker,
             container_id,
             Some(user),
             Some(&repo_dir),
             None,
-            vec!["git", "lfs", "pull"],
+            vec!["sh", "-c", "git lfs ls-files 2>/dev/null | grep -q ."],
         )
-        .context("git lfs pull failed")?;
+        .is_ok();
+        if has_lfs_files {
+            exec_command(
+                docker,
+                container_id,
+                Some(user),
+                Some(&repo_dir),
+                None,
+                vec!["git", "lfs", "pull"],
+            )
+            .context("git lfs pull failed")?;
+        }
     }
 
     Ok(())

@@ -2745,3 +2745,30 @@ fn gateway_lfs_upload_from_pod() {
         "Stored LFS object content should match"
     );
 }
+
+#[test]
+fn gateway_lfs_not_used() {
+    // Pod creation must succeed when the container has git-lfs installed
+    // but the repo has no LFS-tracked files.
+    let repo = TestRepo::new();
+    std::fs::write(repo.path().join("plain.txt"), "hello\n").expect("write file");
+    Command::new("git")
+        .args(["add", "plain.txt"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git add failed");
+    create_commit(repo.path(), "add plain file");
+
+    let image_id =
+        build_test_image(repo.path(), LFS_DOCKERFILE).expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "no-lfs", "--", "cat", "plain.txt"])
+        .success()
+        .expect("pod enter failed for non-LFS repo with git-lfs installed");
+
+    assert_eq!(output, b"hello\n", "file content should match");
+}
