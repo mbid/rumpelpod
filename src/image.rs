@@ -25,8 +25,6 @@ pub struct BuildResult {
 /// Optional flags that control Docker build behavior.
 #[derive(Default)]
 pub struct BuildFlags {
-    /// Skip the image-exists check and rebuild unconditionally.
-    pub force: bool,
     /// Pass `--no-cache` to disable Docker layer caching.
     pub no_cache: bool,
     /// Pass `--pull` to pull the base image before building.
@@ -43,6 +41,24 @@ pub fn resolve_image(
     repo_root: &Path,
 ) -> Result<BuildResult> {
     if let Some(build) = &devcontainer.build {
+        // Skip the build if the image already exists on the target host, avoiding
+        // the overhead of sending build context (potentially the whole repo) over
+        // the network to a remote Docker daemon.
+        let image_name = compute_image_tag(
+            build,
+            &repo_root.join(
+                build
+                    .dockerfile
+                    .as_deref()
+                    .expect("resolved build must have dockerfile"),
+            ),
+        )?;
+        if image_exists(&image_name, docker_host) {
+            return Ok(BuildResult {
+                image: Image(image_name),
+                built: false,
+            });
+        }
         build_devcontainer_image(build, docker_host, repo_root, &BuildFlags::default())
     } else {
         Ok(BuildResult {
@@ -85,16 +101,6 @@ pub fn build_devcontainer_image(
 
     // Compute a deterministic hash of the build configuration
     let image_name = compute_image_tag(build, &dockerfile_path)?;
-
-    // Skip the build if the image already exists on the target host, avoiding
-    // the overhead of sending build context (potentially the whole repo) over
-    // the network to a remote Docker daemon.
-    if !flags.force && image_exists(&image_name, docker_host) {
-        return Ok(BuildResult {
-            image: Image(image_name),
-            built: false,
-        });
-    }
 
     // Build the Docker image
     let mut cmd = Command::new("docker");

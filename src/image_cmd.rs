@@ -20,18 +20,12 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
     };
 
     let flags = BuildFlags {
-        force: cmd.force,
         no_cache: cmd.no_cache,
         pull: cmd.pull,
     };
 
     let result = image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags)?;
-
-    if result.built {
-        println!("Image built: {}", result.image.0);
-    } else {
-        println!("Image already up to date: {}", result.image.0);
-    }
+    println!("Image built: {}", result.image.0);
 
     Ok(())
 }

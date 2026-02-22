@@ -407,7 +407,7 @@ pub enum ImageSubcommand {
     /// Build the devcontainer image from its Dockerfile
     #[command(long_about = "Build the devcontainer image from its Dockerfile.
 
-Requires 'build.dockerfile' in devcontainer.json. Skips the build if a cached image with a matching content hash already exists. Use --force to rebuild unconditionally.
+Requires 'build.dockerfile' in devcontainer.json.
 ")]
     Build(ImageBuildCommand),
 
@@ -425,10 +425,6 @@ pub struct ImageBuildCommand {
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
-
-    /// Rebuild even if the image already exists
-    #[arg(long)]
-    pub force: bool,
 
     /// Disable Docker layer cache (--no-cache)
     #[arg(long)]

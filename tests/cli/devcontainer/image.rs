@@ -376,7 +376,7 @@ fn image_build_builds_and_reports() {
 }
 
 #[test]
-fn image_build_reports_cached_on_second_run() {
+fn image_build_always_rebuilds() {
     let repo = TestRepo::new();
 
     let unique = repo.path().file_name().unwrap().to_string_lossy();
@@ -394,7 +394,7 @@ fn image_build_reports_cached_on_second_run() {
         .success()
         .expect("first image build failed");
 
-    // Second build -- should report cache hit
+    // Second build -- should rebuild, not report cached
     let stdout = rumpel_cmd(&repo)
         .args(["image", "build"])
         .success()
@@ -402,40 +402,8 @@ fn image_build_reports_cached_on_second_run() {
 
     let stdout = String::from_utf8_lossy(&stdout);
     assert!(
-        stdout.contains("Image already up to date:"),
-        "expected cache-hit message, got: {stdout}",
-    );
-}
-
-#[test]
-fn image_build_force_rebuilds() {
-    let repo = TestRepo::new();
-
-    let unique = repo.path().file_name().unwrap().to_string_lossy();
-    let dockerfile = formatdoc! {r#"
-        FROM debian:13
-        LABEL test.unique="{unique}"
-    "#};
-
-    write_test_dockerfile(&repo, &dockerfile);
-    write_devcontainer_with_build(&repo, "Dockerfile");
-
-    // First build
-    rumpel_cmd(&repo)
-        .args(["image", "build"])
-        .success()
-        .expect("first image build failed");
-
-    // Force rebuild -- should build again, not hit cache
-    let stdout = rumpel_cmd(&repo)
-        .args(["image", "build", "--force"])
-        .success()
-        .expect("forced image build failed");
-
-    let stdout = String::from_utf8_lossy(&stdout);
-    assert!(
         stdout.contains("Image built:"),
-        "expected 'Image built:' after --force, got: {stdout}",
+        "expected 'Image built:' on second run, got: {stdout}",
     );
 }
 
