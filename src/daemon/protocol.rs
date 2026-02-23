@@ -15,7 +15,7 @@ use tokio::task::block_in_place;
 use url::Url;
 
 use crate::async_runtime::block_on;
-use crate::config::DockerHost;
+use crate::config::Host;
 use crate::devcontainer::DevContainer;
 
 /// Opaque wrapper for docker image names.
@@ -107,8 +107,8 @@ pub struct PodLaunchParams {
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the pod.
     pub host_branch: Option<String>,
-    /// Where the Docker daemon lives: localhost or a remote SSH host.
-    pub docker_host: DockerHost,
+    /// Where the pod runs: localhost, a remote SSH host, or Kubernetes.
+    pub host: Host,
     /// The devcontainer.json config, with `${localEnv:...}` already resolved
     /// and build paths normalized to repo-root-relative.
     pub devcontainer: DevContainer,
@@ -1039,7 +1039,7 @@ mod tests {
             pod_name: PodName("test-sandbox".to_string()),
             repo_path: PathBuf::from("/tmp/repo"),
             host_branch: Some("main".to_string()),
-            docker_host: DockerHost::Localhost,
+            host: Host::Localhost,
             devcontainer: dc,
         });
 

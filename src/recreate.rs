@@ -20,7 +20,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         pod_name: PodName(cmd.name.clone()),
         repo_path: repo_root,
         host_branch,
-        docker_host,
+        host: docker_host,
         devcontainer,
     })?;
 

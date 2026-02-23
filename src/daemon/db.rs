@@ -8,7 +8,7 @@ use indoc::indoc;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use crate::config::DockerHost;
+use crate::config::Host;
 
 /// Strongly-typed wrapper for pod database IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +89,7 @@ pub const LOCALHOST_DB_STR: &str = "localhost";
 /// Normalize a host string from the database to the current canonical format.
 /// Handles format changes from older versions (e.g. explicit default SSH port).
 fn normalize_host(host: String) -> String {
-    DockerHost::from_db_string(&host)
+    Host::from_db_string(&host)
         .map(|h| h.to_db_string())
         .unwrap_or(host)
 }

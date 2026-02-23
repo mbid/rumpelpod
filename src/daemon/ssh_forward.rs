@@ -22,7 +22,7 @@ use log::{debug, info, warn};
 use sha2::{Digest, Sha256};
 
 use crate::command_ext::CommandExt;
-use crate::config::{get_runtime_dir, DockerHost};
+use crate::config::{get_runtime_dir, Host};
 
 /// Initial delay for exponential backoff on reconnection.
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -119,7 +119,7 @@ struct RemoteHost {
 }
 
 impl RemoteHost {
-    fn from_docker_host(host: &DockerHost) -> Self {
+    fn from_docker_host(host: &Host) -> Self {
         RemoteHost {
             destination: host.ssh_destination().to_string(),
             port: host.ssh_port(),
@@ -269,7 +269,7 @@ impl SshForwardManager {
     /// Get or create a forwarded socket for the given remote Docker specification.
     ///
     /// Returns the local socket path to use for Docker connections.
-    pub fn get_socket(&self, docker_host: &DockerHost) -> Result<PathBuf> {
+    pub fn get_socket(&self, docker_host: &Host) -> Result<PathBuf> {
         let remote_host = RemoteHost::from_docker_host(docker_host);
         self.ensure_connection(&remote_host)
     }
@@ -278,7 +278,7 @@ impl SshForwardManager {
     ///
     /// Returns the socket path if a connection already exists and is alive, otherwise None.
     /// Unlike `get_socket`, this does not create a new connection.
-    pub fn try_get_socket(&self, docker_host: &DockerHost) -> Option<PathBuf> {
+    pub fn try_get_socket(&self, docker_host: &Host) -> Option<PathBuf> {
         let remote_host = RemoteHost::from_docker_host(docker_host);
         let mut connections = self.connections.lock().unwrap();
 
@@ -535,7 +535,7 @@ impl SshForwardManager {
     /// to a local unix socket where the git HTTP server is listening.
     pub fn setup_git_http_forwards(
         &self,
-        docker_host: &DockerHost,
+        docker_host: &Host,
         local_git_socket: &Path,
         remote_bridge_ip: &str,
     ) -> Result<RemoteForwards> {
@@ -592,7 +592,7 @@ impl SshForwardManager {
     }
 
     /// Get the current remote forwards for a remote host, if any.
-    pub fn get_remote_forwards(&self, docker_host: &DockerHost) -> Option<RemoteForwards> {
+    pub fn get_remote_forwards(&self, docker_host: &Host) -> Option<RemoteForwards> {
         let host = RemoteHost::from_docker_host(docker_host);
         let connections = self.connections.lock().unwrap();
         connections
@@ -604,7 +604,7 @@ impl SshForwardManager {
     /// Add a local port forward (`-L`) through an existing SSH connection.
     pub fn add_local_forward(
         &self,
-        docker_host: &DockerHost,
+        docker_host: &Host,
         local_port: u16,
         remote_addr: &str,
         remote_port: u16,
@@ -716,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_remote_host_from_docker_host() {
-        let docker_host = DockerHost::parse("ssh://deploy@docker.example.com:2222").unwrap();
+        let docker_host = Host::parse("ssh://deploy@docker.example.com:2222").unwrap();
         let host = RemoteHost::from_docker_host(&docker_host);
         assert_eq!(host.destination, "deploy@docker.example.com");
         assert_eq!(host.port, 2222);

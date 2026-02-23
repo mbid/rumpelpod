@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
-use crate::config::DockerHost;
+use crate::config::Host;
 use crate::devcontainer::{BuildOptions, DevContainer};
 
 // Re-export so callers can use image::Image
@@ -37,7 +37,7 @@ pub struct BuildFlags {
 /// paths (via `resolve_build_paths`) before calling this.
 pub fn resolve_image(
     devcontainer: &DevContainer,
-    docker_host: &DockerHost,
+    docker_host: &Host,
     repo_root: &Path,
 ) -> Result<BuildResult> {
     if let Some(build) = &devcontainer.build {
@@ -76,7 +76,7 @@ pub fn resolve_image(
 /// Build a Docker image from devcontainer.json build configuration.
 pub fn build_devcontainer_image(
     build: &BuildOptions,
-    docker_host: &DockerHost,
+    docker_host: &Host,
     repo_root: &Path,
     flags: &BuildFlags,
 ) -> Result<BuildResult> {
@@ -167,7 +167,7 @@ pub fn build_devcontainer_image(
 /// Pull a Docker image from its registry.
 ///
 /// Inherits stdout/stderr so the user sees download progress.
-pub fn pull_image(image_name: &str, docker_host: &DockerHost) -> Result<()> {
+pub fn pull_image(image_name: &str, docker_host: &Host) -> Result<()> {
     let mut cmd = Command::new("docker");
     if let Some(uri) = docker_host.docker_host_uri() {
         cmd.args(["-H", &uri]);
@@ -182,7 +182,7 @@ pub fn pull_image(image_name: &str, docker_host: &DockerHost) -> Result<()> {
 }
 
 /// Check whether a Docker image already exists on the target host.
-fn image_exists(image_name: &str, docker_host: &DockerHost) -> bool {
+fn image_exists(image_name: &str, docker_host: &Host) -> bool {
     let mut cmd = Command::new("docker");
     if let Some(uri) = docker_host.docker_host_uri() {
         cmd.args(["-H", &uri]);

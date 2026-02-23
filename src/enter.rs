@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use log::{info, trace};
 
 use crate::cli::EnterCommand;
-use crate::config::{load_toml_config, DockerHost};
+use crate::config::{load_toml_config, Host};
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
 use crate::devcontainer::{
@@ -57,7 +57,7 @@ pub fn parse_size_string(s: &str) -> Option<u64> {
 }
 
 /// Log hostRequirements and decide whether to enforce them based on host type.
-fn check_host_requirements(requirements: &HostRequirements, docker_host: &DockerHost) {
+fn check_host_requirements(requirements: &HostRequirements, docker_host: &Host) {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(cpus) = requirements.cpus {
@@ -95,7 +95,7 @@ fn check_host_requirements(requirements: &HostRequirements, docker_host: &Docker
     // here and use the parsed values to select an appropriate node or instance
     // type.
     match docker_host {
-        DockerHost::Localhost | DockerHost::Ssh { .. } => {
+        Host::Localhost | Host::Ssh { .. } => {
             info!("Running on local/remote Docker -- hostRequirements are advisory only");
         }
     }
@@ -104,18 +104,18 @@ fn check_host_requirements(requirements: &HostRequirements, docker_host: &Docker
 /// Load devcontainer.json, validate it, and prepare it for the daemon.
 ///
 /// Resolves `${localEnv:...}` and normalizes build paths to repo-root-relative.
-/// Returns the DevContainer and the parsed DockerHost.
+/// Returns the DevContainer and the parsed Host.
 pub fn load_and_resolve(
     repo_root: &Path,
     host_override: Option<&str>,
-) -> Result<(DevContainer, DockerHost)> {
+) -> Result<(DevContainer, Host)> {
     let toml_config = load_toml_config(repo_root)?;
     let host_str = host_override.or(toml_config.host.as_deref());
     let docker_host = host_str
-        .map(DockerHost::parse)
+        .map(Host::parse)
         .transpose()
         .context("Invalid host specification")?
-        .unwrap_or(DockerHost::Localhost);
+        .unwrap_or(Host::Localhost);
 
     let (mut devcontainer, devcontainer_dir) = DevContainer::find_and_load(repo_root)?
         .map(|(dc, dir)| {
@@ -179,7 +179,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
         pod_name: PodName(pod_name.to_string()),
         repo_path: repo_root,
         host_branch,
-        docker_host,
+        host: docker_host,
         devcontainer,
     })?;
     trace!("launch_pod daemon RPC: {:?}", t.elapsed());

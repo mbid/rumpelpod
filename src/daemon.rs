@@ -24,7 +24,7 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, DockerHost};
+use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, Host};
 use crate::devcontainer::{
     self, compute_devcontainer_id, shell_escape, substitute_vars, DevContainer, LifecycleCommand,
     Port, PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
@@ -889,7 +889,7 @@ fn setup_port_forwarding(
     forward_ports: &[Port],
     ports_attributes: &std::collections::HashMap<String, PortAttributes>,
     other_ports_attributes: &Option<PortAttributes>,
-    docker_host: &DockerHost,
+    docker_host: &Host,
 ) -> Result<()> {
     if forward_ports.is_empty() {
         return Ok(());
@@ -1115,10 +1115,10 @@ fn try_remove_container(
     use bollard::errors::Error as BollardError;
 
     let socket_path = if let Some(host) = host_str {
-        let host = DockerHost::from_db_string(host)?;
+        let host = Host::from_db_string(host)?;
         match &host {
-            DockerHost::Ssh { .. } => ssh_forward.get_socket(&host)?,
-            DockerHost::Localhost => default_docker_socket(),
+            Host::Ssh { .. } => ssh_forward.get_socket(&host)?,
+            Host::Localhost => default_docker_socket(),
         }
     } else {
         default_docker_socket()
@@ -1605,7 +1605,7 @@ struct ContainerEndpoint {
 fn get_container_endpoint(
     docker: &Docker,
     container_id: &str,
-    docker_host: &DockerHost,
+    docker_host: &Host,
     ssh_forward: &SshForwardManager,
 ) -> Result<ContainerEndpoint> {
     let default_port = crate::pod::DEFAULT_PORT;
@@ -1617,11 +1617,11 @@ fn get_container_endpoint(
             // host-network containers.
             let container_port = allocate_ephemeral_port()?;
             match docker_host {
-                DockerHost::Localhost => Ok(ContainerEndpoint {
+                Host::Localhost => Ok(ContainerEndpoint {
                     url: format!("http://127.0.0.1:{}", container_port),
                     container_port,
                 }),
-                DockerHost::Ssh { .. } => {
+                Host::Ssh { .. } => {
                     let local_port = allocate_ephemeral_port()?;
                     ssh_forward.add_local_forward(
                         docker_host,
@@ -1637,11 +1637,11 @@ fn get_container_endpoint(
             }
         }
         Some(ip) => match docker_host {
-            DockerHost::Localhost => Ok(ContainerEndpoint {
+            Host::Localhost => Ok(ContainerEndpoint {
                 url: format!("http://{}:{}", ip, default_port),
                 container_port: default_port,
             }),
-            DockerHost::Ssh { .. } => {
+            Host::Ssh { .. } => {
                 let local_port = allocate_ephemeral_port()?;
                 ssh_forward.add_local_forward(docker_host, local_port, &ip, default_port)?;
                 Ok(ContainerEndpoint {
@@ -2039,7 +2039,7 @@ impl Daemon for DaemonServer {
             pod_name,
             repo_path,
             host_branch,
-            docker_host,
+            host: docker_host,
             devcontainer,
         } = params;
 
@@ -2097,8 +2097,8 @@ impl Daemon for DaemonServer {
 
         // Get the Docker socket to use (local or forwarded from remote)
         let docker_socket = match &docker_host {
-            DockerHost::Ssh { .. } => self.ssh_forward.get_socket(&docker_host)?,
-            DockerHost::Localhost => default_docker_socket(),
+            Host::Ssh { .. } => self.ssh_forward.get_socket(&docker_host)?,
+            Host::Localhost => default_docker_socket(),
         };
 
         let docker = Docker::connect_with_socket(
@@ -2120,7 +2120,7 @@ impl Daemon for DaemonServer {
 
         // Determine the git HTTP server URL based on network config and local/remote
         let (server_ip, server_port) = match &docker_host {
-            DockerHost::Ssh { .. } => {
+            Host::Ssh { .. } => {
                 // Remote Docker: set up SSH remote port forwarding if not already done
                 let forwards = match self.ssh_forward.get_remote_forwards(&docker_host) {
                     Some(f) => f,
@@ -2156,7 +2156,7 @@ impl Daemon for DaemonServer {
                     )
                 }
             }
-            DockerHost::Localhost => {
+            Host::Localhost => {
                 // Local Docker: use the local git HTTP servers directly.
                 // On macOS Docker Desktop, host.docker.internal works for
                 // both bridge and host-network containers since Docker runs
@@ -2624,15 +2624,15 @@ impl Daemon for DaemonServer {
 
         let pod_name = &params.pod_name;
         let repo_path = &params.repo_path;
-        let docker_host = &params.docker_host;
+        let docker_host = &params.host;
         let container_repo_path = params.devcontainer.container_repo_path(repo_path);
 
         let name = docker_name(repo_path, pod_name);
 
         // Get the Docker socket to use (local or forwarded from remote)
         let docker_socket = match docker_host {
-            DockerHost::Ssh { .. } => self.ssh_forward.get_socket(docker_host)?,
-            DockerHost::Localhost => default_docker_socket(),
+            Host::Ssh { .. } => self.ssh_forward.get_socket(docker_host)?,
+            Host::Localhost => default_docker_socket(),
         };
 
         let docker = Docker::connect_with_socket(
@@ -2707,10 +2707,10 @@ impl Daemon for DaemonServer {
             let conn = self.db.lock().unwrap();
             match db::get_pod(&conn, &repo_path, &pod_name.0)? {
                 Some(record) => {
-                    let host = DockerHost::from_db_string(&record.host)?;
+                    let host = Host::from_db_string(&record.host)?;
                     match &host {
-                        DockerHost::Ssh { .. } => self.ssh_forward.get_socket(&host)?,
-                        DockerHost::Localhost => default_docker_socket(),
+                        Host::Ssh { .. } => self.ssh_forward.get_socket(&host)?,
+                        Host::Localhost => default_docker_socket(),
                     }
                 }
                 None => default_docker_socket(),
@@ -2828,7 +2828,7 @@ impl Daemon for DaemonServer {
         let mut remote_status_maps: HashMap<String, Option<HashMap<String, PodContainerInfo>>> =
             HashMap::new();
         for pod in &db_pods {
-            let host = DockerHost::from_db_string(&pod.host).ok();
+            let host = Host::from_db_string(&pod.host).ok();
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
             if is_remote && !remote_status_maps.contains_key(&pod.host) {
                 // Try to get existing socket for this remote
@@ -2843,7 +2843,7 @@ impl Daemon for DaemonServer {
         // Build combined list with status from Docker where available
         let mut pods = Vec::new();
         for pod in db_pods {
-            let host = DockerHost::from_db_string(&pod.host).ok();
+            let host = Host::from_db_string(&pod.host).ok();
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
 
             let container_info = if !is_remote {
@@ -2891,7 +2891,7 @@ impl Daemon for DaemonServer {
             // Compute git status on the host by comparing HEAD to rumpelpod/<pod_name>
             let git_info = compute_git_info(&repo_path, &pod.name);
 
-            // Display using DockerHost::Display to normalize the format
+            // Display using Host::Display to normalize the format
             // (e.g. strip default port 22 from old DB entries).
             let display_host = host
                 .map(|h| h.to_string())
