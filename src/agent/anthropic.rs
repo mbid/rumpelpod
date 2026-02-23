@@ -25,7 +25,7 @@ use super::common::{
     execute_write_in_pod, get_input_via_editor, read_agents_md, ToolName, MAX_TOKENS,
 };
 use super::history::ConversationTracker;
-use crate::enter::{merge_env, resolve_remote_env};
+use crate::enter::{merge_env, resolve_remote_env, resolve_remote_env_via_pod};
 
 fn make_tool(name: ToolName) -> Tool {
     Tool::Custom(CustomTool {
@@ -166,12 +166,12 @@ pub fn run_claude_agent(
     let pod = PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
 
     // Resolve ${containerEnv:VAR} now that the container is running.
-    // resolve_remote_env uses docker exec, so skip it for k8s hosts.
     let remote_env = if let Some(docker_socket) = launch_result.docker_socket.as_ref() {
         let resolved = resolve_remote_env(&remote_env, docker_socket, container_name);
         merge_env(launch_result.probed_env.clone(), resolved)
     } else {
-        merge_env(launch_result.probed_env.clone(), Vec::new())
+        let resolved = resolve_remote_env_via_pod(&remote_env, &pod);
+        merge_env(launch_result.probed_env.clone(), resolved)
     };
 
     // Read AGENTS.md once at startup to include project-specific instructions

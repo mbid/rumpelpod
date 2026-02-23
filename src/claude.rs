@@ -11,7 +11,9 @@ use crate::daemon::protocol::{
     ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, PodName,
 };
 use crate::devcontainer::shell_escape;
-use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env};
+use crate::enter::{
+    launch_pod, load_and_resolve, merge_env, resolve_remote_env, resolve_remote_env_via_pod,
+};
 use crate::git::get_repo_root;
 
 const SCREENRC_PATH: &str = "/tmp/rumpelpod-screenrc";
@@ -60,8 +62,9 @@ fn prepare_screen(docker_host: &str, container_id: &str, user: &str) -> Result<S
     })
 }
 
-/// Like prepare_screen but via kubectl exec for Kubernetes pods.
-fn prepare_screen_k8s(context: &str, namespace: &str, pod_name: &str) -> Result<ScreenState> {
+/// Like prepare_screen but via the in-container HTTP server.
+/// Works for any host type including Kubernetes.
+fn prepare_screen_via_pod(pod: &crate::pod::PodClient) -> Result<ScreenState> {
     let script = format!(
         "which screen >/dev/null 2>&1 || {{ echo SCREEN_MISSING; exit 0; }}; \
          ulimit -n 65536; \
@@ -71,14 +74,15 @@ fn prepare_screen_k8s(context: &str, namespace: &str, pod_name: &str) -> Result<
          screen -ls claude 2>/dev/null | grep -q '\\.claude' && echo SESSION_EXISTS || echo SESSION_NEW"
     );
 
-    let output = Command::new("kubectl")
-        .args(["--context", context])
-        .args(["--namespace", namespace])
-        .args(["exec", pod_name, "--", "sh", "-c", &script])
-        .output()
+    let run_result = pod
+        .run(&["sh", "-c", &script], None, None, &[], None, Some(10))
         .context("Failed to prepare screen in container")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    use base64::Engine;
+    let stdout = base64::engine::general_purpose::STANDARD
+        .decode(&run_result.stdout)
+        .unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&stdout);
 
     if stdout.contains("SCREEN_MISSING") {
         return Ok(ScreenState {
@@ -142,8 +146,17 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
         let ts = Instant::now();
         let screen_state = match &result.host {
-            Host::Kubernetes { context, namespace } => {
-                prepare_screen_k8s(context, namespace, &result.container_id.0)
+            Host::Kubernetes { .. } => {
+                let pod = match crate::pod::PodClient::new(
+                    &result.container_url,
+                    &result.container_token,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return (Err(e), config_handle.join().unwrap());
+                    }
+                };
+                prepare_screen_via_pod(&pod)
             }
             Host::Localhost | Host::Ssh { .. } => {
                 let docker_socket = match result.docker_socket.as_ref() {
@@ -180,7 +193,9 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     let status = match &result.host {
         Host::Kubernetes { context, namespace } => {
-            let merged_env = merge_env(result.probed_env, Vec::new());
+            let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+            let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
+            let merged_env = merge_env(result.probed_env, remote_env);
 
             // Build the screen command with env vars and workdir baked in,
             // since kubectl exec has no --workdir or -e flags.

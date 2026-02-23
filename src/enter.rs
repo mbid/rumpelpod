@@ -233,6 +233,65 @@ pub fn resolve_remote_env(
         .collect()
 }
 
+/// Resolve `${containerEnv:VAR}` placeholders via the in-container HTTP server
+/// instead of `docker exec`. Works for any host type including Kubernetes.
+pub fn resolve_remote_env_via_pod(
+    remote_env: &HashMap<String, String>,
+    pod: &crate::pod::PodClient,
+) -> Vec<(String, String)> {
+    // Regex would be overkill -- just scan for ${containerEnv:...} patterns
+    // and resolve them by running printenv in the container.
+    remote_env
+        .iter()
+        .map(|(key, value)| {
+            let resolved = resolve_container_env_vars(value, pod);
+            (key.clone(), resolved)
+        })
+        .collect()
+}
+
+/// Replace `${containerEnv:VAR}` and `${containerEnv:VAR:default}` patterns
+/// in a string by reading the variable from the container via PodClient.
+fn resolve_container_env_vars(value: &str, pod: &crate::pod::PodClient) -> String {
+    let mut result = String::new();
+    let mut rest = value;
+
+    while let Some(start) = rest.find("${containerEnv:") {
+        result.push_str(&rest[..start]);
+        let after_prefix = &rest[start + "${containerEnv:".len()..];
+        if let Some(end) = after_prefix.find('}') {
+            let inner = &after_prefix[..end];
+            let (var_name, default) = if let Some(colon) = inner.find(':') {
+                (&inner[..colon], Some(&inner[colon + 1..]))
+            } else {
+                (inner, None)
+            };
+
+            let val = pod
+                .run(&["printenv", var_name], None, None, &[], None, Some(5))
+                .ok()
+                .filter(|r| r.exit_code == 0)
+                .and_then(|r| {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(&r.stdout)
+                        .ok()
+                })
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .map(|s| s.trim_end_matches('\n').to_string());
+
+            result.push_str(&val.unwrap_or_else(|| default.unwrap_or_default().to_string()));
+            rest = &after_prefix[end + 1..];
+        } else {
+            // Unclosed brace, keep literal
+            result.push_str(&rest[..start + "${containerEnv:".len()]);
+            rest = after_prefix;
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let t_total = Instant::now();
 
@@ -267,7 +326,9 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
     let status = match &result.host {
         Host::Kubernetes { context, namespace } => {
-            let merged_env = merge_env(result.probed_env, Vec::new());
+            let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+            let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
+            let merged_env = merge_env(result.probed_env, remote_env);
 
             // kubectl exec has no --workdir or -e, so wrap in sh -c
             let env_prefix: String = merged_env

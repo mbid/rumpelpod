@@ -3,7 +3,6 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::cli::MergeCommand;
-use crate::config::Host;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, PodName};
 use crate::enter;
@@ -16,52 +15,38 @@ fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<(
     let (devcontainer, _) = enter::load_and_resolve(repo_root, None)?;
     let container_repo_path = devcontainer.container_repo_path(repo_root);
 
-    let output = match &result.host {
-        Host::Kubernetes { context, namespace } => Command::new("kubectl")
-            .args(["--context", context])
-            .args(["--namespace", namespace])
-            .args([
-                "exec",
-                &result.container_id.0,
-                "--",
+    let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+    let run_result = pod
+        .run(
+            &[
                 "git",
                 "-C",
                 &container_repo_path.to_string_lossy(),
                 "status",
                 "--porcelain",
-            ])
-            .output()
-            .context("Failed to check pod working tree status")?,
-        Host::Localhost | Host::Ssh { .. } => {
-            let docker_socket = result
-                .docker_socket
-                .as_ref()
-                .context("docker_socket is required for Docker hosts")?;
-            let docker_host_arg = format!("unix://{}", docker_socket.display());
-            Command::new("docker")
-                .args(["-H", &docker_host_arg])
-                .args([
-                    "exec",
-                    "--user",
-                    &result.user,
-                    &result.container_id.0,
-                    "git",
-                    "-C",
-                    &container_repo_path.to_string_lossy(),
-                    "status",
-                    "--porcelain",
-                ])
-                .output()
-                .context("Failed to check pod working tree status")?
-        }
-    };
+            ],
+            Some(&result.user),
+            None,
+            &[],
+            None,
+            Some(30),
+        )
+        .context("Failed to check pod working tree status")?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if run_result.exit_code != 0 {
+        use base64::Engine;
+        let stderr = base64::engine::general_purpose::STANDARD
+            .decode(&run_result.stderr)
+            .unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&stderr);
         bail!("git status in pod '{}' failed: {}", pod_name, stderr.trim());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    use base64::Engine;
+    let stdout = base64::engine::general_purpose::STANDARD
+        .decode(&run_result.stdout)
+        .unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&stdout);
     if !stdout.trim().is_empty() {
         eprintln!("warning: pod '{}' has uncommitted changes", pod_name);
     }
