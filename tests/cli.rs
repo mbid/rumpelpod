@@ -18,6 +18,8 @@ mod devcontainer;
 mod enter;
 #[path = "cli/gateway/mod.rs"]
 mod gateway;
+#[path = "cli/k8s/mod.rs"]
+mod k8s;
 #[path = "cli/list.rs"]
 mod list;
 #[path = "cli/merge.rs"]
