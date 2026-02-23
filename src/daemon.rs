@@ -1119,6 +1119,9 @@ fn try_remove_container(
         match &host {
             Host::Ssh { .. } => ssh_forward.get_socket(&host)?,
             Host::Localhost => default_docker_socket(),
+            Host::Kubernetes { .. } => {
+                anyhow::bail!("try_remove_container called for Kubernetes host");
+            }
         }
     } else {
         default_docker_socket()
@@ -1634,6 +1637,9 @@ fn get_container_endpoint(
                         container_port,
                     })
                 }
+                Host::Kubernetes { .. } => {
+                    anyhow::bail!("get_container_endpoint called for Kubernetes host");
+                }
             }
         }
         Some(ip) => match docker_host {
@@ -1648,6 +1654,9 @@ fn get_container_endpoint(
                     url: format!("http://127.0.0.1:{}", local_port),
                     container_port: default_port,
                 })
+            }
+            Host::Kubernetes { .. } => {
+                anyhow::bail!("get_container_endpoint called for Kubernetes host");
             }
         },
     }
@@ -2095,10 +2104,15 @@ impl Daemon for DaemonServer {
             }
         }
 
+        if let Host::Kubernetes { .. } = &docker_host {
+            anyhow::bail!("Kubernetes host support not yet implemented");
+        }
+
         // Get the Docker socket to use (local or forwarded from remote)
         let docker_socket = match &docker_host {
             Host::Ssh { .. } => self.ssh_forward.get_socket(&docker_host)?,
             Host::Localhost => default_docker_socket(),
+            Host::Kubernetes { .. } => unreachable!(),
         };
 
         let docker = Docker::connect_with_socket(
@@ -2167,6 +2181,7 @@ impl Daemon for DaemonServer {
                     (self.bridge_container_ip.clone(), self.bridge_server_port)
                 }
             }
+            Host::Kubernetes { .. } => unreachable!(),
         };
 
         // TODO: There's a potential race condition between inspect and
@@ -2629,10 +2644,15 @@ impl Daemon for DaemonServer {
 
         let name = docker_name(repo_path, pod_name);
 
+        if let Host::Kubernetes { .. } = docker_host {
+            anyhow::bail!("Kubernetes host support not yet implemented");
+        }
+
         // Get the Docker socket to use (local or forwarded from remote)
         let docker_socket = match docker_host {
             Host::Ssh { .. } => self.ssh_forward.get_socket(docker_host)?,
             Host::Localhost => default_docker_socket(),
+            Host::Kubernetes { .. } => unreachable!(),
         };
 
         let docker = Docker::connect_with_socket(
@@ -2700,6 +2720,21 @@ impl Daemon for DaemonServer {
     }
 
     fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
+        // Check if this is a k8s pod
+        {
+            let conn = self.db.lock().unwrap();
+            if let Some(record) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
+                let host = Host::from_db_string(&record.host)?;
+                if let Host::Kubernetes { .. } = &host {
+                    anyhow::bail!(
+                        "Kubernetes pods cannot be stopped. \
+                         Use 'rumpel delete {}' instead.",
+                        pod_name.0
+                    );
+                }
+            }
+        }
+
         let name = docker_name(&repo_path, &pod_name);
 
         // Determine Docker socket from DB record
@@ -2711,6 +2746,7 @@ impl Daemon for DaemonServer {
                     match &host {
                         Host::Ssh { .. } => self.ssh_forward.get_socket(&host)?,
                         Host::Localhost => default_docker_socket(),
+                        Host::Kubernetes { .. } => unreachable!(),
                     }
                 }
                 None => default_docker_socket(),

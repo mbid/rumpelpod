@@ -217,7 +217,7 @@ pub struct EnterCommand {
     #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -262,7 +262,7 @@ pub struct RecreateCommand {
     #[arg(help = "Name of the pod to recreate", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -308,7 +308,7 @@ pub struct AgentCommand {
     #[arg(help = "Name of the pod to use", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -367,7 +367,7 @@ pub struct ClaudeCommand {
     #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -387,7 +387,7 @@ pub struct ClaudeCommand {
 
 #[derive(Args)]
 pub struct CpCommand {
-    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -432,7 +432,7 @@ Requires 'image' in devcontainer.json (not 'build'). Runs 'docker pull' so you g
 
 #[derive(Args)]
 pub struct ImageBuildCommand {
-    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
@@ -448,7 +448,7 @@ pub struct ImageBuildCommand {
 
 #[derive(Args)]
 pub struct ImageFetchCommand {
-    /// Docker host: "localhost" for local or "ssh://user@host" for remote.
+    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
     /// Overrides .rumpelpod.toml setting.
     #[arg(long)]
     pub host: Option<String>,
