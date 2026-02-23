@@ -3296,8 +3296,68 @@ impl Daemon for DaemonServer {
 
         let name = docker_name(repo_path, pod_name);
 
-        if let Host::Kubernetes { .. } = docker_host {
-            anyhow::bail!("Kubernetes host support not yet implemented");
+        if let Host::Kubernetes {
+            ref context,
+            ref namespace,
+        } = docker_host
+        {
+            let snapshot_user = params.devcontainer.user().map(String::from);
+            let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, repo_path);
+            let client = crate::k8s::K8sClient::new(context, namespace)?;
+
+            // 1. Snapshot dirty files if the pod is running
+            let mut patch: Option<Vec<u8>> = None;
+
+            let status = client.get_pod_status(&k8s_name)?;
+            if status == PodStatus::Running {
+                let local_port = self
+                    .k8s_forwards
+                    .lock()
+                    .unwrap()
+                    .get(&(repo_path.to_path_buf(), pod_name.0.clone()))
+                    .and_then(|handles| handles.first().map(|h| h.local_port));
+
+                if let Some(port) = local_port {
+                    let container_url = format!("http://127.0.0.1:{}", port);
+                    if let Ok(token_bytes) =
+                        client.exec_output(&k8s_name, &["cat", crate::pod::TOKEN_FILE])
+                    {
+                        let token = String::from_utf8_lossy(&token_bytes).trim().to_string();
+                        if let Ok(old_pod) = PodClient::new(&container_url, &token) {
+                            patch = old_pod
+                                .git_snapshot(
+                                    Path::new(&container_repo_path),
+                                    snapshot_user.as_deref(),
+                                )
+                                .context("snapshotting dirty files in k8s pod")?;
+                        }
+                    }
+                }
+            }
+
+            // 2. Delete the pod
+            self.delete_pod(pod_name.clone(), repo_path.clone(), true)?;
+
+            // 3. Create new pod
+            let launch_result = self.launch_pod(params)?;
+
+            // 4. Apply patch if we have one
+            if let Some(patch_content) = patch {
+                let new_pod =
+                    PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
+                let created_files =
+                    get_created_files_from_patch(&patch_content).unwrap_or_default();
+                new_pod
+                    .git_apply_patch(
+                        Path::new(&container_repo_path),
+                        &patch_content,
+                        &created_files,
+                        Some(&launch_result.user),
+                    )
+                    .context("applying snapshot patch to new k8s pod")?;
+            }
+
+            return Ok(launch_result);
         }
 
         // Get the Docker socket to use (local or forwarded from remote)

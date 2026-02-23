@@ -795,3 +795,61 @@ fn k8s_forward_port() {
 
     cleanup_k8s_pods();
 }
+
+#[test]
+fn k8s_recreate() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-recreate";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config(&repo, image_tag);
+
+    let daemon = TestDaemon::start();
+
+    // Create a pod and write a dirty (uncommitted) file
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "k8s-recreate-test",
+            "--",
+            "sh",
+            "-c",
+            "echo dirty-content > /home/testuser/workspace/dirty.txt",
+        ])
+        .success()
+        .expect("writing dirty file failed");
+
+    // Recreate the pod
+    pod_command(&repo, &daemon)
+        .args(["recreate", "k8s-recreate-test"])
+        .success()
+        .expect("rumpel recreate failed");
+
+    // Verify the dirty file survived the recreate
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "k8s-recreate-test",
+            "--",
+            "cat",
+            "/home/testuser/workspace/dirty.txt",
+        ])
+        .success()
+        .expect("reading dirty file after recreate failed");
+
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).trim(),
+        "dirty-content",
+        "dirty file should survive recreate",
+    );
+
+    cleanup_k8s_pods();
+}
