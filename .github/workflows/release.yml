@@ -94,6 +94,7 @@ jobs:
 
       - name: Create tarball
         run: |
+          chmod +x staging/*
           tar -C staging -czf "rumpel-${{ github.ref_name }}.tar.gz" \
             rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64
 
