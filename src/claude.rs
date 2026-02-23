@@ -5,11 +5,12 @@ use anyhow::{bail, Context, Result};
 use log::trace;
 
 use crate::cli::ClaudeCommand;
-use crate::config::load_toml_config;
+use crate::config::{load_toml_config, Host};
 use crate::daemon;
 use crate::daemon::protocol::{
     ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, PodName,
 };
+use crate::devcontainer::shell_escape;
 use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env};
 use crate::git::get_repo_root;
 
@@ -59,6 +60,39 @@ fn prepare_screen(docker_host: &str, container_id: &str, user: &str) -> Result<S
     })
 }
 
+/// Like prepare_screen but via kubectl exec for Kubernetes pods.
+fn prepare_screen_k8s(context: &str, namespace: &str, pod_name: &str) -> Result<ScreenState> {
+    let script = format!(
+        "which screen >/dev/null 2>&1 || {{ echo SCREEN_MISSING; exit 0; }}; \
+         ulimit -n 65536; \
+         printf 'startup_message off\\ndefscrollback 50000\\n' > {SCREENRC_PATH}; \
+         printf '#!/bin/sh\\nulimit -n 65536\\nexec screen \"$@\"\\n' > {SCREEN_WRAPPER_PATH} \
+         && chmod +x {SCREEN_WRAPPER_PATH}; \
+         screen -ls claude 2>/dev/null | grep -q '\\.claude' && echo SESSION_EXISTS || echo SESSION_NEW"
+    );
+
+    let output = Command::new("kubectl")
+        .args(["--context", context])
+        .args(["--namespace", namespace])
+        .args(["exec", pod_name, "--", "sh", "-c", &script])
+        .output()
+        .context("Failed to prepare screen in container")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    if stdout.contains("SCREEN_MISSING") {
+        return Ok(ScreenState {
+            available: false,
+            session_exists: false,
+        });
+    }
+
+    Ok(ScreenState {
+        available: true,
+        session_exists: stdout.contains("SESSION_EXISTS"),
+    })
+}
+
 pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let t_total = Instant::now();
 
@@ -83,14 +117,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let result = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 
-    let docker_socket = result
-        .docker_socket
-        .as_ref()
-        .context("docker_socket is required for Docker hosts")?;
-    let docker_host = format!("unix://{}", docker_socket.display());
-
     // Run screen preparation and config copy in parallel to avoid
-    // sequential round trips to the Docker daemon.
+    // sequential round trips.
     let t = Instant::now();
     let (screen_state, config_result) = std::thread::scope(|s| {
         let config_handle = s.spawn(|| {
@@ -113,7 +141,26 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         });
 
         let ts = Instant::now();
-        let screen_state = prepare_screen(&docker_host, &result.container_id.0, &result.user);
+        let screen_state = match &result.host {
+            Host::Kubernetes { context, namespace } => {
+                prepare_screen_k8s(context, namespace, &result.container_id.0)
+            }
+            Host::Localhost | Host::Ssh { .. } => {
+                let docker_socket = match result.docker_socket.as_ref() {
+                    Some(s) => s,
+                    None => {
+                        return (
+                            Err(anyhow::anyhow!(
+                                "docker_socket is required for Docker hosts"
+                            )),
+                            config_handle.join().unwrap(),
+                        );
+                    }
+                };
+                let docker_host = format!("unix://{}", docker_socket.display());
+                prepare_screen(&docker_host, &result.container_id.0, &result.user)
+            }
+        };
         trace!("prepare_screen: {:?}", ts.elapsed());
 
         let config_result = config_handle.join().unwrap();
@@ -131,61 +178,126 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         );
     }
 
-    // Build the docker exec command for the interactive screen session
-    let mut docker_cmd = Command::new("docker");
-    docker_cmd.args(["-H", &docker_host]);
-    docker_cmd.arg("exec");
-    docker_cmd.args(["--user", &result.user]);
-    docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
+    let status = match &result.host {
+        Host::Kubernetes { context, namespace } => {
+            let merged_env = merge_env(result.probed_env, Vec::new());
 
-    // Inject probed + remoteEnv variables
-    let t = Instant::now();
-    let remote_env = resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
-    let merged_env = merge_env(result.probed_env, remote_env);
-    trace!("resolve_remote_env: {:?}", t.elapsed());
+            // Build the screen command with env vars and workdir baked in,
+            // since kubectl exec has no --workdir or -e flags.
+            let env_prefix: String = merged_env
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, shell_escape(v)))
+                .collect::<Vec<_>>()
+                .join(" ");
 
-    for (key, value) in &merged_env {
-        docker_cmd.args(["-e", &format!("{}={}", key, value)]);
-    }
+            let screen_cmd = if screen_state.session_exists {
+                format!(
+                    "{} -c {} -U -d -R claude",
+                    SCREEN_WRAPPER_PATH, SCREENRC_PATH
+                )
+            } else {
+                let mut parts = vec![format!(
+                    "{} -c {} -U -S claude -- claude",
+                    SCREEN_WRAPPER_PATH, SCREENRC_PATH
+                )];
+                if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
+                    parts.push("--dangerously-skip-permissions".to_string());
+                }
+                for arg in &cmd.args {
+                    parts.push(shell_escape(arg));
+                }
+                parts.join(" ")
+            };
 
-    docker_cmd.args(["-it"]);
-    docker_cmd.arg(&result.container_id.0);
+            let wrapper = if env_prefix.is_empty() {
+                format!(
+                    "cd {} && exec {}",
+                    shell_escape(&workdir.to_string_lossy()),
+                    screen_cmd,
+                )
+            } else {
+                format!(
+                    "cd {} && exec env {} {}",
+                    shell_escape(&workdir.to_string_lossy()),
+                    env_prefix,
+                    screen_cmd,
+                )
+            };
 
-    if screen_state.session_exists {
-        // Reattach to existing session
-        docker_cmd.args([
-            SCREEN_WRAPPER_PATH,
-            "-c",
-            SCREENRC_PATH,
-            "-U",
-            "-d",
-            "-R",
-            "claude",
-        ]);
-    } else {
-        // Create new screen session running claude
-        docker_cmd.args([
-            SCREEN_WRAPPER_PATH,
-            "-c",
-            SCREENRC_PATH,
-            "-U",
-            "-S",
-            "claude",
-            "--",
-            "claude",
-        ]);
-        if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
-            docker_cmd.arg("--dangerously-skip-permissions");
+            let mut kubectl = Command::new("kubectl");
+            kubectl.args(["--context", context]);
+            kubectl.args(["--namespace", namespace]);
+            kubectl.args(["exec", "-it"]);
+            kubectl.arg(&result.container_id.0);
+            kubectl.args(["--", "sh", "-c", &wrapper]);
+
+            trace!("total claude startup: {:?}", t_total.elapsed());
+            kubectl.status()?
         }
-        docker_cmd.args(&cmd.args);
-    }
 
-    trace!("total claude startup: {:?}", t_total.elapsed());
+        Host::Localhost | Host::Ssh { .. } => {
+            let docker_socket = result
+                .docker_socket
+                .as_ref()
+                .context("docker_socket is required for Docker hosts")?;
+            let docker_host = format!("unix://{}", docker_socket.display());
 
-    let status = docker_cmd.status()?;
+            let mut docker_cmd = Command::new("docker");
+            docker_cmd.args(["-H", &docker_host]);
+            docker_cmd.arg("exec");
+            docker_cmd.args(["--user", &result.user]);
+            docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
+
+            // Inject probed + remoteEnv variables
+            let t = Instant::now();
+            let remote_env =
+                resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
+            let merged_env = merge_env(result.probed_env, remote_env);
+            trace!("resolve_remote_env: {:?}", t.elapsed());
+
+            for (key, value) in &merged_env {
+                docker_cmd.args(["-e", &format!("{}={}", key, value)]);
+            }
+
+            docker_cmd.args(["-it"]);
+            docker_cmd.arg(&result.container_id.0);
+
+            if screen_state.session_exists {
+                // Reattach to existing session
+                docker_cmd.args([
+                    SCREEN_WRAPPER_PATH,
+                    "-c",
+                    SCREENRC_PATH,
+                    "-U",
+                    "-d",
+                    "-R",
+                    "claude",
+                ]);
+            } else {
+                // Create new screen session running claude
+                docker_cmd.args([
+                    SCREEN_WRAPPER_PATH,
+                    "-c",
+                    SCREENRC_PATH,
+                    "-U",
+                    "-S",
+                    "claude",
+                    "--",
+                    "claude",
+                ]);
+                if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
+                    docker_cmd.arg("--dangerously-skip-permissions");
+                }
+                docker_cmd.args(&cmd.args);
+            }
+
+            trace!("total claude startup: {:?}", t_total.elapsed());
+            docker_cmd.status()?
+        }
+    };
 
     if !status.success() {
-        bail!("docker exec exited with status {}", status);
+        bail!("exec exited with status {}", status);
     }
 
     Ok(())

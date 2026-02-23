@@ -1,6 +1,3 @@
-// TODO: Remove once this module is wired into daemon.rs
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -85,8 +82,7 @@ impl K8sClient {
     /// Create a new Kubernetes client for the given context and namespace.
     pub fn new(context: &str, namespace: &str) -> Result<Self> {
         let client = block_on(async {
-            let kubeconfig = Kubeconfig::read()
-                .context("reading kubeconfig")?;
+            let kubeconfig = Kubeconfig::read().context("reading kubeconfig")?;
             let config = Config::from_custom_kubeconfig(
                 kubeconfig,
                 &KubeConfigOptions {
@@ -146,8 +142,7 @@ impl K8sClient {
             }
         }
 
-        let pod: Pod = serde_json::from_value(pod_spec)
-            .context("serializing pod spec")?;
+        let pod: Pod = serde_json::from_value(pod_spec).context("serializing pod spec")?;
 
         block_on(async {
             pods.create(&PostParams::default(), &pod)
@@ -167,8 +162,8 @@ impl K8sClient {
         let deadline = std::time::Instant::now() + timeout;
 
         loop {
-            let pod = block_on(pods.get(name))
-                .with_context(|| format!("getting pod '{}'", name))?;
+            let pod =
+                block_on(pods.get(name)).with_context(|| format!("getting pod '{}'", name))?;
 
             let phase = pod
                 .status
@@ -183,14 +178,13 @@ impl K8sClient {
                     if let Some(ref status) = pod.status {
                         if let Some(ref statuses) = status.container_statuses {
                             for cs in statuses {
-                                if let Some(ref waiting) = cs.state.as_ref().and_then(|s| s.waiting.as_ref()) {
+                                if let Some(waiting) =
+                                    cs.state.as_ref().and_then(|s| s.waiting.as_ref())
+                                {
                                     let reason = waiting.reason.as_deref().unwrap_or("Unknown");
                                     if reason.contains("Err") || reason.contains("BackOff") {
                                         let msg = waiting.message.as_deref().unwrap_or("");
-                                        bail!(
-                                            "Pod '{}' failed to start: {} {}",
-                                            name, reason, msg
-                                        );
+                                        bail!("Pod '{}' failed to start: {} {}", name, reason, msg);
                                     }
                                 }
                             }
@@ -206,7 +200,8 @@ impl K8sClient {
             if std::time::Instant::now() > deadline {
                 bail!(
                     "Timed out waiting for pod '{}' to reach Running phase (current: {})",
-                    name, phase
+                    name,
+                    phase
                 );
             }
 
@@ -218,10 +213,13 @@ impl K8sClient {
     pub fn delete_pod(&self, name: &str) -> Result<()> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         block_on(async {
-            pods.delete(name, &DeleteParams {
-                grace_period_seconds: Some(0),
-                ..Default::default()
-            })
+            pods.delete(
+                name,
+                &DeleteParams {
+                    grace_period_seconds: Some(0),
+                    ..Default::default()
+                },
+            )
             .await
             .context("deleting pod")?;
             Ok::<_, anyhow::Error>(())
@@ -234,9 +232,7 @@ impl K8sClient {
     /// Get the status of a pod, mapped to PodStatus.
     pub fn get_pod_status(&self, name: &str) -> Result<PodStatus> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let pod = match block_on(pods.get_opt(name))
-            .context("getting pod status")?
-        {
+        let pod = match block_on(pods.get_opt(name)).context("getting pod status")? {
             Some(pod) => pod,
             None => return Ok(PodStatus::Gone),
         };
@@ -256,6 +252,7 @@ impl K8sClient {
     }
 
     /// List pods matching the rumpelpod label selector for a given repo path.
+    #[allow(dead_code)]
     pub fn list_pods(
         &self,
         repo_path: &std::path::Path,
@@ -264,8 +261,7 @@ impl K8sClient {
         let hash = repo_path_hash(repo_path);
         let selector = format!(
             "{}={},{}={}",
-            LABEL_MANAGED_BY, LABEL_MANAGED_BY_VALUE,
-            LABEL_REPO_HASH, hash,
+            LABEL_MANAGED_BY, LABEL_MANAGED_BY_VALUE, LABEL_REPO_HASH, hash,
         );
 
         let list = block_on(pods.list(&ListParams::default().labels(&selector)))
@@ -307,11 +303,7 @@ impl K8sClient {
 
     /// Execute a command in a pod and return stdout as bytes.
     /// Used for non-interactive operations like copying files or detecting arch.
-    pub fn exec_output(
-        &self,
-        name: &str,
-        cmd: &[&str],
-    ) -> Result<Vec<u8>> {
+    pub fn exec_output(&self, name: &str, cmd: &[&str]) -> Result<Vec<u8>> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let cmd: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
 
@@ -333,7 +325,10 @@ impl K8sClient {
                 stdout.read_to_end(&mut stdout_buf).await?;
             }
 
-            let status = attached.take_status().unwrap().await
+            let status = attached
+                .take_status()
+                .unwrap()
+                .await
                 .context("waiting for exec status")?;
 
             if let Some(reason) = status.reason {
@@ -348,12 +343,7 @@ impl K8sClient {
 
     /// Execute a command in a pod, writing stdin and returning stdout.
     /// Used for operations like copying a binary into the pod.
-    pub fn exec_with_stdin(
-        &self,
-        name: &str,
-        cmd: &[&str],
-        stdin_data: &[u8],
-    ) -> Result<()> {
+    pub fn exec_with_stdin(&self, name: &str, cmd: &[&str], stdin_data: &[u8]) -> Result<()> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let cmd: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
         let data = stdin_data.to_vec();
@@ -377,7 +367,10 @@ impl K8sClient {
                 stdin.shutdown().await?;
             }
 
-            let status = attached.take_status().unwrap().await
+            let status = attached
+                .take_status()
+                .unwrap()
+                .await
                 .context("waiting for exec status")?;
 
             if let Some(reason) = status.reason {
@@ -392,15 +385,8 @@ impl K8sClient {
 
     /// Start a detached background process in the pod.
     /// Uses nohup + background to detach from the exec session.
-    pub fn exec_detached(
-        &self,
-        name: &str,
-        cmd: &str,
-    ) -> Result<()> {
-        let wrapped = format!(
-            "nohup {} </dev/null >/dev/null 2>&1 &",
-            cmd
-        );
+    pub fn exec_detached(&self, name: &str, cmd: &str) -> Result<()> {
+        let wrapped = format!("nohup {} </dev/null >/dev/null 2>&1 &", cmd);
         self.exec_output(name, &["sh", "-c", &wrapped])?;
         Ok(())
     }
@@ -414,21 +400,19 @@ impl K8sClient {
 
     /// Set up port forwarding from a local port to a pod port.
     /// Returns the local port that was bound.
-    pub fn port_forward(
-        &self,
-        name: &str,
-        remote_port: u16,
-    ) -> Result<PortForwardHandle> {
+    pub fn port_forward(&self, name: &str, remote_port: u16) -> Result<PortForwardHandle> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
         let name_owned = name.to_string();
 
         let (local_port, cancel_tx) = block_on(async {
-            let mut forwarder = pods.portforward(&name_owned, &[remote_port])
+            let mut forwarder = pods
+                .portforward(&name_owned, &[remote_port])
                 .await
                 .context("setting up port forward")?;
 
             // Grab the stream for the requested port
-            let mut port_stream = forwarder.take_stream(remote_port)
+            let mut port_stream = forwarder
+                .take_stream(remote_port)
                 .context("taking port forward stream")?;
 
             // Bind a local TCP listener on an ephemeral port
@@ -480,7 +464,12 @@ impl K8sClient {
             Ok::<_, anyhow::Error>((local_port, cancel_tx))
         })?;
 
-        trace!("Port forward established: 127.0.0.1:{} -> {}:{}", local_port, name, remote_port);
+        trace!(
+            "Port forward established: 127.0.0.1:{} -> {}:{}",
+            local_port,
+            name,
+            remote_port
+        );
 
         Ok(PortForwardHandle {
             local_port,
@@ -489,12 +478,12 @@ impl K8sClient {
     }
 
     /// Build standard labels for a rumpelpod-managed k8s pod.
-    pub fn pod_labels(
-        pod_name: &str,
-        repo_path: &std::path::Path,
-    ) -> BTreeMap<String, String> {
+    pub fn pod_labels(pod_name: &str, repo_path: &std::path::Path) -> BTreeMap<String, String> {
         let mut labels = BTreeMap::new();
-        labels.insert(LABEL_MANAGED_BY.to_string(), LABEL_MANAGED_BY_VALUE.to_string());
+        labels.insert(
+            LABEL_MANAGED_BY.to_string(),
+            LABEL_MANAGED_BY_VALUE.to_string(),
+        );
         labels.insert(LABEL_REPO_HASH.to_string(), repo_path_hash(repo_path));
         labels.insert(LABEL_POD_NAME.to_string(), pod_name.to_string());
         labels
@@ -521,8 +510,7 @@ pub struct PortForwardHandle {
 /// Resolve the rumpel binary path for a given container architecture.
 /// Mirrors resolve_rumpel_binary in daemon.rs.
 pub fn resolve_rumpel_binary(arch: &ContainerArch) -> Result<PathBuf> {
-    let current_exe = std::env::current_exe()
-        .context("failed to get current executable path")?;
+    let current_exe = std::env::current_exe().context("failed to get current executable path")?;
     let exe_dir = current_exe
         .parent()
         .context("executable has no parent directory")?;

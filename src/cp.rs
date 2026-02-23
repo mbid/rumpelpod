@@ -3,6 +3,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::cli::CpCommand;
+use crate::config::Host;
 use crate::enter;
 
 #[derive(Debug)]
@@ -88,36 +89,71 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
     };
 
     let result = enter::launch_pod(pod_name, cmd.host.as_deref())?;
-    let docker_socket = result
-        .docker_socket
-        .as_ref()
-        .context("docker_socket is required for Docker hosts")?;
 
-    // Fill in the container ID
-    let docker_src = docker_src.replace("{}", &result.container_id.0);
-    let docker_dest = docker_dest.replace("{}", &result.container_id.0);
+    let (container_path, local_path, from_pod) = match &direction {
+        CopyDirection::FromPod {
+            container_path,
+            local_path,
+            ..
+        } => (container_path.as_str(), local_path.as_str(), true),
+        CopyDirection::ToPod {
+            local_path,
+            container_path,
+            ..
+        } => (container_path.as_str(), local_path.as_str(), false),
+    };
 
-    let mut docker_cmd = Command::new("docker");
-    docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
-    docker_cmd.arg("cp");
+    let status = match &result.host {
+        Host::Kubernetes { context, namespace } => {
+            let k8s_src;
+            let k8s_dest;
+            if from_pod {
+                k8s_src = format!("{}:{}", result.container_id.0, container_path);
+                k8s_dest = local_path.to_string();
+            } else {
+                k8s_src = local_path.to_string();
+                k8s_dest = format!("{}:{}", result.container_id.0, container_path);
+            }
 
-    if cmd.archive {
-        docker_cmd.arg("-a");
-    }
-    if cmd.follow_link {
-        docker_cmd.arg("-L");
-    }
-    if cmd.quiet {
-        docker_cmd.arg("-q");
-    }
+            let mut kubectl = Command::new("kubectl");
+            kubectl.args(["--context", context]);
+            kubectl.args(["--namespace", namespace]);
+            kubectl.arg("cp");
+            kubectl.arg(&k8s_src);
+            kubectl.arg(&k8s_dest);
+            kubectl.status()?
+        }
+        Host::Localhost | Host::Ssh { .. } => {
+            let docker_socket = result
+                .docker_socket
+                .as_ref()
+                .context("docker_socket is required for Docker hosts")?;
 
-    docker_cmd.arg(&docker_src);
-    docker_cmd.arg(&docker_dest);
+            let docker_src = docker_src.replace("{}", &result.container_id.0);
+            let docker_dest = docker_dest.replace("{}", &result.container_id.0);
 
-    let status = docker_cmd.status()?;
+            let mut docker_cmd = Command::new("docker");
+            docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
+            docker_cmd.arg("cp");
+
+            if cmd.archive {
+                docker_cmd.arg("-a");
+            }
+            if cmd.follow_link {
+                docker_cmd.arg("-L");
+            }
+            if cmd.quiet {
+                docker_cmd.arg("-q");
+            }
+
+            docker_cmd.arg(&docker_src);
+            docker_cmd.arg(&docker_dest);
+            docker_cmd.status()?
+        }
+    };
 
     if !status.success() {
-        bail!("docker cp exited with status {}", status);
+        bail!("cp exited with status {}", status);
     }
 
     Ok(())

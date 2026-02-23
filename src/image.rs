@@ -40,6 +40,15 @@ pub fn resolve_image(
     docker_host: &Host,
     repo_root: &Path,
 ) -> Result<BuildResult> {
+    if let Host::Kubernetes { .. } = docker_host {
+        if devcontainer.has_build() {
+            bail!(
+                "Image building is not supported with Kubernetes hosts. \
+                 Use a pre-built image."
+            );
+        }
+    }
+
     if let Some(build) = &devcontainer.build {
         // Skip the build if the image already exists on the target host, avoiding
         // the overhead of sending build context (potentially the whole repo) over

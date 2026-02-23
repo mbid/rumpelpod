@@ -147,6 +147,12 @@ struct DaemonServer {
     ssh_forward: Arc<SshForwardManager>,
     /// Path to the Unix socket for the git HTTP server (used for remote forwarding).
     git_unix_socket: PathBuf,
+    /// Port the externally-bound git HTTP server is listening on.
+    /// Used by Kubernetes pods that cannot reach the Docker bridge.
+    external_server_port: u16,
+    /// Active port-forward handles for Kubernetes pods.
+    /// Dropping a handle cancels the forward.
+    k8s_forwards: Arc<Mutex<HashMap<(PathBuf, String), crate::k8s::PortForwardHandle>>>,
 }
 
 /// Label key used to store the repository path on containers.
@@ -2042,6 +2048,449 @@ fn run_once_lifecycle_commands_via_pod(
     Ok(background)
 }
 
+impl DaemonServer {
+    #[allow(clippy::too_many_arguments)]
+    fn launch_pod_k8s(
+        &self,
+        pod_name: &PodName,
+        repo_path: &Path,
+        host_branch: Option<&str>,
+        context: &str,
+        namespace: &str,
+        devcontainer: &DevContainer,
+        image_built: bool,
+    ) -> Result<LaunchResult> {
+        let image = devcontainer.image.as_ref().context(
+            "Kubernetes hosts require a pre-built image (no 'image' in devcontainer.json)",
+        )?;
+
+        let user = devcontainer
+            .user()
+            .context(
+                "containerUser is required for Kubernetes hosts \
+                 because we cannot inspect the remote image",
+            )?
+            .to_string();
+
+        let container_repo_path = devcontainer.container_repo_path(repo_path);
+
+        gateway::setup_gateway(repo_path)?;
+        let submodules = gateway::detect_submodules(repo_path);
+
+        let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, repo_path);
+        let client = crate::k8s::K8sClient::new(context, namespace)?;
+        let host_spec = Host::Kubernetes {
+            context: context.to_string(),
+            namespace: namespace.to_string(),
+        }
+        .to_db_string();
+        let gateway_path = gateway::gateway_path(repo_path)?;
+
+        // Check DB for existing pod; if the k8s pod is still Running, reconnect
+        {
+            let conn = self.db.lock().unwrap();
+            if let Some(record) = db::get_pod(&conn, repo_path, &pod_name.0)? {
+                let status = client.get_pod_status(&k8s_name)?;
+                if status == PodStatus::Running {
+                    drop(conn);
+
+                    let pf = client
+                        .port_forward(&k8s_name, crate::pod::DEFAULT_PORT)
+                        .context("re-establishing port forward to existing k8s pod")?;
+                    let container_url = format!("http://127.0.0.1:{}", pf.local_port);
+
+                    // Wait for the container-serve to be reachable
+                    let poll_client = reqwest::blocking::Client::builder()
+                        .timeout(Some(std::time::Duration::from_secs(1)))
+                        .build()
+                        .unwrap();
+                    let container_token = {
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(5);
+                        loop {
+                            if poll_client
+                                .get(format!("{}/health", container_url))
+                                .send()
+                                .is_ok_and(|r| r.status().is_success())
+                            {
+                                // Read token from the pod
+                                let token_bytes = client
+                                    .exec_output(&k8s_name, &["cat", crate::pod::TOKEN_FILE])?;
+                                break String::from_utf8_lossy(&token_bytes).trim().to_string();
+                            }
+                            if std::time::Instant::now() >= deadline {
+                                anyhow::bail!(
+                                    "container server in existing k8s pod did not respond"
+                                );
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                    };
+
+                    let pod = PodClient::new(&container_url, &container_token)?;
+
+                    let token = self.git_server_state.register(
+                        gateway_path.clone(),
+                        pod_name.0.clone(),
+                        repo_path.to_path_buf(),
+                    );
+                    self.active_tokens
+                        .lock()
+                        .unwrap()
+                        .insert((repo_path.to_path_buf(), pod_name.0.clone()), token.clone());
+
+                    let host_ip = self.resolve_k8s_host_ip(&client, &k8s_name)?;
+                    let base_url = format!("http://{}:{}", host_ip, self.external_server_port);
+                    let url = format!("{}/gateway.git", base_url);
+                    let direct_config = is_direct_git_config_mode()?;
+
+                    ensure_repo_initialized_via_pod(
+                        &pod,
+                        &url,
+                        &token,
+                        &container_repo_path,
+                        &user,
+                    )?;
+                    check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
+
+                    pod.git_setup_remotes(
+                        &container_repo_path,
+                        &url,
+                        &token,
+                        &pod_name.0,
+                        None,
+                        direct_config,
+                        Some(&user),
+                    )
+                    .context("configuring git remotes")?;
+
+                    let sub_entries: Vec<SubmoduleEntry> = submodules
+                        .iter()
+                        .map(|s| SubmoduleEntry {
+                            name: s.name.clone(),
+                            path: s.path.clone(),
+                            displaypath: s.displaypath.clone(),
+                        })
+                        .collect();
+                    pod.git_setup_submodules(
+                        &container_repo_path,
+                        &sub_entries,
+                        &base_url,
+                        &token,
+                        &pod_name.0,
+                        false,
+                        direct_config,
+                        Some(&user),
+                    )
+                    .context("setting up submodules")?;
+
+                    {
+                        let conn = self.db.lock().unwrap();
+                        db::update_pod_status(&conn, record.id, db::PodStatus::Ready)?;
+                    }
+
+                    self.k8s_forwards
+                        .lock()
+                        .unwrap()
+                        .insert((repo_path.to_path_buf(), pod_name.0.clone()), pf);
+
+                    let effective_probe = devcontainer
+                        .user_env_probe
+                        .as_ref()
+                        .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
+                    let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
+
+                    let user_info =
+                        pod.user_info(&user)
+                            .unwrap_or_else(|_| crate::pod::UserInfoResponse {
+                                home: String::new(),
+                                shell: "/bin/sh".to_string(),
+                                uid: 0,
+                                gid: 0,
+                            });
+
+                    return Ok(LaunchResult {
+                        container_id: ContainerId(k8s_name),
+                        user,
+                        docker_socket: None,
+                        host: Host::Kubernetes {
+                            context: context.to_string(),
+                            namespace: namespace.to_string(),
+                        },
+                        image_built,
+                        probed_env,
+                        user_shell: user_info.shell,
+                        container_url,
+                        container_token,
+                    });
+                }
+
+                // Pod exists in DB but is gone from k8s -- clean up the stale record
+                db::delete_pod(&conn, repo_path, &pod_name.0)?;
+            }
+        }
+
+        // Register pod with the git HTTP server
+        let token = self.git_server_state.register(
+            gateway_path.clone(),
+            pod_name.0.clone(),
+            repo_path.to_path_buf(),
+        );
+        self.active_tokens
+            .lock()
+            .unwrap()
+            .insert((repo_path.to_path_buf(), pod_name.0.clone()), token.clone());
+
+        // Create pod record in database
+        let pod_id = {
+            let conn = self.db.lock().unwrap();
+            db::create_pod(&conn, repo_path, &pod_name.0, &host_spec)?
+        };
+
+        let mark_error = |e: anyhow::Error| -> anyhow::Error {
+            if let Ok(conn) = self.db.lock() {
+                let _ = db::update_pod_status(&conn, pod_id, db::PodStatus::Error);
+            }
+            e
+        };
+
+        let env: Vec<(String, String)> = devcontainer
+            .container_env
+            .as_ref()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+
+        let labels = crate::k8s::K8sClient::pod_labels(&pod_name.0, repo_path);
+        let annotations = crate::k8s::K8sClient::pod_annotations();
+
+        client
+            .create_pod(&k8s_name, image, labels, annotations, Some(&user), &env)
+            .map_err(|e| mark_error(e.context("creating k8s pod")))?;
+
+        client
+            .wait_running(&k8s_name, std::time::Duration::from_secs(120))
+            .map_err(|e| mark_error(e.context("waiting for k8s pod to start")))?;
+
+        let arch = client
+            .get_pod_arch(&k8s_name)
+            .map_err(|e| mark_error(e.context("detecting pod architecture")))?;
+
+        let bin_path = crate::k8s::resolve_rumpel_binary(&arch).map_err(mark_error)?;
+        let bin_data = std::fs::read(&bin_path)
+            .with_context(|| format!("reading {}", bin_path.display()))
+            .map_err(mark_error)?;
+
+        client
+            .exec_output(&k8s_name, &["mkdir", "-p", "/opt/rumpelpod/bin"])
+            .map_err(|e| mark_error(e.context("creating /opt/rumpelpod/bin in k8s pod")))?;
+
+        client
+            .exec_with_stdin(
+                &k8s_name,
+                &[
+                    "sh",
+                    "-c",
+                    "cat > /opt/rumpelpod/bin/rumpel && chmod +x /opt/rumpelpod/bin/rumpel",
+                ],
+                &bin_data,
+            )
+            .map_err(|e| mark_error(e.context("copying rumpel binary to k8s pod")))?;
+
+        let container_serve_cmd = format!(
+            "/opt/rumpelpod/bin/rumpel container-serve --port {} --token {}",
+            crate::pod::DEFAULT_PORT,
+            token
+        );
+        client
+            .exec_detached(&k8s_name, &container_serve_cmd)
+            .map_err(|e| mark_error(e.context("starting container-serve in k8s pod")))?;
+
+        // Wait for container-serve to become ready
+        let pf = client
+            .port_forward(&k8s_name, crate::pod::DEFAULT_PORT)
+            .map_err(|e| mark_error(e.context("setting up port forward")))?;
+        let container_url = format!("http://127.0.0.1:{}", pf.local_port);
+
+        let poll_client = reqwest::blocking::Client::builder()
+            .timeout(Some(std::time::Duration::from_secs(1)))
+            .build()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if poll_client
+                .get(format!("{}/health", container_url))
+                .send()
+                .is_ok_and(|r| r.status().is_success())
+            {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(mark_error(anyhow::anyhow!(
+                    "container server in k8s pod did not become ready within 10 seconds"
+                )));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        let pod = PodClient::new(&container_url, &token).map_err(mark_error)?;
+
+        let host_ip = self
+            .resolve_k8s_host_ip(&client, &k8s_name)
+            .map_err(mark_error)?;
+        let base_url = format!("http://{}:{}", host_ip, self.external_server_port);
+        let url = format!("{}/gateway.git", base_url);
+        let direct_config = is_direct_git_config_mode().map_err(mark_error)?;
+
+        ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)
+            .map_err(mark_error)?;
+        check_git_ownership_via_pod(&pod, &container_repo_path, &user).map_err(mark_error)?;
+
+        pod.git_setup_remotes(
+            &container_repo_path,
+            &url,
+            &token,
+            &pod_name.0,
+            host_branch,
+            direct_config,
+            Some(&user),
+        )
+        .context("configuring git remotes")
+        .map_err(mark_error)?;
+
+        let sub_entries: Vec<SubmoduleEntry> = submodules
+            .iter()
+            .map(|s| SubmoduleEntry {
+                name: s.name.clone(),
+                path: s.path.clone(),
+                displaypath: s.displaypath.clone(),
+            })
+            .collect();
+        pod.git_setup_submodules(
+            &container_repo_path,
+            &sub_entries,
+            &base_url,
+            &token,
+            &pod_name.0,
+            true,
+            direct_config,
+            Some(&user),
+        )
+        .context("setting up submodules")
+        .map_err(mark_error)?;
+
+        {
+            let conn = self.db.lock().unwrap();
+            db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
+        }
+
+        self.k8s_forwards
+            .lock()
+            .unwrap()
+            .insert((repo_path.to_path_buf(), pod_name.0.clone()), pf);
+
+        let effective_probe = devcontainer
+            .user_env_probe
+            .as_ref()
+            .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
+        let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
+        let env_strings: Vec<String> = probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+
+        // Run lifecycle commands for new pod
+        let wait_for = devcontainer.effective_wait_for();
+        let mut bg_commands = run_once_lifecycle_commands_via_pod(
+            &pod,
+            &user,
+            &container_repo_path,
+            devcontainer,
+            pod_id,
+            &self.db,
+            &wait_for,
+            &env_strings,
+        )
+        .map_err(mark_error)?;
+
+        if wait_for >= WaitFor::PostStartCommand {
+            if let Some(cmd) = &devcontainer.post_start_command {
+                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                    .map_err(mark_error)?;
+            }
+        } else if let Some(cmd) = &devcontainer.post_start_command {
+            bg_commands.push(("postStartCommand".to_string(), cmd.clone()));
+        }
+
+        if wait_for >= WaitFor::PostAttachCommand {
+            if let Some(cmd) = &devcontainer.post_attach_command {
+                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                    .map_err(mark_error)?;
+            }
+        } else if let Some(cmd) = &devcontainer.post_attach_command {
+            bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
+        }
+
+        if !bg_commands.is_empty() {
+            spawn_background_lifecycle_commands_via_pod(
+                container_url.clone(),
+                token.clone(),
+                user.clone(),
+                container_repo_path.clone(),
+                bg_commands,
+                env_strings,
+            );
+        }
+
+        let user_info = pod
+            .user_info(&user)
+            .unwrap_or_else(|_| crate::pod::UserInfoResponse {
+                home: String::new(),
+                shell: "/bin/sh".to_string(),
+                uid: 0,
+                gid: 0,
+            });
+
+        Ok(LaunchResult {
+            container_id: ContainerId(k8s_name),
+            user,
+            docker_socket: None,
+            host: Host::Kubernetes {
+                context: context.to_string(),
+                namespace: namespace.to_string(),
+            },
+            image_built,
+            probed_env,
+            user_shell: user_info.shell,
+            container_url,
+            container_token: token,
+        })
+    }
+
+    fn resolve_k8s_host_ip(
+        &self,
+        client: &crate::k8s::K8sClient,
+        k8s_name: &str,
+    ) -> Result<String> {
+        std::env::var("RUMPELPOD_K8S_HOST_IP")
+            .ok()
+            .or_else(|| {
+                let output = client
+                    .exec_output(
+                        k8s_name,
+                        &["sh", "-c", "ip route show default | awk '{print $3}'"],
+                    )
+                    .ok()?;
+                let ip = String::from_utf8_lossy(&output).trim().to_string();
+                if ip.is_empty() {
+                    None
+                } else {
+                    Some(ip)
+                }
+            })
+            .context(
+                "Could not determine host IP for Kubernetes git connectivity. \
+                 Set RUMPELPOD_K8S_HOST_IP.",
+            )
+    }
+}
+
 impl Daemon for DaemonServer {
     fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
         let PodLaunchParams {
@@ -2104,8 +2553,20 @@ impl Daemon for DaemonServer {
             }
         }
 
-        if let Host::Kubernetes { .. } = &docker_host {
-            anyhow::bail!("Kubernetes host support not yet implemented");
+        if let Host::Kubernetes {
+            ref context,
+            ref namespace,
+        } = docker_host
+        {
+            return self.launch_pod_k8s(
+                &pod_name,
+                &repo_path,
+                host_branch.as_deref(),
+                context,
+                namespace,
+                &devcontainer,
+                image_built,
+            );
         }
 
         // Get the Docker socket to use (local or forwarded from remote)
@@ -2781,6 +3242,45 @@ impl Daemon for DaemonServer {
         let host_str = pod_record.map(|r| r.host);
         drop(conn);
 
+        // Check if this is a Kubernetes pod
+        let host = host_str
+            .as_deref()
+            .and_then(|s| Host::from_db_string(s).ok());
+        if let Some(Host::Kubernetes {
+            ref context,
+            ref namespace,
+        }) = host
+        {
+            let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, &repo_path);
+            let client = crate::k8s::K8sClient::new(context, namespace)?;
+
+            // Delete the k8s pod (ignore "not found" since it may already be gone)
+            if let Err(e) = client.delete_pod(&k8s_name) {
+                error!("failed to delete k8s pod '{}': {}", k8s_name, e);
+            }
+
+            // Drop the port-forward handle
+            self.k8s_forwards
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()));
+
+            if let Some(token) = self
+                .active_tokens
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()))
+            {
+                self.git_server_state.unregister(&token);
+            }
+            if let Ok(gateway_path) = gateway::gateway_path(&repo_path) {
+                cleanup_pod_refs(&gateway_path, &repo_path, &pod_name);
+            }
+            let conn = self.db.lock().unwrap();
+            db::delete_pod(&conn, &repo_path, &pod_name.0)?;
+            return Ok(());
+        }
+
         let container_name = docker_name(&repo_path, &pod_name);
 
         if wait {
@@ -2865,16 +3365,35 @@ impl Daemon for DaemonServer {
         // Collect unique remote hosts and check for existing connections
         let mut remote_status_maps: HashMap<String, Option<HashMap<String, PodContainerInfo>>> =
             HashMap::new();
+        // Cache k8s pod statuses per (context, namespace) to avoid repeated API calls
+        let mut k8s_status_cache: HashMap<String, Option<PodStatus>> = HashMap::new();
         for pod in &db_pods {
             let host = Host::from_db_string(&pod.host).ok();
-            let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
-            if is_remote && !remote_status_maps.contains_key(&pod.host) {
-                // Try to get existing socket for this remote
-                let status_map = host
-                    .as_ref()
-                    .and_then(|h| self.ssh_forward.try_get_socket(h))
-                    .and_then(|socket| get_container_status_via_socket(&socket, &repo_path).ok());
-                remote_status_maps.insert(pod.host.clone(), status_map);
+            match &host {
+                Some(Host::Kubernetes {
+                    ref context,
+                    ref namespace,
+                }) => {
+                    let k8s_name = crate::k8s::k8s_pod_name(&pod.name, &repo_path);
+                    let cache_key = format!("{}/{}", pod.host, k8s_name);
+                    k8s_status_cache.entry(cache_key).or_insert_with(|| {
+                        crate::k8s::K8sClient::new(context, namespace)
+                            .and_then(|c| c.get_pod_status(&k8s_name))
+                            .ok()
+                    });
+                }
+                Some(Host::Ssh { .. }) => {
+                    if !remote_status_maps.contains_key(&pod.host) {
+                        let status_map = host
+                            .as_ref()
+                            .and_then(|h| self.ssh_forward.try_get_socket(h))
+                            .and_then(|socket| {
+                                get_container_status_via_socket(&socket, &repo_path).ok()
+                            });
+                        remote_status_maps.insert(pod.host.clone(), status_map);
+                    }
+                }
+                Some(Host::Localhost) | None => {}
             }
         }
 
@@ -2882,49 +3401,60 @@ impl Daemon for DaemonServer {
         let mut pods = Vec::new();
         for pod in db_pods {
             let host = Host::from_db_string(&pod.host).ok();
+            let is_k8s = host
+                .as_ref()
+                .is_some_and(|h| matches!(h, Host::Kubernetes { .. }));
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
 
-            let container_info = if !is_remote {
-                local_container_status.get(&pod.name)
+            let (status, container_id) = if is_k8s {
+                let k8s_name = crate::k8s::k8s_pod_name(&pod.name, &repo_path);
+                let cache_key = format!("{}/{}", pod.host, k8s_name);
+                let k8s_status = k8s_status_cache.get(&cache_key).and_then(|s| s.clone());
+                let status = match pod.status {
+                    db::PodStatus::Deleting => PodStatus::Deleting,
+                    db::PodStatus::DeleteFailed => PodStatus::Broken,
+                    _ => k8s_status.unwrap_or(PodStatus::Disconnected),
+                };
+                (status, Some(k8s_name))
             } else {
-                remote_status_maps
-                    .get(&pod.host)
-                    .and_then(|m| m.as_ref())
-                    .and_then(|status_map| status_map.get(&pod.name))
-            };
+                let container_info = if !is_remote {
+                    local_container_status.get(&pod.name)
+                } else {
+                    remote_status_maps
+                        .get(&pod.host)
+                        .and_then(|m| m.as_ref())
+                        .and_then(|status_map| status_map.get(&pod.name))
+                };
 
-            let status = match pod.status {
-                // DB status takes precedence during deletion
-                db::PodStatus::Deleting => PodStatus::Deleting,
-                db::PodStatus::DeleteFailed => PodStatus::Broken,
-                _ => match container_info {
-                    Some(info) => info.status.clone(),
-                    None => {
-                        if is_remote
-                            && remote_status_maps
-                                .get(&pod.host)
-                                .is_none_or(|m| m.is_none())
-                        {
-                            // No connection to remote -- can't determine actual status
-                            PodStatus::Disconnected
-                        } else {
-                            // Container doesn't exist locally or on the remote
-                            match pod.status {
-                                db::PodStatus::Ready => PodStatus::Gone,
-                                db::PodStatus::Initializing | db::PodStatus::Error => {
-                                    PodStatus::Stopped
-                                }
-                                // Already handled in outer match
-                                db::PodStatus::Deleting | db::PodStatus::DeleteFailed => {
-                                    unreachable!()
+                let status = match pod.status {
+                    db::PodStatus::Deleting => PodStatus::Deleting,
+                    db::PodStatus::DeleteFailed => PodStatus::Broken,
+                    _ => match container_info {
+                        Some(info) => info.status.clone(),
+                        None => {
+                            if is_remote
+                                && remote_status_maps
+                                    .get(&pod.host)
+                                    .is_none_or(|m| m.is_none())
+                            {
+                                PodStatus::Disconnected
+                            } else {
+                                match pod.status {
+                                    db::PodStatus::Ready => PodStatus::Gone,
+                                    db::PodStatus::Initializing | db::PodStatus::Error => {
+                                        PodStatus::Stopped
+                                    }
+                                    db::PodStatus::Deleting | db::PodStatus::DeleteFailed => {
+                                        unreachable!()
+                                    }
                                 }
                             }
                         }
-                    }
-                },
+                    },
+                };
+                let container_id = container_info.and_then(|info| info.container_id.clone());
+                (status, container_id)
             };
-
-            let container_id = container_info.and_then(|info| info.container_id.clone());
 
             // Compute git status on the host by comparing HEAD to rumpelpod/<pod_name>
             let git_info = compute_git_info(&repo_path, &pod.name);
@@ -3076,6 +3606,10 @@ pub fn run_daemon() -> Result<()> {
     let localhost_server = GitHttpServer::start("127.0.0.1", 0, git_server_state.clone())
         .context("starting git HTTP server on localhost")?;
 
+    // Start git HTTP server on 0.0.0.0 for Kubernetes pods
+    let external_server = GitHttpServer::start("0.0.0.0", 0, git_server_state.clone())
+        .context("starting git HTTP server for Kubernetes")?;
+
     // Start git HTTP server on a Unix socket for SSH remote port forwarding.
     // This allows the server to be accessed from remote Docker hosts.
     let runtime_dir = crate::config::get_runtime_dir()?;
@@ -3116,11 +3650,14 @@ pub fn run_daemon() -> Result<()> {
         active_tokens: Arc::new(Mutex::new(BTreeMap::new())),
         ssh_forward: Arc::new(ssh_forward),
         git_unix_socket,
+        external_server_port: external_server.port,
+        k8s_forwards: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Keep servers alive for the lifetime of the daemon
     let _bridge_server = bridge_server;
     let _localhost_server = localhost_server;
+    let _external_server = external_server;
     let _unix_server = unix_server;
 
     protocol::serve_daemon(daemon, listener);

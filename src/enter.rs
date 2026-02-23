@@ -12,8 +12,8 @@ use crate::config::{load_toml_config, Host};
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
 use crate::devcontainer::{
-    substitute_vars, ContainerEnvSource, DevContainer, GpuRequirement, HostRequirements, MountType,
-    SubstitutionContext, UserEnvProbe,
+    shell_escape, substitute_vars, ContainerEnvSource, DevContainer, GpuRequirement,
+    HostRequirements, MountType, SubstitutionContext, UserEnvProbe,
 };
 use crate::git::{get_current_branch, get_repo_root};
 
@@ -257,70 +257,113 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let result = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 
-    let docker_socket = result
-        .docker_socket
-        .as_ref()
-        .context("docker_socket is required for Docker hosts")?;
-
-    // The host subdir may not exist in the container yet (e.g. empty dirs
-    // are not copied by `docker build`). Create it so --workdir succeeds.
-    if workdir != container_repo_path {
-        let docker_host_arg = format!("unix://{}", docker_socket.display());
-        let status = Command::new("docker")
-            .args(["-H", &docker_host_arg])
-            .args(["exec", "--user", &result.user, &result.container_id.0])
-            .args(["mkdir", "-p", &workdir.to_string_lossy()])
-            .status()
-            .context("Failed to create workdir in container")?;
-        if !status.success() {
-            bail!(
-                "Failed to create workdir {} in container",
-                workdir.display()
-            );
-        }
-    }
-
     let mut command = cmd.command.clone();
     if command.is_empty() {
         command.push(result.user_shell.clone());
-        // Launch with probe flags so init files are sourced
         if let Some(flags) = effective_probe.shell_flags_interactive() {
             command.push(flags.to_string());
         }
     }
-    // Non-interactive commands get probed env via -e flags (below), so no
-    // shell wrapping needed. Wrapping with `bash -lic` would re-source
-    // /etc/profile which unconditionally resets PATH, undoing -e overrides.
 
-    let mut docker_cmd = Command::new("docker");
-    docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
-    docker_cmd.arg("exec");
-    docker_cmd.args(["--user", &result.user]);
-    docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
+    let status = match &result.host {
+        Host::Kubernetes { context, namespace } => {
+            let merged_env = merge_env(result.probed_env, Vec::new());
 
-    // Inject probed + remoteEnv variables, resolving ${containerEnv:VAR} lazily
-    let t = Instant::now();
-    let remote_env = resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
-    let merged_env = merge_env(result.probed_env, remote_env);
-    trace!("resolve_remote_env: {:?}", t.elapsed());
+            // kubectl exec has no --workdir or -e, so wrap in sh -c
+            let env_prefix: String = merged_env
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, shell_escape(v)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let cmd_str = command
+                .iter()
+                .map(|s| shell_escape(s))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let wrapper = if env_prefix.is_empty() {
+                format!(
+                    "cd {} && exec {}",
+                    shell_escape(&workdir.to_string_lossy()),
+                    cmd_str
+                )
+            } else {
+                format!(
+                    "cd {} && exec env {} {}",
+                    shell_escape(&workdir.to_string_lossy()),
+                    env_prefix,
+                    cmd_str,
+                )
+            };
 
-    for (key, value) in &merged_env {
-        docker_cmd.args(["-e", &format!("{}={}", key, value)]);
-    }
+            let mut kubectl = Command::new("kubectl");
+            kubectl.args(["--context", context]);
+            kubectl.args(["--namespace", namespace]);
+            kubectl.args(["exec"]);
+            if std::io::stdin().is_terminal() {
+                kubectl.arg("-it");
+            } else {
+                kubectl.arg("-i");
+            }
+            kubectl.arg(&result.container_id.0);
+            kubectl.args(["--", "sh", "-c", &wrapper]);
 
-    docker_cmd.arg("-i");
-    if std::io::stdin().is_terminal() {
-        docker_cmd.arg("-t");
-    }
-    docker_cmd.arg(&result.container_id.0);
-    docker_cmd.args(&command);
+            trace!("total enter startup: {:?}", t_total.elapsed());
+            kubectl.status()?
+        }
 
-    trace!("total enter startup: {:?}", t_total.elapsed());
+        Host::Localhost | Host::Ssh { .. } => {
+            let docker_socket = result
+                .docker_socket
+                .as_ref()
+                .context("docker_socket is required for Docker hosts")?;
 
-    let status = docker_cmd.status()?;
+            // The host subdir may not exist in the container yet
+            if workdir != container_repo_path {
+                let docker_host_arg = format!("unix://{}", docker_socket.display());
+                let mkdir_status = Command::new("docker")
+                    .args(["-H", &docker_host_arg])
+                    .args(["exec", "--user", &result.user, &result.container_id.0])
+                    .args(["mkdir", "-p", &workdir.to_string_lossy()])
+                    .status()
+                    .context("Failed to create workdir in container")?;
+                if !mkdir_status.success() {
+                    bail!(
+                        "Failed to create workdir {} in container",
+                        workdir.display()
+                    );
+                }
+            }
+
+            let mut docker_cmd = Command::new("docker");
+            docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
+            docker_cmd.arg("exec");
+            docker_cmd.args(["--user", &result.user]);
+            docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
+
+            let t = Instant::now();
+            let remote_env =
+                resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
+            let merged_env = merge_env(result.probed_env, remote_env);
+            trace!("resolve_remote_env: {:?}", t.elapsed());
+
+            for (key, value) in &merged_env {
+                docker_cmd.args(["-e", &format!("{}={}", key, value)]);
+            }
+
+            docker_cmd.arg("-i");
+            if std::io::stdin().is_terminal() {
+                docker_cmd.arg("-t");
+            }
+            docker_cmd.arg(&result.container_id.0);
+            docker_cmd.args(&command);
+
+            trace!("total enter startup: {:?}", t_total.elapsed());
+            docker_cmd.status()?
+        }
+    };
 
     if !status.success() {
-        bail!("docker exec exited with status {}", status);
+        bail!("exec exited with status {}", status);
     }
 
     Ok(())

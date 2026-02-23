@@ -143,15 +143,16 @@ pub fn run_grok_agent(
         .map_err(|e| anyhow::anyhow!("Pod thread panicked: {:?}", e))??;
     let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
-    let docker_socket = launch_result
-        .docker_socket
-        .as_ref()
-        .context("docker_socket is required for Docker hosts")?;
     let pod = PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
 
-    // Resolve ${containerEnv:VAR} now that the container is running
-    let remote_env = resolve_remote_env(&remote_env, docker_socket, container_name);
-    let remote_env = merge_env(launch_result.probed_env.clone(), remote_env);
+    // Resolve ${containerEnv:VAR} now that the container is running.
+    // resolve_remote_env uses docker exec, so skip it for k8s hosts.
+    let remote_env = if let Some(docker_socket) = launch_result.docker_socket.as_ref() {
+        let resolved = resolve_remote_env(&remote_env, docker_socket, container_name);
+        merge_env(launch_result.probed_env.clone(), resolved)
+    } else {
+        merge_env(launch_result.probed_env.clone(), Vec::new())
+    };
 
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(&pod, repo_path);
