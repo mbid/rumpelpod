@@ -139,13 +139,11 @@ The following fields are supported:
 | `rumpel review <name>` | Review changes using the configured git difftool |
 | `rumpel cp <src> <dest>` | Copy files between host and pod (`pod:path` syntax) |
 | `rumpel stop <name>` | Stop a pod without removing it |
-| `rumpel delete <name>` | Delete a pod (refuses if unmerged commits exist unless `--force`) |
+| `rumpel delete <name>` | Delete a pod |
 | `rumpel recreate <name>` | Snapshot dirty files, destroy container, recreate with snapshot |
 | `rumpel ports <name>` | Show forwarded ports |
 | `rumpel image build` | Build the devcontainer image from its Dockerfile |
 | `rumpel image fetch` | Pull the devcontainer image from its registry |
-| `rumpel system-install` | Install the background daemon |
-| `rumpel system-uninstall` | Uninstall the background daemon |
 
 Most commands accept `--host ssh://user@host` to target a remote Docker daemon.
 
