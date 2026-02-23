@@ -17,6 +17,7 @@ mod gateway;
 mod git;
 mod git_http_server;
 mod hook;
+mod k8s;
 pub(crate) mod image;
 mod image_cmd;
 mod list;

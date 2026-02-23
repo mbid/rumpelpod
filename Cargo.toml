@@ -58,6 +58,8 @@ tower-service = ">= 0"
 bollard = ">= 0"
 tokio-stream = ">= 0"
 comfy-table = ">= 0"
+kube = { version = ">= 0", features = ["client", "ws", "rustls-tls"] }
+k8s-openapi = { version = ">= 0", features = ["latest"] }
 
 [build-dependencies]
 sha2 = ">= 0"
