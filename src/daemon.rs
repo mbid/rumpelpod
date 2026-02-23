@@ -151,8 +151,10 @@ struct DaemonServer {
     /// Used by Kubernetes pods that cannot reach the Docker bridge.
     external_server_port: u16,
     /// Active port-forward handles for Kubernetes pods.
-    /// Dropping a handle cancels the forward.
-    k8s_forwards: Arc<Mutex<HashMap<(PathBuf, String), crate::k8s::PortForwardHandle>>>,
+    /// Dropping handles cancels the forwards.  The first entry is always
+    /// the container-serve forward; additional entries are forwardPorts.
+    #[allow(clippy::type_complexity)]
+    k8s_forwards: Arc<Mutex<HashMap<(PathBuf, String), Vec<crate::k8s::PortForwardHandle>>>>,
 }
 
 /// Label key used to store the repository path on containers.
@@ -2189,10 +2191,43 @@ impl DaemonServer {
                         db::update_pod_status(&conn, record.id, db::PodStatus::Ready)?;
                     }
 
+                    // Re-establish forwarded ports from DB
+                    let mut handles = vec![pf];
+                    {
+                        let conn = self.db.lock().unwrap();
+                        let saved_ports = db::list_forwarded_ports(&conn, record.id)?;
+                        for saved in &saved_ports {
+                            match client.port_forward(&k8s_name, saved.container_port) {
+                                Ok(fwd) => {
+                                    if fwd.local_port != saved.local_port {
+                                        // Local port changed; update the DB record
+                                        let _ = conn.execute(
+                                            "UPDATE forwarded_ports SET local_port = ? \
+                                             WHERE pod_id = ? AND container_port = ?",
+                                            rusqlite::params![
+                                                fwd.local_port,
+                                                i64::from(record.id),
+                                                saved.container_port,
+                                            ],
+                                        );
+                                    }
+                                    handles.push(fwd);
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "failed to re-establish port forward for {}: {}",
+                                        saved.container_port,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     self.k8s_forwards
                         .lock()
                         .unwrap()
-                        .insert((repo_path.to_path_buf(), pod_name.0.clone()), pf);
+                        .insert((repo_path.to_path_buf(), pod_name.0.clone()), handles);
 
                     let effective_probe = devcontainer
                         .user_env_probe
@@ -2487,10 +2522,60 @@ impl DaemonServer {
             db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
         }
 
+        // Set up port forwarding for forwardPorts
+        let forward_ports = devcontainer.forward_ports.as_deref().unwrap_or(&[]);
+        let ports_attributes = devcontainer
+            .ports_attributes
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        let other_ports_attributes = &devcontainer.other_ports_attributes;
+
+        let mut handles = vec![pf];
+        if !forward_ports.is_empty() {
+            let conn = self.db.lock().unwrap();
+            for port_spec in forward_ports {
+                let container_port = match resolve_port_number(port_spec) {
+                    Some(p) => p,
+                    None => {
+                        log::warn!("skipping invalid port spec: {:?}", port_spec);
+                        continue;
+                    }
+                };
+
+                match client.port_forward(&k8s_name, container_port) {
+                    Ok(fwd) => {
+                        let label = ports_attributes
+                            .get(&container_port.to_string())
+                            .or(other_ports_attributes.as_ref())
+                            .and_then(|a| a.label.as_deref())
+                            .unwrap_or("")
+                            .to_string();
+
+                        db::insert_forwarded_port(
+                            &conn,
+                            pod_id,
+                            container_port,
+                            fwd.local_port,
+                            &label,
+                        )?;
+                        handles.push(fwd);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "failed to set up port forward for {}: {}",
+                            container_port,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         self.k8s_forwards
             .lock()
             .unwrap()
-            .insert((repo_path.to_path_buf(), pod_name.0.clone()), pf);
+            .insert((repo_path.to_path_buf(), pod_name.0.clone()), handles);
 
         let effective_probe = devcontainer
             .user_env_probe

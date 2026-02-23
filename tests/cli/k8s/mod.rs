@@ -7,14 +7,18 @@
 //! Gated behind `RUMPELPOD_TEST_K8S=1` to avoid running in environments without
 //! kind support.
 
+use std::io::{Read as _, Write as _};
+use std::net::TcpStream;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{
-    build_test_image, pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+    build_docker_image, build_test_image, pod_command, DockerBuild, TestDaemon, TestRepo,
+    TEST_REPO_PATH, TEST_USER, TEST_USER_UID,
 };
 
 /// Kind cluster name used for all k8s tests.
@@ -698,6 +702,96 @@ fn k8s_init_succeeds_despite_unsupported() {
         .args(["enter", "k8s-init-test", "--", "echo", "init-ok"])
         .success()
         .expect("init: true should not prevent pod creation on k8s");
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_forward_port() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+
+    // Build image with socat for echo server
+    let image_id = build_docker_image(DockerBuild {
+        dockerfile: formatdoc! {r#"
+            FROM debian:13
+            RUN apt-get update && apt-get install -y git socat
+            RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+            COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+            USER {TEST_USER}
+        "#},
+        build_context: Some(repo.path().to_path_buf()),
+    })
+    .expect("Failed to build test image with socat");
+
+    let image_tag = "rumpelpod-test:k8s-fwd";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(&repo, image_tag, r#""forwardPorts": [9600]"#);
+
+    let daemon = TestDaemon::start();
+
+    // Create the pod (this should set up the port forward)
+    pod_command(&repo, &daemon)
+        .args(["enter", "k8s-fwd-test", "--", "true"])
+        .success()
+        .expect("rumpel enter failed");
+
+    // Start a socat echo server on port 9600 inside the pod
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "k8s-fwd-test",
+            "--",
+            "sh",
+            "-c",
+            "nohup socat TCP-LISTEN:9600,fork,reuseaddr EXEC:'cat' >/dev/null 2>&1 &",
+        ])
+        .success()
+        .expect("Failed to start echo server");
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Check rumpel ports shows the forwarded port
+    let stdout = pod_command(&repo, &daemon)
+        .args(["ports", "k8s-fwd-test"])
+        .success()
+        .expect("rumpel ports failed");
+
+    let ports_output = String::from_utf8_lossy(&stdout);
+    assert!(
+        ports_output.contains("9600"),
+        "ports output should mention port 9600: {}",
+        ports_output,
+    );
+
+    // Extract the local port from the ports output to connect to it
+    // Format is typically: "  9600 -> 127.0.0.1:XXXXX"
+    let local_port: u16 = ports_output
+        .lines()
+        .find(|l| l.contains("9600"))
+        .and_then(|l| {
+            // Find the local port number after the last ':'
+            l.rsplit(':').next().and_then(|s| s.trim().parse().ok())
+        })
+        .expect("could not parse local port from ports output");
+
+    // Connect and verify echo
+    let mut stream =
+        TcpStream::connect(format!("127.0.0.1:{}", local_port)).expect("TCP connect failed");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream.write_all(b"k8s-echo-test").unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).unwrap();
+    assert_eq!(buf, "k8s-echo-test");
 
     cleanup_k8s_pods();
 }
