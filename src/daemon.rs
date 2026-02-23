@@ -2263,8 +2263,112 @@ impl DaemonServer {
         let labels = crate::k8s::K8sClient::pod_labels(&pod_name.0, repo_path);
         let annotations = crate::k8s::K8sClient::pod_annotations();
 
+        // Build K8sPodOptions from devcontainer config
+        let mounts = devcontainer.resolved_mounts()?;
+        let run_args = devcontainer.run_args.as_deref().unwrap_or(&[]);
+        let run_args_config = parse_run_args_for_docker(run_args);
+
+        // Convert mounts to k8s volume mounts (bind mounts already rejected
+        // by the is_remote() check in launch_pod before dispatching here)
+        let k8s_volumes: Vec<crate::k8s::K8sVolumeMount> = mounts
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| {
+                match m.mount_type {
+                    devcontainer::MountType::Volume => Some(crate::k8s::K8sVolumeMount {
+                        name: format!("vol-{}", i),
+                        mount_path: m.target.clone(),
+                        read_only: m.read_only.unwrap_or(false),
+                        medium: None,
+                    }),
+                    devcontainer::MountType::Tmpfs => Some(crate::k8s::K8sVolumeMount {
+                        name: format!("vol-{}", i),
+                        mount_path: m.target.clone(),
+                        read_only: m.read_only.unwrap_or(false),
+                        medium: Some("Memory".to_string()),
+                    }),
+                    devcontainer::MountType::Bind => {
+                        // Should not reach here due to is_remote() check, but
+                        // be explicit rather than silently dropping.
+                        log::warn!("bind mount '{}' ignored on Kubernetes", m.target);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        let privileged = devcontainer.privileged == Some(true) || run_args_config.privileged;
+        let cap_add = merge_string_vecs(devcontainer.cap_add.as_ref(), &run_args_config.cap_add)
+            .unwrap_or_default();
+
+        let merged_security_opt = merge_string_vecs(
+            devcontainer.security_opt.as_ref(),
+            &run_args_config.security_opt,
+        )
+        .unwrap_or_default();
+        let mut seccomp_unconfined = false;
+        let mut apparmor_unconfined = false;
+        for opt in &merged_security_opt {
+            if opt == "seccomp=unconfined" || opt == "seccomp:unconfined" {
+                seccomp_unconfined = true;
+            } else if opt == "apparmor=unconfined" || opt == "apparmor:unconfined" {
+                apparmor_unconfined = true;
+            } else {
+                log::warn!("unrecognized security_opt '{}' ignored on Kubernetes", opt);
+            }
+        }
+
+        let override_command = devcontainer.override_command.unwrap_or(true);
+
+        // Convert hostRequirements to k8s resource requests
+        let resource_requests = devcontainer.host_requirements.as_ref().and_then(|hr| {
+            let cpu = hr.cpus.map(|c| c.to_string());
+            let memory = hr
+                .memory
+                .as_deref()
+                .and_then(crate::k8s::convert_memory_to_k8s);
+            if cpu.is_some() || memory.is_some() {
+                Some(crate::k8s::K8sResourceRequests { cpu, memory })
+            } else {
+                None
+            }
+        });
+
+        // Warn about unsupported features
+        let use_init = devcontainer.init == Some(true) || run_args_config.init;
+        if use_init {
+            log::warn!(
+                "init: true has no effect on Kubernetes -- \
+                 bake an init process (e.g. tini) into the image instead"
+            );
+        }
+        if !run_args_config.devices.is_empty() {
+            log::warn!(
+                "--device has no effect on Kubernetes -- \
+                 use cluster-specific device plugins instead"
+            );
+        }
+
+        let k8s_options = crate::k8s::K8sPodOptions {
+            volumes: k8s_volumes,
+            privileged,
+            cap_add,
+            seccomp_unconfined,
+            apparmor_unconfined,
+            override_command,
+            resource_requests,
+        };
+
         client
-            .create_pod(&k8s_name, image, labels, annotations, Some(&user), &env)
+            .create_pod(
+                &k8s_name,
+                image,
+                labels,
+                annotations,
+                Some(&user),
+                &env,
+                &k8s_options,
+            )
             .map_err(|e| mark_error(e.context("creating k8s pod")))?;
 
         client

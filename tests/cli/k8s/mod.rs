@@ -66,6 +66,36 @@ fn tag_image(image_id: &str, tag: &str) {
         .expect("Failed to tag docker image");
 }
 
+/// Write devcontainer.json with extra fields and .rumpelpod.toml for a k8s test.
+///
+/// `extra_json` is spliced into the devcontainer.json object, e.g.
+/// `r#""mounts": [{"type":"volume","source":"tv","target":"/data"}]"#`.
+fn write_k8s_pod_config_with_extras(repo: &TestRepo, image_tag: &str, extra_json: &str) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
+
+    let comma = if extra_json.is_empty() { "" } else { "," };
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "image": "{image_tag}",
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "containerUser": "{TEST_USER}"{comma}
+            {extra_json}
+        }}
+    "#};
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+
+    let config = formatdoc! {r#"
+        host = "k8s://{K8S_CONTEXT}"
+    "#};
+    std::fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
+}
+
 /// Write devcontainer.json and .rumpelpod.toml for a k8s test.
 fn write_k8s_pod_config(repo: &TestRepo, image_tag: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
@@ -362,6 +392,312 @@ fn k8s_cp_to_and_from_pod() {
 
     let content = std::fs::read_to_string(&local_download).expect("Failed to read downloaded file");
     assert_eq!(content.trim(), "hello from host");
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_mount_volume() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-vol";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(
+        &repo,
+        image_tag,
+        r#""mounts": [{"type":"volume","source":"tv","target":"/data"}]"#,
+    );
+
+    let daemon = TestDaemon::start();
+
+    // Write a file to the volume mount
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "k8s-vol-test",
+            "--",
+            "sh",
+            "-c",
+            "echo hello > /data/test.txt",
+        ])
+        .success()
+        .expect("writing to volume failed");
+
+    // Read it back
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "k8s-vol-test", "--", "cat", "/data/test.txt"])
+        .success()
+        .expect("reading from volume failed");
+
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello");
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_mount_tmpfs() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-tmpfs";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(
+        &repo,
+        image_tag,
+        r#""mounts": [{"type":"tmpfs","target":"/tmp/mytmp"}]"#,
+    );
+
+    let daemon = TestDaemon::start();
+
+    // Check that the tmpfs mount is present
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "k8s-tmpfs-test", "--", "mount"])
+        .success()
+        .expect("mount command failed");
+
+    let output = String::from_utf8_lossy(&stdout);
+    // emptyDir with Memory medium shows up as tmpfs
+    assert!(
+        output.contains("/tmp/mytmp") && output.contains("tmpfs"),
+        "expected tmpfs at /tmp/mytmp in mount output: {}",
+        output,
+    );
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_bind_mount_rejected() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-bind";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(
+        &repo,
+        image_tag,
+        r#""mounts": [{"type":"bind","source":"/tmp/x","target":"/mnt/x"}]"#,
+    );
+
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "k8s-bind-test", "--", "true"])
+        .output()
+        .expect("rumpel enter failed to execute");
+
+    assert!(
+        !output.status.success(),
+        "should fail with bind mount on k8s",
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bind mounts are not supported"),
+        "error should mention bind mount restriction: {}",
+        stderr,
+    );
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_privileged() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-priv";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(&repo, image_tag, r#""privileged": true"#);
+
+    let daemon = TestDaemon::start();
+
+    // If the cluster allows privileged pods, this should succeed.
+    // kind allows privileged by default.
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "k8s-priv-test", "--", "echo", "privileged-ok"])
+        .success()
+        .expect("rumpel enter with privileged failed");
+
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "privileged-ok");
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_cap_add() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-cap";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(&repo, image_tag, r#""capAdd": ["SYS_PTRACE"]"#);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "k8s-cap-test", "--", "echo", "caps-ok"])
+        .success()
+        .expect("rumpel enter with capAdd failed");
+
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "caps-ok");
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_override_command_false() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    // Build an image with explicit CMD that keeps the container running
+    let image_id = build_test_image(repo.path(), r#"CMD ["tail", "-f", "/dev/null"]"#)
+        .expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-nocmd";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(&repo, image_tag, r#""overrideCommand": false"#);
+
+    let daemon = TestDaemon::start();
+
+    // Check PID 1 is tail, not sleep
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "k8s-nocmd-test", "--", "cat", "/proc/1/cmdline"])
+        .success()
+        .expect("checking PID 1 failed");
+
+    let cmdline = String::from_utf8_lossy(&stdout);
+    assert!(
+        cmdline.contains("tail"),
+        "PID 1 should be tail, got: {:?}",
+        cmdline,
+    );
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_host_requirements() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-reqs";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(
+        &repo,
+        image_tag,
+        r#""hostRequirements": {"cpus": 1, "memory": "256mb"}"#,
+    );
+
+    let daemon = TestDaemon::start();
+
+    // Enter should succeed on kind (resources are requests, not limits)
+    pod_command(&repo, &daemon)
+        .args(["enter", "k8s-reqs-test", "--", "true"])
+        .success()
+        .expect("rumpel enter with hostRequirements failed");
+
+    // Verify resource requests are set via kubectl
+    let kubectl_output = Command::new("kubectl")
+        .args(["--context", K8S_CONTEXT])
+        .args([
+            "get",
+            "pod",
+            "-l",
+            "rumpelpod/pod-name=k8s-reqs-test",
+            "-o",
+            "jsonpath={.items[0].spec.containers[0].resources.requests}",
+        ])
+        .output()
+        .expect("kubectl get failed");
+
+    let requests = String::from_utf8_lossy(&kubectl_output.stdout);
+    assert!(
+        requests.contains("256Mi"),
+        "resource requests should include memory: {}",
+        requests,
+    );
+    assert!(
+        requests.contains("1"),
+        "resource requests should include cpu: {}",
+        requests,
+    );
+
+    cleanup_k8s_pods();
+}
+
+#[test]
+fn k8s_init_succeeds_despite_unsupported() {
+    if !k8s_enabled() {
+        return;
+    }
+    ensure_kind_cluster();
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-init";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_kind(image_tag);
+
+    write_k8s_pod_config_with_extras(&repo, image_tag, r#""init": true"#);
+
+    let daemon = TestDaemon::start();
+
+    // init: true is unsupported on k8s but should not prevent pod creation
+    // (the daemon logs a warning instead of failing)
+    pod_command(&repo, &daemon)
+        .args(["enter", "k8s-init-test", "--", "echo", "init-ok"])
+        .success()
+        .expect("init: true should not prevent pod creation on k8s");
 
     cleanup_k8s_pods();
 }

@@ -52,6 +52,51 @@ impl ContainerArch {
     }
 }
 
+/// Options for creating a Kubernetes pod beyond the basics (image, labels, etc.).
+pub struct K8sPodOptions {
+    pub volumes: Vec<K8sVolumeMount>,
+    pub privileged: bool,
+    pub cap_add: Vec<String>,
+    pub seccomp_unconfined: bool,
+    pub apparmor_unconfined: bool,
+    pub override_command: bool,
+    pub resource_requests: Option<K8sResourceRequests>,
+}
+
+impl Default for K8sPodOptions {
+    fn default() -> Self {
+        Self {
+            volumes: Vec::new(),
+            privileged: false,
+            cap_add: Vec::new(),
+            seccomp_unconfined: false,
+            apparmor_unconfined: false,
+            override_command: true,
+            resource_requests: None,
+        }
+    }
+}
+
+/// A volume mount for a Kubernetes pod (backed by emptyDir).
+pub struct K8sVolumeMount {
+    /// Volume name, e.g. "vol-0", "vol-1".
+    pub name: String,
+    /// Mount path inside the container.
+    pub mount_path: String,
+    /// Whether the mount is read-only.
+    pub read_only: bool,
+    /// "Memory" for tmpfs-backed emptyDir, None for disk-backed.
+    pub medium: Option<String>,
+}
+
+/// Resource requests for a Kubernetes pod.
+pub struct K8sResourceRequests {
+    /// CPU request, e.g. "4" for 4 cores.
+    pub cpu: Option<String>,
+    /// Memory request, e.g. "4Gi".
+    pub memory: Option<String>,
+}
+
 /// Compute a short hash of the repo path for use as a label value.
 /// Label values must be <= 63 chars and match [a-z0-9A-Z._-].
 pub fn repo_path_hash(repo_path: &std::path::Path) -> String {
@@ -101,17 +146,123 @@ impl K8sClient {
         })
     }
 
-    /// Create a Kubernetes pod running the given image with `sleep infinity`.
+    /// Create a Kubernetes pod running the given image.
+    ///
+    /// When `options.override_command` is true, the container command is set to
+    /// `["sleep", "infinity"]` (overriding the image CMD).  When false, the
+    /// image's own CMD is used.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_pod(
         &self,
         name: &str,
         image: &str,
         labels: BTreeMap<String, String>,
-        annotations: BTreeMap<String, String>,
+        mut annotations: BTreeMap<String, String>,
         container_user: Option<&str>,
         env: &[(String, String)],
+        options: &K8sPodOptions,
     ) -> Result<()> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+
+        // Build volume mounts and volume definitions from options
+        let volume_mounts: Vec<serde_json::Value> = options
+            .volumes
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "name": v.name,
+                    "mountPath": v.mount_path,
+                    "readOnly": v.read_only,
+                })
+            })
+            .collect();
+
+        let volumes: Vec<serde_json::Value> = options
+            .volumes
+            .iter()
+            .map(|v| {
+                let empty_dir = match &v.medium {
+                    Some(medium) => serde_json::json!({ "medium": medium }),
+                    None => serde_json::json!({}),
+                };
+                serde_json::json!({
+                    "name": v.name,
+                    "emptyDir": empty_dir,
+                })
+            })
+            .collect();
+
+        let mut container = serde_json::json!({
+            "name": "main",
+            "image": image,
+            "env": env.iter().map(|(k, v)| serde_json::json!({
+                "name": k,
+                "value": v,
+            })).collect::<Vec<_>>(),
+        });
+
+        if options.override_command {
+            container["command"] = serde_json::json!(["sleep", "infinity"]);
+        }
+
+        if !volume_mounts.is_empty() {
+            container["volumeMounts"] = serde_json::json!(volume_mounts);
+        }
+
+        // Build securityContext
+        let mut sec_ctx = serde_json::Map::new();
+
+        if let Some(user) = container_user {
+            if let Ok(uid) = user.parse::<i64>() {
+                sec_ctx.insert("runAsUser".to_string(), serde_json::json!(uid));
+            }
+        }
+
+        if options.privileged {
+            sec_ctx.insert("privileged".to_string(), serde_json::json!(true));
+        }
+
+        if !options.cap_add.is_empty() {
+            sec_ctx.insert(
+                "capabilities".to_string(),
+                serde_json::json!({ "add": options.cap_add }),
+            );
+        }
+
+        if options.seccomp_unconfined {
+            sec_ctx.insert(
+                "seccompProfile".to_string(),
+                serde_json::json!({ "type": "Unconfined" }),
+            );
+        }
+
+        if !sec_ctx.is_empty() {
+            container["securityContext"] = serde_json::Value::Object(sec_ctx);
+        }
+
+        // Build resource requests
+        if let Some(ref reqs) = options.resource_requests {
+            let mut requests = serde_json::Map::new();
+            if let Some(ref cpu) = reqs.cpu {
+                requests.insert("cpu".to_string(), serde_json::json!(cpu));
+            }
+            if let Some(ref memory) = reqs.memory {
+                requests.insert("memory".to_string(), serde_json::json!(memory));
+            }
+            if !requests.is_empty() {
+                container["resources"] = serde_json::json!({
+                    "requests": serde_json::Value::Object(requests),
+                });
+            }
+        }
+
+        // AppArmor unconfined via annotation
+        if options.apparmor_unconfined {
+            annotations.insert(
+                "container.apparmor.security.beta.kubernetes.io/main".to_string(),
+                "unconfined".to_string(),
+            );
+        }
 
         let mut pod_spec = serde_json::json!({
             "apiVersion": "v1",
@@ -122,24 +273,13 @@ impl K8sClient {
                 "annotations": annotations,
             },
             "spec": {
-                "containers": [{
-                    "name": "main",
-                    "image": image,
-                    "command": ["sleep", "infinity"],
-                    "env": env.iter().map(|(k, v)| serde_json::json!({
-                        "name": k,
-                        "value": v,
-                    })).collect::<Vec<_>>(),
-                }],
+                "containers": [container],
                 "restartPolicy": "Never",
             }
         });
 
-        if let Some(user) = container_user {
-            if let Ok(uid) = user.parse::<i64>() {
-                pod_spec["spec"]["containers"][0]["securityContext"] =
-                    serde_json::json!({ "runAsUser": uid });
-            }
+        if !volumes.is_empty() {
+            pod_spec["spec"]["volumes"] = serde_json::json!(volumes);
         }
 
         let pod: Pod = serde_json::from_value(pod_spec).context("serializing pod spec")?;
@@ -505,6 +645,27 @@ pub struct PortForwardHandle {
     pub local_port: u16,
     /// Dropping this sender signals the forwarding task to stop.
     _cancel_tx: tokio::sync::watch::Sender<bool>,
+}
+
+/// Convert a devcontainer-style memory string (e.g. "4gb", "512mb") to
+/// Kubernetes resource quantity format (e.g. "4Gi", "512Mi").
+///
+/// Returns None if the string cannot be parsed.
+pub fn convert_memory_to_k8s(s: &str) -> Option<String> {
+    let s = s.trim().to_lowercase();
+
+    let suffixes: &[(&str, &str)] = &[("tb", "Ti"), ("gb", "Gi"), ("mb", "Mi"), ("kb", "Ki")];
+
+    for (suffix, k8s_suffix) in suffixes {
+        if let Some(num_str) = s.strip_suffix(suffix) {
+            let num: u64 = num_str.trim().parse().ok()?;
+            return Some(format!("{}{}", num, k8s_suffix));
+        }
+    }
+
+    // No suffix -- treat as raw bytes
+    let bytes: u64 = s.parse().ok()?;
+    Some(format!("{}", bytes))
 }
 
 /// Resolve the rumpel binary path for a given container architecture.
