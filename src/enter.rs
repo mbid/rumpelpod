@@ -254,17 +254,13 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         .unwrap_or(UserEnvProbe::LoginInteractiveShell);
 
     let t = Instant::now();
-    let LaunchResult {
-        container_id,
-        user,
-        docker_socket,
-        image_built: _,
-        probed_env,
-        user_shell,
-        container_url: _,
-        container_token: _,
-    } = launch_pod(&cmd.name, cmd.host.as_deref())?;
+    let result = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
+
+    let docker_socket = result
+        .docker_socket
+        .as_ref()
+        .context("docker_socket is required for Docker hosts")?;
 
     // The host subdir may not exist in the container yet (e.g. empty dirs
     // are not copied by `docker build`). Create it so --workdir succeeds.
@@ -272,7 +268,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         let docker_host_arg = format!("unix://{}", docker_socket.display());
         let status = Command::new("docker")
             .args(["-H", &docker_host_arg])
-            .args(["exec", "--user", &user, &container_id.0])
+            .args(["exec", "--user", &result.user, &result.container_id.0])
             .args(["mkdir", "-p", &workdir.to_string_lossy()])
             .status()
             .context("Failed to create workdir in container")?;
@@ -286,7 +282,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
-        command.push(user_shell);
+        command.push(result.user_shell.clone());
         // Launch with probe flags so init files are sourced
         if let Some(flags) = effective_probe.shell_flags_interactive() {
             command.push(flags.to_string());
@@ -299,13 +295,13 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let mut docker_cmd = Command::new("docker");
     docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
     docker_cmd.arg("exec");
-    docker_cmd.args(["--user", &user]);
+    docker_cmd.args(["--user", &result.user]);
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
     // Inject probed + remoteEnv variables, resolving ${containerEnv:VAR} lazily
     let t = Instant::now();
-    let remote_env = resolve_remote_env(&remote_env_map, &docker_socket, &container_id.0);
-    let merged_env = merge_env(probed_env, remote_env);
+    let remote_env = resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
+    let merged_env = merge_env(result.probed_env, remote_env);
     trace!("resolve_remote_env: {:?}", t.elapsed());
 
     for (key, value) in &merged_env {
@@ -316,7 +312,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     if std::io::stdin().is_terminal() {
         docker_cmd.arg("-t");
     }
-    docker_cmd.arg(&container_id.0);
+    docker_cmd.arg(&result.container_id.0);
     docker_cmd.args(&command);
 
     trace!("total enter startup: {:?}", t_total.elapsed());

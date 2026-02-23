@@ -8,7 +8,7 @@ use crate::cli::ClaudeCommand;
 use crate::config::load_toml_config;
 use crate::daemon;
 use crate::daemon::protocol::{
-    ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, LaunchResult, PodName,
+    ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, PodName,
 };
 use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env};
 use crate::git::get_repo_root;
@@ -80,18 +80,13 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
     let t = Instant::now();
-    let LaunchResult {
-        container_id,
-        user,
-        docker_socket,
-        image_built: _,
-        probed_env,
-        user_shell: _,
-        container_url,
-        container_token,
-    } = launch_pod(&cmd.name, cmd.host.as_deref())?;
+    let result = launch_pod(&cmd.name, cmd.host.as_deref())?;
     trace!("launch_pod: {:?}", t.elapsed());
 
+    let docker_socket = result
+        .docker_socket
+        .as_ref()
+        .context("docker_socket is required for Docker hosts")?;
     let docker_host = format!("unix://{}", docker_socket.display());
 
     // Run screen preparation and config copy in parallel to avoid
@@ -102,23 +97,23 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             let tc = Instant::now();
             let socket_path = daemon::socket_path()?;
             let client = DaemonClient::new_unix(&socket_path);
-            let result = client.ensure_claude_config(EnsureClaudeConfigRequest {
+            let cfg_result = client.ensure_claude_config(EnsureClaudeConfigRequest {
                 pod_name: PodName(cmd.name.clone()),
                 repo_path: repo_root.clone(),
                 container_repo_path: workdir.clone(),
-                container_id: ContainerId(container_id.0.clone()),
-                user: user.clone(),
-                docker_socket: docker_socket.clone(),
-                container_url: container_url.clone(),
-                container_token: container_token.clone(),
+                container_id: ContainerId(result.container_id.0.clone()),
+                user: result.user.clone(),
+                docker_socket: result.docker_socket.clone(),
+                container_url: result.container_url.clone(),
+                container_token: result.container_token.clone(),
                 auto_approve_hook: skip_permissions_hook,
             });
             trace!("ensure_claude_config: {:?}", tc.elapsed());
-            result
+            cfg_result
         });
 
         let ts = Instant::now();
-        let screen_state = prepare_screen(&docker_host, &container_id.0, &user);
+        let screen_state = prepare_screen(&docker_host, &result.container_id.0, &result.user);
         trace!("prepare_screen: {:?}", ts.elapsed());
 
         let config_result = config_handle.join().unwrap();
@@ -140,13 +135,13 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let mut docker_cmd = Command::new("docker");
     docker_cmd.args(["-H", &docker_host]);
     docker_cmd.arg("exec");
-    docker_cmd.args(["--user", &user]);
+    docker_cmd.args(["--user", &result.user]);
     docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
     // Inject probed + remoteEnv variables
     let t = Instant::now();
-    let remote_env = resolve_remote_env(&remote_env_map, &docker_socket, &container_id.0);
-    let merged_env = merge_env(probed_env, remote_env);
+    let remote_env = resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
+    let merged_env = merge_env(result.probed_env, remote_env);
     trace!("resolve_remote_env: {:?}", t.elapsed());
 
     for (key, value) in &merged_env {
@@ -154,7 +149,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     }
 
     docker_cmd.args(["-it"]);
-    docker_cmd.arg(&container_id.0);
+    docker_cmd.arg(&result.container_id.0);
 
     if screen_state.session_exists {
         // Reattach to existing session

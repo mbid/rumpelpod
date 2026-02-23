@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::cli::CpCommand;
 use crate::enter;
@@ -88,13 +88,17 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
     };
 
     let result = enter::launch_pod(pod_name, cmd.host.as_deref())?;
+    let docker_socket = result
+        .docker_socket
+        .as_ref()
+        .context("docker_socket is required for Docker hosts")?;
 
     // Fill in the container ID
     let docker_src = docker_src.replace("{}", &result.container_id.0);
     let docker_dest = docker_dest.replace("{}", &result.container_id.0);
 
     let mut docker_cmd = Command::new("docker");
-    docker_cmd.args(["-H", &format!("unix://{}", result.docker_socket.display())]);
+    docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
     docker_cmd.arg("cp");
 
     if cmd.archive {

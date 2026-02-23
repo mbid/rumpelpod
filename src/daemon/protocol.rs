@@ -34,8 +34,10 @@ pub struct LaunchResult {
     /// or the user from the image's USER directive.
     pub user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
-    /// Clients must use this socket for all Docker operations on this pod.
-    pub docker_socket: std::path::PathBuf,
+    /// `None` for Kubernetes pods (which use kubectl instead of docker).
+    pub docker_socket: Option<std::path::PathBuf>,
+    /// The host where the pod is running.
+    pub host: Host,
     /// Whether a devcontainer image was built during this launch.
     /// False when the image was already cached or when using a pre-built image.
     pub image_built: bool,
@@ -121,7 +123,10 @@ struct PodLaunchResponse {
     /// The resolved user for the pod.
     user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
-    docker_socket: PathBuf,
+    /// `None` for Kubernetes pods.
+    docker_socket: Option<PathBuf>,
+    /// The host where the pod is running.
+    host: Host,
     /// Whether a devcontainer image was built during this launch.
     image_built: bool,
     /// Environment variables captured by probing the user's shell init files.
@@ -239,7 +244,8 @@ pub struct EnsureClaudeConfigRequest {
     pub container_repo_path: PathBuf,
     pub container_id: ContainerId,
     pub user: String,
-    pub docker_socket: PathBuf,
+    /// The Docker socket path. `None` for Kubernetes pods.
+    pub docker_socket: Option<PathBuf>,
     pub container_url: String,
     pub container_token: String,
     /// Install a Claude PermissionRequest hook that auto-approves all tool use.
@@ -356,6 +362,7 @@ impl Daemon for DaemonClient {
                 container_id: body.container_id,
                 user: body.user,
                 docker_socket: body.docker_socket,
+                host: body.host,
                 image_built: body.image_built,
                 probed_env: body.probed_env,
                 user_shell: body.user_shell,
@@ -388,6 +395,7 @@ impl Daemon for DaemonClient {
                 container_id: body.container_id,
                 user: body.user,
                 docker_socket: body.docker_socket,
+                host: body.host,
                 image_built: body.image_built,
                 probed_env: body.probed_env,
                 user_shell: body.user_shell,
@@ -631,6 +639,7 @@ async fn launch_pod_handler<D: Daemon>(
             container_id: launch_result.container_id,
             user: launch_result.user,
             docker_socket: launch_result.docker_socket,
+            host: launch_result.host,
             image_built: launch_result.image_built,
             probed_env: launch_result.probed_env,
             user_shell: launch_result.user_shell,
@@ -658,6 +667,7 @@ async fn recreate_pod_handler<D: Daemon>(
             container_id: res.container_id,
             user: res.user,
             docker_socket: res.docker_socket,
+            host: res.host,
             image_built: res.image_built,
             probed_env: res.probed_env,
             user_shell: res.user_shell,
@@ -896,10 +906,12 @@ mod tests {
                 .map(String::from)
                 .unwrap_or_else(|| "mockuser".to_string());
             let image = params.devcontainer.image.as_deref().unwrap_or("none");
+            let host = params.host;
             Ok(LaunchResult {
                 container_id: ContainerId(format!("{}:{}", params.pod_name.0, image)),
                 user,
-                docker_socket: PathBuf::from("/var/run/docker.sock"),
+                docker_socket: Some(PathBuf::from("/var/run/docker.sock")),
+                host,
                 image_built: false,
                 probed_env: HashMap::new(),
                 user_shell: "/bin/sh".to_string(),
@@ -915,10 +927,12 @@ mod tests {
                 .map(String::from)
                 .unwrap_or_else(|| "mockuser".to_string());
             let image = params.devcontainer.image.as_deref().unwrap_or("none");
+            let host = params.host;
             Ok(LaunchResult {
                 container_id: ContainerId(format!("recreated:{}:{}", params.pod_name.0, image)),
                 user,
-                docker_socket: PathBuf::from("/var/run/docker.sock"),
+                docker_socket: Some(PathBuf::from("/var/run/docker.sock")),
+                host,
                 image_built: false,
                 probed_env: HashMap::new(),
                 user_shell: "/bin/sh".to_string(),

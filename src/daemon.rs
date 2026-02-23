@@ -2377,7 +2377,8 @@ impl Daemon for DaemonServer {
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
-                docker_socket,
+                docker_socket: Some(docker_socket),
+                host: docker_host,
                 image_built,
                 probed_env,
                 user_shell,
@@ -2622,7 +2623,8 @@ impl Daemon for DaemonServer {
         Ok(LaunchResult {
             container_id,
             user,
-            docker_socket,
+            docker_socket: Some(docker_socket),
+            host: docker_host,
             image_built,
             probed_env,
             user_shell,

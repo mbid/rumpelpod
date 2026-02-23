@@ -12,9 +12,13 @@ use crate::git::get_repo_root;
 /// Prints a warning to stderr if the working tree is dirty.
 fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<()> {
     let result = enter::launch_pod(pod_name, None)?;
+    let docker_socket = result
+        .docker_socket
+        .as_ref()
+        .context("docker_socket is required for Docker hosts")?;
     let (devcontainer, _) = enter::load_and_resolve(repo_root, None)?;
     let container_repo_path = devcontainer.container_repo_path(repo_root);
-    let docker_host_arg = format!("unix://{}", result.docker_socket.display());
+    let docker_host_arg = format!("unix://{}", docker_socket.display());
 
     let output = Command::new("docker")
         .args(["-H", &docker_host_arg])
