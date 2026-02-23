@@ -1,17 +1,21 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{delete, get, post, put};
 use axum::serve::Listener;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
+use tokio_stream::StreamExt;
 use url::Url;
 
 use crate::async_runtime::block_on;
@@ -112,23 +116,36 @@ pub struct PodLaunchParams {
     /// The devcontainer.json config, with `${localEnv:...}` already resolved
     /// and build paths normalized to repo-root-relative.
     pub devcontainer: DevContainer,
+    /// Channel for streaming Docker build output lines back to the handler.
+    /// Only used server-side; skipped during serialization.
+    #[serde(skip)]
+    pub build_output_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 /// Response body for launch/recreate pod endpoints.
 #[derive(Debug, Serialize, Deserialize)]
-struct PodLaunchResponse {
-    container_id: ContainerId,
+pub struct PodLaunchResponse {
+    pub container_id: ContainerId,
     /// The resolved user for the pod.
-    user: String,
+    pub user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
-    docker_socket: PathBuf,
+    pub docker_socket: PathBuf,
     /// Whether a devcontainer image was built during this launch.
-    image_built: bool,
+    pub image_built: bool,
     /// Environment variables captured by probing the user's shell init files.
-    probed_env: HashMap<String, String>,
-    user_shell: String,
-    container_url: String,
-    container_token: String,
+    pub probed_env: HashMap<String, String>,
+    pub user_shell: String,
+    pub container_url: String,
+    pub container_token: String,
+}
+
+/// NDJSON event streamed from launch/recreate endpoints.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PodLaunchEvent {
+    BuildOutput { line: String },
+    Result(PodLaunchResponse),
+    Error { error: String },
 }
 
 /// Request body for stop_pod endpoint.
@@ -337,6 +354,42 @@ impl DaemonClient {
     }
 }
 
+/// Read an NDJSON stream of `PodLaunchEvent`s, writing build output to stderr,
+/// and return the final `LaunchResult`.
+fn read_launch_stream(response: reqwest::blocking::Response) -> Result<LaunchResult> {
+    for line in BufReader::new(response).lines() {
+        let line = line.map_err(|e| anyhow::anyhow!("Failed to read response stream: {}", e))?;
+        if line.is_empty() {
+            continue;
+        }
+        let event: PodLaunchEvent = serde_json::from_str(&line)
+            .map_err(|e| anyhow::anyhow!("Failed to parse event: {} (line: {})", e, line))?;
+        match event {
+            PodLaunchEvent::BuildOutput { line } => {
+                eprintln!("{}", line);
+            }
+            PodLaunchEvent::Result(body) => {
+                return Ok(LaunchResult {
+                    container_id: body.container_id,
+                    user: body.user,
+                    docker_socket: body.docker_socket,
+                    image_built: body.image_built,
+                    probed_env: body.probed_env,
+                    user_shell: body.user_shell,
+                    container_url: body.container_url,
+                    container_token: body.container_token,
+                });
+            }
+            PodLaunchEvent::Error { error } => {
+                return Err(anyhow::anyhow!("Server error: {}", error));
+            }
+        }
+    }
+    Err(anyhow::anyhow!(
+        "Server closed stream without sending a result"
+    ))
+}
+
 impl Daemon for DaemonClient {
     fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
         let url = self.url.join("/pod")?;
@@ -348,26 +401,7 @@ impl Daemon for DaemonClient {
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
-        if response.status().is_success() {
-            let body: PodLaunchResponse = response
-                .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
-            Ok(LaunchResult {
-                container_id: body.container_id,
-                user: body.user,
-                docker_socket: body.docker_socket,
-                image_built: body.image_built,
-                probed_env: body.probed_env,
-                user_shell: body.user_shell,
-                container_url: body.container_url,
-                container_token: body.container_token,
-            })
-        } else {
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
-            });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
-        }
+        read_launch_stream(response)
     }
 
     fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
@@ -380,26 +414,7 @@ impl Daemon for DaemonClient {
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
-        if response.status().is_success() {
-            let body: PodLaunchResponse = response
-                .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
-            Ok(LaunchResult {
-                container_id: body.container_id,
-                user: body.user,
-                docker_socket: body.docker_socket,
-                image_built: body.image_built,
-                probed_env: body.probed_env,
-                user_shell: body.user_shell,
-                container_url: body.container_url,
-                container_token: body.container_token,
-            })
-        } else {
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
-            });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
-        }
+        read_launch_stream(response)
     }
 
     fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
@@ -619,58 +634,88 @@ impl Daemon for DaemonClient {
     }
 }
 
+/// Build a streaming NDJSON response for launch/recreate endpoints.
+///
+/// Spawns a blocking task that runs `op(params)`, forwarding build output
+/// lines as `PodLaunchEvent::BuildOutput` and the final result as
+/// `PodLaunchEvent::Result` or `PodLaunchEvent::Error`.
+fn streaming_launch_response<D: Daemon>(
+    daemon: Arc<D>,
+    mut params: PodLaunchParams,
+    op: fn(&D, PodLaunchParams) -> Result<LaunchResult>,
+) -> Response {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<PodLaunchEvent>(64);
+
+    // std channel for build output lines (used inside the blocking spawn)
+    let (build_tx, build_rx) = std::sync::mpsc::channel::<String>();
+    params.build_output_tx = Some(build_tx);
+
+    tokio::task::spawn_blocking(move || {
+        let event_tx_fwd = event_tx.clone();
+
+        // Forward build output lines from the std channel to the tokio channel
+        let forwarder = std::thread::spawn(move || {
+            for line in build_rx {
+                if event_tx_fwd
+                    .blocking_send(PodLaunchEvent::BuildOutput { line })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        let result = op(&daemon, params);
+
+        // Wait for the forwarder to drain; the std channel is closed once
+        // build_output_tx (inside params) is dropped by op().
+        let _ = forwarder.join();
+
+        let event = match result {
+            Ok(r) => PodLaunchEvent::Result(PodLaunchResponse {
+                container_id: r.container_id,
+                user: r.user,
+                docker_socket: r.docker_socket,
+                image_built: r.image_built,
+                probed_env: r.probed_env,
+                user_shell: r.user_shell,
+                container_url: r.container_url,
+                container_token: r.container_token,
+            }),
+            Err(e) => PodLaunchEvent::Error {
+                error: format!("{:#}", e),
+            },
+        };
+        let _ = event_tx.blocking_send(event);
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx).map(|event| {
+        let mut line =
+            serde_json::to_string(&event).expect("PodLaunchEvent is always serializable");
+        line.push('\n');
+        Ok::<_, std::convert::Infallible>(line)
+    });
+
+    Response::builder()
+        .header("content-type", "application/x-ndjson")
+        .body(Body::from_stream(stream))
+        .expect("building response never fails")
+}
+
 /// Handler for PUT /pod endpoint.
 async fn launch_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(params): Json<PodLaunchParams>,
-) -> Result<Json<PodLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.launch_pod(params));
-
-    match result {
-        Ok(launch_result) => Ok(Json(PodLaunchResponse {
-            container_id: launch_result.container_id,
-            user: launch_result.user,
-            docker_socket: launch_result.docker_socket,
-            image_built: launch_result.image_built,
-            probed_env: launch_result.probed_env,
-            user_shell: launch_result.user_shell,
-            container_url: launch_result.container_url,
-            container_token: launch_result.container_token,
-        })),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("{:#}", e),
-            }),
-        )),
-    }
+) -> Response {
+    streaming_launch_response(daemon, params, D::launch_pod)
 }
 
 /// Handler for POST /pod/recreate endpoint.
 async fn recreate_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(params): Json<PodLaunchParams>,
-) -> Result<Json<PodLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.recreate_pod(params));
-
-    match result {
-        Ok(res) => Ok(Json(PodLaunchResponse {
-            container_id: res.container_id,
-            user: res.user,
-            docker_socket: res.docker_socket,
-            image_built: res.image_built,
-            probed_env: res.probed_env,
-            user_shell: res.user_shell,
-            container_url: res.container_url,
-            container_token: res.container_token,
-        })),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("{:#}", e),
-            }),
-        )),
-    }
+) -> Response {
+    streaming_launch_response(daemon, params, D::recreate_pod)
 }
 
 /// Handler for POST /pod/stop endpoint.
@@ -1041,6 +1086,7 @@ mod tests {
             host_branch: Some("main".to_string()),
             docker_host: DockerHost::Localhost,
             devcontainer: dc,
+            build_output_tx: None,
         });
 
         let launch_result = result.unwrap();

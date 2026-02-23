@@ -2041,6 +2041,7 @@ impl Daemon for DaemonServer {
             host_branch,
             docker_host,
             devcontainer,
+            build_output_tx,
         } = params;
 
         // Resolve daemon-side variables (container workspace paths,
@@ -2048,7 +2049,15 @@ impl Daemon for DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
-        let build_result = crate::image::resolve_image(&devcontainer, &docker_host, &repo_path)?;
+        let on_output: Option<crate::image::BuildOutputFn> =
+            build_output_tx.map(|tx| -> crate::image::BuildOutputFn {
+                Box::new(move |line: &str| {
+                    let _ = tx.send(line.to_string());
+                })
+            });
+
+        let build_result =
+            crate::image::resolve_image(&devcontainer, &docker_host, &repo_path, on_output)?;
         let image = build_result.image;
         let image_built = build_result.built;
         let container_repo_path = devcontainer.container_repo_path(&repo_path);

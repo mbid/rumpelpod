@@ -22,6 +22,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         host_branch,
         docker_host,
         devcontainer,
+        build_output_tx: None,
     })?;
 
     println!("Pod '{}' recreated successfully.", cmd.name);

@@ -181,12 +181,9 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
         host_branch,
         docker_host,
         devcontainer,
+        build_output_tx: None,
     })?;
     trace!("launch_pod daemon RPC: {:?}", t.elapsed());
-
-    if result.image_built {
-        eprintln!("Devcontainer image built.");
-    }
 
     Ok(result)
 }
