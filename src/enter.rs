@@ -10,7 +10,9 @@ use log::{info, trace};
 use crate::cli::EnterCommand;
 use crate::config::{load_toml_config, DockerHost};
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
+use crate::daemon::protocol::{
+    Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
+};
 use crate::devcontainer::{
     substitute_vars, ContainerEnvSource, DevContainer, GpuRequirement, HostRequirements, MountType,
     SubstitutionContext, UserEnvProbe,
@@ -175,14 +177,17 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
     let client = DaemonClient::new_unix(&socket_path);
 
     let t = Instant::now();
-    let result = client.launch_pod(PodLaunchParams {
+    let mut progress = client.launch_pod(PodLaunchParams {
         pod_name: PodName(pod_name.to_string()),
         repo_path: repo_root,
         host_branch,
         docker_host,
         devcontainer,
-        build_output_tx: None,
     })?;
+    for line in &mut progress {
+        eprintln!("{}", line);
+    }
+    let result = progress.finish()?;
     trace!("launch_pod daemon RPC: {:?}", t.elapsed());
 
     Ok(result)

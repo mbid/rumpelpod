@@ -116,10 +116,6 @@ pub struct PodLaunchParams {
     /// The devcontainer.json config, with `${localEnv:...}` already resolved
     /// and build paths normalized to repo-root-relative.
     pub devcontainer: DevContainer,
-    /// Channel for streaming Docker build output lines back to the handler.
-    /// Only used server-side; skipped during serialization.
-    #[serde(skip)]
-    pub build_output_tx: Option<std::sync::mpsc::Sender<String>>,
 }
 
 /// Response body for launch/recreate pod endpoints.
@@ -137,15 +133,6 @@ pub struct PodLaunchResponse {
     pub user_shell: String,
     pub container_url: String,
     pub container_token: String,
-}
-
-/// NDJSON event streamed from launch/recreate endpoints.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PodLaunchEvent {
-    BuildOutput { line: String },
-    Result(PodLaunchResponse),
-    Error { error: String },
 }
 
 /// Request body for stop_pod endpoint.
@@ -269,12 +256,49 @@ struct ErrorResponse {
     error: String,
 }
 
+/// Progress handle for a launch/recreate operation.
+///
+/// Yields build-output lines via `Iterator::next()` and returns the final
+/// result from `finish()`.  Implementations exist for the server side
+/// (thread-backed), the client side (SSE-backed), and tests (immediate).
+pub trait LaunchProgress: Iterator<Item = String> + Send {
+    /// Drain remaining output and return the final result.
+    fn finish(self) -> Result<LaunchResult>;
+}
+
+/// Trivial `LaunchProgress` that yields no build output -- just wraps a
+/// pre-computed result.  Used by mocks and tests.
+pub struct ImmediateLaunchProgress(Option<Result<LaunchResult>>);
+
+impl ImmediateLaunchProgress {
+    pub fn new(result: Result<LaunchResult>) -> Self {
+        Self(Some(result))
+    }
+}
+
+impl Iterator for ImmediateLaunchProgress {
+    type Item = String;
+    fn next(&mut self) -> Option<String> {
+        None
+    }
+}
+
+impl LaunchProgress for ImmediateLaunchProgress {
+    fn finish(mut self) -> Result<LaunchResult> {
+        self.0
+            .take()
+            .expect("finish() called twice on ImmediateLaunchProgress")
+    }
+}
+
 pub trait Daemon: Send + Sync + 'static {
+    type Progress: LaunchProgress;
+
     // PUT /pod
-    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult>;
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<Self::Progress>;
 
     // POST /pod/recreate
-    fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult>;
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<Self::Progress>;
 
     // POST /pod/stop
     // Stops a pod container without removing it.
@@ -354,44 +378,151 @@ impl DaemonClient {
     }
 }
 
-/// Read an NDJSON stream of `PodLaunchEvent`s, writing build output to stderr,
-/// and return the final `LaunchResult`.
-fn read_launch_stream(response: reqwest::blocking::Response) -> Result<LaunchResult> {
-    for line in BufReader::new(response).lines() {
-        let line = line.map_err(|e| anyhow::anyhow!("Failed to read response stream: {}", e))?;
-        if line.is_empty() {
-            continue;
+/// SSE-backed `LaunchProgress` for the HTTP client side.
+///
+/// Parses `event: build_output` / `event: result` / `event: error` lines
+/// from a `text/event-stream` response.
+pub struct ClientLaunchProgress {
+    lines: std::io::Lines<BufReader<reqwest::blocking::Response>>,
+    result: Option<Result<LaunchResult>>,
+}
+
+impl ClientLaunchProgress {
+    fn new(response: reqwest::blocking::Response) -> Self {
+        Self {
+            lines: BufReader::new(response).lines(),
+            result: None,
         }
-        let event: PodLaunchEvent = serde_json::from_str(&line)
-            .map_err(|e| anyhow::anyhow!("Failed to parse event: {} (line: {})", e, line))?;
-        match event {
-            PodLaunchEvent::BuildOutput { line } => {
-                eprintln!("{}", line);
+    }
+}
+
+impl Iterator for ClientLaunchProgress {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        // SSE format: "event: <type>\ndata: <json>\n\n"
+        // We need to read event + data line pairs.
+        loop {
+            let line = match self.lines.next()? {
+                Ok(l) => l,
+                Err(e) => {
+                    self.result = Some(Err(anyhow::anyhow!(
+                        "Failed to read response stream: {}",
+                        e
+                    )));
+                    return None;
+                }
+            };
+
+            // Skip blank lines (SSE record separator)
+            if line.is_empty() {
+                continue;
             }
-            PodLaunchEvent::Result(body) => {
-                return Ok(LaunchResult {
-                    container_id: body.container_id,
-                    user: body.user,
-                    docker_socket: body.docker_socket,
-                    image_built: body.image_built,
-                    probed_env: body.probed_env,
-                    user_shell: body.user_shell,
-                    container_url: body.container_url,
-                    container_token: body.container_token,
-                });
-            }
-            PodLaunchEvent::Error { error } => {
-                return Err(anyhow::anyhow!("Server error: {}", error));
+
+            let event_type = match line.strip_prefix("event: ") {
+                Some(t) => t.to_string(),
+                None => continue,
+            };
+
+            // Read the "data: ..." line
+            let data_line = match self.lines.next() {
+                Some(Ok(l)) => l,
+                Some(Err(e)) => {
+                    self.result = Some(Err(anyhow::anyhow!("Failed to read data line: {}", e)));
+                    return None;
+                }
+                None => {
+                    self.result = Some(Err(anyhow::anyhow!(
+                        "Stream ended mid-event (no data line)"
+                    )));
+                    return None;
+                }
+            };
+
+            let data = match data_line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => {
+                    self.result = Some(Err(anyhow::anyhow!(
+                        "Expected 'data: ' line, got: {}",
+                        data_line
+                    )));
+                    return None;
+                }
+            };
+
+            match event_type.as_str() {
+                "build_output" => {
+                    // data is a JSON-encoded string
+                    match serde_json::from_str::<String>(data) {
+                        Ok(s) => return Some(s),
+                        Err(e) => {
+                            self.result = Some(Err(anyhow::anyhow!(
+                                "Failed to parse build_output data: {}",
+                                e
+                            )));
+                            return None;
+                        }
+                    }
+                }
+                "result" => {
+                    match serde_json::from_str::<PodLaunchResponse>(data) {
+                        Ok(body) => {
+                            self.result = Some(Ok(LaunchResult {
+                                container_id: body.container_id,
+                                user: body.user,
+                                docker_socket: body.docker_socket,
+                                image_built: body.image_built,
+                                probed_env: body.probed_env,
+                                user_shell: body.user_shell,
+                                container_url: body.container_url,
+                                container_token: body.container_token,
+                            }));
+                        }
+                        Err(e) => {
+                            self.result =
+                                Some(Err(anyhow::anyhow!("Failed to parse result data: {}", e)));
+                        }
+                    }
+                    return None;
+                }
+                "error" => {
+                    match serde_json::from_str::<ErrorResponse>(data) {
+                        Ok(err) => {
+                            self.result = Some(Err(anyhow::anyhow!("Server error: {}", err.error)));
+                        }
+                        Err(e) => {
+                            self.result =
+                                Some(Err(anyhow::anyhow!("Failed to parse error data: {}", e)));
+                        }
+                    }
+                    return None;
+                }
+                other => {
+                    self.result = Some(Err(anyhow::anyhow!("Unknown SSE event type: {}", other)));
+                    return None;
+                }
             }
         }
     }
-    Err(anyhow::anyhow!(
-        "Server closed stream without sending a result"
-    ))
+}
+
+impl LaunchProgress for ClientLaunchProgress {
+    fn finish(mut self) -> Result<LaunchResult> {
+        // Drain any remaining build output
+        while self.next().is_some() {}
+
+        self.result.unwrap_or_else(|| {
+            Err(anyhow::anyhow!(
+                "Server closed stream without sending a result"
+            ))
+        })
+    }
 }
 
 impl Daemon for DaemonClient {
-    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+    type Progress = ClientLaunchProgress;
+
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<ClientLaunchProgress> {
         let url = self.url.join("/pod")?;
 
         let response = self
@@ -401,10 +532,10 @@ impl Daemon for DaemonClient {
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
-        read_launch_stream(response)
+        Ok(ClientLaunchProgress::new(response))
     }
 
-    fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<ClientLaunchProgress> {
         let url = self.url.join("/pod/recreate")?;
 
         let response = self
@@ -414,7 +545,7 @@ impl Daemon for DaemonClient {
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
-        read_launch_stream(response)
+        Ok(ClientLaunchProgress::new(response))
     }
 
     fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
@@ -634,70 +765,80 @@ impl Daemon for DaemonClient {
     }
 }
 
-/// Build a streaming NDJSON response for launch/recreate endpoints.
+/// Format a single SSE event with the given type and JSON-encoded data.
+fn sse_event(event_type: &str, data: &str) -> String {
+    format!("event: {}\ndata: {}\n\n", event_type, data)
+}
+
+/// Build an SSE streaming response for launch/recreate endpoints.
 ///
-/// Spawns a blocking task that runs `op(params)`, forwarding build output
-/// lines as `PodLaunchEvent::BuildOutput` and the final result as
-/// `PodLaunchEvent::Result` or `PodLaunchEvent::Error`.
+/// Spawns a blocking task that calls `op()` to get a `LaunchProgress`,
+/// iterates build output lines (sending each as `event: build_output`),
+/// then calls `finish()` and sends `event: result` or `event: error`.
 fn streaming_launch_response<D: Daemon>(
     daemon: Arc<D>,
-    mut params: PodLaunchParams,
-    op: fn(&D, PodLaunchParams) -> Result<LaunchResult>,
+    params: PodLaunchParams,
+    op: fn(&D, PodLaunchParams) -> Result<D::Progress>,
 ) -> Response {
-    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<PodLaunchEvent>(64);
-
-    // std channel for build output lines (used inside the blocking spawn)
-    let (build_tx, build_rx) = std::sync::mpsc::channel::<String>();
-    params.build_output_tx = Some(build_tx);
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
 
     tokio::task::spawn_blocking(move || {
-        let event_tx_fwd = event_tx.clone();
-
-        // Forward build output lines from the std channel to the tokio channel
-        let forwarder = std::thread::spawn(move || {
-            for line in build_rx {
-                if event_tx_fwd
-                    .blocking_send(PodLaunchEvent::BuildOutput { line })
-                    .is_err()
-                {
-                    break;
-                }
+        let mut progress = match op(&daemon, params) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = sse_event(
+                    "error",
+                    &serde_json::to_string(&ErrorResponse {
+                        error: format!("{:#}", e),
+                    })
+                    .expect("ErrorResponse is always serializable"),
+                );
+                let _ = event_tx.blocking_send(msg);
+                return;
             }
-        });
-
-        let result = op(&daemon, params);
-
-        // Wait for the forwarder to drain; the std channel is closed once
-        // build_output_tx (inside params) is dropped by op().
-        let _ = forwarder.join();
-
-        let event = match result {
-            Ok(r) => PodLaunchEvent::Result(PodLaunchResponse {
-                container_id: r.container_id,
-                user: r.user,
-                docker_socket: r.docker_socket,
-                image_built: r.image_built,
-                probed_env: r.probed_env,
-                user_shell: r.user_shell,
-                container_url: r.container_url,
-                container_token: r.container_token,
-            }),
-            Err(e) => PodLaunchEvent::Error {
-                error: format!("{:#}", e),
-            },
         };
-        let _ = event_tx.blocking_send(event);
+
+        // Stream build output lines
+        for line in &mut progress {
+            let json_str = serde_json::to_string(&line).expect("String is always serializable");
+            let msg = sse_event("build_output", &json_str);
+            if event_tx.blocking_send(msg).is_err() {
+                return;
+            }
+        }
+
+        // Send final result
+        let msg = match progress.finish() {
+            Ok(r) => sse_event(
+                "result",
+                &serde_json::to_string(&PodLaunchResponse {
+                    container_id: r.container_id,
+                    user: r.user,
+                    docker_socket: r.docker_socket,
+                    image_built: r.image_built,
+                    probed_env: r.probed_env,
+                    user_shell: r.user_shell,
+                    container_url: r.container_url,
+                    container_token: r.container_token,
+                })
+                .expect("PodLaunchResponse is always serializable"),
+            ),
+            Err(e) => sse_event(
+                "error",
+                &serde_json::to_string(&ErrorResponse {
+                    error: format!("{:#}", e),
+                })
+                .expect("ErrorResponse is always serializable"),
+            ),
+        };
+        let _ = event_tx.blocking_send(msg);
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx).map(|event| {
-        let mut line =
-            serde_json::to_string(&event).expect("PodLaunchEvent is always serializable");
-        line.push('\n');
-        Ok::<_, std::convert::Infallible>(line)
-    });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx)
+        .map(Ok::<_, std::convert::Infallible>);
 
     Response::builder()
-        .header("content-type", "application/x-ndjson")
+        .header("content-type", "text/event-stream")
         .body(Body::from_stream(stream))
         .expect("building response never fails")
 }
@@ -934,14 +1075,16 @@ mod tests {
     struct MockDaemon;
 
     impl Daemon for MockDaemon {
-        fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+        type Progress = ImmediateLaunchProgress;
+
+        fn launch_pod(&self, params: PodLaunchParams) -> Result<ImmediateLaunchProgress> {
             let user = params
                 .devcontainer
                 .user()
                 .map(String::from)
                 .unwrap_or_else(|| "mockuser".to_string());
             let image = params.devcontainer.image.as_deref().unwrap_or("none");
-            Ok(LaunchResult {
+            Ok(ImmediateLaunchProgress::new(Ok(LaunchResult {
                 container_id: ContainerId(format!("{}:{}", params.pod_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
@@ -950,17 +1093,17 @@ mod tests {
                 user_shell: "/bin/sh".to_string(),
                 container_url: String::new(),
                 container_token: String::new(),
-            })
+            })))
         }
 
-        fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+        fn recreate_pod(&self, params: PodLaunchParams) -> Result<ImmediateLaunchProgress> {
             let user = params
                 .devcontainer
                 .user()
                 .map(String::from)
                 .unwrap_or_else(|| "mockuser".to_string());
             let image = params.devcontainer.image.as_deref().unwrap_or("none");
-            Ok(LaunchResult {
+            Ok(ImmediateLaunchProgress::new(Ok(LaunchResult {
                 container_id: ContainerId(format!("recreated:{}:{}", params.pod_name.0, image)),
                 user,
                 docker_socket: PathBuf::from("/var/run/docker.sock"),
@@ -969,7 +1112,7 @@ mod tests {
                 user_shell: "/bin/sh".to_string(),
                 container_url: String::new(),
                 container_token: String::new(),
-            })
+            })))
         }
 
         fn stop_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
@@ -1080,16 +1223,15 @@ mod tests {
             ..Default::default()
         };
 
-        let result = client.launch_pod(PodLaunchParams {
+        let progress = client.launch_pod(PodLaunchParams {
             pod_name: PodName("test-sandbox".to_string()),
             repo_path: PathBuf::from("/tmp/repo"),
             host_branch: Some("main".to_string()),
             docker_host: DockerHost::Localhost,
             devcontainer: dc,
-            build_output_tx: None,
         });
 
-        let launch_result = result.unwrap();
+        let launch_result = progress.unwrap().finish().unwrap();
         assert_eq!(launch_result.container_id.0, "test-sandbox:test-image");
     }
 
@@ -1108,11 +1250,13 @@ mod tests {
     }
 
     impl Daemon for MockDaemonWithDb {
-        fn launch_pod(&self, _params: PodLaunchParams) -> Result<LaunchResult> {
+        type Progress = ImmediateLaunchProgress;
+
+        fn launch_pod(&self, _params: PodLaunchParams) -> Result<ImmediateLaunchProgress> {
             unimplemented!("not needed for conversation tests")
         }
 
-        fn recreate_pod(&self, _params: PodLaunchParams) -> Result<LaunchResult> {
+        fn recreate_pod(&self, _params: PodLaunchParams) -> Result<ImmediateLaunchProgress> {
             unimplemented!("not needed for conversation tests")
         }
 
