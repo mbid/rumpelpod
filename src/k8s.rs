@@ -165,7 +165,7 @@ impl K8sClient {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
 
         // Build volume mounts and volume definitions from options
-        let volume_mounts: Vec<serde_json::Value> = options
+        let mut volume_mounts: Vec<serde_json::Value> = options
             .volumes
             .iter()
             .map(|v| {
@@ -177,7 +177,7 @@ impl K8sClient {
             })
             .collect();
 
-        let volumes: Vec<serde_json::Value> = options
+        let mut volumes: Vec<serde_json::Value> = options
             .volumes
             .iter()
             .map(|v| {
@@ -192,6 +192,17 @@ impl K8sClient {
             })
             .collect();
 
+        // Always include a writable emptyDir for the rumpel binary so we
+        // can write to /opt/rumpelpod/bin as a non-root user.
+        volume_mounts.push(serde_json::json!({
+            "name": "rumpelpod-bin",
+            "mountPath": "/opt/rumpelpod/bin",
+        }));
+        volumes.push(serde_json::json!({
+            "name": "rumpelpod-bin",
+            "emptyDir": {},
+        }));
+
         let mut container = serde_json::json!({
             "name": "main",
             "image": image,
@@ -199,14 +210,11 @@ impl K8sClient {
                 "name": k,
                 "value": v,
             })).collect::<Vec<_>>(),
+            "volumeMounts": volume_mounts,
         });
 
         if options.override_command {
             container["command"] = serde_json::json!(["sleep", "infinity"]);
-        }
-
-        if !volume_mounts.is_empty() {
-            container["volumeMounts"] = serde_json::json!(volume_mounts);
         }
 
         // Build securityContext
@@ -264,7 +272,7 @@ impl K8sClient {
             );
         }
 
-        let mut pod_spec = serde_json::json!({
+        let pod_spec = serde_json::json!({
             "apiVersion": "v1",
             "kind": "Pod",
             "metadata": {
@@ -274,13 +282,10 @@ impl K8sClient {
             },
             "spec": {
                 "containers": [container],
+                "volumes": volumes,
                 "restartPolicy": "Never",
             }
         });
-
-        if !volumes.is_empty() {
-            pod_spec["spec"]["volumes"] = serde_json::json!(volumes);
-        }
 
         let pod: Pod = serde_json::from_value(pod_spec).context("serializing pod spec")?;
 

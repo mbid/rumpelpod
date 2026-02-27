@@ -2,10 +2,8 @@
 //!
 //! These tests require `kind` and `kubectl` to be installed and a Docker daemon
 //! running. A dedicated kind cluster is created per test run and cleaned up on
-//! drop.
-//!
-//! Gated behind `RUMPELPOD_TEST_K8S=1` to avoid running in environments without
-//! kind support.
+//! drop.  Each test creates an isolated namespace to avoid conflicts with
+//! parallel test runs.
 
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -27,9 +25,61 @@ const CLUSTER_NAME: &str = "rumpelpod-test";
 /// Context name that kind creates (always `kind-` prefixed).
 const K8S_CONTEXT: &str = "kind-rumpelpod-test";
 
-/// Returns true if k8s tests should run.
-fn k8s_enabled() -> bool {
-    std::env::var("RUMPELPOD_TEST_K8S").is_ok()
+/// Node image to use -- must match the version preloaded in the devcontainer.
+const KIND_NODE_IMAGE: &str = "kindest/node:v1.32.2";
+
+/// Per-test namespace that is automatically deleted on drop.
+struct K8sNamespace {
+    name: String,
+}
+
+impl K8sNamespace {
+    fn new(test_name: &str) -> Self {
+        let suffix = format!("{:06x}", rand::random::<u32>() & 0x00ff_ffff);
+
+        let sanitized: String = test_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        // "rp-" (3) + "-" (1) + suffix (6) = 10 chars overhead
+        let max_name_len = 63 - 10;
+        let truncated = &sanitized[..sanitized.len().min(max_name_len)];
+        let name = format!("rp-{}-{}", truncated, suffix);
+
+        Command::new("kubectl")
+            .args(["--context", K8S_CONTEXT, "create", "namespace", &name])
+            .success()
+            .expect("Failed to create k8s namespace");
+
+        Self { name }
+    }
+}
+
+impl Drop for K8sNamespace {
+    fn drop(&mut self) {
+        let status = Command::new("kubectl")
+            .args([
+                "--context",
+                K8S_CONTEXT,
+                "delete",
+                "namespace",
+                &self.name,
+                "--grace-period=0",
+                "--force",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Err(e) = status {
+            eprintln!("Failed to delete namespace {}: {}", self.name, e);
+        }
+    }
 }
 
 /// Shared kind cluster, created once per test run.
@@ -46,9 +96,16 @@ fn ensure_kind_cluster() {
             return;
         }
 
-        // Create cluster
+        // Create cluster with the preloaded node image
         Command::new("kind")
-            .args(["create", "cluster", "--name", CLUSTER_NAME])
+            .args([
+                "create",
+                "cluster",
+                "--name",
+                CLUSTER_NAME,
+                "--image",
+                KIND_NODE_IMAGE,
+            ])
             .success()
             .expect("Failed to create kind cluster");
     });
@@ -74,7 +131,12 @@ fn tag_image(image_id: &str, tag: &str) {
 ///
 /// `extra_json` is spliced into the devcontainer.json object, e.g.
 /// `r#""mounts": [{"type":"volume","source":"tv","target":"/data"}]"#`.
-fn write_k8s_pod_config_with_extras(repo: &TestRepo, image_tag: &str, extra_json: &str) {
+fn write_k8s_pod_config_with_extras(
+    repo: &TestRepo,
+    image_tag: &str,
+    namespace: &str,
+    extra_json: &str,
+) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
 
@@ -94,62 +156,21 @@ fn write_k8s_pod_config_with_extras(repo: &TestRepo, image_tag: &str, extra_json
     .expect("Failed to write devcontainer.json");
 
     let config = formatdoc! {r#"
-        host = "k8s://{K8S_CONTEXT}"
+        host = "k8s://{K8S_CONTEXT}/{namespace}"
     "#};
     std::fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");
 }
 
 /// Write devcontainer.json and .rumpelpod.toml for a k8s test.
-fn write_k8s_pod_config(repo: &TestRepo, image_tag: &str) {
-    let devcontainer_dir = repo.path().join(".devcontainer");
-    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
-
-    // k8s hosts require an explicit containerUser since we cannot inspect
-    // the image to determine the USER directive.
-    let devcontainer_json = formatdoc! {r#"
-        {{
-            "image": "{image_tag}",
-            "workspaceFolder": "{TEST_REPO_PATH}",
-            "containerUser": "{TEST_USER}"
-        }}
-    "#};
-    std::fs::write(
-        devcontainer_dir.join("devcontainer.json"),
-        devcontainer_json,
-    )
-    .expect("Failed to write devcontainer.json");
-
-    let config = formatdoc! {r#"
-        host = "k8s://{K8S_CONTEXT}"
-    "#};
-    std::fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
-/// Clean up any k8s pods created by rumpelpod in the default namespace.
-fn cleanup_k8s_pods() {
-    let _ = Command::new("kubectl")
-        .args(["--context", K8S_CONTEXT])
-        .args([
-            "delete",
-            "pods",
-            "-l",
-            "app.kubernetes.io/managed-by=rumpelpod",
-            "--grace-period=0",
-            "--force",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+fn write_k8s_pod_config(repo: &TestRepo, image_tag: &str, namespace: &str) {
+    write_k8s_pod_config_with_extras(repo, image_tag, namespace, "");
 }
 
 #[test]
 fn k8s_enter_smoke() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("enter-smoke");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -159,7 +180,7 @@ fn k8s_enter_smoke() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config(&repo, image_tag);
+    write_k8s_pod_config(&repo, image_tag, &ns.name);
 
     let daemon = TestDaemon::start();
 
@@ -178,16 +199,12 @@ fn k8s_enter_smoke() {
         stderr,
     );
     assert_eq!(stdout.trim(), "hello from k8s");
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_list_shows_pod() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("list-shows-pod");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -196,7 +213,7 @@ fn k8s_list_shows_pod() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config(&repo, image_tag);
+    write_k8s_pod_config(&repo, image_tag, &ns.name);
 
     let daemon = TestDaemon::start();
 
@@ -218,16 +235,12 @@ fn k8s_list_shows_pod() {
         "list should show pod: {}",
         output,
     );
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_delete_removes_pod() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("delete-removes-pod");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -236,7 +249,7 @@ fn k8s_delete_removes_pod() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config(&repo, image_tag);
+    write_k8s_pod_config(&repo, image_tag, &ns.name);
 
     let daemon = TestDaemon::start();
 
@@ -268,6 +281,7 @@ fn k8s_delete_removes_pod() {
     // Verify k8s pod is also gone
     let kubectl_output = Command::new("kubectl")
         .args(["--context", K8S_CONTEXT])
+        .args(["--namespace", &ns.name])
         .args(["get", "pod", "-l", "rumpelpod/pod-name=k8s-del-test"])
         .args(["-o", "name"])
         .output()
@@ -282,10 +296,8 @@ fn k8s_delete_removes_pod() {
 
 #[test]
 fn k8s_image_build_rejected() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("image-build-rejected");
 
     let repo = TestRepo::new();
 
@@ -312,8 +324,9 @@ fn k8s_image_build_rejected() {
     std::fs::write(devcontainer_dir.join("Dockerfile"), "FROM debian:13\n")
         .expect("Failed to write Dockerfile");
 
+    let namespace = &ns.name;
     let config = formatdoc! {r#"
-        host = "k8s://{K8S_CONTEXT}"
+        host = "k8s://{K8S_CONTEXT}/{namespace}"
     "#};
     std::fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");
@@ -340,10 +353,8 @@ fn k8s_image_build_rejected() {
 
 #[test]
 fn k8s_cp_to_and_from_pod() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("cp-to-and-from-pod");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -352,7 +363,7 @@ fn k8s_cp_to_and_from_pod() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config(&repo, image_tag);
+    write_k8s_pod_config(&repo, image_tag, &ns.name);
 
     let daemon = TestDaemon::start();
 
@@ -396,16 +407,12 @@ fn k8s_cp_to_and_from_pod() {
 
     let content = std::fs::read_to_string(&local_download).expect("Failed to read downloaded file");
     assert_eq!(content.trim(), "hello from host");
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_mount_volume() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("mount-volume");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -417,6 +424,7 @@ fn k8s_mount_volume() {
     write_k8s_pod_config_with_extras(
         &repo,
         image_tag,
+        &ns.name,
         r#""mounts": [{"type":"volume","source":"tv","target":"/data"}]"#,
     );
 
@@ -442,16 +450,12 @@ fn k8s_mount_volume() {
         .expect("reading from volume failed");
 
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello");
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_mount_tmpfs() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("mount-tmpfs");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -463,6 +467,7 @@ fn k8s_mount_tmpfs() {
     write_k8s_pod_config_with_extras(
         &repo,
         image_tag,
+        &ns.name,
         r#""mounts": [{"type":"tmpfs","target":"/tmp/mytmp"}]"#,
     );
 
@@ -481,16 +486,12 @@ fn k8s_mount_tmpfs() {
         "expected tmpfs at /tmp/mytmp in mount output: {}",
         output,
     );
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_bind_mount_rejected() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("bind-mount-rejected");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -502,6 +503,7 @@ fn k8s_bind_mount_rejected() {
     write_k8s_pod_config_with_extras(
         &repo,
         image_tag,
+        &ns.name,
         r#""mounts": [{"type":"bind","source":"/tmp/x","target":"/mnt/x"}]"#,
     );
 
@@ -523,16 +525,12 @@ fn k8s_bind_mount_rejected() {
         "error should mention bind mount restriction: {}",
         stderr,
     );
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_privileged() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("privileged");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -541,7 +539,7 @@ fn k8s_privileged() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config_with_extras(&repo, image_tag, r#""privileged": true"#);
+    write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""privileged": true"#);
 
     let daemon = TestDaemon::start();
 
@@ -553,16 +551,12 @@ fn k8s_privileged() {
         .expect("rumpel enter with privileged failed");
 
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "privileged-ok");
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_cap_add() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("cap-add");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -571,7 +565,7 @@ fn k8s_cap_add() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config_with_extras(&repo, image_tag, r#""capAdd": ["SYS_PTRACE"]"#);
+    write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""capAdd": ["SYS_PTRACE"]"#);
 
     let daemon = TestDaemon::start();
 
@@ -581,16 +575,12 @@ fn k8s_cap_add() {
         .expect("rumpel enter with capAdd failed");
 
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "caps-ok");
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_override_command_false() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("override-command-false");
 
     let repo = TestRepo::new();
     // Build an image with explicit CMD that keeps the container running
@@ -601,7 +591,7 @@ fn k8s_override_command_false() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config_with_extras(&repo, image_tag, r#""overrideCommand": false"#);
+    write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""overrideCommand": false"#);
 
     let daemon = TestDaemon::start();
 
@@ -617,16 +607,12 @@ fn k8s_override_command_false() {
         "PID 1 should be tail, got: {:?}",
         cmdline,
     );
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_host_requirements() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("host-requirements");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -638,6 +624,7 @@ fn k8s_host_requirements() {
     write_k8s_pod_config_with_extras(
         &repo,
         image_tag,
+        &ns.name,
         r#""hostRequirements": {"cpus": 1, "memory": "256mb"}"#,
     );
 
@@ -652,6 +639,7 @@ fn k8s_host_requirements() {
     // Verify resource requests are set via kubectl
     let kubectl_output = Command::new("kubectl")
         .args(["--context", K8S_CONTEXT])
+        .args(["--namespace", &ns.name])
         .args([
             "get",
             "pod",
@@ -674,16 +662,12 @@ fn k8s_host_requirements() {
         "resource requests should include cpu: {}",
         requests,
     );
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_init_succeeds_despite_unsupported() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("init-unsupported");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -692,7 +676,7 @@ fn k8s_init_succeeds_despite_unsupported() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config_with_extras(&repo, image_tag, r#""init": true"#);
+    write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""init": true"#);
 
     let daemon = TestDaemon::start();
 
@@ -702,16 +686,12 @@ fn k8s_init_succeeds_despite_unsupported() {
         .args(["enter", "k8s-init-test", "--", "echo", "init-ok"])
         .success()
         .expect("init: true should not prevent pod creation on k8s");
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_forward_port() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("forward-port");
 
     let repo = TestRepo::new();
 
@@ -732,7 +712,7 @@ fn k8s_forward_port() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config_with_extras(&repo, image_tag, r#""forwardPorts": [9600]"#);
+    write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""forwardPorts": [9600]"#);
 
     let daemon = TestDaemon::start();
 
@@ -792,16 +772,12 @@ fn k8s_forward_port() {
     let mut buf = String::new();
     stream.read_to_string(&mut buf).unwrap();
     assert_eq!(buf, "k8s-echo-test");
-
-    cleanup_k8s_pods();
 }
 
 #[test]
 fn k8s_recreate() {
-    if !k8s_enabled() {
-        return;
-    }
     ensure_kind_cluster();
+    let ns = K8sNamespace::new("recreate");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -810,7 +786,7 @@ fn k8s_recreate() {
     tag_image(&image_id.to_string(), image_tag);
     load_image_into_kind(image_tag);
 
-    write_k8s_pod_config(&repo, image_tag);
+    write_k8s_pod_config(&repo, image_tag, &ns.name);
 
     let daemon = TestDaemon::start();
 
@@ -850,6 +826,4 @@ fn k8s_recreate() {
         "dirty-content",
         "dirty file should survive recreate",
     );
-
-    cleanup_k8s_pods();
 }

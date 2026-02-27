@@ -131,11 +131,12 @@ RUN cargo build; cargo test --no-run; true
 
 USER root
 
-# Pre-download test base image so tests don't depend on Docker Hub availability.
+# Pre-download test images so tests don't depend on Docker Hub availability.
 RUN mkdir /preloaded-images \
-    && skopeo copy docker://docker.io/library/debian:13 docker-archive:/preloaded-images/debian-13.tar:debian:13
+    && skopeo copy docker://docker.io/library/debian:13 docker-archive:/preloaded-images/debian-13.tar:debian:13 \
+    && skopeo copy docker://docker.io/kindest/node:v1.32.2 docker-archive:/preloaded-images/kindest-node.tar:kindest/node:v1.32.2
 
-RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nExecStart=/usr/bin/docker load -i /preloaded-images/debian-13.tar\n\n[Install]\nWantedBy=multi-user.target\n' \
+RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c '"'"'/usr/bin/docker load -i /preloaded-images/debian-13.tar && /usr/bin/docker load -i /preloaded-images/kindest-node.tar'"'"'\n\n[Install]\nWantedBy=multi-user.target\n' \
     > /etc/systemd/system/preload-images.service \
     && systemctl enable preload-images.service
 
