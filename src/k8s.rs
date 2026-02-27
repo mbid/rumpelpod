@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
@@ -543,6 +543,29 @@ impl K8sClient {
         ContainerArch::from_uname(&arch_str)
     }
 
+    /// Return the InternalIP of any node in the cluster.
+    pub fn get_any_node_ip(&self) -> Result<std::net::IpAddr> {
+        let nodes: Api<Node> = Api::all(self.client.clone());
+        let node_list =
+            block_on(nodes.list(&ListParams::default())).context("listing k8s nodes")?;
+
+        for node in &node_list.items {
+            if let Some(status) = &node.status {
+                if let Some(addrs) = &status.addresses {
+                    for addr in addrs {
+                        if addr.type_ == "InternalIP" {
+                            if let Ok(ip) = addr.address.parse() {
+                                return Ok(ip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        bail!("no node with InternalIP found in the cluster")
+    }
+
     /// Set up port forwarding from a local port to a pod port.
     /// Returns the local port that was bound.
     pub fn port_forward(&self, name: &str, remote_port: u16) -> Result<PortForwardHandle> {
@@ -575,6 +598,9 @@ impl K8sClient {
             // connection is typical).
             let pods_clone = pods.clone();
             tokio::spawn(async move {
+                // The Portforwarder must stay alive as long as its stream is
+                // in use -- dropping it aborts the underlying WebSocket.
+                let mut _active_forwarder = forwarder;
                 loop {
                     tokio::select! {
                         accept = listener.accept() => {
@@ -585,11 +611,14 @@ impl K8sClient {
                                         &mut port_stream,
                                     ).await;
                                     // After the connection closes, get a fresh
-                                    // port-forward stream for the next connection
+                                    // port-forward stream for the next connection.
                                     match pods_clone.portforward(&name_owned, &[remote_port]).await {
                                         Ok(mut pf) => {
                                             match pf.take_stream(remote_port) {
-                                                Some(s) => port_stream = s,
+                                                Some(s) => {
+                                                    port_stream = s;
+                                                    _active_forwarder = pf;
+                                                }
                                                 None => break,
                                             }
                                         }

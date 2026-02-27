@@ -2101,33 +2101,11 @@ impl DaemonServer {
                         .context("re-establishing port forward to existing k8s pod")?;
                     let container_url = format!("http://127.0.0.1:{}", pf.local_port);
 
-                    // Wait for the container-serve to be reachable
-                    let poll_client = reqwest::blocking::Client::builder()
-                        .timeout(Some(std::time::Duration::from_secs(1)))
-                        .build()
-                        .unwrap();
-                    let container_token = {
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_secs(5);
-                        loop {
-                            if poll_client
-                                .get(format!("{}/health", container_url))
-                                .send()
-                                .is_ok_and(|r| r.status().is_success())
-                            {
-                                // Read token from the pod
-                                let token_bytes = client
-                                    .exec_output(&k8s_name, &["cat", crate::pod::TOKEN_FILE])?;
-                                break String::from_utf8_lossy(&token_bytes).trim().to_string();
-                            }
-                            if std::time::Instant::now() >= deadline {
-                                anyhow::bail!(
-                                    "container server in existing k8s pod did not respond"
-                                );
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                        }
-                    };
+                    // Read token from the pod, then let PodClient::new
+                    // handle the readiness poll.
+                    let token_bytes =
+                        client.exec_output(&k8s_name, &["cat", crate::pod::TOKEN_FILE])?;
+                    let container_token = String::from_utf8_lossy(&token_bytes).trim().to_string();
 
                     let pod = PodClient::new(&container_url, &container_token)?;
 
@@ -2141,7 +2119,7 @@ impl DaemonServer {
                         .unwrap()
                         .insert((repo_path.to_path_buf(), pod_name.0.clone()), token.clone());
 
-                    let host_ip = self.resolve_k8s_host_ip(&client, &k8s_name)?;
+                    let host_ip = self.resolve_k8s_host_ip(&client)?;
                     let base_url = format!("http://{}:{}", host_ip, self.external_server_port);
                     let url = format!("{}/gateway.git", base_url);
                     let direct_config = is_direct_git_config_mode()?;
@@ -2444,38 +2422,15 @@ impl DaemonServer {
             .exec_detached(&k8s_name, &container_serve_cmd)
             .map_err(|e| mark_error(e.context("starting container-serve in k8s pod")))?;
 
-        // Wait for container-serve to become ready
         let pf = client
             .port_forward(&k8s_name, crate::pod::DEFAULT_PORT)
             .map_err(|e| mark_error(e.context("setting up port forward")))?;
         let container_url = format!("http://127.0.0.1:{}", pf.local_port);
 
-        let poll_client = reqwest::blocking::Client::builder()
-            .timeout(Some(std::time::Duration::from_secs(1)))
-            .build()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if poll_client
-                .get(format!("{}/health", container_url))
-                .send()
-                .is_ok_and(|r| r.status().is_success())
-            {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(mark_error(anyhow::anyhow!(
-                    "container server in k8s pod did not become ready within 10 seconds"
-                )));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-
+        // PodClient::new polls /health until the server is ready.
         let pod = PodClient::new(&container_url, &token).map_err(mark_error)?;
 
-        let host_ip = self
-            .resolve_k8s_host_ip(&client, &k8s_name)
-            .map_err(mark_error)?;
+        let host_ip = self.resolve_k8s_host_ip(&client).map_err(mark_error)?;
         let base_url = format!("http://{}:{}", host_ip, self.external_server_port);
         let url = format!("{}/gateway.git", base_url);
         let direct_config = is_direct_git_config_mode().map_err(mark_error)?;
@@ -2652,31 +2607,34 @@ impl DaemonServer {
         })
     }
 
-    fn resolve_k8s_host_ip(
-        &self,
-        client: &crate::k8s::K8sClient,
-        k8s_name: &str,
-    ) -> Result<String> {
-        std::env::var("RUMPELPOD_K8S_HOST_IP")
-            .ok()
-            .or_else(|| {
-                let output = client
-                    .exec_output(
-                        k8s_name,
-                        &["sh", "-c", "ip route show default | awk '{print $3}'"],
-                    )
-                    .ok()?;
-                let ip = String::from_utf8_lossy(&output).trim().to_string();
-                if ip.is_empty() {
-                    None
-                } else {
-                    Some(ip)
-                }
-            })
-            .context(
-                "Could not determine host IP for Kubernetes git connectivity. \
-                 Set RUMPELPOD_K8S_HOST_IP.",
-            )
+    /// Determine the local IP address that k8s pods can use to reach
+    /// the daemon's git server.
+    ///
+    /// Strategy: find any node's InternalIP, then open a connected (but
+    /// unsent) UDP socket toward it.  The OS picks the correct source
+    /// address from the local routing table without sending any packet.
+    fn resolve_k8s_host_ip(&self, client: &crate::k8s::K8sClient) -> Result<String> {
+        if let Ok(ip) = std::env::var("RUMPELPOD_K8S_HOST_IP") {
+            return Ok(ip);
+        }
+
+        let node_ip = client
+            .get_any_node_ip()
+            .context("resolving k8s host IP: cannot list nodes")?;
+
+        let dest = std::net::SocketAddr::new(node_ip, 1);
+        let sock = std::net::UdpSocket::bind(if node_ip.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        })
+        .context("binding UDP socket")?;
+        sock.connect(dest)
+            .context("connecting UDP socket to node IP")?;
+        let local_addr = sock
+            .local_addr()
+            .context("reading local address of UDP socket")?;
+        Ok(local_addr.ip().to_string())
     }
 }
 
