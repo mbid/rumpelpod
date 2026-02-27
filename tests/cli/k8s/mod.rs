@@ -14,7 +14,7 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{
-    build_docker_image, build_test_image, pod_command, DockerBuild, TestDaemon, TestRepo,
+    build_docker_image, build_test_image, pod_command, DockerBuild, ImageId, TestDaemon, TestRepo,
     TEST_REPO_PATH, TEST_USER, TEST_USER_UID,
 };
 
@@ -114,9 +114,57 @@ fn ensure_k3d_cluster() {
 
 /// Load a Docker image into the k3d cluster by tag.
 ///
-/// Serialized with a mutex because k3d uses a single "tools" container per
-/// cluster for imports, so concurrent imports would conflict.
-fn load_image_into_cluster(image_tag: &str) {
+/// If the image ID already exists in the k3s node's containerd, we just add
+/// the new tag locally (instant) instead of running `k3d image import` (~6s
+/// each, serialized by a mutex).
+fn load_image_into_cluster(image_id: &ImageId, image_tag: &str) {
+    let node = format!("k3d-{}-server-0", CLUSTER_NAME);
+
+    // Check if the image ID already exists in the node's containerd.
+    let crictl_output = Command::new("docker")
+        .args(["exec", &node, "crictl", "images", "-o", "json"])
+        .output()
+        .expect("Failed to query crictl images");
+
+    if crictl_output.status.success() {
+        let json: serde_json::Value =
+            serde_json::from_slice(&crictl_output.stdout).expect("Failed to parse crictl JSON");
+
+        if let Some(images) = json["images"].as_array() {
+            let existing_ref = images.iter().find_map(|img| {
+                if img["id"].as_str() == Some(&image_id.0) {
+                    img["repoTags"]
+                        .as_array()
+                        .and_then(|tags| tags.first())
+                        .and_then(|t| t.as_str())
+                        .map(String::from)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(existing_ref) = existing_ref {
+                let target = format!("docker.io/library/{}", image_tag);
+                Command::new("docker")
+                    .args([
+                        "exec",
+                        &node,
+                        "ctr",
+                        "-n",
+                        "k8s.io",
+                        "images",
+                        "tag",
+                        &existing_ref,
+                        &target,
+                    ])
+                    .success()
+                    .expect("Failed to tag image in containerd");
+                return;
+            }
+        }
+    }
+
+    // Image not found in the node -- fall back to the full import.
     static IMPORT_LOCK: Mutex<()> = Mutex::new(());
     let _guard = IMPORT_LOCK.lock().unwrap();
 
@@ -185,7 +233,7 @@ fn k8s_enter_smoke() {
     // Tag and load image into k3d
     let image_tag = "rumpelpod-test:k8s-enter";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -218,7 +266,7 @@ fn k8s_list_shows_pod() {
 
     let image_tag = "rumpelpod-test:k8s-list";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -254,7 +302,7 @@ fn k8s_delete_removes_pod() {
 
     let image_tag = "rumpelpod-test:k8s-delete";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -368,7 +416,7 @@ fn k8s_cp_to_and_from_pod() {
 
     let image_tag = "rumpelpod-test:k8s-cp";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -426,7 +474,7 @@ fn k8s_mount_volume() {
 
     let image_tag = "rumpelpod-test:k8s-vol";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -469,7 +517,7 @@ fn k8s_mount_tmpfs() {
 
     let image_tag = "rumpelpod-test:k8s-tmpfs";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -505,7 +553,7 @@ fn k8s_bind_mount_rejected() {
 
     let image_tag = "rumpelpod-test:k8s-bind";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -544,7 +592,7 @@ fn k8s_privileged() {
 
     let image_tag = "rumpelpod-test:k8s-priv";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""privileged": true"#);
 
@@ -570,7 +618,7 @@ fn k8s_cap_add() {
 
     let image_tag = "rumpelpod-test:k8s-cap";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""capAdd": ["SYS_PTRACE"]"#);
 
@@ -596,7 +644,7 @@ fn k8s_override_command_false() {
 
     let image_tag = "rumpelpod-test:k8s-nocmd";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""overrideCommand": false"#);
 
@@ -626,7 +674,7 @@ fn k8s_host_requirements() {
 
     let image_tag = "rumpelpod-test:k8s-reqs";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -681,7 +729,7 @@ fn k8s_init_succeeds_despite_unsupported() {
 
     let image_tag = "rumpelpod-test:k8s-init";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""init": true"#);
 
@@ -717,7 +765,7 @@ fn k8s_forward_port() {
 
     let image_tag = "rumpelpod-test:k8s-fwd";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""forwardPorts": [9600]"#);
 
@@ -782,7 +830,7 @@ fn k8s_recreate() {
 
     let image_tag = "rumpelpod-test:k8s-recreate";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_cluster(image_tag);
+    load_image_into_cluster(&image_id, image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
