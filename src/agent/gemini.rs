@@ -25,7 +25,7 @@ use super::common::{
     execute_write_in_pod, get_input_via_editor, read_agents_md, ToolName, MAX_TOKENS,
 };
 use super::history::ConversationTracker;
-use crate::enter::{merge_env, resolve_remote_env, resolve_remote_env_via_pod};
+use crate::enter::{merge_env, resolve_remote_env_via_pod};
 
 fn make_function_declaration(name: ToolName) -> FunctionDeclaration {
     // Gemini API doesn't support additionalProperties in function parameters
@@ -205,18 +205,12 @@ pub fn run_gemini_agent(
     let launch_result = pod_handle
         .join()
         .map_err(|e| anyhow::anyhow!("Pod thread panicked: {:?}", e))??;
-    let container_name = &launch_result.container_id.0;
     let user = &launch_result.user;
     let pod = PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
 
     // Resolve ${containerEnv:VAR} now that the container is running.
-    let remote_env = if let Some(docker_socket) = launch_result.docker_socket.as_ref() {
-        let resolved = resolve_remote_env(&remote_env, docker_socket, container_name);
-        merge_env(launch_result.probed_env.clone(), resolved)
-    } else {
-        let resolved = resolve_remote_env_via_pod(&remote_env, &pod);
-        merge_env(launch_result.probed_env.clone(), resolved)
-    };
+    let resolved = resolve_remote_env_via_pod(&remote_env, &pod);
+    let remote_env = merge_env(launch_result.probed_env.clone(), resolved);
 
     // Read AGENTS.md once at startup to include project-specific instructions
     let agents_md = read_agents_md(&pod, repo_path);

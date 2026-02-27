@@ -911,17 +911,6 @@ pub struct SubstitutionContext {
 
     /// `${devcontainerId}` value, if known.
     pub devcontainer_id: Option<String>,
-
-    /// When set, `${containerEnv:VAR}` is resolved by running
-    /// `docker exec printenv` against this running container.
-    pub container_env_source: Option<ContainerEnvSource>,
-}
-
-/// Everything needed to read an environment variable from a running container
-/// via `docker exec printenv`.
-pub struct ContainerEnvSource {
-    pub docker_socket: PathBuf,
-    pub container_id: String,
 }
 
 /// Substitute all known variable patterns in a single string value.
@@ -973,13 +962,6 @@ fn resolve_variable(inner: &str, ctx: &SubstitutionContext) -> Option<String> {
         return Some(val.unwrap_or_else(|| default.unwrap_or_default().to_string()));
     }
 
-    if let Some(rest) = inner.strip_prefix("containerEnv:") {
-        let src = ctx.container_env_source.as_ref()?;
-        let (var_name, default) = split_var_default(rest);
-        let val = read_container_env_var(&src.docker_socket, &src.container_id, var_name);
-        return Some(val.unwrap_or_else(|| default.unwrap_or_default().to_string()));
-    }
-
     match inner {
         "localWorkspaceFolder" => ctx.local_workspace_folder.clone(),
         "localWorkspaceFolderBasename" => ctx.local_workspace_folder_basename.clone(),
@@ -987,29 +969,6 @@ fn resolve_variable(inner: &str, ctx: &SubstitutionContext) -> Option<String> {
         "containerWorkspaceFolderBasename" => ctx.container_workspace_folder_basename.clone(),
         "devcontainerId" => ctx.devcontainer_id.clone(),
         _ => None,
-    }
-}
-
-/// Read a single environment variable from a running container via
-/// `docker exec printenv`.
-fn read_container_env_var(
-    docker_socket: &Path,
-    container_id: &str,
-    var_name: &str,
-) -> Option<String> {
-    let output = std::process::Command::new("docker")
-        .args(["-H", &format!("unix://{}", docker_socket.display())])
-        .args(["exec", container_id, "printenv", var_name])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        Some(
-            String::from_utf8_lossy(&output.stdout)
-                .trim_end_matches('\n')
-                .to_string(),
-        )
-    } else {
-        None
     }
 }
 
@@ -1061,7 +1020,6 @@ mod tests {
             container_workspace_folder: Some("/workspaces/project".to_string()),
             container_workspace_folder_basename: Some("project".to_string()),
             devcontainer_id: Some("abc123def456".to_string()),
-            container_env_source: None,
         }
     }
 

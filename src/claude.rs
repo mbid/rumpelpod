@@ -11,9 +11,7 @@ use crate::daemon::protocol::{
     ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, PodName,
 };
 use crate::devcontainer::shell_escape;
-use crate::enter::{
-    launch_pod, load_and_resolve, merge_env, resolve_remote_env, resolve_remote_env_via_pod,
-};
+use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env_via_pod};
 use crate::git::get_repo_root;
 
 const SCREENRC_PATH: &str = "/tmp/rumpelpod-screenrc";
@@ -191,12 +189,13 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         );
     }
 
+    // Resolve ${containerEnv:VAR} via the in-container HTTP server (works for all host types).
+    let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+    let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
+    let merged_env = merge_env(result.probed_env, remote_env);
+
     let status = match &result.host {
         Host::Kubernetes { context, namespace } => {
-            let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
-            let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
-            let merged_env = merge_env(result.probed_env, remote_env);
-
             // Build the screen command with env vars and workdir baked in,
             // since kubectl exec has no --workdir or -e flags.
             let env_prefix: String = merged_env
@@ -262,13 +261,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             docker_cmd.arg("exec");
             docker_cmd.args(["--user", &result.user]);
             docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
-
-            // Inject probed + remoteEnv variables
-            let t = Instant::now();
-            let remote_env =
-                resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
-            let merged_env = merge_env(result.probed_env, remote_env);
-            trace!("resolve_remote_env: {:?}", t.elapsed());
 
             for (key, value) in &merged_env {
                 docker_cmd.args(["-e", &format!("{}={}", key, value)]);

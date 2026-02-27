@@ -12,8 +12,8 @@ use crate::config::{load_toml_config, Host};
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
 use crate::devcontainer::{
-    shell_escape, substitute_vars, ContainerEnvSource, DevContainer, GpuRequirement,
-    HostRequirements, MountType, SubstitutionContext, UserEnvProbe,
+    shell_escape, DevContainer, GpuRequirement, HostRequirements, MountType, SubstitutionContext,
+    UserEnvProbe,
 };
 use crate::git::{get_current_branch, get_repo_root};
 
@@ -208,31 +208,6 @@ pub fn merge_env(
     merged.into_iter().collect()
 }
 
-/// Resolve `${containerEnv:VAR}` placeholders in `remote_env` by running
-/// `docker exec printenv VAR` in the container.  `${localEnv:VAR}` is already
-/// resolved at config load time, so only container references remain.
-pub fn resolve_remote_env(
-    remote_env: &HashMap<String, String>,
-    docker_socket: &Path,
-    container_id: &str,
-) -> Vec<(String, String)> {
-    let ctx = SubstitutionContext {
-        container_env_source: Some(ContainerEnvSource {
-            docker_socket: docker_socket.to_path_buf(),
-            container_id: container_id.to_string(),
-        }),
-        ..Default::default()
-    };
-
-    remote_env
-        .iter()
-        .map(|(key, value)| {
-            let resolved = substitute_vars(value, &ctx);
-            (key.clone(), resolved)
-        })
-        .collect()
-}
-
 /// Resolve `${containerEnv:VAR}` placeholders via the in-container HTTP server
 /// instead of `docker exec`. Works for any host type including Kubernetes.
 pub fn resolve_remote_env_via_pod(
@@ -324,12 +299,13 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         }
     }
 
+    // Resolve ${containerEnv:VAR} via the in-container HTTP server (works for all host types).
+    let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+    let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
+    let merged_env = merge_env(result.probed_env, remote_env);
+
     let status = match &result.host {
         Host::Kubernetes { context, namespace } => {
-            let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
-            let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
-            let merged_env = merge_env(result.probed_env, remote_env);
-
             // kubectl exec has no --workdir or -e, so wrap in sh -c
             let env_prefix: String = merged_env
                 .iter()
@@ -400,12 +376,6 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
             docker_cmd.arg("exec");
             docker_cmd.args(["--user", &result.user]);
             docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
-
-            let t = Instant::now();
-            let remote_env =
-                resolve_remote_env(&remote_env_map, docker_socket, &result.container_id.0);
-            let merged_env = merge_env(result.probed_env, remote_env);
-            trace!("resolve_remote_env: {:?}", t.elapsed());
 
             for (key, value) in &merged_env {
                 docker_cmd.args(["-e", &format!("{}={}", key, value)]);
