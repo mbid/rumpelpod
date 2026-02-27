@@ -29,9 +29,13 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         gnupg \
         docker.io \
         kubectl \
-        kind \
         screen \
         skopeo
+
+RUN dpkg_arch=$(dpkg --print-architecture) && \
+    curl -fsSL "https://github.com/k3d-io/k3d/releases/download/v5.8.3/k3d-linux-${dpkg_arch}" \
+        -o /usr/local/bin/k3d && \
+    chmod +x /usr/local/bin/k3d
 
 # Cross-compiler for the non-native architecture.
 RUN export DEBIAN_FRONTEND=noninteractive && \
@@ -134,9 +138,9 @@ USER root
 # Pre-download test images so tests don't depend on Docker Hub availability.
 RUN mkdir /preloaded-images \
     && skopeo copy docker://docker.io/library/debian:13 docker-archive:/preloaded-images/debian-13.tar:debian:13 \
-    && skopeo copy docker://docker.io/kindest/node:v1.32.2 docker-archive:/preloaded-images/kindest-node.tar:kindest/node:v1.32.2
+    && skopeo copy docker://docker.io/rancher/k3s:v1.32.5-k3s1 docker-archive:/preloaded-images/k3s-node.tar:rancher/k3s:v1.32.5-k3s1
 
-RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c '"'"'/usr/bin/docker load -i /preloaded-images/debian-13.tar && /usr/bin/docker load -i /preloaded-images/kindest-node.tar'"'"'\n\n[Install]\nWantedBy=multi-user.target\n' \
+RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c '"'"'/usr/bin/docker load -i /preloaded-images/debian-13.tar && /usr/bin/docker load -i /preloaded-images/k3s-node.tar'"'"'\n\n[Install]\nWantedBy=multi-user.target\n' \
     > /etc/systemd/system/preload-images.service \
     && systemctl enable preload-images.service
 

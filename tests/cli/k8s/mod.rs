@@ -1,13 +1,13 @@
 //! Integration tests for Kubernetes host support.
 //!
-//! These tests require `kind` and `kubectl` to be installed and a Docker daemon
-//! running. A dedicated kind cluster is created per test run and cleaned up on
+//! These tests require `k3d` and `kubectl` to be installed and a Docker daemon
+//! running. A dedicated k3d cluster is created per test run and cleaned up on
 //! drop.  Each test creates an isolated namespace to avoid conflicts with
 //! parallel test runs.
 
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use indoc::formatdoc;
@@ -18,14 +18,14 @@ use crate::common::{
     TEST_REPO_PATH, TEST_USER, TEST_USER_UID,
 };
 
-/// Kind cluster name used for all k8s tests.
+/// k3d cluster name used for all k8s tests.
 const CLUSTER_NAME: &str = "rumpelpod-test";
 
-/// Context name that kind creates (always `kind-` prefixed).
-const K8S_CONTEXT: &str = "kind-rumpelpod-test";
+/// Context name that k3d creates (always `k3d-` prefixed).
+const K8S_CONTEXT: &str = "k3d-rumpelpod-test";
 
 /// Node image to use -- must match the version preloaded in the devcontainer.
-const KIND_NODE_IMAGE: &str = "kindest/node:v1.32.2";
+const K3S_IMAGE: &str = "rancher/k3s:v1.32.5-k3s1";
 
 /// Per-test namespace that is automatically deleted on drop.
 struct K8sNamespace {
@@ -81,44 +81,52 @@ impl Drop for K8sNamespace {
     }
 }
 
-/// Shared kind cluster, created once per test run.
-fn ensure_kind_cluster() {
+/// Shared k3d cluster, created once per test run.
+fn ensure_k3d_cluster() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
         // Check if cluster already exists
-        let output = Command::new("kind")
-            .args(["get", "clusters"])
+        let output = Command::new("k3d")
+            .args(["cluster", "list", "-o", "json"])
             .output()
-            .expect("Failed to run kind");
-        let clusters = String::from_utf8_lossy(&output.stdout);
-        if clusters.lines().any(|l| l.trim() == CLUSTER_NAME) {
+            .expect("Failed to run k3d");
+        let json = String::from_utf8_lossy(&output.stdout);
+        if json.contains(&format!("\"name\":\"{}\"", CLUSTER_NAME)) {
             return;
         }
 
         // Create cluster with the preloaded node image
-        Command::new("kind")
+        Command::new("k3d")
             .args([
-                "create",
                 "cluster",
-                "--name",
+                "create",
                 CLUSTER_NAME,
                 "--image",
-                KIND_NODE_IMAGE,
+                K3S_IMAGE,
+                "--no-lb",
+                "--timeout",
+                "60s",
             ])
             .success()
-            .expect("Failed to create kind cluster");
+            .expect("Failed to create k3d cluster");
     });
 }
 
-/// Load a Docker image into the kind cluster by tag.
-fn load_image_into_kind(image_tag: &str) {
-    Command::new("kind")
-        .args(["load", "docker-image", image_tag, "--name", CLUSTER_NAME])
+/// Load a Docker image into the k3d cluster by tag.
+///
+/// Serialized with a mutex because k3d uses a single "tools" container per
+/// cluster for imports, so concurrent imports would conflict.
+fn load_image_into_cluster(image_tag: &str) {
+    static IMPORT_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = IMPORT_LOCK.lock().unwrap();
+
+    Command::new("k3d")
+        .args(["image", "import", image_tag, "-c", CLUSTER_NAME])
         .success()
-        .expect("Failed to load image into kind cluster");
+        .expect("Failed to load image into k3d cluster");
 }
 
-/// Tag an image with a stable name so kind can find it.
+/// Tag an image with a stable name so k3d can find it.
 fn tag_image(image_id: &str, tag: &str) {
     Command::new("docker")
         .args(["tag", image_id, tag])
@@ -168,16 +176,16 @@ fn write_k8s_pod_config(repo: &TestRepo, image_tag: &str, namespace: &str) {
 
 #[test]
 fn k8s_enter_smoke() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("enter-smoke");
 
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
 
-    // Tag and load image into kind
+    // Tag and load image into k3d
     let image_tag = "rumpelpod-test:k8s-enter";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -202,7 +210,7 @@ fn k8s_enter_smoke() {
 
 #[test]
 fn k8s_list_shows_pod() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("list-shows-pod");
 
     let repo = TestRepo::new();
@@ -210,7 +218,7 @@ fn k8s_list_shows_pod() {
 
     let image_tag = "rumpelpod-test:k8s-list";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -238,7 +246,7 @@ fn k8s_list_shows_pod() {
 
 #[test]
 fn k8s_delete_removes_pod() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("delete-removes-pod");
 
     let repo = TestRepo::new();
@@ -246,7 +254,7 @@ fn k8s_delete_removes_pod() {
 
     let image_tag = "rumpelpod-test:k8s-delete";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -295,7 +303,7 @@ fn k8s_delete_removes_pod() {
 
 #[test]
 fn k8s_image_build_rejected() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("image-build-rejected");
 
     let repo = TestRepo::new();
@@ -352,7 +360,7 @@ fn k8s_image_build_rejected() {
 
 #[test]
 fn k8s_cp_to_and_from_pod() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("cp-to-and-from-pod");
 
     let repo = TestRepo::new();
@@ -360,7 +368,7 @@ fn k8s_cp_to_and_from_pod() {
 
     let image_tag = "rumpelpod-test:k8s-cp";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
@@ -410,7 +418,7 @@ fn k8s_cp_to_and_from_pod() {
 
 #[test]
 fn k8s_mount_volume() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("mount-volume");
 
     let repo = TestRepo::new();
@@ -418,7 +426,7 @@ fn k8s_mount_volume() {
 
     let image_tag = "rumpelpod-test:k8s-vol";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -453,7 +461,7 @@ fn k8s_mount_volume() {
 
 #[test]
 fn k8s_mount_tmpfs() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("mount-tmpfs");
 
     let repo = TestRepo::new();
@@ -461,7 +469,7 @@ fn k8s_mount_tmpfs() {
 
     let image_tag = "rumpelpod-test:k8s-tmpfs";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -489,7 +497,7 @@ fn k8s_mount_tmpfs() {
 
 #[test]
 fn k8s_bind_mount_rejected() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("bind-mount-rejected");
 
     let repo = TestRepo::new();
@@ -497,7 +505,7 @@ fn k8s_bind_mount_rejected() {
 
     let image_tag = "rumpelpod-test:k8s-bind";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -528,7 +536,7 @@ fn k8s_bind_mount_rejected() {
 
 #[test]
 fn k8s_privileged() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("privileged");
 
     let repo = TestRepo::new();
@@ -536,14 +544,14 @@ fn k8s_privileged() {
 
     let image_tag = "rumpelpod-test:k8s-priv";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""privileged": true"#);
 
     let daemon = TestDaemon::start();
 
     // If the cluster allows privileged pods, this should succeed.
-    // kind allows privileged by default.
+    // k3d allows privileged by default.
     let stdout = pod_command(&repo, &daemon)
         .args(["enter", "k8s-priv-test", "--", "echo", "privileged-ok"])
         .success()
@@ -554,7 +562,7 @@ fn k8s_privileged() {
 
 #[test]
 fn k8s_cap_add() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("cap-add");
 
     let repo = TestRepo::new();
@@ -562,7 +570,7 @@ fn k8s_cap_add() {
 
     let image_tag = "rumpelpod-test:k8s-cap";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""capAdd": ["SYS_PTRACE"]"#);
 
@@ -578,7 +586,7 @@ fn k8s_cap_add() {
 
 #[test]
 fn k8s_override_command_false() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("override-command-false");
 
     let repo = TestRepo::new();
@@ -588,7 +596,7 @@ fn k8s_override_command_false() {
 
     let image_tag = "rumpelpod-test:k8s-nocmd";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""overrideCommand": false"#);
 
@@ -610,7 +618,7 @@ fn k8s_override_command_false() {
 
 #[test]
 fn k8s_host_requirements() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("host-requirements");
 
     let repo = TestRepo::new();
@@ -618,7 +626,7 @@ fn k8s_host_requirements() {
 
     let image_tag = "rumpelpod-test:k8s-reqs";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(
         &repo,
@@ -629,7 +637,7 @@ fn k8s_host_requirements() {
 
     let daemon = TestDaemon::start();
 
-    // Enter should succeed on kind (resources are requests, not limits)
+    // Enter should succeed on k3d (resources are requests, not limits)
     pod_command(&repo, &daemon)
         .args(["enter", "k8s-reqs-test", "--", "true"])
         .success()
@@ -665,7 +673,7 @@ fn k8s_host_requirements() {
 
 #[test]
 fn k8s_init_succeeds_despite_unsupported() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("init-unsupported");
 
     let repo = TestRepo::new();
@@ -673,7 +681,7 @@ fn k8s_init_succeeds_despite_unsupported() {
 
     let image_tag = "rumpelpod-test:k8s-init";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""init": true"#);
 
@@ -689,7 +697,7 @@ fn k8s_init_succeeds_despite_unsupported() {
 
 #[test]
 fn k8s_forward_port() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("forward-port");
 
     let repo = TestRepo::new();
@@ -709,7 +717,7 @@ fn k8s_forward_port() {
 
     let image_tag = "rumpelpod-test:k8s-fwd";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config_with_extras(&repo, image_tag, &ns.name, r#""forwardPorts": [9600]"#);
 
@@ -766,7 +774,7 @@ fn k8s_forward_port() {
 
 #[test]
 fn k8s_recreate() {
-    ensure_kind_cluster();
+    ensure_k3d_cluster();
     let ns = K8sNamespace::new("recreate");
 
     let repo = TestRepo::new();
@@ -774,7 +782,7 @@ fn k8s_recreate() {
 
     let image_tag = "rumpelpod-test:k8s-recreate";
     tag_image(&image_id.to_string(), image_tag);
-    load_image_into_kind(image_tag);
+    load_image_into_cluster(image_tag);
 
     write_k8s_pod_config(&repo, image_tag, &ns.name);
 
