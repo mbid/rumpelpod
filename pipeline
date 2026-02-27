@@ -14,7 +14,8 @@ RUSTFLAGS="-D warnings" cargo clippy --all-targets
 
 echo ""
 echo "=== Checking for running docker containers ==="
-running_containers=$(docker ps -q 2>/dev/null)
+# Exclude k3d cluster containers -- they persist across test runs by design.
+running_containers=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -v '^k3d-' || true)
 if [ -n "$running_containers" ]; then
     echo "ERROR: Found running docker containers. Stop them before running the pipeline:"
     docker ps --format "  {{.ID}}  {{.Image}}  {{.Names}}"

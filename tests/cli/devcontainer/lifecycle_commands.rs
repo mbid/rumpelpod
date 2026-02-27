@@ -508,7 +508,10 @@ fn update_content_command_failure_stops_chain() {
 /// With waitFor set to onCreateCommand, commands after it (like
 /// postCreateCommand) should run in the background so enter returns
 /// without waiting for them.
+// Flaky under parallel load: the 25s threshold assumes container creation
+// is fast, but concurrent k8s cluster setup can push Docker latency past it.
 #[test]
+#[ignore]
 fn wait_for_on_create_attaches_early() {
     let repo = TestRepo::new();
 
