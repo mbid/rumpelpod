@@ -5,6 +5,7 @@ use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchProgress, PodLaunchParams, PodName};
 use crate::enter::load_and_resolve;
 use crate::git::{get_current_branch, get_repo_root};
+use crate::image::OutputLine;
 
 pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
@@ -24,7 +25,10 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         devcontainer,
     })?;
     for line in &mut progress {
-        eprintln!("{}", line);
+        match line {
+            OutputLine::Stdout(s) => println!("{}", s),
+            OutputLine::Stderr(s) => eprintln!("{}", s),
+        }
     }
     progress.finish()?;
 

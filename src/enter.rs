@@ -18,6 +18,7 @@ use crate::devcontainer::{
     SubstitutionContext, UserEnvProbe,
 };
 use crate::git::{get_current_branch, get_repo_root};
+use crate::image::OutputLine;
 
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
@@ -185,7 +186,10 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
         devcontainer,
     })?;
     for line in &mut progress {
-        eprintln!("{}", line);
+        match line {
+            OutputLine::Stdout(s) => println!("{}", s),
+            OutputLine::Stderr(s) => eprintln!("{}", s),
+        }
     }
     let result = progress.finish()?;
     trace!("launch_pod daemon RPC: {:?}", t.elapsed());

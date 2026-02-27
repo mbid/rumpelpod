@@ -13,8 +13,14 @@ use std::process::{Command, Stdio};
 use crate::config::DockerHost;
 use crate::devcontainer::{BuildOptions, DevContainer};
 
+/// A line of Docker build output, tagged with the stream it came from.
+pub enum OutputLine {
+    Stdout(String),
+    Stderr(String),
+}
+
 /// Callback invoked with each line of Docker build output.
-pub type BuildOutputFn = Box<dyn FnMut(&str) + Send>;
+pub type BuildOutputFn = Box<dyn FnMut(OutputLine) + Send>;
 
 // Re-export so callers can use image::Image
 pub use crate::daemon::protocol::Image;
@@ -186,7 +192,7 @@ pub fn build_devcontainer_image(
             stdout_buf_clone.lock().unwrap().push_str(&line);
             stdout_buf_clone.lock().unwrap().push('\n');
             if let Some(ref cb) = callback {
-                cb.lock().unwrap()(&line);
+                cb.lock().unwrap()(OutputLine::Stdout(line));
             }
         }
     });
@@ -200,7 +206,7 @@ pub fn build_devcontainer_image(
             stderr_buf_clone.lock().unwrap().push_str(&line);
             stderr_buf_clone.lock().unwrap().push('\n');
             if let Some(ref cb) = callback_for_stderr {
-                cb.lock().unwrap()(&line);
+                cb.lock().unwrap()(OutputLine::Stderr(line));
             }
         }
     });

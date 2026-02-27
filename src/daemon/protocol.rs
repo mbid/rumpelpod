@@ -21,6 +21,7 @@ use url::Url;
 use crate::async_runtime::block_on;
 use crate::config::DockerHost;
 use crate::devcontainer::DevContainer;
+use crate::image::OutputLine;
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,7 +262,7 @@ struct ErrorResponse {
 /// Yields build-output lines via `Iterator::next()` and returns the final
 /// result from `finish()`.  Implementations exist for the server side
 /// (thread-backed), the client side (SSE-backed), and tests (immediate).
-pub trait LaunchProgress: Iterator<Item = String> + Send {
+pub trait LaunchProgress: Iterator<Item = OutputLine> + Send {
     /// Drain remaining output and return the final result.
     fn finish(self) -> Result<LaunchResult>;
 }
@@ -277,8 +278,8 @@ impl ImmediateLaunchProgress {
 }
 
 impl Iterator for ImmediateLaunchProgress {
-    type Item = String;
-    fn next(&mut self) -> Option<String> {
+    type Item = OutputLine;
+    fn next(&mut self) -> Option<OutputLine> {
         None
     }
 }
@@ -380,8 +381,8 @@ impl DaemonClient {
 
 /// SSE-backed `LaunchProgress` for the HTTP client side.
 ///
-/// Parses `event: build_output` / `event: result` / `event: error` lines
-/// from a `text/event-stream` response.
+/// Parses `event: build_stdout` / `event: build_stderr` / `event: result` /
+/// `event: error` lines from a `text/event-stream` response.
 pub struct ClientLaunchProgress {
     lines: std::io::Lines<BufReader<reqwest::blocking::Response>>,
     result: Option<Result<LaunchResult>>,
@@ -397,9 +398,9 @@ impl ClientLaunchProgress {
 }
 
 impl Iterator for ClientLaunchProgress {
-    type Item = String;
+    type Item = OutputLine;
 
-    fn next(&mut self) -> Option<String> {
+    fn next(&mut self) -> Option<OutputLine> {
         // SSE format: "event: <type>\ndata: <json>\n\n"
         // We need to read event + data line pairs.
         loop {
@@ -451,13 +452,19 @@ impl Iterator for ClientLaunchProgress {
             };
 
             match event_type.as_str() {
-                "build_output" => {
+                "build_stdout" | "build_stderr" => {
                     // data is a JSON-encoded string
                     match serde_json::from_str::<String>(data) {
-                        Ok(s) => return Some(s),
+                        Ok(s) => {
+                            if event_type == "build_stdout" {
+                                return Some(OutputLine::Stdout(s));
+                            } else {
+                                return Some(OutputLine::Stderr(s));
+                            }
+                        }
                         Err(e) => {
                             self.result = Some(Err(anyhow::anyhow!(
-                                "Failed to parse build_output data: {}",
+                                "Failed to parse build output data: {}",
                                 e
                             )));
                             return None;
@@ -773,7 +780,8 @@ fn sse_event(event_type: &str, data: &str) -> String {
 /// Build an SSE streaming response for launch/recreate endpoints.
 ///
 /// Spawns a blocking task that calls `op()` to get a `LaunchProgress`,
-/// iterates build output lines (sending each as `event: build_output`),
+/// iterates build output lines (sending each as `event: build_stdout` or
+/// `event: build_stderr`),
 /// then calls `finish()` and sends `event: result` or `event: error`.
 fn streaming_launch_response<D: Daemon>(
     daemon: Arc<D>,
@@ -800,8 +808,12 @@ fn streaming_launch_response<D: Daemon>(
 
         // Stream build output lines
         for line in &mut progress {
-            let json_str = serde_json::to_string(&line).expect("String is always serializable");
-            let msg = sse_event("build_output", &json_str);
+            let (event_type, text) = match line {
+                OutputLine::Stdout(s) => ("build_stdout", s),
+                OutputLine::Stderr(s) => ("build_stderr", s),
+            };
+            let json_str = serde_json::to_string(&text).expect("String is always serializable");
+            let msg = sse_event(event_type, &json_str);
             if event_tx.blocking_send(msg).is_err() {
                 return;
             }

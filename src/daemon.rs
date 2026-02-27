@@ -2040,14 +2040,14 @@ fn run_once_lifecycle_commands_via_pod(
 /// through a channel.  `Iterator::next()` reads lines; `finish()` joins the
 /// thread and returns the final result.
 pub struct ServerLaunchProgress {
-    rx: Option<std::sync::mpsc::Receiver<String>>,
+    rx: Option<std::sync::mpsc::Receiver<crate::image::OutputLine>>,
     handle: Option<std::thread::JoinHandle<Result<LaunchResult>>>,
 }
 
 impl Iterator for ServerLaunchProgress {
-    type Item = String;
+    type Item = crate::image::OutputLine;
 
-    fn next(&mut self) -> Option<String> {
+    fn next(&mut self) -> Option<crate::image::OutputLine> {
         self.rx.as_ref()?.recv().ok()
     }
 }
@@ -2073,7 +2073,7 @@ impl DaemonServer {
     fn launch_pod_impl(
         &self,
         params: PodLaunchParams,
-        build_tx: std::sync::mpsc::Sender<String>,
+        build_tx: std::sync::mpsc::Sender<crate::image::OutputLine>,
     ) -> Result<LaunchResult> {
         let PodLaunchParams {
             pod_name,
@@ -2090,8 +2090,8 @@ impl DaemonServer {
 
         let on_output: Option<crate::image::BuildOutputFn> = {
             let tx = build_tx;
-            Some(Box::new(move |line: &str| {
-                let _ = tx.send(line.to_string());
+            Some(Box::new(move |line: crate::image::OutputLine| {
+                let _ = tx.send(line);
             }) as crate::image::BuildOutputFn)
         };
 
@@ -2670,7 +2670,7 @@ impl DaemonServer {
     fn recreate_pod_impl(
         &self,
         mut params: PodLaunchParams,
-        build_tx: std::sync::mpsc::Sender<String>,
+        build_tx: std::sync::mpsc::Sender<crate::image::OutputLine>,
     ) -> Result<LaunchResult> {
         // Resolve daemon-side variables so container_repo_path and other
         // fields are fully resolved before we use them for snapshotting.
