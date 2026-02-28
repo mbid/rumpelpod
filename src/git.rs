@@ -3,10 +3,18 @@
 //! This module provides utilities for working with git repositories,
 //! particularly for locating the repository root from any subdirectory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use git2::Repository;
+use serde::{Deserialize, Serialize};
+
+/// Git user identity (name and email) read from the host's effective config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitIdentity {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
 
 /// Discover the git repository root from the current working directory.
 ///
@@ -33,6 +41,19 @@ pub fn get_repo_root() -> Result<PathBuf> {
             );
         }
     }
+}
+
+/// Read the effective git user.name and user.email for a repository,
+/// respecting repo-level overrides via the config cascade.
+pub fn get_git_user_config(repo_path: &Path) -> GitIdentity {
+    let config = Repository::open(repo_path)
+        .ok()
+        .and_then(|r| r.config().ok());
+    let name = config.as_ref().and_then(|c| c.get_string("user.name").ok());
+    let email = config
+        .as_ref()
+        .and_then(|c| c.get_string("user.email").ok());
+    GitIdentity { name, email }
 }
 
 /// Get the current branch name from a repository path.

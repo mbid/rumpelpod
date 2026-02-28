@@ -165,8 +165,12 @@ Shows the diff between the pod's primary branch and the merge base with its upst
 
 The pod must have been created while the host was on a branch (not in detached HEAD state) for the upstream to be set.
 
+Use -- <path>... to restrict the review to specific paths, like git difftool.
+
 Examples:
-  rumpel review dev             # Review changes in 'dev' pod
+  rumpel review dev               # Review all changes in 'dev' pod
+  rumpel review dev -- src/       # Review only changes under src/
+  rumpel review dev -- foo bar    # Review only foo and bar
 ")]
     Review(ReviewCommand),
 
@@ -339,6 +343,10 @@ pub struct ReviewCommand {
         help = "Skip prompting before opening each file"
     )]
     pub yes: bool,
+
+    /// Restrict review to specific paths (like git difftool -- <path>...)
+    #[arg(last = true, value_name = "PATH")]
+    pub paths: Vec<String>,
 }
 
 #[derive(Args)]

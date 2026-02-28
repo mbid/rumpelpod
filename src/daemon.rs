@@ -2676,6 +2676,7 @@ impl DaemonServer {
             host_branch,
             host: docker_host,
             devcontainer,
+            git_identity,
         } = params;
 
         // Resolve daemon-side variables (container workspace paths,
@@ -2912,7 +2913,7 @@ impl DaemonServer {
 
             // On re-entry, don't pass host_branch - we don't want to change
             // the upstream of an existing branch.
-            pod.git_setup_remotes(
+            pod.git_setup(
                 &container_repo_path,
                 &url,
                 &token,
@@ -2920,8 +2921,9 @@ impl DaemonServer {
                 None,
                 direct_config,
                 Some(&user),
+                git_identity.as_ref(),
             )
-            .context("configuring git remotes")?;
+            .context("configuring git")?;
 
             // Set up submodule repos (re-entry: is_first_entry = false)
             let sub_entries: Vec<SubmoduleEntry> = submodules
@@ -3134,7 +3136,7 @@ impl DaemonServer {
             check_git_ownership_via_pod(&pod_inner, &container_repo_path, &user)?;
 
             pod_inner
-                .git_setup_remotes(
+                .git_setup(
                     &container_repo_path,
                     &url,
                     &token,
@@ -3142,8 +3144,9 @@ impl DaemonServer {
                     host_branch.as_deref(),
                     direct_config,
                     Some(&user),
+                    git_identity.as_ref(),
                 )
-                .context("configuring git remotes")?;
+                .context("configuring git")?;
 
             // Set up submodule repos (new container: is_first_entry = true)
             let sub_entries: Vec<SubmoduleEntry> = submodules

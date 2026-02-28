@@ -41,7 +41,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/fs/mkdir", post(fs_mkdir_handler))
         .route("/fs/chown", post(fs_chown_handler))
         .route("/git/clone", post(git_clone_handler))
-        .route("/git/setup-remotes", post(git_setup_remotes_handler))
+        .route("/git/setup", post(git_setup_handler))
         .route("/git/install-hook", post(git_install_hook_handler))
         .route("/git/setup-submodules", post(git_setup_submodules_handler))
         .route("/git/sanitize", post(git_sanitize_handler))
@@ -271,16 +271,16 @@ async fn git_clone_handler(
     ok_json(serde_json::json!({}))
 }
 
-async fn git_setup_remotes_handler(
-    Json(req): Json<GitSetupRemotesRequest>,
+async fn git_setup_handler(
+    Json(req): Json<GitSetupRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let user = resolve_user_opt(&req.user).map_err(err_json)?;
-    let result = setup_git_remotes_impl(&req, user.as_ref());
+    let result = setup_git_impl(&req, user.as_ref());
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn setup_git_remotes_impl(req: &GitSetupRemotesRequest, u: Option<&User>) -> Result<()> {
+fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
     let repo_path = &req.repo_path;
     let push_refspec = format!("+refs/heads/*:refs/heads/rumpelpod/*@{}", req.pod_name);
 
@@ -400,6 +400,38 @@ fn setup_git_remotes_impl(req: &GitSetupRemotesRequest, u: Option<&User>) -> Res
                 u,
             )
             .with_context(|| format!("setting upstream of '{}' to '{}'", branch_name, upstream))?;
+        }
+    }
+
+    // Write host git identity into the pod's .git/config
+    if let Some(ref identity) = req.git_identity {
+        if req.direct_config {
+            let config_path = repo_path.join(".git/config");
+            let mut config = std::fs::read_to_string(&config_path)
+                .with_context(|| format!("reading {}", config_path.display()))?;
+
+            use std::fmt::Write;
+            let has_name = identity.name.is_some();
+            let has_email = identity.email.is_some();
+            if has_name || has_email {
+                write!(config, "\n[user]")?;
+                if let Some(ref name) = identity.name {
+                    write!(config, "\n\tname = {}", name)?;
+                }
+                if let Some(ref email) = identity.email {
+                    write!(config, "\n\temail = {}", email)?;
+                }
+                config.push('\n');
+                std::fs::write(&config_path, config)
+                    .with_context(|| format!("writing {}", config_path.display()))?;
+            }
+        } else {
+            if let Some(ref name) = identity.name {
+                run_git_command(&["config", "user.name", name], Some(repo_path), u)?;
+            }
+            if let Some(ref email) = identity.email {
+                run_git_command(&["config", "user.email", email], Some(repo_path), u)?;
+            }
         }
     }
 

@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
+use crate::git::GitIdentity;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -162,7 +163,7 @@ impl PodClient {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn git_setup_remotes(
+    pub fn git_setup(
         &self,
         repo_path: &Path,
         url: &str,
@@ -171,10 +172,11 @@ impl PodClient {
         host_branch: Option<&str>,
         direct_config: bool,
         user: Option<&str>,
+        git_identity: Option<&GitIdentity>,
     ) -> Result<()> {
         self.post_unit(
-            "/git/setup-remotes",
-            &GitSetupRemotesRequest {
+            "/git/setup",
+            &GitSetupRequest {
                 repo_path: repo_path.to_path_buf(),
                 url: url.to_string(),
                 token: token.to_string(),
@@ -182,6 +184,7 @@ impl PodClient {
                 host_branch: host_branch.map(String::from),
                 direct_config,
                 user: user.map(String::from),
+                git_identity: git_identity.cloned(),
             },
         )
     }

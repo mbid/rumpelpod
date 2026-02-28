@@ -21,6 +21,7 @@ use url::Url;
 use crate::async_runtime::block_on;
 use crate::config::Host;
 use crate::devcontainer::DevContainer;
+use crate::git::GitIdentity;
 use crate::image::OutputLine;
 
 /// Opaque wrapper for docker image names.
@@ -119,6 +120,8 @@ pub struct PodLaunchParams {
     /// The devcontainer.json config, with `${localEnv:...}` already resolved
     /// and build paths normalized to repo-root-relative.
     pub devcontainer: DevContainer,
+    /// Git user identity from the host, to be written into the pod's .git/config.
+    pub git_identity: Option<GitIdentity>,
 }
 
 /// Response body for launch/recreate pod endpoints.

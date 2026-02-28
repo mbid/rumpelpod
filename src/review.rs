@@ -141,10 +141,21 @@ fn get_difftool_cmd(repo_root: &std::path::Path, tool: &str) -> Result<Option<St
     }
 }
 
-/// Get the list of files changed between two commits.
-fn get_changed_files(repo_root: &std::path::Path, base: &str, target: &str) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", base, target])
+/// Get the list of files changed between two commits,
+/// optionally restricted to specific paths (like git diff -- <path>...).
+fn get_changed_files(
+    repo_root: &std::path::Path,
+    base: &str,
+    target: &str,
+    paths: &[String],
+) -> Result<Vec<String>> {
+    let mut cmd = Command::new("git");
+    cmd.args(["diff", "--name-only", base, target]);
+    if !paths.is_empty() {
+        cmd.arg("--");
+        cmd.args(paths);
+    }
+    let output = cmd
         .current_dir(repo_root)
         .output()
         .context("Failed to get list of changed files")?;
@@ -358,7 +369,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let tool_path = get_tool_path(&repo_root, &tool)?;
 
     // Get the list of changed files
-    let changed_files = get_changed_files(&repo_root, &merge_base, &pod_ref)?;
+    let changed_files = get_changed_files(&repo_root, &merge_base, &pod_ref, &cmd.paths)?;
 
     if changed_files.is_empty() {
         // No changes to review
