@@ -332,6 +332,106 @@ fn review_multiple_files() {
 }
 
 #[test]
+fn review_path_filter() {
+    let repo = TestRepo::new();
+
+    // Create multiple files
+    fs::write(repo.path().join("file1.txt"), "file1 original\n").expect("Failed to write file1");
+    fs::write(repo.path().join("file2.txt"), "file2 original\n").expect("Failed to write file2");
+    fs::write(repo.path().join("file3.txt"), "file3 original\n").expect("Failed to write file3");
+    Command::new("git")
+        .args(["add", "file1.txt", "file2.txt", "file3.txt"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git add failed");
+    create_commit(repo.path(), "Add files");
+
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+    let pod_name = "review-path-filter";
+
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run rumpel enter");
+
+    // Modify all three files in the pod
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            pod_name,
+            "--",
+            "sh",
+            "-c",
+            "echo 'file1 modified' > file1.txt && echo 'file2 modified' > file2.txt && echo 'file3 modified' > file3.txt",
+        ])
+        .success()
+        .expect("Failed to modify files in pod");
+
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            pod_name,
+            "--",
+            "git",
+            "add",
+            "file1.txt",
+            "file2.txt",
+            "file3.txt",
+        ])
+        .success()
+        .expect("Failed to stage files in pod");
+
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            pod_name,
+            "--",
+            "git",
+            "commit",
+            "-m",
+            "Modify all three files",
+        ])
+        .success()
+        .expect("Failed to commit in pod");
+
+    // Set up mock difftool
+    let log_file = setup_mock_difftool(repo.path());
+
+    // Review with path filter -- only file1.txt and file3.txt
+    pod_command(&repo, &daemon)
+        .args(["review", pod_name, "--yes", "--", "file1.txt", "file3.txt"])
+        .success()
+        .expect("rumpel review with path filter failed");
+
+    // Verify only the filtered files were shown
+    let log = read_difftool_log(&log_file);
+
+    let diff_count = log.matches("=== DIFF ===").count();
+    assert_eq!(
+        diff_count, 2,
+        "Should have 2 diffs (file1 and file3 only), got: {}",
+        diff_count
+    );
+
+    assert!(
+        log.contains("file1 modified"),
+        "Log should contain file1 modifications"
+    );
+    assert!(
+        !log.contains("file2 modified"),
+        "Log should NOT contain file2 modifications (filtered out)"
+    );
+    assert!(
+        log.contains("file3 modified"),
+        "Log should contain file3 modifications"
+    );
+}
+
+#[test]
 fn review_works_in_detached_head() {
     let repo = TestRepo::new();
 
