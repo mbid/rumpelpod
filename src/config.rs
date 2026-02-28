@@ -102,6 +102,12 @@ pub enum Host {
         context: String,
         /// The Kubernetes namespace (default "default").
         namespace: String,
+        /// Registry to push built images to (host-side address).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registry: Option<String>,
+        /// Registry address for pods to pull from (defaults to `registry`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pull_registry: Option<String>,
     },
 }
 
@@ -234,7 +240,9 @@ impl std::fmt::Display for Host {
                     write!(f, "ssh://{}:{}", ssh_destination, port)
                 }
             }
-            Host::Kubernetes { context, namespace } => {
+            Host::Kubernetes {
+                context, namespace, ..
+            } => {
                 if namespace == "default" {
                     write!(f, "k8s:{}", context)
                 } else {
@@ -253,6 +261,10 @@ pub struct K8sConfig {
     pub context: String,
     /// The Kubernetes namespace (default "default").
     pub namespace: Option<String>,
+    /// Registry to push built images to (host-side address).
+    pub registry: Option<String>,
+    /// Registry address for pods to pull from (defaults to `registry`).
+    pub pull_registry: Option<String>,
 }
 
 /// Configuration from `.rumpelpod.toml`.
@@ -501,6 +513,8 @@ mod tests {
         let host = Host::Kubernetes {
             context: "my-cluster".to_string(),
             namespace: "default".to_string(),
+            registry: None,
+            pull_registry: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster");
     }
@@ -510,6 +524,8 @@ mod tests {
         let host = Host::Kubernetes {
             context: "my-cluster".to_string(),
             namespace: "staging".to_string(),
+            registry: None,
+            pull_registry: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster/staging");
     }
@@ -519,6 +535,8 @@ mod tests {
         let host = Host::Kubernetes {
             context: "my-cluster".to_string(),
             namespace: "default".to_string(),
+            registry: None,
+            pull_registry: None,
         };
         assert!(host.is_remote());
         assert!(!host.is_docker());
@@ -539,6 +557,8 @@ mod tests {
             Host::Kubernetes {
                 context: "my-cluster".to_string(),
                 namespace: "staging".to_string(),
+                registry: None,
+                pull_registry: None,
             },
         ];
         for host in hosts {

@@ -3,6 +3,7 @@
 use anyhow::{bail, Result};
 
 use crate::cli::{ImageBuildCommand, ImageFetchCommand};
+use crate::config::Host;
 use crate::enter::load_and_resolve;
 use crate::git::get_repo_root;
 use crate::image::{self, BuildFlags};
@@ -19,6 +20,12 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
         ),
     };
 
+    // K8s has no Docker daemon -- build against the local daemon instead.
+    let build_host = match &docker_host {
+        Host::Kubernetes { .. } => &Host::Localhost,
+        other => other,
+    };
+
     let flags = BuildFlags {
         no_cache: cmd.no_cache,
         pull: cmd.pull,
@@ -30,8 +37,25 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
             image::OutputLine::Stderr(s) => eprintln!("{}", s),
         }));
     let result =
-        image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags, on_output)?;
+        image::build_devcontainer_image(build_opts, build_host, &repo_root, &flags, on_output)?;
     println!("Image built: {}", result.image.0);
+
+    // For K8s with a registry, push the built image
+    if let Host::Kubernetes {
+        registry: Some(ref push_reg),
+        ref pull_registry,
+        ..
+    } = docker_host
+    {
+        let pull_reg = pull_registry.as_deref().unwrap_or(push_reg);
+        let on_push: Option<image::BuildOutputFn> =
+            Some(Box::new(|line: image::OutputLine| match line {
+                image::OutputLine::Stdout(s) => println!("{}", s),
+                image::OutputLine::Stderr(s) => eprintln!("{}", s),
+            }));
+        let pushed = image::push_to_registry(&result.image, push_reg, pull_reg, on_push)?;
+        println!("Image pushed: {}", pushed.0);
+    }
 
     Ok(())
 }
@@ -44,6 +68,13 @@ pub fn fetch(cmd: &ImageFetchCommand) -> Result<()> {
         bail!(
             "This devcontainer uses 'build', not 'image'.\n\
              Use 'rumpel image build' to build from the Dockerfile."
+        );
+    }
+
+    if matches!(docker_host, Host::Kubernetes { .. }) {
+        bail!(
+            "'rumpel image fetch' is not supported for Kubernetes hosts.\n\
+             Images are pulled directly by the cluster."
         );
     }
 

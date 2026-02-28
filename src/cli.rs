@@ -41,6 +41,16 @@ pub struct HostArgs {
     /// Requires --k8s-context.
     #[arg(long, requires = "k8s_context")]
     pub k8s_namespace: Option<String>,
+
+    /// Registry to push built images to (host-side address).
+    /// Requires --k8s-context.
+    #[arg(long, requires = "k8s_context")]
+    pub k8s_registry: Option<String>,
+
+    /// Registry address for pods to pull from (defaults to --k8s-registry).
+    /// Requires --k8s-registry.
+    #[arg(long, requires = "k8s_registry")]
+    pub k8s_pull_registry: Option<String>,
 }
 
 impl HostArgs {
@@ -57,6 +67,8 @@ impl HostArgs {
             Ok(Some(Host::Kubernetes {
                 context: ctx.clone(),
                 namespace,
+                registry: self.k8s_registry.clone(),
+                pull_registry: self.k8s_pull_registry.clone(),
             }))
         } else if let Some(ref h) = self.host {
             Ok(Some(Host::parse(h)?))

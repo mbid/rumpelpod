@@ -197,7 +197,9 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let merged_env = merge_env(result.probed_env, remote_env);
 
     let status = match &result.host {
-        Host::Kubernetes { context, namespace } => {
+        Host::Kubernetes {
+            context, namespace, ..
+        } => {
             // Build the screen command with env vars and workdir baked in,
             // since kubectl exec has no --workdir or -e flags.
             let env_prefix: String = merged_env

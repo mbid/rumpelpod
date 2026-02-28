@@ -127,6 +127,8 @@ pub fn load_and_resolve(
                 .namespace
                 .clone()
                 .unwrap_or_else(|| "default".to_string()),
+            registry: k8s.registry.clone(),
+            pull_registry: k8s.pull_registry.clone(),
         }
     } else {
         Host::Localhost
@@ -322,7 +324,9 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let merged_env = merge_env(result.probed_env, remote_env);
 
     let status = match &result.host {
-        Host::Kubernetes { context, namespace } => {
+        Host::Kubernetes {
+            context, namespace, ..
+        } => {
             // kubectl exec has no --workdir or -e, so wrap in sh -c
             let env_prefix: String = merged_env
                 .iter()

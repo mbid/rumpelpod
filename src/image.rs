@@ -3,7 +3,7 @@
 //! This module handles resolving Docker images for pods, including building
 //! images from devcontainer.json specifications when needed.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -50,14 +50,21 @@ pub fn resolve_image(
     repo_root: &Path,
     on_output: Option<BuildOutputFn>,
 ) -> Result<BuildResult> {
-    if let Host::Kubernetes { .. } = docker_host {
-        if devcontainer.has_build() {
+    if let Host::Kubernetes { registry, .. } = docker_host {
+        if devcontainer.has_build() && registry.is_none() {
             bail!(
-                "Image building is not supported with Kubernetes hosts. \
-                 Use a pre-built image."
+                "Building images for Kubernetes requires a registry.\n\
+                 Set 'registry' in the [k8s] section of .rumpelpod.toml, \
+                 or use --k8s-registry."
             );
         }
     }
+
+    // K8s has no Docker daemon -- build against the local daemon instead.
+    let build_host = match docker_host {
+        Host::Kubernetes { .. } => &Host::Localhost,
+        other => other,
+    };
 
     if let Some(build) = &devcontainer.build {
         // Skip the build if the image already exists on the target host, avoiding
@@ -72,7 +79,7 @@ pub fn resolve_image(
                     .expect("resolved build must have dockerfile"),
             ),
         )?;
-        if image_exists(&image_name, docker_host) {
+        if image_exists(&image_name, build_host) {
             return Ok(BuildResult {
                 image: Image(image_name),
                 built: false,
@@ -80,7 +87,7 @@ pub fn resolve_image(
         }
         build_devcontainer_image(
             build,
-            docker_host,
+            build_host,
             repo_root,
             &BuildFlags::default(),
             on_output,
@@ -253,6 +260,126 @@ pub fn pull_image(image_name: &str, docker_host: &Host) -> Result<()> {
         bail!("docker pull failed with status {}", status);
     }
     Ok(())
+}
+
+/// Tag a locally-built image for a registry, push it, and return a
+/// digest-based image reference for the pod spec.
+///
+/// The returned `Image` is `{pull_registry}@sha256:...` so the pod spec pins
+/// the exact manifest content rather than a mutable tag.
+pub fn push_to_registry(
+    local_image: &Image,
+    push_registry: &str,
+    pull_registry: &str,
+    on_output: Option<BuildOutputFn>,
+) -> Result<Image> {
+    let remote_ref = format!("{}:{}", push_registry, local_image.0);
+
+    // Tag for the push registry
+    let status = Command::new("docker")
+        .args(["tag", &local_image.0, &remote_ref])
+        .status()
+        .context("running docker tag")?;
+    if !status.success() {
+        bail!("docker tag failed with status {}", status);
+    }
+
+    // Push (stream output so the user sees upload progress)
+    let mut cmd = Command::new("docker");
+    cmd.args(["push", &remote_ref]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().context("running docker push")?;
+    let child_stdout = child.stdout.take().expect("stdout was piped");
+    let child_stderr = child.stderr.take().expect("stderr was piped");
+
+    let callback = on_output.map(|cb| std::sync::Arc::new(std::sync::Mutex::new(cb)));
+    let callback_for_stderr = callback.clone();
+
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stdout_buf_clone = stdout_buf.clone();
+    let stderr_buf_clone = stderr_buf.clone();
+
+    let stdout_thread = std::thread::spawn(move || {
+        for line in BufReader::new(child_stdout).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            stdout_buf_clone.lock().unwrap().push_str(&line);
+            stdout_buf_clone.lock().unwrap().push('\n');
+            if let Some(ref cb) = callback {
+                cb.lock().unwrap()(OutputLine::Stdout(line));
+            }
+        }
+    });
+
+    let stderr_thread = std::thread::spawn(move || {
+        for line in BufReader::new(child_stderr).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            stderr_buf_clone.lock().unwrap().push_str(&line);
+            stderr_buf_clone.lock().unwrap().push('\n');
+            if let Some(ref cb) = callback_for_stderr {
+                cb.lock().unwrap()(OutputLine::Stderr(line));
+            }
+        }
+    });
+
+    let status = child.wait()?;
+    stdout_thread.join().expect("stdout reader panicked");
+    stderr_thread.join().expect("stderr reader panicked");
+
+    if !status.success() {
+        bail!(
+            "docker push failed:\nSTDOUT: {}\nSTDERR: {}",
+            stdout_buf.lock().unwrap(),
+            stderr_buf.lock().unwrap()
+        );
+    }
+
+    // Get the manifest digest via RepoDigests (populated after push)
+    let inspect_output = Command::new("docker")
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{json .RepoDigests}}",
+            &remote_ref,
+        ])
+        .output()
+        .context("running docker image inspect for digest")?;
+    if !inspect_output.status.success() {
+        bail!(
+            "docker image inspect failed after push: {}",
+            String::from_utf8_lossy(&inspect_output.stderr)
+        );
+    }
+
+    let repo_digests: Vec<String> = serde_json::from_slice(&inspect_output.stdout)
+        .context("parsing RepoDigests JSON from docker image inspect")?;
+
+    // Find the digest for our push registry and extract the sha256 hash
+    let digest_ref = repo_digests
+        .iter()
+        .find(|d| d.starts_with(push_registry))
+        .with_context(|| {
+            format!(
+                "no RepoDigest found for registry '{}' in {:?}",
+                push_registry, repo_digests
+            )
+        })?;
+
+    let at_pos = digest_ref
+        .find('@')
+        .context("RepoDigest does not contain '@'")?;
+    let digest = &digest_ref[at_pos + 1..];
+
+    Ok(Image(format!("{}@{}", pull_registry, digest)))
 }
 
 /// Check whether a Docker image already exists on the target host.

@@ -27,6 +27,24 @@ const K8S_CONTEXT: &str = "k3d-rumpelpod-test";
 /// Node image to use -- must match the version preloaded in the devcontainer.
 const K3S_IMAGE: &str = "rancher/k3s:v1.32.5-k3s1";
 
+/// Local registry name (k3d prefixes with "k3d-" for the container name).
+const REGISTRY_NAME: &str = "rumpelpod-test-registry";
+
+/// Host port for the local registry.
+const REGISTRY_HOST_PORT: u16 = 15050;
+
+/// Registry address for pushing from the host (includes repo name).
+fn push_registry() -> String {
+    format!("localhost:{}/rumpelpod", REGISTRY_HOST_PORT)
+}
+
+/// Registry address for pulling from inside the cluster (includes repo name).
+/// k3d configures containerd mirrors so that "NAME:HOSTPORT" is resolved
+/// to the registry container's internal port (5000).
+fn pull_registry() -> String {
+    format!("{}:{}/rumpelpod", REGISTRY_NAME, REGISTRY_HOST_PORT)
+}
+
 /// Per-test namespace that is automatically deleted on drop.
 struct K8sNamespace {
     name: String,
@@ -95,7 +113,9 @@ fn ensure_k3d_cluster() {
             return;
         }
 
-        // Create cluster with the preloaded node image
+        let registry_spec = format!("{}:0.0.0.0:{}", REGISTRY_NAME, REGISTRY_HOST_PORT);
+
+        // Create cluster with the preloaded node image and a local registry
         Command::new("k3d")
             .args([
                 "cluster",
@@ -106,6 +126,8 @@ fn ensure_k3d_cluster() {
                 "--no-lb",
                 "--timeout",
                 "60s",
+                "--registry-create",
+                &registry_spec,
             ])
             .success()
             .expect("Failed to create k3d cluster");
@@ -351,14 +373,9 @@ fn k8s_delete_removes_pod() {
     );
 }
 
-#[test]
-fn k8s_image_build_rejected() {
-    ensure_k3d_cluster();
-    let ns = K8sNamespace::new("image-build-rejected");
-
-    let repo = TestRepo::new();
-
-    // Write a devcontainer.json with build instead of image
+/// Write devcontainer.json with a build section and .rumpelpod.toml with registry
+/// config for k8s image build tests.
+fn write_k8s_build_config(repo: &TestRepo, namespace: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
 
@@ -377,7 +394,53 @@ fn k8s_image_build_rejected() {
     )
     .expect("Failed to write devcontainer.json");
 
-    // Write a minimal Dockerfile
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+    "#};
+    std::fs::write(devcontainer_dir.join("Dockerfile"), dockerfile)
+        .expect("Failed to write Dockerfile");
+
+    let push_reg = push_registry();
+    let pull_reg = pull_registry();
+    let config = formatdoc! {r#"
+        [k8s]
+        context = "{K8S_CONTEXT}"
+        namespace = "{namespace}"
+        registry = "{push_reg}"
+        pull-registry = "{pull_reg}"
+    "#};
+    std::fs::write(repo.path().join(".rumpelpod.toml"), config)
+        .expect("Failed to write .rumpelpod.toml");
+}
+
+#[test]
+fn k8s_image_build_no_registry() {
+    ensure_k3d_cluster();
+    let ns = K8sNamespace::new("build-no-registry");
+
+    let repo = TestRepo::new();
+
+    // Write a devcontainer.json with build but no registry in .rumpelpod.toml
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "build": {{
+                "dockerfile": "Dockerfile"
+            }},
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "containerUser": "{TEST_USER}"
+        }}
+    "#};
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+
     std::fs::write(devcontainer_dir.join("Dockerfile"), "FROM debian:13\n")
         .expect("Failed to write Dockerfile");
 
@@ -399,14 +462,52 @@ fn k8s_image_build_rejected() {
 
     assert!(
         !output.status.success(),
-        "should fail with build on k8s host",
+        "should fail with build on k8s without registry",
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("not supported with Kubernetes"),
-        "error should mention k8s: {}",
+        stderr.contains("requires a registry"),
+        "error should mention registry requirement: {}",
         stderr,
+    );
+}
+
+#[test]
+fn k8s_image_build() {
+    ensure_k3d_cluster();
+    let ns = K8sNamespace::new("image-build");
+
+    let repo = TestRepo::new();
+    write_k8s_build_config(&repo, &ns.name);
+
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "k8s-build-test",
+            "--",
+            "echo",
+            "hello from built image",
+        ])
+        .output()
+        .expect("rumpel enter failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "rumpel enter with built image failed: stdout={}, stderr={}",
+        stdout,
+        stderr,
+    );
+    // stdout includes build/push output before the command output
+    assert!(
+        stdout.trim().ends_with("hello from built image"),
+        "command output should end with expected message: {}",
+        stdout,
     );
 }
 

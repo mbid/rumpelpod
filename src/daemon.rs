@@ -2089,14 +2089,17 @@ impl DaemonServer {
         pod_name: &PodName,
         repo_path: &Path,
         host_branch: Option<&str>,
-        context: &str,
-        namespace: &str,
+        docker_host: &Host,
         devcontainer: &DevContainer,
+        image: &str,
         image_built: bool,
     ) -> Result<LaunchResult> {
-        let image = devcontainer.image.as_ref().context(
-            "Kubernetes hosts require a pre-built image (no 'image' in devcontainer.json)",
-        )?;
+        let (context, namespace) = match docker_host {
+            Host::Kubernetes {
+                context, namespace, ..
+            } => (context.as_str(), namespace.as_str()),
+            _ => unreachable!("launch_pod_k8s called with non-Kubernetes host"),
+        };
 
         let user = devcontainer
             .user()
@@ -2113,10 +2116,6 @@ impl DaemonServer {
 
         let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, repo_path);
         let client = crate::k8s::K8sClient::new(context, namespace)?;
-        let k8s_host = Host::Kubernetes {
-            context: context.to_string(),
-            namespace: namespace.to_string(),
-        };
         let gateway_path = gateway::gateway_path(repo_path)?;
 
         // Check DB for existing pod; if the k8s pod is still Running, reconnect
@@ -2257,10 +2256,7 @@ impl DaemonServer {
                         container_id: ContainerId(k8s_name),
                         user,
                         docker_socket: None,
-                        host: Host::Kubernetes {
-                            context: context.to_string(),
-                            namespace: namespace.to_string(),
-                        },
+                        host: docker_host.clone(),
                         image_built,
                         probed_env,
                         user_shell: user_info.shell,
@@ -2288,7 +2284,7 @@ impl DaemonServer {
         // Create pod record in database
         let pod_id = {
             let conn = self.db.lock().unwrap();
-            db::create_pod(&conn, repo_path, &pod_name.0, &k8s_host)?
+            db::create_pod(&conn, repo_path, &pod_name.0, docker_host)?
         };
 
         let mark_error = |e: anyhow::Error| -> anyhow::Error {
@@ -2626,10 +2622,7 @@ impl DaemonServer {
             container_id: ContainerId(k8s_name),
             user,
             docker_socket: None,
-            host: Host::Kubernetes {
-                context: context.to_string(),
-                namespace: namespace.to_string(),
-            },
+            host: docker_host.clone(),
             image_built,
             probed_env,
             user_shell: user_info.shell,
@@ -2690,6 +2683,7 @@ impl DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
+        let push_tx = build_tx.clone();
         let on_output: Option<crate::image::BuildOutputFn> = {
             let tx = build_tx;
             Some(Box::new(move |line: crate::image::OutputLine| {
@@ -2699,8 +2693,30 @@ impl DaemonServer {
 
         let build_result =
             crate::image::resolve_image(&devcontainer, &docker_host, &repo_path, on_output)?;
-        let image = build_result.image;
+        let mut image = build_result.image;
         let image_built = build_result.built;
+
+        // For K8s with a built image, push to the configured registry
+        if let Host::Kubernetes {
+            ref registry,
+            ref pull_registry,
+            ..
+        } = docker_host
+        {
+            if devcontainer.has_build() {
+                let push_reg = registry
+                    .as_deref()
+                    .expect("registry validated in resolve_image");
+                let pull_reg = pull_registry.as_deref().unwrap_or(push_reg);
+                let on_push: Option<crate::image::BuildOutputFn> = {
+                    let tx = push_tx;
+                    Some(Box::new(move |line: crate::image::OutputLine| {
+                        let _ = tx.send(line);
+                    }))
+                };
+                image = crate::image::push_to_registry(&image, push_reg, pull_reg, on_push)?;
+            }
+        }
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
         let user = devcontainer.user().map(String::from);
         let host_network = devcontainer.has_host_network();
@@ -2747,18 +2763,14 @@ impl DaemonServer {
             }
         }
 
-        if let Host::Kubernetes {
-            ref context,
-            ref namespace,
-        } = docker_host
-        {
+        if matches!(docker_host, Host::Kubernetes { .. }) {
             return self.launch_pod_k8s(
                 &pod_name,
                 &repo_path,
                 host_branch.as_deref(),
-                context,
-                namespace,
+                &docker_host,
                 &devcontainer,
+                &image.0,
                 image_built,
             );
         }
@@ -3311,6 +3323,7 @@ impl DaemonServer {
         if let Host::Kubernetes {
             ref context,
             ref namespace,
+            ..
         } = docker_host
         {
             let snapshot_user = params.devcontainer.user().map(String::from);
@@ -3534,6 +3547,7 @@ impl Daemon for DaemonServer {
         if let Some(Host::Kubernetes {
             ref context,
             ref namespace,
+            ..
         }) = host
         {
             let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, &repo_path);
@@ -3658,6 +3672,7 @@ impl Daemon for DaemonServer {
                 Some(Host::Kubernetes {
                     ref context,
                     ref namespace,
+                    ..
                 }) => {
                     let k8s_name = crate::k8s::k8s_pod_name(&pod.name, &repo_path);
                     let cache_key = format!("{}/{}", pod.host, k8s_name);

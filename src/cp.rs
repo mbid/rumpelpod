@@ -104,7 +104,9 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
     };
 
     let status = match &result.host {
-        Host::Kubernetes { context, namespace } => {
+        Host::Kubernetes {
+            context, namespace, ..
+        } => {
             let k8s_src;
             let k8s_dest;
             if from_pod {
