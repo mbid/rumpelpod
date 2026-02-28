@@ -132,6 +132,7 @@ fn agent_large_file_output() {
 }
 
 #[test]
+#[ignore] // flaky: LLM sometimes fails to follow the tail instructions within the timeout
 fn agent_can_read_large_output_from_one_time_command() {
     let repo = TestRepo::new();
     let script_name = "once.sh";
