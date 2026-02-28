@@ -211,7 +211,9 @@ fn write_k8s_pod_config_with_extras(
     .expect("Failed to write devcontainer.json");
 
     let config = formatdoc! {r#"
-        host = "k8s://{K8S_CONTEXT}/{namespace}"
+        [k8s]
+        context = "{K8S_CONTEXT}"
+        namespace = "{namespace}"
     "#};
     std::fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");
@@ -381,7 +383,9 @@ fn k8s_image_build_rejected() {
 
     let namespace = &ns.name;
     let config = formatdoc! {r#"
-        host = "k8s://{K8S_CONTEXT}/{namespace}"
+        [k8s]
+        context = "{K8S_CONTEXT}"
+        namespace = "{namespace}"
     "#};
     std::fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");

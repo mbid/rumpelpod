@@ -199,9 +199,9 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
 
     // Launch the pod container in a background thread
     let name = cmd.name.clone();
-    let host = cmd.host.clone();
+    let host_override = cmd.host_args.resolve()?;
     let pod_handle: JoinHandle<Result<LaunchResult>> =
-        thread::spawn(move || enter::launch_pod(&name, host.as_deref()));
+        thread::spawn(move || enter::launch_pod(&name, host_override));
 
     // Set up LLM cache if specified
     // We need a provider string for the cache.

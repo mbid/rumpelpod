@@ -110,15 +110,24 @@ fn check_host_requirements(requirements: &HostRequirements, docker_host: &Host) 
 /// Returns the DevContainer and the parsed Host.
 pub fn load_and_resolve(
     repo_root: &Path,
-    host_override: Option<&str>,
+    host_override: Option<Host>,
 ) -> Result<(DevContainer, Host)> {
     let toml_config = load_toml_config(repo_root)?;
-    let host_str = host_override.or(toml_config.host.as_deref());
-    let docker_host = host_str
-        .map(Host::parse)
-        .transpose()
-        .context("Invalid host specification")?
-        .unwrap_or(Host::Localhost);
+    let docker_host = if let Some(h) = host_override {
+        h
+    } else if let Some(ref host_str) = toml_config.host {
+        Host::parse(host_str).context("Invalid host in .rumpelpod.toml")?
+    } else if let Some(ref k8s) = toml_config.k8s {
+        Host::Kubernetes {
+            context: k8s.context.clone(),
+            namespace: k8s
+                .namespace
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+        }
+    } else {
+        Host::Localhost
+    };
 
     let (mut devcontainer, devcontainer_dir) = DevContainer::find_and_load(repo_root)?
         .map(|(dc, dir)| {
@@ -152,7 +161,7 @@ pub fn load_and_resolve(
 
 /// Launch a pod and return the container ID and user.
 /// This is shared logic between `enter` and `agent` commands.
-pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchResult> {
+pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
     let t = Instant::now();
     let repo_root = get_repo_root()?;
     let (devcontainer, docker_host) = load_and_resolve(&repo_root, host_override)?;
@@ -274,8 +283,10 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
     trace!("get_repo_root: {:?}", t.elapsed());
 
+    let host_override = cmd.host_args.resolve()?;
+
     let t = Instant::now();
-    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, host_override.clone())?;
     trace!("load_and_resolve: {:?}", t.elapsed());
 
     let container_repo_path = devcontainer.container_repo_path(&repo_root);
@@ -288,7 +299,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
         .unwrap_or(UserEnvProbe::LoginInteractiveShell);
 
     let t = Instant::now();
-    let result = launch_pod(&cmd.name, cmd.host.as_deref())?;
+    let result = launch_pod(&cmd.name, host_override)?;
     trace!("launch_pod: {:?}", t.elapsed());
 
     let mut command = cmd.command.clone();

@@ -88,7 +88,7 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
         ),
     };
 
-    let result = enter::launch_pod(pod_name, cmd.host.as_deref())?;
+    let result = enter::launch_pod(pod_name, cmd.host_args.resolve()?)?;
 
     let (container_path, local_path, from_pod) = match &direction {
         CopyDirection::FromPod {

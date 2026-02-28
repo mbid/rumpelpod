@@ -102,9 +102,11 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
     trace!("get_repo_root: {:?}", t.elapsed());
 
+    let host_override = cmd.host_args.resolve()?;
+
     let t = Instant::now();
     let toml_config = load_toml_config(&repo_root)?;
-    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, host_override.clone())?;
     trace!("load_and_resolve: {:?}", t.elapsed());
 
     // CLI --no-dangerously-skip-permissions wins over the toml setting.
@@ -116,7 +118,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let remote_env_map = devcontainer.remote_env.clone().unwrap_or_default();
 
     let t = Instant::now();
-    let result = launch_pod(&cmd.name, cmd.host.as_deref())?;
+    let result = launch_pod(&cmd.name, host_override)?;
     trace!("launch_pod: {:?}", t.elapsed());
 
     // Run screen preparation and config copy in parallel to avoid

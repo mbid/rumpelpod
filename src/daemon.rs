@@ -1123,7 +1123,7 @@ fn try_remove_container(
     use bollard::errors::Error as BollardError;
 
     let socket_path = if let Some(host) = host_str {
-        let host = Host::from_db_string(host)?;
+        let host = serde_json::from_str::<Host>(host)?;
         match &host {
             Host::Ssh { .. } => ssh_forward.get_socket(&host)?,
             Host::Localhost => default_docker_socket(),
@@ -2081,11 +2081,10 @@ impl DaemonServer {
 
         let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, repo_path);
         let client = crate::k8s::K8sClient::new(context, namespace)?;
-        let host_spec = Host::Kubernetes {
+        let k8s_host = Host::Kubernetes {
             context: context.to_string(),
             namespace: namespace.to_string(),
-        }
-        .to_db_string();
+        };
         let gateway_path = gateway::gateway_path(repo_path)?;
 
         // Check DB for existing pod; if the k8s pod is still Running, reconnect
@@ -2257,7 +2256,7 @@ impl DaemonServer {
         // Create pod record in database
         let pod_id = {
             let conn = self.db.lock().unwrap();
-            db::create_pod(&conn, repo_path, &pod_name.0, &host_spec)?
+            db::create_pod(&conn, repo_path, &pod_name.0, &k8s_host)?
         };
 
         let mark_error = |e: anyhow::Error| -> anyhow::Error {
@@ -2680,7 +2679,7 @@ impl Daemon for DaemonServer {
         }
 
         // Get the host specification string for the database
-        let host_spec = docker_host.to_db_string();
+        let host_spec = serde_json::to_string(&docker_host)?;
 
         // Check for name conflicts between local and remote pods
         {
@@ -2688,12 +2687,14 @@ impl Daemon for DaemonServer {
             if let Some(existing) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
                 // A pod with this name exists - check if the host matches
                 if existing.host != host_spec {
+                    let existing_host: Host =
+                        serde_json::from_str(&existing.host).unwrap_or(docker_host.clone());
                     anyhow::bail!(
                         "Pod '{}' already exists on {} but was requested on {}.\n\
                          Delete the existing pod first with 'rumpel delete {}'.",
                         pod_name.0,
-                        existing.host,
-                        host_spec,
+                        existing_host,
+                        docker_host,
                         pod_name.0
                     );
                 }
@@ -2822,7 +2823,7 @@ impl Daemon for DaemonServer {
                 let conn = self.db.lock().unwrap();
                 let pod_id = match db::get_pod(&conn, &repo_path, &pod_name.0)? {
                     Some(pod) => pod.id,
-                    None => db::create_pod(&conn, &repo_path, &pod_name.0, &host_spec)?,
+                    None => db::create_pod(&conn, &repo_path, &pod_name.0, &docker_host)?,
                 };
                 db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
                 pod_id
@@ -3009,7 +3010,7 @@ impl Daemon for DaemonServer {
         // Create pod record in database with status "initializing"
         let pod_id = {
             let conn = self.db.lock().unwrap();
-            db::create_pod(&conn, &repo_path, &pod_name.0, &host_spec)?
+            db::create_pod(&conn, &repo_path, &pod_name.0, &docker_host)?
         };
 
         // Helper to mark pod as error and propagate the original error
@@ -3394,7 +3395,7 @@ impl Daemon for DaemonServer {
         {
             let conn = self.db.lock().unwrap();
             if let Some(record) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
-                let host = Host::from_db_string(&record.host)?;
+                let host = serde_json::from_str::<Host>(&record.host)?;
                 if let Host::Kubernetes { .. } = &host {
                     anyhow::bail!(
                         "Kubernetes pods cannot be stopped. \
@@ -3412,7 +3413,7 @@ impl Daemon for DaemonServer {
             let conn = self.db.lock().unwrap();
             match db::get_pod(&conn, &repo_path, &pod_name.0)? {
                 Some(record) => {
-                    let host = Host::from_db_string(&record.host)?;
+                    let host = serde_json::from_str::<Host>(&record.host)?;
                     match &host {
                         Host::Ssh { .. } => self.ssh_forward.get_socket(&host)?,
                         Host::Localhost => default_docker_socket(),
@@ -3452,7 +3453,7 @@ impl Daemon for DaemonServer {
         // Check if this is a Kubernetes pod
         let host = host_str
             .as_deref()
-            .and_then(|s| Host::from_db_string(s).ok());
+            .and_then(|s| serde_json::from_str::<Host>(s).ok());
         if let Some(Host::Kubernetes {
             ref context,
             ref namespace,
@@ -3575,7 +3576,7 @@ impl Daemon for DaemonServer {
         // Cache k8s pod statuses per (context, namespace) to avoid repeated API calls
         let mut k8s_status_cache: HashMap<String, Option<PodStatus>> = HashMap::new();
         for pod in &db_pods {
-            let host = Host::from_db_string(&pod.host).ok();
+            let host = serde_json::from_str::<Host>(&pod.host).ok();
             match &host {
                 Some(Host::Kubernetes {
                     ref context,
@@ -3607,7 +3608,7 @@ impl Daemon for DaemonServer {
         // Build combined list with status from Docker where available
         let mut pods = Vec::new();
         for pod in db_pods {
-            let host = Host::from_db_string(&pod.host).ok();
+            let host = serde_json::from_str::<Host>(&pod.host).ok();
             let is_k8s = host
                 .as_ref()
                 .is_some_and(|h| matches!(h, Host::Kubernetes { .. }));

@@ -9,7 +9,7 @@ use crate::git::{get_current_branch, get_repo_root};
 pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
-    let (devcontainer, docker_host) = load_and_resolve(&repo_root, cmd.host.as_deref())?;
+    let (devcontainer, docker_host) = load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
 
     let host_branch = get_current_branch(&repo_root);
 

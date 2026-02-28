@@ -83,17 +83,6 @@ impl PodStatus {
     }
 }
 
-/// Host specification for local pods stored in the database.
-pub const LOCALHOST_DB_STR: &str = "localhost";
-
-/// Normalize a host string from the database to the current canonical format.
-/// Handles format changes from older versions (e.g. explicit default SSH port).
-fn normalize_host(host: String) -> String {
-    Host::from_db_string(&host)
-        .map(|h| h.to_db_string())
-        .unwrap_or(host)
-}
-
 /// Information about a pod from the database.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Some fields used only in tests or for future features
@@ -273,9 +262,10 @@ fn create_and_init_db(path: &Path) -> Result<Connection> {
 ///
 /// Returns the ID of the new pod.
 /// Returns an error if a pod with this repo_path and name already exists.
-pub fn create_pod(conn: &Connection, repo_path: &Path, name: &str, host: &str) -> Result<PodId> {
+pub fn create_pod(conn: &Connection, repo_path: &Path, name: &str, host: &Host) -> Result<PodId> {
     let now = Utc::now().to_rfc3339();
     let repo_path_str = repo_path.to_string_lossy();
+    let host_json = serde_json::to_string(host).context("Failed to serialize host")?;
 
     conn.execute(
         "INSERT INTO pods (repo_path, name, host, status, created_at, updated_at)
@@ -283,7 +273,7 @@ pub fn create_pod(conn: &Connection, repo_path: &Path, name: &str, host: &str) -
         rusqlite::params![
             repo_path_str,
             name,
-            host,
+            host_json,
             PodStatus::Initializing.as_str(),
             now,
             now
@@ -324,7 +314,7 @@ pub fn get_pod(conn: &Connection, repo_path: &Path, name: &str) -> Result<Option
                 id: PodId(row.get(0)?),
                 repo_path: row.get(1)?,
                 name: row.get(2)?,
-                host: normalize_host(row.get(3)?),
+                host: row.get(3)?,
                 status,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
@@ -356,7 +346,7 @@ pub fn get_pod_by_id(conn: &Connection, id: PodId) -> Result<Option<PodRecord>> 
                 id: PodId(row.get(0)?),
                 repo_path: row.get(1)?,
                 name: row.get(2)?,
-                host: normalize_host(row.get(3)?),
+                host: row.get(3)?,
                 status,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
@@ -390,7 +380,7 @@ pub fn list_pods(conn: &Connection, repo_path: &Path) -> Result<Vec<PodRecord>> 
                 id: PodId(row.get(0)?),
                 repo_path: row.get(1)?,
                 name: row.get(2)?,
-                host: normalize_host(row.get(3)?),
+                host: row.get(3)?,
                 status,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
@@ -700,15 +690,13 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        // Create a local pod
-        let id = create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        let id = create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
         assert!(i64::from(id) > 0);
 
-        // Get it back
         let pod = get_pod(&conn, &repo_path, "dev").unwrap().unwrap();
         assert_eq!(pod.id, id);
         assert_eq!(pod.name, "dev");
-        assert_eq!(pod.host, LOCALHOST_DB_STR);
+        assert_eq!(pod.host, serde_json::to_string(&Host::Localhost).unwrap());
         assert_eq!(pod.status, PodStatus::Initializing);
     }
 
@@ -718,40 +706,15 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        // Create a remote pod (DB stores the ssh:// URL)
-        let id = create_pod(&conn, &repo_path, "remote", "ssh://user@host").unwrap();
+        let ssh_host = Host::Ssh {
+            ssh_destination: "user@host".to_string(),
+            port: 22,
+        };
+        let id = create_pod(&conn, &repo_path, "remote", &ssh_host).unwrap();
 
         let pod = get_pod(&conn, &repo_path, "remote").unwrap().unwrap();
         assert_eq!(pod.id, id);
-        assert_eq!(pod.host, "ssh://user@host");
-    }
-
-    #[test]
-    fn test_host_normalized_on_read() {
-        let (_temp_dir, conn) = test_db();
-
-        let repo_path = PathBuf::from("/home/user/project");
-
-        // Simulate a record written by an older version with explicit default port
-        create_pod(&conn, &repo_path, "old", "ssh://dev:22").unwrap();
-        create_pod(&conn, &repo_path, "old-user", "ssh://user@host:22").unwrap();
-
-        // Reading back should normalize away the default port
-        let s1 = get_pod(&conn, &repo_path, "old").unwrap().unwrap();
-        assert_eq!(s1.host, "ssh://dev");
-
-        let s2 = get_pod(&conn, &repo_path, "old-user").unwrap().unwrap();
-        assert_eq!(s2.host, "ssh://user@host");
-
-        // Non-default port should be preserved
-        create_pod(&conn, &repo_path, "custom-port", "ssh://dev:2222").unwrap();
-        let s3 = get_pod(&conn, &repo_path, "custom-port").unwrap().unwrap();
-        assert_eq!(s3.host, "ssh://dev:2222");
-
-        // list_pods should also normalize
-        let all = list_pods(&conn, &repo_path).unwrap();
-        let old = all.iter().find(|s| s.name == "old").unwrap();
-        assert_eq!(old.host, "ssh://dev");
+        assert_eq!(pod.host, serde_json::to_string(&ssh_host).unwrap());
     }
 
     #[test]
@@ -760,11 +723,9 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        // Create first pod
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
 
-        // Creating another with same name should fail
-        let result = create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR);
+        let result = create_pod(&conn, &repo_path, "dev", &Host::Localhost);
         assert!(result.is_err());
     }
 
@@ -774,18 +735,15 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        let id = create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        let id = create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
 
-        // Initial status is Initializing
         let pod = get_pod(&conn, &repo_path, "dev").unwrap().unwrap();
         assert_eq!(pod.status, PodStatus::Initializing);
 
-        // Update to Ready
         update_pod_status(&conn, id, PodStatus::Ready).unwrap();
         let pod = get_pod(&conn, &repo_path, "dev").unwrap().unwrap();
         assert_eq!(pod.status, PodStatus::Ready);
 
-        // Update to Error
         update_pod_status(&conn, id, PodStatus::Error).unwrap();
         let pod = get_pod(&conn, &repo_path, "dev").unwrap().unwrap();
         assert_eq!(pod.status, PodStatus::Error);
@@ -797,15 +755,18 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
-        create_pod(&conn, &repo_path, "test", "ssh://remote").unwrap();
+        let ssh_host = Host::Ssh {
+            ssh_destination: "remote".to_string(),
+            port: 22,
+        };
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
+        create_pod(&conn, &repo_path, "test", &ssh_host).unwrap();
 
         let pods = list_pods(&conn, &repo_path).unwrap();
         assert_eq!(pods.len(), 2);
-        // Should be sorted by name
         assert_eq!(pods[0].name, "dev");
         assert_eq!(pods[1].name, "test");
-        assert_eq!(pods[1].host, "ssh://remote");
+        assert_eq!(pods[1].host, serde_json::to_string(&ssh_host).unwrap());
     }
 
     #[test]
@@ -815,8 +776,8 @@ mod tests {
         let repo1 = PathBuf::from("/home/user/project1");
         let repo2 = PathBuf::from("/home/user/project2");
 
-        create_pod(&conn, &repo1, "dev", LOCALHOST_DB_STR).unwrap();
-        create_pod(&conn, &repo2, "dev", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo1, "dev", &Host::Localhost).unwrap();
+        create_pod(&conn, &repo2, "dev", &Host::Localhost).unwrap();
 
         let repo1_pods = list_pods(&conn, &repo1).unwrap();
         assert_eq!(repo1_pods.len(), 1);
@@ -833,17 +794,14 @@ mod tests {
 
         let repo_path = PathBuf::from("/home/user/project");
 
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
 
-        // Delete the pod
         let deleted = delete_pod(&conn, &repo_path, "dev").unwrap();
         assert!(deleted);
 
-        // Should no longer exist
         let pod = get_pod(&conn, &repo_path, "dev").unwrap();
         assert!(pod.is_none());
 
-        // Deleting again should return false
         let deleted = delete_pod(&conn, &repo_path, "dev").unwrap();
         assert!(!deleted);
     }
@@ -855,8 +813,7 @@ mod tests {
         let repo_path = PathBuf::from("/home/user/project");
         let history = serde_json::json!([]);
 
-        // Create pod and conversation
-        let pod_id = create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        let pod_id = create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
         let conv_id = save_conversation(
             &conn,
             None,
@@ -891,7 +848,7 @@ mod tests {
         let history = serde_json::json!([{"role": "user", "content": "hello"}]);
 
         // Create pod first
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
 
         // Save new conversation
         let id = save_conversation(
@@ -926,7 +883,7 @@ mod tests {
         ]);
 
         // Create pod first
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
 
         // Save initial
         let id = save_conversation(
@@ -968,7 +925,7 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create pod first
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
 
         // Save multiple conversations
         let id1 = save_conversation(
@@ -1010,8 +967,8 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create pods first
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
-        create_pod(&conn, &repo_path, "test", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
+        create_pod(&conn, &repo_path, "test", &Host::Localhost).unwrap();
 
         // Save to different pods
         save_conversation(
@@ -1054,8 +1011,8 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create pods first
-        create_pod(&conn, &repo1, "dev", LOCALHOST_DB_STR).unwrap();
-        create_pod(&conn, &repo2, "dev", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo1, "dev", &Host::Localhost).unwrap();
+        create_pod(&conn, &repo2, "dev", &Host::Localhost).unwrap();
 
         // Save to different repos with same pod name
         save_conversation(
@@ -1105,8 +1062,8 @@ mod tests {
         let history = serde_json::json!([]);
 
         // Create pods first
-        create_pod(&conn, &repo_path, "dev", LOCALHOST_DB_STR).unwrap();
-        create_pod(&conn, &repo_path, "test", LOCALHOST_DB_STR).unwrap();
+        create_pod(&conn, &repo_path, "dev", &Host::Localhost).unwrap();
+        create_pod(&conn, &repo_path, "test", &Host::Localhost).unwrap();
 
         // Save conversations in different pods
         save_conversation(

@@ -105,27 +105,24 @@ pub enum Host {
     },
 }
 
-/// The string used in the database for localhost.
-const LOCALHOST_DB_STR: &str = "localhost";
-
 impl Host {
-    /// Parse a host specification from CLI or config file.
+    /// Parse a Docker host specification from CLI or config file.
     ///
     /// - `"localhost"` means local Docker.
     /// - `"ssh://user@host"` or `"ssh://host:port"` means remote Docker via SSH.
-    /// - `"k8s://context"` or `"k8s://context/namespace"` means Kubernetes.
     ///
     /// Bare hostnames like `"dev"` are rejected -- use `"ssh://dev"` instead.
+    /// Kubernetes hosts are configured via `--k8s-context` / `[k8s]` instead.
     pub fn parse(s: &str) -> Result<Self> {
-        if s == LOCALHOST_DB_STR {
+        if s == "localhost" {
             return Ok(Host::Localhost);
         }
 
         let url = Url::parse(s).with_context(|| {
             if !s.contains("://") {
                 format!(
-                    "Invalid host '{}'. Use 'localhost' for local Docker, \
-                     'ssh://host' for remote Docker, or 'k8s://context' for Kubernetes.",
+                    "Invalid host '{}'. Use 'localhost' for local Docker \
+                     or 'ssh://host' for remote Docker.",
                     s
                 )
             } else {
@@ -152,69 +149,14 @@ impl Host {
                     port,
                 })
             }
-            "k8s" => {
-                // k8s://context or k8s://context/namespace
-                let context = url
-                    .host_str()
-                    .ok_or_else(|| anyhow::anyhow!("k8s:// URL must have a context: {}", s))?
-                    .to_string();
-
-                let path = url.path().trim_start_matches('/');
-                let namespace = if path.is_empty() {
-                    "default".to_string()
-                } else {
-                    path.to_string()
-                };
-
-                Ok(Host::Kubernetes { context, namespace })
-            }
             other => {
                 bail!(
                     "Unsupported scheme '{}' in host '{}'. \
-                     Supported: 'ssh://', 'k8s://'.",
+                     Use 'ssh://' for remote Docker, or \
+                     '--k8s-context' / '[k8s]' for Kubernetes.",
                     other,
                     s
                 );
-            }
-        }
-    }
-
-    /// Reconstruct from the string stored in the database.
-    ///
-    /// The DB stores `"localhost"` for local or an `ssh://` URL for remote.
-    pub fn from_db_string(s: &str) -> Result<Self> {
-        Self::parse(s)
-    }
-
-    /// Serialize to the string stored in the database.
-    ///
-    /// Produces `"localhost"` for local, `"ssh://..."` for SSH, or
-    /// `"k8s://context"` / `"k8s://context/namespace"` for Kubernetes.
-    pub fn to_db_string(&self) -> String {
-        match self {
-            Host::Localhost => LOCALHOST_DB_STR.to_string(),
-            Host::Ssh {
-                ssh_destination,
-                port,
-            } => {
-                if *port == 22 {
-                    format!("ssh://{}", ssh_destination)
-                } else {
-                    // url crate puts port after host, but ssh_destination may
-                    // contain user@host so we split on '@' to build a proper URL.
-                    if let Some((user, host)) = ssh_destination.split_once('@') {
-                        format!("ssh://{}@{}:{}", user, host, port)
-                    } else {
-                        format!("ssh://{}:{}", ssh_destination, port)
-                    }
-                }
-            }
-            Host::Kubernetes { context, namespace } => {
-                if namespace == "default" {
-                    format!("k8s://{}", context)
-                } else {
-                    format!("k8s://{}/{}", context, namespace)
-                }
             }
         }
     }
@@ -276,17 +218,47 @@ impl Host {
 }
 
 impl std::fmt::Display for Host {
-    /// Human-readable display, used in `rumpel list`.
-    /// Shows `"localhost"` or `"ssh://user@host"` (omitting default port 22).
+    /// Human-readable display for `rumpel list` and error messages.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_db_string())
+        match self {
+            Host::Localhost => write!(f, "localhost"),
+            Host::Ssh {
+                ssh_destination,
+                port,
+            } => {
+                if *port == 22 {
+                    write!(f, "ssh://{}", ssh_destination)
+                } else if let Some((user, host)) = ssh_destination.split_once('@') {
+                    write!(f, "ssh://{}@{}:{}", user, host, port)
+                } else {
+                    write!(f, "ssh://{}:{}", ssh_destination, port)
+                }
+            }
+            Host::Kubernetes { context, namespace } => {
+                if namespace == "default" {
+                    write!(f, "k8s:{}", context)
+                } else {
+                    write!(f, "k8s:{}/{}", context, namespace)
+                }
+            }
+        }
     }
+}
+
+/// Kubernetes target from `[k8s]` in `.rumpelpod.toml`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct K8sConfig {
+    /// The kubeconfig context name.
+    pub context: String,
+    /// The Kubernetes namespace (default "default").
+    pub namespace: Option<String>,
 }
 
 /// Configuration from `.rumpelpod.toml`.
 ///
 /// Fields that have equivalents in devcontainer.json (image, user,
-/// workspaceFolder, runtime, network) are intentionally omitted — they
+/// workspaceFolder, runtime, network) are intentionally omitted -- they
 /// should be set in devcontainer.json instead (runtime and network via
 /// `runArgs`).
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -300,6 +272,9 @@ pub struct TomlConfig {
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     pub host: Option<String>,
+
+    /// Kubernetes target. Mutually exclusive with `host`.
+    pub k8s: Option<K8sConfig>,
 }
 
 /// Load `.rumpelpod.toml` from the given repo root, if present.
@@ -310,6 +285,14 @@ pub fn load_toml_config(repo_root: &Path) -> Result<TomlConfig> {
             .with_context(|| format!("Failed to read {}", config_path.display()))?;
         let config: TomlConfig = toml::from_str(&contents)
             .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+
+        // host and [k8s] are mutually exclusive
+        if config.host.is_some() && config.k8s.is_some() {
+            bail!(
+                "Configuration error: 'host' and '[k8s]' are mutually exclusive in {}.",
+                config_path.display()
+            );
+        }
 
         // Validate agent model options
         let model_options_count = config.agent.model.is_some() as usize
@@ -433,7 +416,6 @@ mod tests {
     fn parse_localhost() {
         let host = Host::parse("localhost").unwrap();
         assert_eq!(host, Host::Localhost);
-        assert_eq!(host.to_db_string(), "localhost");
         assert_eq!(host.to_string(), "localhost");
     }
 
@@ -442,7 +424,6 @@ mod tests {
         let host = Host::parse("ssh://dev").unwrap();
         assert_eq!(host.ssh_destination(), "dev");
         assert_eq!(host.ssh_port(), 22);
-        assert_eq!(host.to_db_string(), "ssh://dev");
         assert_eq!(host.to_string(), "ssh://dev");
     }
 
@@ -451,7 +432,7 @@ mod tests {
         let host = Host::parse("ssh://user@dev").unwrap();
         assert_eq!(host.ssh_destination(), "user@dev");
         assert_eq!(host.ssh_port(), 22);
-        assert_eq!(host.to_db_string(), "ssh://user@dev");
+        assert_eq!(host.to_string(), "ssh://user@dev");
     }
 
     #[test]
@@ -459,13 +440,12 @@ mod tests {
         let host = Host::parse("ssh://user@dev:2222").unwrap();
         assert_eq!(host.ssh_destination(), "user@dev");
         assert_eq!(host.ssh_port(), 2222);
-        assert_eq!(host.to_db_string(), "ssh://user@dev:2222");
+        assert_eq!(host.to_string(), "ssh://user@dev:2222");
     }
 
     #[test]
     fn parse_ssh_default_port_not_shown() {
         let host = Host::parse("ssh://user@dev:22").unwrap();
-        assert_eq!(host.to_db_string(), "ssh://user@dev");
         assert_eq!(host.to_string(), "ssh://user@dev");
     }
 
@@ -492,6 +472,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_k8s_scheme_rejected() {
+        let err = Host::parse("k8s://my-cluster").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("k8s-context"),
+            "error should suggest --k8s-context: {}",
+            msg
+        );
+    }
+
+    #[test]
     fn docker_host_uri_localhost() {
         assert_eq!(Host::Localhost.docker_host_uri(), None);
     }
@@ -506,59 +497,54 @@ mod tests {
     }
 
     #[test]
-    fn parse_k8s_context_only() {
-        let host = Host::parse("k8s://my-cluster").unwrap();
-        assert_eq!(
-            host,
-            Host::Kubernetes {
-                context: "my-cluster".to_string(),
-                namespace: "default".to_string(),
-            }
-        );
-        assert_eq!(host.to_db_string(), "k8s://my-cluster");
-        assert_eq!(host.to_string(), "k8s://my-cluster");
+    fn display_k8s_default_namespace() {
+        let host = Host::Kubernetes {
+            context: "my-cluster".to_string(),
+            namespace: "default".to_string(),
+        };
+        assert_eq!(host.to_string(), "k8s:my-cluster");
     }
 
     #[test]
-    fn parse_k8s_with_namespace() {
-        let host = Host::parse("k8s://my-cluster/staging").unwrap();
-        assert_eq!(
-            host,
-            Host::Kubernetes {
-                context: "my-cluster".to_string(),
-                namespace: "staging".to_string(),
-            }
-        );
-        assert_eq!(host.to_db_string(), "k8s://my-cluster/staging");
-    }
-
-    #[test]
-    fn parse_k8s_default_namespace_omitted() {
-        let host = Host::parse("k8s://my-cluster/default").unwrap();
-        assert_eq!(host.to_db_string(), "k8s://my-cluster");
+    fn display_k8s_custom_namespace() {
+        let host = Host::Kubernetes {
+            context: "my-cluster".to_string(),
+            namespace: "staging".to_string(),
+        };
+        assert_eq!(host.to_string(), "k8s:my-cluster/staging");
     }
 
     #[test]
     fn k8s_is_remote() {
-        let host = Host::parse("k8s://my-cluster").unwrap();
+        let host = Host::Kubernetes {
+            context: "my-cluster".to_string(),
+            namespace: "default".to_string(),
+        };
         assert!(host.is_remote());
         assert!(!host.is_docker());
     }
 
     #[test]
-    fn roundtrip_through_db_string() {
-        for input in &[
-            "localhost",
-            "ssh://dev",
-            "ssh://user@host",
-            "ssh://user@host:2222",
-            "k8s://my-cluster",
-            "k8s://my-cluster/staging",
-        ] {
-            let host = Host::parse(input).unwrap();
-            let db_str = host.to_db_string();
-            let roundtripped = Host::from_db_string(&db_str).unwrap();
-            assert_eq!(host, roundtripped, "roundtrip failed for {}", input);
+    fn serde_json_roundtrip() {
+        let hosts = vec![
+            Host::Localhost,
+            Host::Ssh {
+                ssh_destination: "user@host".to_string(),
+                port: 22,
+            },
+            Host::Ssh {
+                ssh_destination: "dev".to_string(),
+                port: 2222,
+            },
+            Host::Kubernetes {
+                context: "my-cluster".to_string(),
+                namespace: "staging".to_string(),
+            },
+        ];
+        for host in hosts {
+            let json = serde_json::to_string(&host).unwrap();
+            let roundtripped: Host = serde_json::from_str(&json).unwrap();
+            assert_eq!(host, roundtripped, "roundtrip failed for {:?}", host);
         }
     }
 }

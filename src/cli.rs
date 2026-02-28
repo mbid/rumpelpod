@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
+use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 
-use crate::config::Model;
+use crate::config::{Host, Model};
 
 /// Validate that a pod name contains only Docker/git-safe characters:
 /// ASCII alphanumeric, hyphens, underscores, and dots.
@@ -21,6 +22,48 @@ fn validate_pod_name(name: &str) -> Result<String, String> {
         ));
     }
     Ok(name.to_string())
+}
+
+/// Shared flags for selecting the target host (Docker or Kubernetes).
+#[derive(Args, Clone, Debug)]
+pub struct HostArgs {
+    /// Docker host: "localhost" or "ssh://user@host".
+    /// Overrides .rumpelpod.toml setting.
+    #[arg(long, conflicts_with_all = ["k8s_context", "k8s_namespace"])]
+    pub host: Option<String>,
+
+    /// Kubernetes context name.
+    /// Mutually exclusive with --host.
+    #[arg(long)]
+    pub k8s_context: Option<String>,
+
+    /// Kubernetes namespace (default "default").
+    /// Requires --k8s-context.
+    #[arg(long, requires = "k8s_context")]
+    pub k8s_namespace: Option<String>,
+}
+
+impl HostArgs {
+    /// Build a Host from the CLI flags, if any were given.
+    pub fn resolve(&self) -> Result<Option<Host>> {
+        if let Some(ref ctx) = self.k8s_context {
+            let namespace = self
+                .k8s_namespace
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            if self.host.is_some() {
+                bail!("--host and --k8s-context are mutually exclusive");
+            }
+            Ok(Some(Host::Kubernetes {
+                context: ctx.clone(),
+                namespace,
+            }))
+        } else if let Some(ref h) = self.host {
+            Ok(Some(Host::parse(h)?))
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -217,10 +260,8 @@ pub struct EnterCommand {
     #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
-    /// Overrides .rumpelpod.toml setting.
-    #[arg(long)]
-    pub host: Option<String>,
+    #[command(flatten)]
+    pub host_args: HostArgs,
 
     /// Command to run inside the pod (default: interactive shell)
     #[arg(last = true, value_name = "COMMAND")]
@@ -262,10 +303,8 @@ pub struct RecreateCommand {
     #[arg(help = "Name of the pod to recreate", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
-    /// Overrides .rumpelpod.toml setting.
-    #[arg(long)]
-    pub host: Option<String>,
+    #[command(flatten)]
+    pub host_args: HostArgs,
 }
 
 #[derive(Args)]
@@ -308,10 +347,8 @@ pub struct AgentCommand {
     #[arg(help = "Name of the pod to use", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
-    /// Overrides .rumpelpod.toml setting.
-    #[arg(long)]
-    pub host: Option<String>,
+    #[command(flatten)]
+    pub host_args: HostArgs,
 
     /// Model to use (overrides config file)
     #[arg(short, long, value_enum, conflicts_with_all = ["custom_anthropic_model", "custom_gemini_model", "custom_xai_model"])]
@@ -367,10 +404,8 @@ pub struct ClaudeCommand {
     #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
     pub name: String,
 
-    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
-    /// Overrides .rumpelpod.toml setting.
-    #[arg(long)]
-    pub host: Option<String>,
+    #[command(flatten)]
+    pub host_args: HostArgs,
 
     /// Disable --dangerously-skip-permissions (which is on by default)
     #[arg(long, conflicts_with = "dangerously_skip_permissions_hook")]
@@ -387,10 +422,8 @@ pub struct ClaudeCommand {
 
 #[derive(Args)]
 pub struct CpCommand {
-    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
-    /// Overrides .rumpelpod.toml setting.
-    #[arg(long)]
-    pub host: Option<String>,
+    #[command(flatten)]
+    pub host_args: HostArgs,
 
     /// Archive mode (preserve uid/gid)
     #[arg(short = 'a', long = "archive")]
@@ -432,10 +465,8 @@ Requires 'image' in devcontainer.json (not 'build'). Runs 'docker pull' so you g
 
 #[derive(Args)]
 pub struct ImageBuildCommand {
-    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
-    /// Overrides .rumpelpod.toml setting.
-    #[arg(long)]
-    pub host: Option<String>,
+    #[command(flatten)]
+    pub host_args: HostArgs,
 
     /// Disable Docker layer cache (--no-cache)
     #[arg(long)]
@@ -448,10 +479,8 @@ pub struct ImageBuildCommand {
 
 #[derive(Args)]
 pub struct ImageFetchCommand {
-    /// Host: "localhost", "ssh://user@host", or "k8s://context[/namespace]".
-    /// Overrides .rumpelpod.toml setting.
-    #[arg(long)]
-    pub host: Option<String>,
+    #[command(flatten)]
+    pub host_args: HostArgs,
 }
 
 #[derive(Subcommand)]

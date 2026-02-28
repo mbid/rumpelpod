@@ -1162,7 +1162,7 @@ mod tests {
                 &conn,
                 &repo_path,
                 "dev",
-                crate::daemon::db::LOCALHOST_DB_STR,
+                &crate::config::Host::Localhost,
             )
             .unwrap();
         }
@@ -1215,7 +1215,7 @@ mod tests {
                 &conn,
                 &repo_path,
                 "dev",
-                crate::daemon::db::LOCALHOST_DB_STR,
+                &crate::config::Host::Localhost,
             )
             .unwrap();
         }
