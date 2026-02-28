@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 
 use indoc::indoc;
 use rumpelpod::CommandExt;
@@ -433,5 +433,117 @@ fn enter_forwards_piped_stdin() {
         stdout.trim(),
         "hello from stdin",
         "cat should echo back what was piped through stdin"
+    );
+}
+
+#[test]
+fn enter_propagates_host_git_identity() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    // Change host identity after building the image so the pod can only get
+    // these values via propagation, not from the baked-in .git/config.
+    Command::new("git")
+        .args(["config", "user.name", "Pod Author"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git config user.name failed");
+    Command::new("git")
+        .args(["config", "user.email", "pod@example.org"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git config user.email failed");
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "git-id-test", "--", "git", "config", "user.name"])
+        .success()
+        .expect("rumpel enter failed");
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "Pod Author",
+        "Pod git user.name should match host, got: {}",
+        stdout.trim()
+    );
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "git-id-test", "--", "git", "config", "user.email"])
+        .success()
+        .expect("rumpel enter failed");
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "pod@example.org",
+        "Pod git user.email should match host, got: {}",
+        stdout.trim()
+    );
+}
+
+#[test]
+fn enter_updates_git_identity_on_reentry() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // First enter creates the container with the original identity.
+    pod_command(&repo, &daemon)
+        .args(["enter", "reentry-id-test", "--", "echo", "setup"])
+        .success()
+        .expect("first enter failed");
+
+    // Change host identity between entries.
+    Command::new("git")
+        .args(["config", "user.name", "Updated Author"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git config user.name failed");
+    Command::new("git")
+        .args(["config", "user.email", "updated@example.org"])
+        .current_dir(repo.path())
+        .success()
+        .expect("git config user.email failed");
+
+    // Re-entry should propagate the new identity.
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "reentry-id-test",
+            "--",
+            "git",
+            "config",
+            "user.name",
+        ])
+        .success()
+        .expect("re-entry failed");
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "Updated Author",
+        "Pod git user.name should be updated on re-entry, got: {}",
+        stdout.trim()
+    );
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "reentry-id-test",
+            "--",
+            "git",
+            "config",
+            "user.email",
+        ])
+        .success()
+        .expect("re-entry failed");
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "updated@example.org",
+        "Pod git user.email should be updated on re-entry, got: {}",
+        stdout.trim()
     );
 }
