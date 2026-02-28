@@ -894,7 +894,9 @@ fn parse_null_delimited_env(data: &[u8]) -> HashMap<String, String> {
 async fn run_handler(
     Json(req): Json<RunRequest>,
 ) -> Result<Json<RunResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = run_impl(req);
+    let result = tokio::task::spawn_blocking(|| run_impl(req))
+        .await
+        .expect("run_impl panicked");
     match result {
         Ok(resp) => ok_json(resp),
         Err(e) => Err(err_json(e)),
@@ -902,6 +904,8 @@ async fn run_handler(
 }
 
 fn run_impl(req: RunRequest) -> Result<RunResponse> {
+    use std::io::Read;
+
     if req.cmd.is_empty() {
         anyhow::bail!("empty command");
     }
@@ -944,47 +948,59 @@ fn run_impl(req: RunRequest) -> Result<RunResponse> {
         }
     }
 
+    // Drain stdout and stderr in background threads to prevent deadlock
+    // when the child produces more output than the OS pipe buffer (~64KB).
+    let child_stdout = child.stdout.take().expect("stdout was piped");
+    let child_stderr = child.stderr.take().expect("stderr was piped");
+
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = child_stdout;
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = child_stderr;
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
     let timeout = req.timeout_secs.map(std::time::Duration::from_secs);
 
-    if let Some(dur) = timeout {
-        // Poll with timeout
+    let (status, timed_out) = if let Some(dur) = timeout {
         let start = std::time::Instant::now();
         loop {
             match child.try_wait()? {
-                Some(status) => {
-                    let output = child.wait_with_output()?;
-                    return Ok(RunResponse {
-                        exit_code: status.code().unwrap_or(-1),
-                        stdout: base64_encode(&output.stdout),
-                        stderr: base64_encode(&output.stderr),
-                        timed_out: false,
-                    });
-                }
+                Some(status) => break (status, false),
                 None => {
                     if start.elapsed() >= dur {
-                        // Kill the process
                         let _ = child.kill();
-                        let output = child.wait_with_output()?;
-                        return Ok(RunResponse {
-                            exit_code: -1,
-                            stdout: base64_encode(&output.stdout),
-                            stderr: base64_encode(&output.stderr),
-                            timed_out: true,
-                        });
+                        let status = child.wait().context("waiting after kill")?;
+                        break (status, true);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }
     } else {
-        let output = child.wait_with_output().context("waiting for command")?;
-        Ok(RunResponse {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: base64_encode(&output.stdout),
-            stderr: base64_encode(&output.stderr),
-            timed_out: false,
-        })
-    }
+        let status = child.wait().context("waiting for command")?;
+        (status, false)
+    };
+
+    let stdout = stdout_thread.join().expect("stdout reader panicked");
+    let stderr = stderr_thread.join().expect("stderr reader panicked");
+
+    Ok(RunResponse {
+        exit_code: if timed_out {
+            -1
+        } else {
+            status.code().unwrap_or(-1)
+        },
+        stdout: base64_encode(&stdout),
+        stderr: base64_encode(&stderr),
+        timed_out,
+    })
 }
 
 // ---------------------------------------------------------------------------

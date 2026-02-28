@@ -6,12 +6,21 @@
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::config::Host;
 use crate::devcontainer::{BuildOptions, DevContainer};
+
+/// A line of Docker build output, tagged with the stream it came from.
+pub enum OutputLine {
+    Stdout(String),
+    Stderr(String),
+}
+
+/// Callback invoked with each line of Docker build output.
+pub type BuildOutputFn = Box<dyn FnMut(OutputLine) + Send>;
 
 // Re-export so callers can use image::Image
 pub use crate::daemon::protocol::Image;
@@ -39,6 +48,7 @@ pub fn resolve_image(
     devcontainer: &DevContainer,
     docker_host: &Host,
     repo_root: &Path,
+    on_output: Option<BuildOutputFn>,
 ) -> Result<BuildResult> {
     if let Host::Kubernetes { .. } = docker_host {
         if devcontainer.has_build() {
@@ -68,7 +78,13 @@ pub fn resolve_image(
                 built: false,
             });
         }
-        build_devcontainer_image(build, docker_host, repo_root, &BuildFlags::default())
+        build_devcontainer_image(
+            build,
+            docker_host,
+            repo_root,
+            &BuildFlags::default(),
+            on_output,
+        )
     } else {
         Ok(BuildResult {
             image: Image(
@@ -88,6 +104,7 @@ pub fn build_devcontainer_image(
     docker_host: &Host,
     repo_root: &Path,
     flags: &BuildFlags,
+    on_output: Option<BuildOutputFn>,
 ) -> Result<BuildResult> {
     let dockerfile = build
         .dockerfile
@@ -157,13 +174,61 @@ pub fn build_devcontainer_image(
 
     cmd.arg(context_path.display().to_string());
 
-    let output = cmd.output()?;
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
 
-    if !output.status.success() {
+    let mut child = cmd.spawn()?;
+
+    let child_stdout = child.stdout.take().expect("stdout was piped");
+    let child_stderr = child.stderr.take().expect("stderr was piped");
+
+    // Shared callback protected by a mutex so both reader threads can call it
+    let callback = on_output.map(|cb| std::sync::Arc::new(std::sync::Mutex::new(cb)));
+    let callback_for_stderr = callback.clone();
+
+    // Collect all output for the error message if the build fails
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stdout_buf_clone = stdout_buf.clone();
+    let stderr_buf_clone = stderr_buf.clone();
+
+    let stdout_thread = std::thread::spawn(move || {
+        for line in BufReader::new(child_stdout).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            stdout_buf_clone.lock().unwrap().push_str(&line);
+            stdout_buf_clone.lock().unwrap().push('\n');
+            if let Some(ref cb) = callback {
+                cb.lock().unwrap()(OutputLine::Stdout(line));
+            }
+        }
+    });
+
+    let stderr_thread = std::thread::spawn(move || {
+        for line in BufReader::new(child_stderr).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            stderr_buf_clone.lock().unwrap().push_str(&line);
+            stderr_buf_clone.lock().unwrap().push('\n');
+            if let Some(ref cb) = callback_for_stderr {
+                cb.lock().unwrap()(OutputLine::Stderr(line));
+            }
+        }
+    });
+
+    let status = child.wait()?;
+    stdout_thread.join().expect("stdout reader panicked");
+    stderr_thread.join().expect("stderr reader panicked");
+
+    if !status.success() {
         bail!(
             "Docker build failed:\nSTDOUT: {}\nSTDERR: {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            stdout_buf.lock().unwrap(),
+            stderr_buf.lock().unwrap()
         );
     }
 

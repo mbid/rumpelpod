@@ -321,7 +321,7 @@ fn devcontainer_build_skips_when_image_exists() {
 
     let daemon = TestDaemon::start();
 
-    // First enter should build the image.
+    // First enter should build the image and stream build output.
     let output = pod_command(&repo, &daemon)
         .args(["enter", "skip-test-1", "--", "echo", "built"])
         .output()
@@ -329,8 +329,8 @@ fn devcontainer_build_skips_when_image_exists() {
     assert!(output.status.success(), "first enter failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Devcontainer image built"),
-        "first enter should build the image, stderr: {stderr}",
+        stderr.contains("FROM") || stderr.contains("Step") || stderr.contains("RUN"),
+        "first enter should stream build output, stderr: {stderr}",
     );
 
     // Second enter with a different pod name should reuse the cached image.
@@ -341,7 +341,7 @@ fn devcontainer_build_skips_when_image_exists() {
     assert!(output.status.success(), "second enter failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        !stderr.contains("Devcontainer image built"),
+        !(stderr.contains("FROM") || stderr.contains("Step") || stderr.contains("RUN")),
         "second enter should skip the build, stderr: {stderr}",
     );
 }
@@ -472,5 +472,66 @@ fn image_fetch_errors_on_build_config() {
     assert!(
         stderr.contains("image build"),
         "error should suggest 'image build', got: {stderr}",
+    );
+}
+
+// ---- streaming build output tests ----
+
+#[test]
+fn devcontainer_build_streams_output() {
+    let repo = TestRepo::new();
+
+    let unique = repo.path().file_name().unwrap().to_string_lossy();
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u 1007 -s /bin/bash {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        LABEL test.stream="{unique}"
+        USER {TEST_USER}
+    "#};
+
+    write_test_dockerfile(&repo, &dockerfile);
+    write_devcontainer_with_build(&repo, "Dockerfile");
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "stream-test", "--", "echo", "streamed"])
+        .output()
+        .expect("rumpel enter failed");
+
+    assert!(output.status.success(), "enter failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FROM") || stderr.contains("Step") || stderr.contains("RUN"),
+        "build output should be streamed to stderr, got: {stderr}",
+    );
+}
+
+#[test]
+fn image_build_streams_output() {
+    let repo = TestRepo::new();
+
+    let unique = repo.path().file_name().unwrap().to_string_lossy();
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        LABEL test.stream.direct="{unique}"
+    "#};
+
+    write_test_dockerfile(&repo, &dockerfile);
+    write_devcontainer_with_build(&repo, "Dockerfile");
+
+    let output = rumpel_cmd(&repo)
+        .args(["image", "build"])
+        .output()
+        .expect("rumpel image build failed");
+
+    assert!(output.status.success(), "image build failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("FROM") || stderr.contains("Step") || stderr.contains("RUN"),
+        "build output should be streamed to stderr, got: {stderr}",
     );
 }

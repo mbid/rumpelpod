@@ -10,12 +10,15 @@ use log::{info, trace};
 use crate::cli::EnterCommand;
 use crate::config::{load_toml_config, Host};
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, LaunchResult, PodLaunchParams, PodName};
+use crate::daemon::protocol::{
+    Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
+};
 use crate::devcontainer::{
     shell_escape, DevContainer, GpuRequirement, HostRequirements, MountType, SubstitutionContext,
     UserEnvProbe,
 };
 use crate::git::{get_current_branch, get_repo_root};
+use crate::image::OutputLine;
 
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
@@ -187,18 +190,21 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let client = DaemonClient::new_unix(&socket_path);
 
     let t = Instant::now();
-    let result = client.launch_pod(PodLaunchParams {
+    let mut progress = client.launch_pod(PodLaunchParams {
         pod_name: PodName(pod_name.to_string()),
         repo_path: repo_root,
         host_branch,
         host: docker_host,
         devcontainer,
     })?;
-    trace!("launch_pod daemon RPC: {:?}", t.elapsed());
-
-    if result.image_built {
-        eprintln!("Devcontainer image built.");
+    for line in &mut progress {
+        match line {
+            OutputLine::Stdout(s) => println!("{}", s),
+            OutputLine::Stderr(s) => eprintln!("{}", s),
+        }
     }
+    let result = progress.finish()?;
+    trace!("launch_pod daemon RPC: {:?}", t.elapsed());
 
     Ok(result)
 }

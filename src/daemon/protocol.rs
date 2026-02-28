@@ -1,22 +1,27 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{delete, get, post, put};
 use axum::serve::Listener;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
+use tokio_stream::StreamExt;
 use url::Url;
 
 use crate::async_runtime::block_on;
 use crate::config::Host;
 use crate::devcontainer::DevContainer;
+use crate::image::OutputLine;
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,22 +123,22 @@ pub struct PodLaunchParams {
 
 /// Response body for launch/recreate pod endpoints.
 #[derive(Debug, Serialize, Deserialize)]
-struct PodLaunchResponse {
-    container_id: ContainerId,
+pub struct PodLaunchResponse {
+    pub container_id: ContainerId,
     /// The resolved user for the pod.
-    user: String,
+    pub user: String,
     /// The Docker socket path to use for connecting to the Docker daemon.
     /// `None` for Kubernetes pods.
-    docker_socket: Option<PathBuf>,
+    pub docker_socket: Option<PathBuf>,
     /// The host where the pod is running.
-    host: Host,
+    pub host: Host,
     /// Whether a devcontainer image was built during this launch.
-    image_built: bool,
+    pub image_built: bool,
     /// Environment variables captured by probing the user's shell init files.
-    probed_env: HashMap<String, String>,
-    user_shell: String,
-    container_url: String,
-    container_token: String,
+    pub probed_env: HashMap<String, String>,
+    pub user_shell: String,
+    pub container_url: String,
+    pub container_token: String,
 }
 
 /// Request body for stop_pod endpoint.
@@ -258,12 +263,49 @@ struct ErrorResponse {
     error: String,
 }
 
+/// Progress handle for a launch/recreate operation.
+///
+/// Yields build-output lines via `Iterator::next()` and returns the final
+/// result from `finish()`.  Implementations exist for the server side
+/// (thread-backed), the client side (SSE-backed), and tests (immediate).
+pub trait LaunchProgress: Iterator<Item = OutputLine> + Send {
+    /// Drain remaining output and return the final result.
+    fn finish(self) -> Result<LaunchResult>;
+}
+
+/// Trivial `LaunchProgress` that yields no build output -- just wraps a
+/// pre-computed result.  Used by mocks and tests.
+pub struct ImmediateLaunchProgress(Option<Result<LaunchResult>>);
+
+impl ImmediateLaunchProgress {
+    pub fn new(result: Result<LaunchResult>) -> Self {
+        Self(Some(result))
+    }
+}
+
+impl Iterator for ImmediateLaunchProgress {
+    type Item = OutputLine;
+    fn next(&mut self) -> Option<OutputLine> {
+        None
+    }
+}
+
+impl LaunchProgress for ImmediateLaunchProgress {
+    fn finish(mut self) -> Result<LaunchResult> {
+        self.0
+            .take()
+            .expect("finish() called twice on ImmediateLaunchProgress")
+    }
+}
+
 pub trait Daemon: Send + Sync + 'static {
+    type Progress: LaunchProgress;
+
     // PUT /pod
-    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult>;
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<Self::Progress>;
 
     // POST /pod/recreate
-    fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult>;
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<Self::Progress>;
 
     // POST /pod/stop
     // Stops a pod container without removing it.
@@ -343,8 +385,158 @@ impl DaemonClient {
     }
 }
 
+/// SSE-backed `LaunchProgress` for the HTTP client side.
+///
+/// Parses `event: build_stdout` / `event: build_stderr` / `event: result` /
+/// `event: error` lines from a `text/event-stream` response.
+pub struct ClientLaunchProgress {
+    lines: std::io::Lines<BufReader<reqwest::blocking::Response>>,
+    result: Option<Result<LaunchResult>>,
+}
+
+impl ClientLaunchProgress {
+    fn new(response: reqwest::blocking::Response) -> Self {
+        Self {
+            lines: BufReader::new(response).lines(),
+            result: None,
+        }
+    }
+}
+
+impl Iterator for ClientLaunchProgress {
+    type Item = OutputLine;
+
+    fn next(&mut self) -> Option<OutputLine> {
+        // SSE format: "event: <type>\ndata: <json>\n\n"
+        // We need to read event + data line pairs.
+        loop {
+            let line = match self.lines.next()? {
+                Ok(l) => l,
+                Err(e) => {
+                    self.result = Some(Err(anyhow::anyhow!(
+                        "Failed to read response stream: {}",
+                        e
+                    )));
+                    return None;
+                }
+            };
+
+            // Skip blank lines (SSE record separator)
+            if line.is_empty() {
+                continue;
+            }
+
+            let event_type = match line.strip_prefix("event: ") {
+                Some(t) => t.to_string(),
+                None => continue,
+            };
+
+            // Read the "data: ..." line
+            let data_line = match self.lines.next() {
+                Some(Ok(l)) => l,
+                Some(Err(e)) => {
+                    self.result = Some(Err(anyhow::anyhow!("Failed to read data line: {}", e)));
+                    return None;
+                }
+                None => {
+                    self.result = Some(Err(anyhow::anyhow!(
+                        "Stream ended mid-event (no data line)"
+                    )));
+                    return None;
+                }
+            };
+
+            let data = match data_line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => {
+                    self.result = Some(Err(anyhow::anyhow!(
+                        "Expected 'data: ' line, got: {}",
+                        data_line
+                    )));
+                    return None;
+                }
+            };
+
+            match event_type.as_str() {
+                "build_stdout" | "build_stderr" => {
+                    // data is a JSON-encoded string
+                    match serde_json::from_str::<String>(data) {
+                        Ok(s) => {
+                            if event_type == "build_stdout" {
+                                return Some(OutputLine::Stdout(s));
+                            } else {
+                                return Some(OutputLine::Stderr(s));
+                            }
+                        }
+                        Err(e) => {
+                            self.result = Some(Err(anyhow::anyhow!(
+                                "Failed to parse build output data: {}",
+                                e
+                            )));
+                            return None;
+                        }
+                    }
+                }
+                "result" => {
+                    match serde_json::from_str::<PodLaunchResponse>(data) {
+                        Ok(body) => {
+                            self.result = Some(Ok(LaunchResult {
+                                container_id: body.container_id,
+                                user: body.user,
+                                docker_socket: body.docker_socket,
+                                host: body.host,
+                                image_built: body.image_built,
+                                probed_env: body.probed_env,
+                                user_shell: body.user_shell,
+                                container_url: body.container_url,
+                                container_token: body.container_token,
+                            }));
+                        }
+                        Err(e) => {
+                            self.result =
+                                Some(Err(anyhow::anyhow!("Failed to parse result data: {}", e)));
+                        }
+                    }
+                    return None;
+                }
+                "error" => {
+                    match serde_json::from_str::<ErrorResponse>(data) {
+                        Ok(err) => {
+                            self.result = Some(Err(anyhow::anyhow!("Server error: {}", err.error)));
+                        }
+                        Err(e) => {
+                            self.result =
+                                Some(Err(anyhow::anyhow!("Failed to parse error data: {}", e)));
+                        }
+                    }
+                    return None;
+                }
+                other => {
+                    self.result = Some(Err(anyhow::anyhow!("Unknown SSE event type: {}", other)));
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+impl LaunchProgress for ClientLaunchProgress {
+    fn finish(mut self) -> Result<LaunchResult> {
+        // Drain any remaining build output
+        while self.next().is_some() {}
+
+        self.result.unwrap_or_else(|| {
+            Err(anyhow::anyhow!(
+                "Server closed stream without sending a result"
+            ))
+        })
+    }
+}
+
 impl Daemon for DaemonClient {
-    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+    type Progress = ClientLaunchProgress;
+
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<ClientLaunchProgress> {
         let url = self.url.join("/pod")?;
 
         let response = self
@@ -354,30 +546,10 @@ impl Daemon for DaemonClient {
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
-        if response.status().is_success() {
-            let body: PodLaunchResponse = response
-                .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
-            Ok(LaunchResult {
-                container_id: body.container_id,
-                user: body.user,
-                docker_socket: body.docker_socket,
-                host: body.host,
-                image_built: body.image_built,
-                probed_env: body.probed_env,
-                user_shell: body.user_shell,
-                container_url: body.container_url,
-                container_token: body.container_token,
-            })
-        } else {
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
-            });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
-        }
+        Ok(ClientLaunchProgress::new(response))
     }
 
-    fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<ClientLaunchProgress> {
         let url = self.url.join("/pod/recreate")?;
 
         let response = self
@@ -387,27 +559,7 @@ impl Daemon for DaemonClient {
             .send()
             .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
-        if response.status().is_success() {
-            let body: PodLaunchResponse = response
-                .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
-            Ok(LaunchResult {
-                container_id: body.container_id,
-                user: body.user,
-                docker_socket: body.docker_socket,
-                host: body.host,
-                image_built: body.image_built,
-                probed_env: body.probed_env,
-                user_shell: body.user_shell,
-                container_url: body.container_url,
-                container_token: body.container_token,
-            })
-        } else {
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
-            });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
-        }
+        Ok(ClientLaunchProgress::new(response))
     }
 
     fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
@@ -627,60 +779,104 @@ impl Daemon for DaemonClient {
     }
 }
 
+/// Format a single SSE event with the given type and JSON-encoded data.
+fn sse_event(event_type: &str, data: &str) -> String {
+    format!("event: {}\ndata: {}\n\n", event_type, data)
+}
+
+/// Build an SSE streaming response for launch/recreate endpoints.
+///
+/// Spawns a blocking task that calls `op()` to get a `LaunchProgress`,
+/// iterates build output lines (sending each as `event: build_stdout` or
+/// `event: build_stderr`),
+/// then calls `finish()` and sends `event: result` or `event: error`.
+fn streaming_launch_response<D: Daemon>(
+    daemon: Arc<D>,
+    params: PodLaunchParams,
+    op: fn(&D, PodLaunchParams) -> Result<D::Progress>,
+) -> Response {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    tokio::task::spawn_blocking(move || {
+        let mut progress = match op(&daemon, params) {
+            Ok(p) => p,
+            Err(e) => {
+                let msg = sse_event(
+                    "error",
+                    &serde_json::to_string(&ErrorResponse {
+                        error: format!("{:#}", e),
+                    })
+                    .expect("ErrorResponse is always serializable"),
+                );
+                let _ = event_tx.blocking_send(msg);
+                return;
+            }
+        };
+
+        // Stream build output lines
+        for line in &mut progress {
+            let (event_type, text) = match line {
+                OutputLine::Stdout(s) => ("build_stdout", s),
+                OutputLine::Stderr(s) => ("build_stderr", s),
+            };
+            let json_str = serde_json::to_string(&text).expect("String is always serializable");
+            let msg = sse_event(event_type, &json_str);
+            if event_tx.blocking_send(msg).is_err() {
+                return;
+            }
+        }
+
+        // Send final result
+        let msg = match progress.finish() {
+            Ok(r) => sse_event(
+                "result",
+                &serde_json::to_string(&PodLaunchResponse {
+                    container_id: r.container_id,
+                    user: r.user,
+                    docker_socket: r.docker_socket,
+                    host: r.host,
+                    image_built: r.image_built,
+                    probed_env: r.probed_env,
+                    user_shell: r.user_shell,
+                    container_url: r.container_url,
+                    container_token: r.container_token,
+                })
+                .expect("PodLaunchResponse is always serializable"),
+            ),
+            Err(e) => sse_event(
+                "error",
+                &serde_json::to_string(&ErrorResponse {
+                    error: format!("{:#}", e),
+                })
+                .expect("ErrorResponse is always serializable"),
+            ),
+        };
+        let _ = event_tx.blocking_send(msg);
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx)
+        .map(Ok::<_, std::convert::Infallible>);
+
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .expect("building response never fails")
+}
+
 /// Handler for PUT /pod endpoint.
 async fn launch_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(params): Json<PodLaunchParams>,
-) -> Result<Json<PodLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.launch_pod(params));
-
-    match result {
-        Ok(launch_result) => Ok(Json(PodLaunchResponse {
-            container_id: launch_result.container_id,
-            user: launch_result.user,
-            docker_socket: launch_result.docker_socket,
-            host: launch_result.host,
-            image_built: launch_result.image_built,
-            probed_env: launch_result.probed_env,
-            user_shell: launch_result.user_shell,
-            container_url: launch_result.container_url,
-            container_token: launch_result.container_token,
-        })),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("{:#}", e),
-            }),
-        )),
-    }
+) -> Response {
+    streaming_launch_response(daemon, params, D::launch_pod)
 }
 
 /// Handler for POST /pod/recreate endpoint.
 async fn recreate_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(params): Json<PodLaunchParams>,
-) -> Result<Json<PodLaunchResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.recreate_pod(params));
-
-    match result {
-        Ok(res) => Ok(Json(PodLaunchResponse {
-            container_id: res.container_id,
-            user: res.user,
-            docker_socket: res.docker_socket,
-            host: res.host,
-            image_built: res.image_built,
-            probed_env: res.probed_env,
-            user_shell: res.user_shell,
-            container_url: res.container_url,
-            container_token: res.container_token,
-        })),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("{:#}", e),
-            }),
-        )),
-    }
+) -> Response {
+    streaming_launch_response(daemon, params, D::recreate_pod)
 }
 
 /// Handler for POST /pod/stop endpoint.
@@ -887,388 +1083,4 @@ where
             .await
             .unwrap();
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::thread;
-    use tokio::net::UnixListener;
-    use tokio::sync::oneshot;
-
-    struct MockDaemon;
-
-    impl Daemon for MockDaemon {
-        fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
-            let user = params
-                .devcontainer
-                .user()
-                .map(String::from)
-                .unwrap_or_else(|| "mockuser".to_string());
-            let image = params.devcontainer.image.as_deref().unwrap_or("none");
-            let host = params.host;
-            Ok(LaunchResult {
-                container_id: ContainerId(format!("{}:{}", params.pod_name.0, image)),
-                user,
-                docker_socket: Some(PathBuf::from("/var/run/docker.sock")),
-                host,
-                image_built: false,
-                probed_env: HashMap::new(),
-                user_shell: "/bin/sh".to_string(),
-                container_url: String::new(),
-                container_token: String::new(),
-            })
-        }
-
-        fn recreate_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
-            let user = params
-                .devcontainer
-                .user()
-                .map(String::from)
-                .unwrap_or_else(|| "mockuser".to_string());
-            let image = params.devcontainer.image.as_deref().unwrap_or("none");
-            let host = params.host;
-            Ok(LaunchResult {
-                container_id: ContainerId(format!("recreated:{}:{}", params.pod_name.0, image)),
-                user,
-                docker_socket: Some(PathBuf::from("/var/run/docker.sock")),
-                host,
-                image_built: false,
-                probed_env: HashMap::new(),
-                user_shell: "/bin/sh".to_string(),
-                container_url: String::new(),
-                container_token: String::new(),
-            })
-        }
-
-        fn stop_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
-            Ok(())
-        }
-
-        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf, _wait: bool) -> Result<()> {
-            Ok(())
-        }
-
-        fn list_pods(&self, _repo_path: PathBuf) -> Result<Vec<PodInfo>> {
-            Ok(vec![])
-        }
-
-        fn list_ports(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<Vec<PortInfo>> {
-            Ok(vec![])
-        }
-
-        fn save_conversation(
-            &self,
-            id: Option<i64>,
-            _repo_path: PathBuf,
-            _pod_name: String,
-            _model: String,
-            _provider: String,
-            _history: serde_json::Value,
-        ) -> Result<i64> {
-            Ok(id.unwrap_or(1))
-        }
-
-        fn list_conversations(
-            &self,
-            _repo_path: PathBuf,
-            _pod_name: String,
-        ) -> Result<Vec<ConversationSummary>> {
-            Ok(vec![])
-        }
-
-        fn get_conversation(&self, _id: i64) -> Result<Option<GetConversationResponse>> {
-            Ok(None)
-        }
-
-        fn ensure_claude_config(&self, _request: EnsureClaudeConfigRequest) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Helper to start a daemon server in a background thread.
-    struct TestServer {
-        socket_path: PathBuf,
-        shutdown_tx: Option<oneshot::Sender<()>>,
-        handle: Option<thread::JoinHandle<()>>,
-        #[allow(dead_code)]
-        temp_dir: tempfile::TempDir,
-    }
-
-    impl TestServer {
-        fn start<D: Daemon>(daemon: D) -> Self {
-            let temp_dir = tempfile::tempdir().unwrap();
-            let socket_path = temp_dir.path().join("daemon.sock");
-            let socket_path_clone = socket_path.clone();
-
-            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-            let listener = block_on(async { UnixListener::bind(&socket_path_clone).unwrap() });
-
-            let handle = thread::spawn(move || {
-                serve_daemon_until(daemon, listener, async {
-                    let _ = shutdown_rx.await;
-                });
-            });
-
-            // Wait for socket to be ready
-            thread::sleep(std::time::Duration::from_millis(50));
-
-            TestServer {
-                socket_path,
-                shutdown_tx: Some(shutdown_tx),
-                handle: Some(handle),
-                temp_dir,
-            }
-        }
-
-        fn client(&self) -> DaemonClient {
-            DaemonClient::new_unix(&self.socket_path)
-        }
-    }
-
-    impl Drop for TestServer {
-        fn drop(&mut self) {
-            if let Some(tx) = self.shutdown_tx.take() {
-                let _ = tx.send(());
-            }
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
-    }
-
-    #[test]
-    fn test_client_server_roundtrip() {
-        let server = TestServer::start(MockDaemon);
-        let client = server.client();
-
-        let dc = DevContainer {
-            image: Some("test-image".to_string()),
-            remote_user: Some("testuser".to_string()),
-            run_args: Some(vec!["--runtime=runc".to_string()]),
-            ..Default::default()
-        };
-
-        let result = client.launch_pod(PodLaunchParams {
-            pod_name: PodName("test-sandbox".to_string()),
-            repo_path: PathBuf::from("/tmp/repo"),
-            host_branch: Some("main".to_string()),
-            host: Host::Localhost,
-            devcontainer: dc,
-        });
-
-        let launch_result = result.unwrap();
-        assert_eq!(launch_result.container_id.0, "test-sandbox:test-image");
-    }
-
-    /// A mock daemon that uses a real database for conversation operations.
-    struct MockDaemonWithDb {
-        db: std::sync::Mutex<rusqlite::Connection>,
-    }
-
-    impl MockDaemonWithDb {
-        fn new(db_path: &std::path::Path) -> Self {
-            let conn = crate::daemon::db::open_db(db_path).unwrap();
-            Self {
-                db: std::sync::Mutex::new(conn),
-            }
-        }
-    }
-
-    impl Daemon for MockDaemonWithDb {
-        fn launch_pod(&self, _params: PodLaunchParams) -> Result<LaunchResult> {
-            unimplemented!("not needed for conversation tests")
-        }
-
-        fn recreate_pod(&self, _params: PodLaunchParams) -> Result<LaunchResult> {
-            unimplemented!("not needed for conversation tests")
-        }
-
-        fn stop_pod(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<()> {
-            unimplemented!("not needed for conversation tests")
-        }
-
-        fn delete_pod(&self, _pod_name: PodName, _repo_path: PathBuf, _wait: bool) -> Result<()> {
-            unimplemented!("not needed for conversation tests")
-        }
-
-        fn list_pods(&self, _repo_path: PathBuf) -> Result<Vec<PodInfo>> {
-            unimplemented!("not needed for conversation tests")
-        }
-
-        fn list_ports(&self, _pod_name: PodName, _repo_path: PathBuf) -> Result<Vec<PortInfo>> {
-            unimplemented!("not needed for conversation tests")
-        }
-
-        fn save_conversation(
-            &self,
-            id: Option<i64>,
-            repo_path: PathBuf,
-            pod_name: String,
-            model: String,
-            provider: String,
-            history: serde_json::Value,
-        ) -> Result<i64> {
-            let conn = self.db.lock().unwrap();
-            crate::daemon::db::save_conversation(
-                &conn, id, &repo_path, &pod_name, &model, &provider, &history,
-            )
-        }
-
-        fn list_conversations(
-            &self,
-            repo_path: PathBuf,
-            pod_name: String,
-        ) -> Result<Vec<ConversationSummary>> {
-            let conn = self.db.lock().unwrap();
-            let summaries = crate::daemon::db::list_conversations(&conn, &repo_path, &pod_name)?;
-            Ok(summaries
-                .into_iter()
-                .map(|s| ConversationSummary {
-                    id: s.id,
-                    model: s.model,
-                    provider: s.provider,
-                    updated_at: s.updated_at,
-                })
-                .collect())
-        }
-
-        fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>> {
-            let conn = self.db.lock().unwrap();
-            let conv = crate::daemon::db::get_conversation(&conn, id)?;
-            Ok(conv.map(|c| GetConversationResponse {
-                model: c.model,
-                provider: c.provider,
-                history: c.history,
-            }))
-        }
-
-        fn ensure_claude_config(&self, _request: EnsureClaudeConfigRequest) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn test_conversation_save_and_list() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let repo_path = PathBuf::from("/home/user/project");
-
-        // Create pod first (directly in DB since protocol doesn't expose this)
-        {
-            let conn = crate::daemon::db::open_db(&db_path).unwrap();
-            crate::daemon::db::create_pod(
-                &conn,
-                &repo_path,
-                "dev",
-                &crate::config::Host::Localhost,
-            )
-            .unwrap();
-        }
-
-        let server = TestServer::start(MockDaemonWithDb::new(&db_path));
-        let client = server.client();
-
-        let history = serde_json::json!([{"role": "user", "content": "hello"}]);
-
-        // Save a conversation
-        let id = client
-            .save_conversation(
-                None,
-                repo_path.clone(),
-                "dev".to_string(),
-                "claude-sonnet-4-5".to_string(),
-                "anthropic".to_string(),
-                history.clone(),
-            )
-            .unwrap();
-        assert!(id > 0);
-
-        // List conversations
-        let list = client
-            .list_conversations(repo_path.clone(), "dev".to_string())
-            .unwrap();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, id);
-        assert_eq!(list[0].model, "claude-sonnet-4-5");
-        assert_eq!(list[0].provider, "anthropic");
-
-        // Get the conversation back
-        let conv = client.get_conversation(id).unwrap().unwrap();
-        assert_eq!(conv.model, "claude-sonnet-4-5");
-        assert_eq!(conv.provider, "anthropic");
-        assert_eq!(conv.history, history);
-    }
-
-    #[test]
-    fn test_conversation_update() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        let repo_path = PathBuf::from("/home/user/project");
-
-        // Create pod first (directly in DB since protocol doesn't expose this)
-        {
-            let conn = crate::daemon::db::open_db(&db_path).unwrap();
-            crate::daemon::db::create_pod(
-                &conn,
-                &repo_path,
-                "dev",
-                &crate::config::Host::Localhost,
-            )
-            .unwrap();
-        }
-
-        let server = TestServer::start(MockDaemonWithDb::new(&db_path));
-        let client = server.client();
-
-        let history1 = serde_json::json!([{"role": "user", "content": "hello"}]);
-        let history2 = serde_json::json!([
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi there"}
-        ]);
-
-        // Save initial
-        let id = client
-            .save_conversation(
-                None,
-                repo_path.clone(),
-                "dev".to_string(),
-                "claude-sonnet-4-5".to_string(),
-                "anthropic".to_string(),
-                history1,
-            )
-            .unwrap();
-
-        // Update
-        let id2 = client
-            .save_conversation(
-                Some(id),
-                repo_path.clone(),
-                "dev".to_string(),
-                "claude-opus-4-5".to_string(),
-                "anthropic".to_string(),
-                history2.clone(),
-            )
-            .unwrap();
-        assert_eq!(id, id2);
-
-        // Verify update
-        let conv = client.get_conversation(id).unwrap().unwrap();
-        assert_eq!(conv.model, "claude-opus-4-5");
-        assert_eq!(conv.provider, "anthropic");
-        assert_eq!(conv.history, history2);
-    }
-
-    #[test]
-    fn test_conversation_not_found() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let server = TestServer::start(MockDaemonWithDb::new(&db_path));
-        let client = server.client();
-
-        let conv = client.get_conversation(999).unwrap();
-        assert!(conv.is_none());
-    }
 }

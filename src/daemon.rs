@@ -127,6 +127,7 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(runtime_dir.join("rumpelpod.sock"))
 }
 
+#[derive(Clone)]
 struct DaemonServer {
     /// SQLite connection for conversation history.
     db: Arc<Mutex<Connection>>,
@@ -2050,6 +2051,37 @@ fn run_once_lifecycle_commands_via_pod(
     Ok(background)
 }
 
+/// Progress handle returned by `DaemonServer::launch_pod` / `recreate_pod`.
+///
+/// The actual work runs on a background thread that sends build-output lines
+/// through a channel.  `Iterator::next()` reads lines; `finish()` joins the
+/// thread and returns the final result.
+pub struct ServerLaunchProgress {
+    rx: Option<std::sync::mpsc::Receiver<crate::image::OutputLine>>,
+    handle: Option<std::thread::JoinHandle<Result<LaunchResult>>>,
+}
+
+impl Iterator for ServerLaunchProgress {
+    type Item = crate::image::OutputLine;
+
+    fn next(&mut self) -> Option<crate::image::OutputLine> {
+        self.rx.as_ref()?.recv().ok()
+    }
+}
+
+impl protocol::LaunchProgress for ServerLaunchProgress {
+    fn finish(mut self) -> Result<LaunchResult> {
+        // Drop the receiver so the background thread sees a closed channel
+        // and stops sending.
+        drop(self.rx.take());
+        self.handle
+            .take()
+            .expect("finish() called twice on ServerLaunchProgress")
+            .join()
+            .map_err(|_| anyhow::anyhow!("launch thread panicked"))?
+    }
+}
+
 impl DaemonServer {
     #[allow(clippy::too_many_arguments)]
     fn launch_pod_k8s(
@@ -2635,10 +2667,16 @@ impl DaemonServer {
             .context("reading local address of UDP socket")?;
         Ok(local_addr.ip().to_string())
     }
-}
 
-impl Daemon for DaemonServer {
-    fn launch_pod(&self, params: PodLaunchParams) -> Result<LaunchResult> {
+    /// Core launch logic, called on a background thread.
+    ///
+    /// Build output lines are sent to `build_tx`; the caller drives the
+    /// `ServerLaunchProgress` iterator to forward them to the client.
+    fn launch_pod_impl(
+        &self,
+        params: PodLaunchParams,
+        build_tx: std::sync::mpsc::Sender<crate::image::OutputLine>,
+    ) -> Result<LaunchResult> {
         let PodLaunchParams {
             pod_name,
             repo_path,
@@ -2652,7 +2690,15 @@ impl Daemon for DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
-        let build_result = crate::image::resolve_image(&devcontainer, &docker_host, &repo_path)?;
+        let on_output: Option<crate::image::BuildOutputFn> = {
+            let tx = build_tx;
+            Some(Box::new(move |line: crate::image::OutputLine| {
+                let _ = tx.send(line);
+            }) as crate::image::BuildOutputFn)
+        };
+
+        let build_result =
+            crate::image::resolve_image(&devcontainer, &docker_host, &repo_path, on_output)?;
         let image = build_result.image;
         let image_built = build_result.built;
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
@@ -3242,7 +3288,14 @@ impl Daemon for DaemonServer {
         })
     }
 
-    fn recreate_pod(&self, mut params: PodLaunchParams) -> Result<LaunchResult> {
+    /// Core recreate logic, called on a background thread.
+    ///
+    /// Calls `launch_pod_impl` directly to avoid spawning a nested thread.
+    fn recreate_pod_impl(
+        &self,
+        mut params: PodLaunchParams,
+        build_tx: std::sync::mpsc::Sender<crate::image::OutputLine>,
+    ) -> Result<LaunchResult> {
         // Resolve daemon-side variables so container_repo_path and other
         // fields are fully resolved before we use them for snapshotting.
         params.devcontainer =
@@ -3295,10 +3348,10 @@ impl Daemon for DaemonServer {
             }
 
             // 2. Delete the pod
-            self.delete_pod(pod_name.clone(), repo_path.clone(), true)?;
+            Daemon::delete_pod(self, pod_name.clone(), repo_path.clone(), true)?;
 
-            // 3. Create new pod
-            let launch_result = self.launch_pod(params)?;
+            // 3. Create new pod (call impl directly to avoid nested thread)
+            let launch_result = self.launch_pod_impl(params, build_tx)?;
 
             // 4. Apply patch if we have one
             if let Some(patch_content) = patch {
@@ -3362,11 +3415,11 @@ impl Daemon for DaemonServer {
             }
 
             // 2. Delete the container synchronously so launch_pod can reuse the name
-            self.delete_pod(pod_name.clone(), repo_path.clone(), true)?;
+            Daemon::delete_pod(self, pod_name.clone(), repo_path.clone(), true)?;
         }
 
-        // 3. Create new pod
-        let launch_result = self.launch_pod(params)?;
+        // 3. Create new pod (call impl directly to avoid nested thread)
+        let launch_result = self.launch_pod_impl(params, build_tx)?;
 
         // 4. Apply patch if we have one
         if let Some(patch_content) = patch {
@@ -3388,6 +3441,30 @@ impl Daemon for DaemonServer {
         }
 
         Ok(launch_result)
+    }
+}
+
+impl Daemon for DaemonServer {
+    type Progress = ServerLaunchProgress;
+
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let this = self.clone();
+        let handle = std::thread::spawn(move || this.launch_pod_impl(params, tx));
+        Ok(ServerLaunchProgress {
+            rx: Some(rx),
+            handle: Some(handle),
+        })
+    }
+
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let this = self.clone();
+        let handle = std::thread::spawn(move || this.recreate_pod_impl(params, tx));
+        Ok(ServerLaunchProgress {
+            rx: Some(rx),
+            handle: Some(handle),
+        })
     }
 
     fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {

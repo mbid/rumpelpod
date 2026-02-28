@@ -24,7 +24,13 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
         pull: cmd.pull,
     };
 
-    let result = image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags)?;
+    let on_output: Option<image::BuildOutputFn> =
+        Some(Box::new(|line: image::OutputLine| match line {
+            image::OutputLine::Stdout(s) => println!("{}", s),
+            image::OutputLine::Stderr(s) => eprintln!("{}", s),
+        }));
+    let result =
+        image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags, on_output)?;
     println!("Image built: {}", result.image.0);
 
     Ok(())
