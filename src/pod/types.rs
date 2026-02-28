@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::git::GitIdentity;
+
 // ---------------------------------------------------------------------------
 // Filesystem
 // ---------------------------------------------------------------------------
@@ -75,7 +77,7 @@ pub struct GitCloneRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GitSetupRemotesRequest {
+pub struct GitSetupRequest {
     pub repo_path: PathBuf,
     pub url: String,
     pub token: String,
@@ -85,6 +87,8 @@ pub struct GitSetupRemotesRequest {
     pub direct_config: bool,
     /// Run git as this user so fetched objects have correct ownership.
     pub user: Option<String>,
+    /// Git user identity from the host to write into the pod's .git/config.
+    pub git_identity: Option<GitIdentity>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -17,7 +17,7 @@ use crate::devcontainer::{
     substitute_vars, ContainerEnvSource, DevContainer, GpuRequirement, HostRequirements, MountType,
     SubstitutionContext, UserEnvProbe,
 };
-use crate::git::{get_current_branch, get_repo_root};
+use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
 
 /// Compute the path relative from `base` to `path`.
@@ -173,6 +173,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
     }
 
     let host_branch = get_current_branch(&repo_root);
+    let git_identity = get_git_user_config(&repo_root);
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
@@ -184,6 +185,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<&str>) -> Result<LaunchR
         host_branch,
         docker_host,
         devcontainer,
+        git_identity: Some(git_identity),
     })?;
     for line in &mut progress {
         match line {
