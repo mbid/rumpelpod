@@ -2093,6 +2093,7 @@ impl DaemonServer {
         devcontainer: &DevContainer,
         image: &str,
         image_built: bool,
+        git_identity: Option<&crate::git::GitIdentity>,
     ) -> Result<LaunchResult> {
         let (context, namespace) = match docker_host {
             Host::Kubernetes {
@@ -2163,7 +2164,7 @@ impl DaemonServer {
                     )?;
                     check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
 
-                    pod.git_setup_remotes(
+                    pod.git_setup(
                         &container_repo_path,
                         &url,
                         &token,
@@ -2171,8 +2172,9 @@ impl DaemonServer {
                         None,
                         direct_config,
                         Some(&user),
+                        git_identity,
                     )
-                    .context("configuring git remotes")?;
+                    .context("configuring git")?;
 
                     let sub_entries: Vec<SubmoduleEntry> = submodules
                         .iter()
@@ -2466,7 +2468,7 @@ impl DaemonServer {
             .map_err(mark_error)?;
         check_git_ownership_via_pod(&pod, &container_repo_path, &user).map_err(mark_error)?;
 
-        pod.git_setup_remotes(
+        pod.git_setup(
             &container_repo_path,
             &url,
             &token,
@@ -2474,8 +2476,9 @@ impl DaemonServer {
             host_branch,
             direct_config,
             Some(&user),
+            git_identity,
         )
-        .context("configuring git remotes")
+        .context("configuring git")
         .map_err(mark_error)?;
 
         let sub_entries: Vec<SubmoduleEntry> = submodules
@@ -2773,6 +2776,7 @@ impl DaemonServer {
                 &devcontainer,
                 &image.0,
                 image_built,
+                git_identity.as_ref(),
             );
         }
 
