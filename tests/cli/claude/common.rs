@@ -1,8 +1,7 @@
 //! Common utilities for claude integration tests.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,41 +14,72 @@ use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_P
 
 use super::proxy::ClaudeTestProxy;
 
-/// Resolve the host's claude CLI binary to its real path (following symlinks).
-pub fn find_claude_binary() -> PathBuf {
-    let output = Command::new("which")
-        .arg("claude")
-        .output()
-        .expect("run `which claude`");
+/// Pinned Claude Code version for deterministic tests.
+const CLAUDE_CODE_VERSION: &str = "2.1.63";
 
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    assert!(
-        !path.is_empty(),
-        "claude binary not found on host -- install Claude CLI first"
-    );
+/// Fixed date injected via a Node.js Date override (see build_claude_test_image).
+/// Ensures prompts that include the current date produce stable cache keys.
+const FAKE_DATE: &str = "2026-02-01 00:00:00";
 
-    std::fs::canonicalize(&path).expect("resolve claude binary symlinks")
+/// JS module that shifts Date.now() so `new Date()` returns FAKE_DATE.
+///
+/// Only overrides JavaScript's Date object, not system clocks, so
+/// Node.js timers and I/O work normally (unlike libfaketime's
+/// LD_PRELOAD approach which breaks libuv's event loop).
+/// Time still advances -- only the epoch is shifted.
+const FAKETIME_JS: &str = indoc::indoc! {r#"
+    const _Date = globalThis.Date;
+    const _off = new _Date('FAKE_DATE_PLACEHOLDER').getTime() - _Date.now();
+    function F(...a) {
+      if (!new.target) return new _Date(_Date.now()+_off).toString();
+      return a.length ? new _Date(...a) : new _Date(_Date.now()+_off);
+    }
+    F.prototype = _Date.prototype;
+    F.now = () => _Date.now() + _off;
+    F.parse = _Date.parse;
+    F.UTC = _Date.UTC;
+    Object.defineProperty(F,Symbol.hasInstance,{value:o=>o instanceof _Date});
+    globalThis.Date = F;
+"#};
+
+/// npm registry URL for the pinned Claude Code version.
+fn claude_code_tarball_url() -> String {
+    format!("https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-{CLAUDE_CODE_VERSION}.tgz")
 }
 
-/// Build the test image with claude CLI and screen.
+/// Build the test image with a pinned Claude CLI version and fake date.
 ///
-/// Copies the host's claude binary into the build context rather than
-/// downloading it (Docker builds in this environment lack DNS).
+/// Downloads the pinned npm package directly inside the Docker build
+/// (which has network access for apt-get anyway) and extracts it
+/// without npm -- only the node runtime is needed.  Omitting npm also
+/// prevents Claude CLI's background `npm view` update check.
+/// Overrides JavaScript's Date via NODE_OPTIONS so the CLI always
+/// reports a fixed date in prompts (libfaketime breaks Node.js's
+/// event loop).
 pub fn build_claude_test_image(repo: &TestRepo) -> ImageId {
-    let claude_binary = find_claude_binary();
-    let claude_dest = repo.path().join("claude-cli-binary");
-    std::fs::copy(&claude_binary, &claude_dest).expect("copy claude binary into build context");
+    let tarball_url = claude_code_tarball_url();
+    let faketime_js = FAKETIME_JS.replace("FAKE_DATE_PLACEHOLDER", FAKE_DATE);
 
-    // Extra lines run after `USER testuser` from build_test_image.
-    // Switch to root for package install + binary placement, then back.
-    let extra = "\
-USER root
-RUN apt-get update && apt-get install -y screen
-RUN mv /home/testuser/workspace/claude-cli-binary /usr/local/bin/claude \
-    && chmod +x /usr/local/bin/claude
-USER testuser";
+    // nodejs without npm: the CLI only needs the node runtime, and
+    // omitting npm prevents claude's background `npm view` update
+    // check from running inside the container.
+    let extra = formatdoc! {r#"
+        USER root
+        RUN apt-get update && apt-get install -y screen nodejs curl
+        RUN curl -fsSL "{tarball_url}" \
+            | tar xz -C /usr/local/lib --transform='s,^package,claude-code,' \
+            && ln -s /usr/local/lib/claude-code/cli.js /usr/local/bin/claude \
+            && chmod +x /usr/local/lib/claude-code/cli.js
+        COPY faketime.js /opt/faketime.js
+        ENV NODE_OPTIONS="--require /opt/faketime.js"
+        USER testuser
+    "#};
 
-    build_test_image(repo.path(), extra).expect("build claude test image")
+    // Write the JS into the build context so the COPY picks it up.
+    std::fs::write(repo.path().join("faketime.js"), &faketime_js)
+        .expect("write faketime.js to build context");
+
+    build_test_image(repo.path(), &extra).expect("build claude test image")
 }
 
 /// Write devcontainer config that points at the given image and injects
