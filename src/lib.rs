@@ -30,6 +30,7 @@ mod recreate;
 mod review;
 mod service;
 mod stop;
+mod tunnel;
 
 use anyhow::Result;
 use clap::Parser;
@@ -43,6 +44,9 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Daemon => {
             daemon::run_daemon()?;
+        }
+        Command::TunnelServer { port } => {
+            tunnel::run_tunnel_server(port);
         }
         Command::ContainerServe { port, ref token } => {
             pod::run_container_server(port, token.clone());

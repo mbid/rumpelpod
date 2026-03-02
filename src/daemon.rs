@@ -148,14 +148,16 @@ struct DaemonServer {
     ssh_forward: Arc<SshForwardManager>,
     /// Path to the Unix socket for the git HTTP server (used for remote forwarding).
     git_unix_socket: PathBuf,
-    /// Port the externally-bound git HTTP server is listening on.
-    /// Used by Kubernetes pods that cannot reach the Docker bridge.
-    external_server_port: u16,
     /// Active port-forward handles for Kubernetes pods.
     /// Dropping handles cancels the forwards.  The first entry is always
     /// the container-serve forward; additional entries are forwardPorts.
     #[allow(clippy::type_complexity)]
     k8s_forwards: Arc<Mutex<HashMap<(PathBuf, String), Vec<crate::k8s::PortForwardHandle>>>>,
+    /// Active tunnel handles for Kubernetes pods.
+    /// Each tunnel multiplexes TCP over kubectl exec so the pod can reach
+    /// the host's git HTTP server on a loopback port.
+    #[allow(clippy::type_complexity)]
+    k8s_tunnels: Arc<Mutex<HashMap<(PathBuf, String), crate::tunnel::TunnelHandle>>>,
 }
 
 /// Label key used to store the repository path on containers.
@@ -2150,8 +2152,18 @@ impl DaemonServer {
                         .unwrap()
                         .insert((repo_path.to_path_buf(), pod_name.0.clone()), token.clone());
 
-                    let host_ip = self.resolve_k8s_host_ip(&client)?;
-                    let base_url = format!("http://{}:{}", host_ip, self.external_server_port);
+                    let tunnel = client
+                        .start_tunnel(
+                            &k8s_name,
+                            &format!("127.0.0.1:{}", self.localhost_server_port),
+                        )
+                        .context("starting tunnel to existing k8s pod")?;
+                    self.k8s_tunnels
+                        .lock()
+                        .unwrap()
+                        .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
+
+                    let base_url = format!("http://127.0.0.1:{}", crate::tunnel::TUNNEL_PORT);
                     let url = format!("{}/gateway.git", base_url);
                     let direct_config = is_direct_git_config_mode()?;
 
@@ -2459,8 +2471,18 @@ impl DaemonServer {
         // PodClient::new polls /health until the server is ready.
         let pod = PodClient::new(&container_url, &token).map_err(mark_error)?;
 
-        let host_ip = self.resolve_k8s_host_ip(&client).map_err(mark_error)?;
-        let base_url = format!("http://{}:{}", host_ip, self.external_server_port);
+        let tunnel = client
+            .start_tunnel(
+                &k8s_name,
+                &format!("127.0.0.1:{}", self.localhost_server_port),
+            )
+            .map_err(|e| mark_error(e.context("starting tunnel to k8s pod")))?;
+        self.k8s_tunnels
+            .lock()
+            .unwrap()
+            .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
+
+        let base_url = format!("http://127.0.0.1:{}", crate::tunnel::TUNNEL_PORT);
         let url = format!("{}/gateway.git", base_url);
         let direct_config = is_direct_git_config_mode().map_err(mark_error)?;
 
@@ -2632,36 +2654,6 @@ impl DaemonServer {
             container_url,
             container_token: token,
         })
-    }
-
-    /// Determine the local IP address that k8s pods can use to reach
-    /// the daemon's git server.
-    ///
-    /// Strategy: find any node's InternalIP, then open a connected (but
-    /// unsent) UDP socket toward it.  The OS picks the correct source
-    /// address from the local routing table without sending any packet.
-    fn resolve_k8s_host_ip(&self, client: &crate::k8s::K8sClient) -> Result<String> {
-        if let Ok(ip) = std::env::var("RUMPELPOD_K8S_HOST_IP") {
-            return Ok(ip);
-        }
-
-        let node_ip = client
-            .get_any_node_ip()
-            .context("resolving k8s host IP: cannot list nodes")?;
-
-        let dest = std::net::SocketAddr::new(node_ip, 1);
-        let sock = std::net::UdpSocket::bind(if node_ip.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        })
-        .context("binding UDP socket")?;
-        sock.connect(dest)
-            .context("connecting UDP socket to node IP")?;
-        let local_addr = sock
-            .local_addr()
-            .context("reading local address of UDP socket")?;
-        Ok(local_addr.ip().to_string())
     }
 
     /// Core launch logic, called on a background thread.
@@ -3565,8 +3557,12 @@ impl Daemon for DaemonServer {
                 error!("failed to delete k8s pod '{}': {}", k8s_name, e);
             }
 
-            // Drop the port-forward handle
+            // Drop the port-forward and tunnel handles
             self.k8s_forwards
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()));
+            self.k8s_tunnels
                 .lock()
                 .unwrap()
                 .remove(&(repo_path.clone(), pod_name.0.clone()));
@@ -3913,10 +3909,6 @@ pub fn run_daemon() -> Result<()> {
     let localhost_server = GitHttpServer::start("127.0.0.1", 0, git_server_state.clone())
         .context("starting git HTTP server on localhost")?;
 
-    // Start git HTTP server on 0.0.0.0 for Kubernetes pods
-    let external_server = GitHttpServer::start("0.0.0.0", 0, git_server_state.clone())
-        .context("starting git HTTP server for Kubernetes")?;
-
     // Start git HTTP server on a Unix socket for SSH remote port forwarding.
     // This allows the server to be accessed from remote Docker hosts.
     let runtime_dir = crate::config::get_runtime_dir()?;
@@ -3957,14 +3949,13 @@ pub fn run_daemon() -> Result<()> {
         active_tokens: Arc::new(Mutex::new(BTreeMap::new())),
         ssh_forward: Arc::new(ssh_forward),
         git_unix_socket,
-        external_server_port: external_server.port,
         k8s_forwards: Arc::new(Mutex::new(HashMap::new())),
+        k8s_tunnels: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Keep servers alive for the lifetime of the daemon
     let _bridge_server = bridge_server;
     let _localhost_server = localhost_server;
-    let _external_server = external_server;
     let _unix_server = unix_server;
 
     protocol::serve_daemon(daemon, listener);

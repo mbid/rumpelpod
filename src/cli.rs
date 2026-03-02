@@ -242,6 +242,14 @@ Examples:
     #[command(hide = true)]
     Daemon,
 
+    /// Run the in-pod tunnel server (internal, started by daemon via kubectl exec)
+    #[command(hide = true)]
+    TunnelServer {
+        /// Port to listen on
+        #[arg(long, default_value_t = crate::tunnel::TUNNEL_PORT)]
+        port: u16,
+    },
+
     /// Run the in-container HTTP server (internal, started by daemon)
     #[command(hide = true)]
     ContainerServe {

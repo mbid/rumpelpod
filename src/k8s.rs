@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use k8s_openapi::api::core::v1::{Node, Pod};
+use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
@@ -543,27 +543,19 @@ impl K8sClient {
         ContainerArch::from_uname(&arch_str)
     }
 
-    /// Return the InternalIP of any node in the cluster.
-    pub fn get_any_node_ip(&self) -> Result<std::net::IpAddr> {
-        let nodes: Api<Node> = Api::all(self.client.clone());
-        let node_list =
-            block_on(nodes.list(&ListParams::default())).context("listing k8s nodes")?;
-
-        for node in &node_list.items {
-            if let Some(status) = &node.status {
-                if let Some(addrs) = &status.addresses {
-                    for addr in addrs {
-                        if addr.type_ == "InternalIP" {
-                            if let Ok(ip) = addr.address.parse() {
-                                return Ok(ip);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        bail!("no node with InternalIP found in the cluster")
+    /// Start a multiplexed TCP tunnel into a pod.
+    ///
+    /// Runs `rumpel tunnel-server` inside the pod via kubectl exec and
+    /// bridges frames to local TCP connections to `target_addr`.
+    /// The tunnel exposes the host's git HTTP server on a loopback port
+    /// inside the pod.
+    pub fn start_tunnel(
+        &self,
+        k8s_name: &str,
+        target_addr: &str,
+    ) -> Result<crate::tunnel::TunnelHandle> {
+        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
+        block_on(crate::tunnel::start_tunnel(pods, k8s_name, target_addr))
     }
 
     /// Set up port forwarding from a local port to a pod port.
