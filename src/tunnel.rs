@@ -28,8 +28,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 
-/// Port the tunnel listener binds inside the pod.
-pub const TUNNEL_PORT: u16 = 7891;
+/// Default port for the tunnel listener CLI flag.  In practice,
+/// `start_tunnel` always passes 0 (ephemeral) so each tunnel gets a
+/// fresh port with no conflicts.
+pub const DEFAULT_TUNNEL_PORT: u16 = 7891;
 
 const FRAME_OPEN: u8 = 0x01;
 const FRAME_DATA: u8 = 0x02;
@@ -115,8 +117,13 @@ async fn run_tunnel_server_async(port: u16) {
         .await
         .expect("binding tunnel listener");
 
-    // Readiness signal -- the host side reads stderr looking for this line.
-    eprintln!("tunnel listening on port {}", port);
+    // Report the actual bound port so the host side can parse it from stderr.
+    // When port=0 (ephemeral), the OS assigns a fresh port with no conflicts.
+    let actual_port = listener
+        .local_addr()
+        .expect("getting listener address")
+        .port();
+    eprintln!("tunnel listening on port {}", actual_port);
 
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
 
@@ -244,6 +251,8 @@ async fn run_tunnel_server_async(port: u16) {
 
 /// Handle for an active tunnel.  Dropping this cancels the tunnel.
 pub struct TunnelHandle {
+    /// The actual port the tunnel listener bound to inside the pod.
+    pub port: u16,
     _cancel_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -262,21 +271,26 @@ pub async fn start_tunnel(
 
     let target_addr = target_addr.to_string();
 
-    // Kill any leftover tunnel-server from a previous run.
-    let _ = pods
+    // Kill any leftover tunnel-server from a previous run and wait for it
+    // to release the listener port.
+    if let Ok(proc) = pods
         .exec(
             name,
             vec![
                 "sh".to_string(),
                 "-c".to_string(),
-                "pkill -f 'rumpel tunnel-server' 2>/dev/null || true".to_string(),
+                "pkill -f 'rumpel tunnel-server' 2>/dev/null; sleep 0.1; true".to_string(),
             ],
             &AttachParams::default()
                 .stdout(true)
                 .stderr(false)
                 .stdin(false),
         )
-        .await;
+        .await
+    {
+        // Wait for the exec to finish so the old process has time to exit.
+        let _ = proc.join().await;
+    }
 
     let mut attached = pods
         .exec(
@@ -285,7 +299,7 @@ pub async fn start_tunnel(
                 "/opt/rumpelpod/bin/rumpel".to_string(),
                 "tunnel-server".to_string(),
                 "--port".to_string(),
-                TUNNEL_PORT.to_string(),
+                "0".to_string(),
             ],
             &AttachParams::default()
                 .stdout(true)
@@ -298,6 +312,7 @@ pub async fn start_tunnel(
     // Wait for readiness on stderr.
     let mut stderr = attached.stderr().context("taking tunnel stderr")?;
     let mut stderr_buf = Vec::new();
+    let mut tunnel_port: u16 = 0;
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -314,7 +329,16 @@ pub async fn start_tunnel(
         }
         stderr_buf.extend_from_slice(&tmp[..n]);
         if let Ok(s) = std::str::from_utf8(&stderr_buf) {
-            if s.contains("tunnel listening") {
+            for line in s.lines() {
+                if let Some(rest) = line.strip_prefix("tunnel listening on port ") {
+                    tunnel_port = rest
+                        .trim()
+                        .parse()
+                        .context("parsing tunnel port from readiness message")?;
+                    break;
+                }
+            }
+            if tunnel_port != 0 {
                 break;
             }
         }
@@ -370,65 +394,71 @@ pub async fn start_tunnel(
                     };
                     match frame.frame_type {
                         FRAME_OPEN => {
-                            let addr = target_addr.clone();
-                            let stdin_for_stream = stdin_mu.clone();
-                            let writes_for_stream = writes_clone.clone();
                             let sid = frame.stream_id;
-                            tokio::spawn(async move {
-                                let tcp = match TcpStream::connect(&addr).await {
-                                    Ok(s) => s,
-                                    Err(e) => {
-                                        log::debug!(
-                                            "tunnel: failed to connect to {}: {}",
-                                            addr, e
-                                        );
-                                        // Send CLOSE back so the pod side tears
-                                        // down the stream.
-                                        let mut w = stdin_for_stream.lock().await;
-                                        let _ = write_frame(&mut *w, &Frame {
+                            // Connect synchronously so the write half is in the
+                            // map before we read the next frame (which is likely
+                            // a DATA for this same stream).
+                            let tcp = match TcpStream::connect(&target_addr).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    log::debug!(
+                                        "tunnel: failed to connect to {}: {}",
+                                        target_addr, e
+                                    );
+                                    let mut w = stdin_mu.lock().await;
+                                    let _ = write_frame(
+                                        &mut *w,
+                                        &Frame {
                                             stream_id: sid,
                                             frame_type: FRAME_CLOSE,
                                             payload: Vec::new(),
-                                        }).await;
-                                        return;
-                                    }
-                                };
-                                let (read_half, write_half) = tokio::io::split(tcp);
-                                writes_for_stream
-                                    .lock()
-                                    .await
-                                    .insert(sid, write_half);
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            };
+                            let (read_half, write_half) = tokio::io::split(tcp);
+                            writes_clone.lock().await.insert(sid, write_half);
 
-                                // Spawn reader: local TCP read -> DATA frames
-                                // back to pod, CLOSE on EOF.
-                                let stdin_for_reader = stdin_for_stream.clone();
-                                let writes_for_reader = writes_for_stream.clone();
-                                tokio::spawn(async move {
-                                    let mut reader = read_half;
-                                    let mut buf = vec![0u8; MAX_PAYLOAD];
-                                    loop {
-                                        let n = match reader.read(&mut buf).await {
-                                            Ok(0) | Err(_) => break,
-                                            Ok(n) => n,
-                                        };
-                                        let mut w = stdin_for_reader.lock().await;
-                                        if write_frame(&mut *w, &Frame {
+                            // Spawn reader: local TCP read -> DATA frames back
+                            // to pod, CLOSE on EOF.
+                            let stdin_for_reader = stdin_mu.clone();
+                            let writes_for_reader = writes_clone.clone();
+                            tokio::spawn(async move {
+                                let mut reader = read_half;
+                                let mut buf = vec![0u8; MAX_PAYLOAD];
+                                loop {
+                                    let n = match reader.read(&mut buf).await {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(n) => n,
+                                    };
+                                    let mut w = stdin_for_reader.lock().await;
+                                    if write_frame(
+                                        &mut *w,
+                                        &Frame {
                                             stream_id: sid,
                                             frame_type: FRAME_DATA,
                                             payload: buf[..n].to_vec(),
-                                        }).await.is_err() {
-                                            break;
-                                        }
+                                        },
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
                                     }
-                                    // Send CLOSE
-                                    let mut w = stdin_for_reader.lock().await;
-                                    let _ = write_frame(&mut *w, &Frame {
+                                }
+                                let mut w = stdin_for_reader.lock().await;
+                                let _ = write_frame(
+                                    &mut *w,
+                                    &Frame {
                                         stream_id: sid,
                                         frame_type: FRAME_CLOSE,
                                         payload: Vec::new(),
-                                    }).await;
-                                    writes_for_reader.lock().await.remove(&sid);
-                                });
+                                    },
+                                )
+                                .await;
+                                writes_for_reader.lock().await.remove(&sid);
                             });
                         }
                         FRAME_DATA => {
@@ -460,6 +490,7 @@ pub async fn start_tunnel(
     });
 
     Ok(TunnelHandle {
+        port: tunnel_port,
         _cancel_tx: cancel_tx,
     })
 }

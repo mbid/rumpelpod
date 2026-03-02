@@ -2152,18 +2152,29 @@ impl DaemonServer {
                         .unwrap()
                         .insert((repo_path.to_path_buf(), pod_name.0.clone()), token.clone());
 
-                    let tunnel = client
-                        .start_tunnel(
-                            &k8s_name,
-                            &format!("127.0.0.1:{}", self.localhost_server_port),
-                        )
-                        .context("starting tunnel to existing k8s pod")?;
-                    self.k8s_tunnels
-                        .lock()
-                        .unwrap()
-                        .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
+                    // Reuse the existing tunnel if it's still alive, otherwise
+                    // start a fresh one.
+                    let tunnel_key = (repo_path.to_path_buf(), pod_name.0.clone());
+                    let tunnel_port = {
+                        let tunnels = self.k8s_tunnels.lock().unwrap();
+                        tunnels.get(&tunnel_key).map(|t| t.port)
+                    };
+                    let tunnel_port = match tunnel_port {
+                        Some(port) => port,
+                        None => {
+                            let tunnel = client
+                                .start_tunnel(
+                                    &k8s_name,
+                                    &format!("127.0.0.1:{}", self.localhost_server_port),
+                                )
+                                .context("starting tunnel to existing k8s pod")?;
+                            let port = tunnel.port;
+                            self.k8s_tunnels.lock().unwrap().insert(tunnel_key, tunnel);
+                            port
+                        }
+                    };
 
-                    let base_url = format!("http://127.0.0.1:{}", crate::tunnel::TUNNEL_PORT);
+                    let base_url = format!("http://127.0.0.1:{}", tunnel_port);
                     let url = format!("{}/gateway.git", base_url);
                     let direct_config = is_direct_git_config_mode()?;
 
@@ -2477,12 +2488,13 @@ impl DaemonServer {
                 &format!("127.0.0.1:{}", self.localhost_server_port),
             )
             .map_err(|e| mark_error(e.context("starting tunnel to k8s pod")))?;
+        let tunnel_port = tunnel.port;
         self.k8s_tunnels
             .lock()
             .unwrap()
             .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
 
-        let base_url = format!("http://127.0.0.1:{}", crate::tunnel::TUNNEL_PORT);
+        let base_url = format!("http://127.0.0.1:{}", tunnel_port);
         let url = format!("{}/gateway.git", base_url);
         let direct_config = is_direct_git_config_mode().map_err(mark_error)?;
 

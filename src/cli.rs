@@ -246,7 +246,7 @@ Examples:
     #[command(hide = true)]
     TunnelServer {
         /// Port to listen on
-        #[arg(long, default_value_t = crate::tunnel::TUNNEL_PORT)]
+        #[arg(long, default_value_t = crate::tunnel::DEFAULT_TUNNEL_PORT)]
         port: u16,
     },
 
