@@ -978,3 +978,109 @@ fn k8s_recreate() {
         "dirty file should survive recreate",
     );
 }
+
+#[test]
+fn k8s_tunnel_reconnect() {
+    ensure_k3d_cluster();
+    let ns = K8sNamespace::new("tunnel-reconnect");
+
+    let repo = TestRepo::new();
+    // Need procps for pkill to kill the tunnel-server inside the pod.
+    let image_id = build_docker_image(DockerBuild {
+        dockerfile: formatdoc! {r#"
+            FROM debian:13
+            RUN apt-get update && apt-get install -y git procps
+            RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+            COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+            USER {TEST_USER}
+        "#},
+        build_context: Some(repo.path().to_path_buf()),
+    })
+    .expect("Failed to build test image");
+
+    let image_tag = "rumpelpod-test:k8s-tunnel-reconnect";
+    tag_image(&image_id.to_string(), image_tag);
+    load_image_into_cluster(&image_id, image_tag);
+
+    write_k8s_pod_config(&repo, image_tag, &ns.name);
+
+    let daemon = TestDaemon::start();
+
+    // First enter -- creates pod and tunnel.
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "reconnect-test", "--", "echo", "first"])
+        .output()
+        .expect("first enter failed to execute");
+    assert!(
+        output.status.success(),
+        "first enter failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "first");
+
+    // Find the actual K8s pod name.
+    let kubectl_output = Command::new("kubectl")
+        .args(["--context", K8S_CONTEXT])
+        .args(["--namespace", &ns.name])
+        .args([
+            "get",
+            "pod",
+            "-l",
+            "rumpelpod/pod-name=reconnect-test",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ])
+        .output()
+        .expect("kubectl get pod failed");
+    let k8s_pod_name = String::from_utf8_lossy(&kubectl_output.stdout)
+        .trim()
+        .to_string();
+    assert!(
+        !k8s_pod_name.is_empty(),
+        "could not find k8s pod for reconnect-test",
+    );
+
+    // Kill the tunnel-server inside the pod so the mux task detects a broken pipe.
+    let pkill_status = Command::new("kubectl")
+        .args(["--context", K8S_CONTEXT])
+        .args(["--namespace", &ns.name])
+        .args([
+            "exec",
+            &k8s_pod_name,
+            "--",
+            "pkill",
+            "-f",
+            "rumpel tunnel-server",
+        ])
+        .status()
+        .expect("pkill exec failed");
+    assert!(
+        pkill_status.success(),
+        "pkill should find and kill tunnel-server",
+    );
+
+    // Retry until the daemon notices the dead tunnel and reconnects.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let output = pod_command(&repo, &daemon)
+            .args(["enter", "reconnect-test", "--", "echo", "reconnected"])
+            .output()
+            .expect("retry enter failed to execute");
+
+        if output.status.success() {
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout).trim(),
+                "reconnected",
+            );
+            break;
+        }
+
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tunnel reconnection did not succeed within 30s, last stderr: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}

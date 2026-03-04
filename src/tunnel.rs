@@ -20,7 +20,7 @@
 /// via `kubectl exec`, demultiplexes frames from stdout, and opens local
 /// TCP connections to the target address for each stream.
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
@@ -253,7 +253,16 @@ async fn run_tunnel_server_async(port: u16) {
 pub struct TunnelHandle {
     /// The actual port the tunnel listener bound to inside the pod.
     pub port: u16,
+    alive: Arc<AtomicBool>,
     _cancel_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl TunnelHandle {
+    /// Whether the mux task is still running.  Returns false once the
+    /// WebSocket/pipe to the pod breaks or the task is cancelled.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
 }
 
 /// Start a tunnel into a K8s pod.
@@ -365,6 +374,7 @@ pub async fn start_tunnel(
     let pod_stdin = attached.stdin().context("taking tunnel stdin")?;
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let alive = Arc::new(AtomicBool::new(true));
 
     // Shared write half (stdin to pod) for sending frames back.
     let pod_stdin_mu = Arc::new(Mutex::new(pod_stdin));
@@ -376,6 +386,7 @@ pub async fn start_tunnel(
     let stdin_mu = pod_stdin_mu.clone();
     let writes_clone = writes.clone();
     let mut cancel = cancel_rx.clone();
+    let alive_for_mux = alive.clone();
 
     // Mux task: reads frames from pod stdout, dispatches to local TCP.
     tokio::spawn(async move {
@@ -487,10 +498,12 @@ pub async fn start_tunnel(
                 }
             }
         }
+        alive_for_mux.store(false, Ordering::Relaxed);
     });
 
     Ok(TunnelHandle {
         port: tunnel_port,
+        alive,
         _cancel_tx: cancel_tx,
     })
 }

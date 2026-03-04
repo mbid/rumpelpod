@@ -2155,6 +2155,17 @@ impl DaemonServer {
                     // Reuse the existing tunnel if it's still alive, otherwise
                     // start a fresh one.
                     let tunnel_key = (repo_path.to_path_buf(), pod_name.0.clone());
+                    {
+                        let mut tunnels = self.k8s_tunnels.lock().unwrap();
+                        if let Some(handle) = tunnels.get(&tunnel_key) {
+                            if !handle.is_alive() {
+                                log::warn!("k8s tunnel for {} is dead, reconnecting", pod_name.0);
+                                // Drop the stale handle (and its _cancel_tx) before
+                                // start_tunnel runs pkill inside the pod.
+                                tunnels.remove(&tunnel_key);
+                            }
+                        }
+                    }
                     let tunnel_port = {
                         let tunnels = self.k8s_tunnels.lock().unwrap();
                         tunnels.get(&tunnel_key).map(|t| t.port)
@@ -2178,46 +2189,58 @@ impl DaemonServer {
                     let url = format!("{}/gateway.git", base_url);
                     let direct_config = is_direct_git_config_mode()?;
 
-                    ensure_repo_initialized_via_pod(
-                        &pod,
-                        &url,
-                        &token,
-                        &container_repo_path,
-                        &user,
-                    )?;
-                    check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
+                    // Git operations go through the tunnel. If they fail
+                    // (e.g. because the tunnel-server died but the mux
+                    // task hasn't noticed yet), drop the stale handle so
+                    // the next enter creates a fresh tunnel.
+                    let git_result: Result<()> = (|| {
+                        ensure_repo_initialized_via_pod(
+                            &pod,
+                            &url,
+                            &token,
+                            &container_repo_path,
+                            &user,
+                        )?;
+                        check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
 
-                    pod.git_setup(
-                        &container_repo_path,
-                        &url,
-                        &token,
-                        &pod_name.0,
-                        None,
-                        direct_config,
-                        Some(&user),
-                        git_identity,
-                    )
-                    .context("configuring git")?;
+                        pod.git_setup(
+                            &container_repo_path,
+                            &url,
+                            &token,
+                            &pod_name.0,
+                            None,
+                            direct_config,
+                            Some(&user),
+                            git_identity,
+                        )
+                        .context("configuring git")?;
 
-                    let sub_entries: Vec<SubmoduleEntry> = submodules
-                        .iter()
-                        .map(|s| SubmoduleEntry {
-                            name: s.name.clone(),
-                            path: s.path.clone(),
-                            displaypath: s.displaypath.clone(),
-                        })
-                        .collect();
-                    pod.git_setup_submodules(
-                        &container_repo_path,
-                        &sub_entries,
-                        &base_url,
-                        &token,
-                        &pod_name.0,
-                        false,
-                        direct_config,
-                        Some(&user),
-                    )
-                    .context("setting up submodules")?;
+                        let sub_entries: Vec<SubmoduleEntry> = submodules
+                            .iter()
+                            .map(|s| SubmoduleEntry {
+                                name: s.name.clone(),
+                                path: s.path.clone(),
+                                displaypath: s.displaypath.clone(),
+                            })
+                            .collect();
+                        pod.git_setup_submodules(
+                            &container_repo_path,
+                            &sub_entries,
+                            &base_url,
+                            &token,
+                            &pod_name.0,
+                            false,
+                            direct_config,
+                            Some(&user),
+                        )
+                        .context("setting up submodules")?;
+                        Ok(())
+                    })();
+                    if git_result.is_err() {
+                        let key = (repo_path.to_path_buf(), pod_name.0.clone());
+                        self.k8s_tunnels.lock().unwrap().remove(&key);
+                    }
+                    git_result?;
 
                     {
                         let conn = self.db.lock().unwrap();
