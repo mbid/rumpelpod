@@ -1,10 +1,13 @@
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 
 use crate::cli::CpCommand;
 use crate::config::Host;
+use crate::daemon::protocol::LaunchResult;
 use crate::enter;
+use crate::git::get_repo_root;
 
 #[derive(Debug)]
 enum CopyDirection {
@@ -60,28 +63,31 @@ fn parse_direction(src: &str, dest: &str) -> Result<CopyDirection> {
     }
 }
 
+/// Resolve a container path: if relative, make it relative to the container repo root.
+fn resolve_container_path(container_path: &str, container_repo_path: &Path) -> String {
+    if Path::new(container_path).is_absolute() {
+        container_path.to_string()
+    } else {
+        container_repo_path
+            .join(container_path)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn container_repo_path() -> Result<PathBuf> {
+    let repo_root = get_repo_root()?;
+    let (devcontainer, _) = enter::load_and_resolve(&repo_root, None)?;
+    Ok(devcontainer.container_repo_path(&repo_root))
+}
+
 pub fn cp(cmd: &CpCommand) -> Result<()> {
     let direction = parse_direction(&cmd.src, &cmd.dest)?;
+    let repo_path = container_repo_path()?;
 
-    let (pod_name, docker_src, docker_dest) = match &direction {
-        CopyDirection::FromPod {
-            pod_name,
-            container_path,
-            local_path,
-        } => (
-            pod_name.as_str(),
-            format!("{{}}:{}", container_path),
-            local_path.clone(),
-        ),
-        CopyDirection::ToPod {
-            pod_name,
-            local_path,
-            container_path,
-        } => (
-            pod_name.as_str(),
-            local_path.clone(),
-            format!("{{}}:{}", container_path),
-        ),
+    let pod_name = match &direction {
+        CopyDirection::FromPod { pod_name, .. } => pod_name.as_str(),
+        CopyDirection::ToPod { pod_name, .. } => pod_name.as_str(),
     };
 
     let result = enter::launch_pod(pod_name, cmd.host_args.resolve()?)?;
@@ -91,27 +97,37 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
             container_path,
             local_path,
             ..
-        } => (container_path.as_str(), local_path.as_str(), true),
+        } => (
+            resolve_container_path(container_path, &repo_path),
+            local_path.clone(),
+            true,
+        ),
         CopyDirection::ToPod {
             local_path,
             container_path,
             ..
-        } => (container_path.as_str(), local_path.as_str(), false),
+        } => (
+            resolve_container_path(container_path, &repo_path),
+            local_path.clone(),
+            false,
+        ),
     };
 
     let status = match &result.host {
         Host::Kubernetes {
             context, namespace, ..
         } => {
-            let k8s_src;
-            let k8s_dest;
-            if from_pod {
-                k8s_src = format!("{}:{}", result.container_id.0, container_path);
-                k8s_dest = local_path.to_string();
+            let (k8s_src, k8s_dest) = if from_pod {
+                (
+                    format!("{}:{container_path}", result.container_id.0),
+                    local_path.clone(),
+                )
             } else {
-                k8s_src = local_path.to_string();
-                k8s_dest = format!("{}:{}", result.container_id.0, container_path);
-            }
+                (
+                    local_path.clone(),
+                    format!("{}:{container_path}", result.container_id.0),
+                )
+            };
 
             let mut kubectl = Command::new("kubectl");
             kubectl.args(["--context", context]);
@@ -127,8 +143,17 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
                 .as_ref()
                 .context("docker_socket is required for Docker hosts")?;
 
-            let docker_src = docker_src.replace("{}", &result.container_id.0);
-            let docker_dest = docker_dest.replace("{}", &result.container_id.0);
+            let (docker_src, docker_dest) = if from_pod {
+                (
+                    format!("{}:{container_path}", result.container_id.0),
+                    local_path.clone(),
+                )
+            } else {
+                (
+                    local_path.clone(),
+                    format!("{}:{container_path}", result.container_id.0),
+                )
+            };
 
             let mut docker_cmd = Command::new("docker");
             docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
@@ -152,6 +177,52 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
 
     if !status.success() {
         return Err(anyhow::anyhow!("cp exited with status {}", status));
+    }
+
+    // When copying into the pod, fix ownership so files belong to the container user
+    // rather than root (which is what docker/kubectl cp produces by default).
+    if !from_pod && !cmd.archive {
+        chown_in_container(&result, &container_path)?;
+    }
+
+    Ok(())
+}
+
+/// After copying files into a container, chown them to the container user.
+fn chown_in_container(result: &LaunchResult, container_path: &str) -> Result<()> {
+    let status = match &result.host {
+        Host::Kubernetes {
+            context, namespace, ..
+        } => {
+            // Wrap in sh so we can run as root via the container's entrypoint
+            // mechanism; kubectl exec has no --user flag, but pods launched by
+            // rumpelpod include a root-capable shell.
+            let chown_cmd = format!("chown -R {} {container_path}", result.user);
+            let mut kubectl = Command::new("kubectl");
+            kubectl.args(["--context", context]);
+            kubectl.args(["--namespace", namespace]);
+            kubectl.args(["exec", &result.container_id.0, "--"]);
+            kubectl.args(["sh", "-c", &chown_cmd]);
+            kubectl.status()?
+        }
+        Host::Localhost | Host::Ssh { .. } => {
+            let docker_socket = result
+                .docker_socket
+                .as_ref()
+                .context("docker_socket is required for Docker hosts")?;
+
+            let mut docker_cmd = Command::new("docker");
+            docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
+            docker_cmd.args(["exec", "--user", "root", &result.container_id.0]);
+            docker_cmd.args(["chown", "-R", &result.user, container_path]);
+            docker_cmd.status()?
+        }
+    };
+
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "chown in container exited with status {status}"
+        ));
     }
 
     Ok(())
@@ -206,5 +277,32 @@ mod tests {
     fn parse_direction_both_fails() {
         let err = parse_direction("a:/x", "b:/y").unwrap_err();
         assert!(err.to_string().contains("Both"));
+    }
+
+    #[test]
+    fn resolve_absolute_path_unchanged() {
+        let repo = Path::new("/workspaces/myrepo");
+        assert_eq!(
+            resolve_container_path("/tmp/file.txt", repo),
+            "/tmp/file.txt"
+        );
+    }
+
+    #[test]
+    fn resolve_relative_path_prepends_repo_root() {
+        let repo = Path::new("/workspaces/myrepo");
+        assert_eq!(
+            resolve_container_path("src/main.rs", repo),
+            "/workspaces/myrepo/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn resolve_bare_filename() {
+        let repo = Path::new("/workspaces/myrepo");
+        assert_eq!(
+            resolve_container_path("file.txt", repo),
+            "/workspaces/myrepo/file.txt"
+        );
     }
 }
