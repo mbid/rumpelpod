@@ -1179,7 +1179,7 @@ fn try_remove_container(
 /// What we copy:
 ///   ~/.claude/.credentials.json  -- OAuth tokens (needed unless ANTHROPIC_API_KEY is set)
 ///   ~/.claude/settings.json      -- user preferences (model, mode, attribution)
-///   ~/.claude.json               -- stripped to only essential keys
+///   ~/.claude.json               -- whitelisted global keys only
 fn copy_claude_config_via_pod(
     pod: &PodClient,
     user: &str,
@@ -1399,20 +1399,66 @@ fn copy_claude_history_via_pod(
     Ok(())
 }
 
-/// Keep only the keys from ~/.claude.json that are needed for a functional
-/// session. Returns the serialized JSON bytes to write into the container.
-///
-/// Also remaps the per-project entry for `repo_path` so it appears under
-/// `container_repo_path`, preserving trust-dialog and onboarding state.
+/// Keep only whitelisted keys from ~/.claude.json and remap the per-project
+/// entry for `repo_path` so it appears under `container_repo_path`.
 fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) -> Vec<u8> {
-    // Keys that suppress warnings/onboarding or are required for auth.
+    // Global keys that are safe to copy into the container. Keys that leak
+    // host filesystem paths (projects, githubRepoPaths) are omitted;
+    // projects is remapped separately below.
     const KEEP_KEYS: &[&str] = &[
-        "hasCompletedOnboarding",
-        "lastOnboardingVersion",
-        "oauthAccount",
-        "primaryApiKey",
+        "anonymousId",
+        "autoUpdates",
+        "autoUpdatesProtectedForNative",
+        "birthdayHatAnimationCount",
         "bypassPermissionsModeAccepted",
+        "cachedChromeExtensionInstalled",
+        "cachedDynamicConfigs",
+        "cachedExtraUsageDisabledReason",
+        "cachedGrowthBookFeatures",
+        "cachedStatsigGates",
+        "changelogLastFetched",
+        "claudeCodeFirstTokenDate",
+        "clientDataCache",
         "customApiKeyResponses",
+        "effortCalloutDismissed",
+        "feedbackSurveyState",
+        "firstStartTime",
+        "groveConfigCache",
+        "hasAcknowledgedCostThreshold",
+        "hasCompletedOnboarding",
+        "hasSeenTasksHint",
+        "hasShownOpus45Notice",
+        "hasShownOpus46Notice",
+        "hasVisitedExtraUsage",
+        "hasVisitedPasses",
+        "installMethod",
+        "lastOnboardingVersion",
+        "lastReleaseNotesSeen",
+        "lspRecommendationDisabled",
+        "numStartups",
+        "oauthAccount",
+        "officialMarketplaceAutoInstallAttempted",
+        "officialMarketplaceAutoInstalled",
+        "opus45MigrationComplete",
+        "opus46FeedSeenCount",
+        "opusProMigrationComplete",
+        "passesEligibilityCache",
+        "passesLastSeenCampaign",
+        "passesLastSeenRemaining",
+        "passesUpsellSeenCount",
+        "penguinModeOrgEnabled",
+        "primaryApiKey",
+        "promptQueueUseCount",
+        "s1mAccessCache",
+        "s1mNonSubscriberAccessCache",
+        "sonnet1m45MigrationComplete",
+        "sonnet45MigrationComplete",
+        "sonnet45MigrationTimestamp",
+        "subscriptionNoticeCount",
+        "thinkingMigrationComplete",
+        "tipsHistory",
+        "toolUsage",
+        "userID",
     ];
 
     let Ok(mut obj) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
