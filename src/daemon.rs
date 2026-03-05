@@ -325,7 +325,10 @@ impl ContainerArch {
         match s {
             "amd64" => Ok(Self::Amd64),
             "arm64" => Ok(Self::Arm64),
-            other => anyhow::bail!("unsupported container architecture '{}'", other),
+            other => Err(anyhow::anyhow!(
+                "unsupported container architecture '{}'",
+                other
+            )),
         }
     }
 
@@ -362,21 +365,21 @@ fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<St
     match image_user {
         Some(user) if user != "root" && !user.starts_with("0:") && user != "0" => Ok(user),
         Some(user) => {
-            anyhow::bail!(
+            Err(anyhow::anyhow!(
                 "Image '{}' has USER set to '{}' (root). \
                  For security, pods must run as a non-root user.\n\
                  Either set 'containerUser' in devcontainer.json, or change the image's USER directive.",
                 image,
                 user
-            );
+            ))
         }
         None => {
-            anyhow::bail!(
+            Err(anyhow::anyhow!(
                 "Image '{}' has no USER directive (defaults to root). \
                  For security, pods must run as a non-root user.\n\
                  Either set 'containerUser' in devcontainer.json, or add a USER directive to the Dockerfile.",
                 image
-            );
+            ))
         }
     }
 }
@@ -999,7 +1002,7 @@ fn find_available_port(allocated: &std::collections::HashSet<u16>) -> Result<u16
             return Ok(port);
         }
     }
-    anyhow::bail!("no available ports in range 10000-65000")
+    Err(anyhow::anyhow!("no available ports in range 10000-65000"))
 }
 
 #[derive(Clone)]
@@ -1131,7 +1134,9 @@ fn try_remove_container(
             Host::Ssh { .. } => ssh_forward.get_socket(&host)?,
             Host::Localhost => default_docker_socket(),
             Host::Kubernetes { .. } => {
-                anyhow::bail!("try_remove_container called for Kubernetes host");
+                return Err(anyhow::anyhow!(
+                    "try_remove_container called for Kubernetes host"
+                ));
             }
         }
     } else {
@@ -1163,9 +1168,7 @@ fn try_remove_container(
         Err(BollardError::DockerResponseServerError {
             status_code: 404, ..
         }) => Ok(()),
-        Err(e) => {
-            anyhow::bail!("docker rm failed: {}", e);
-        }
+        Err(e) => Err(anyhow::anyhow!("docker rm failed: {}", e)),
     }
 }
 
@@ -1312,10 +1315,10 @@ fn copy_claude_project_dir_via_pod(
         .context("creating tar archive of claude project data")?;
 
     if !tar_output.status.success() {
-        anyhow::bail!(
+        return Err(anyhow::anyhow!(
             "tar failed: {}",
             String::from_utf8_lossy(&tar_output.stderr)
-        );
+        ));
     }
 
     if !tar_output.stdout.is_empty() {
@@ -1329,7 +1332,10 @@ fn copy_claude_project_dir_via_pod(
         )?;
         if result.exit_code != 0 {
             let stderr = base64_decode_lossy(&result.stderr);
-            anyhow::bail!("extracting claude project data: {}", stderr);
+            return Err(anyhow::anyhow!(
+                "extracting claude project data: {}",
+                stderr
+            ));
         }
     }
 
@@ -1523,12 +1529,13 @@ fn resolve_rumpel_binary(container_arch: Option<ContainerArch>) -> Result<PathBu
 
     let exe_dir = exe.parent().context("resolving executable directory")?;
     let bin = exe_dir.join(arch.binary_name());
-    anyhow::ensure!(
-        bin.exists(),
-        "binary '{}' not found next to {}",
-        arch.binary_name(),
-        exe.display(),
-    );
+    if !bin.exists() {
+        return Err(anyhow::anyhow!(
+            "binary '{}' not found next to {}",
+            arch.binary_name(),
+            exe.display(),
+        ));
+    }
     Ok(bin)
 }
 
@@ -1648,9 +1655,9 @@ fn get_container_endpoint(
                         container_port,
                     })
                 }
-                Host::Kubernetes { .. } => {
-                    anyhow::bail!("get_container_endpoint called for Kubernetes host");
-                }
+                Host::Kubernetes { .. } => Err(anyhow::anyhow!(
+                    "get_container_endpoint called for Kubernetes host"
+                )),
             }
         }
         Some(ip) => match docker_host {
@@ -1666,9 +1673,9 @@ fn get_container_endpoint(
                     container_port: default_port,
                 })
             }
-            Host::Kubernetes { .. } => {
-                anyhow::bail!("get_container_endpoint called for Kubernetes host");
-            }
+            Host::Kubernetes { .. } => Err(anyhow::anyhow!(
+                "get_container_endpoint called for Kubernetes host"
+            )),
         },
     }
 }
@@ -1760,7 +1767,9 @@ fn start_container_server(
             return Ok(token);
         }
         if std::time::Instant::now() >= deadline {
-            anyhow::bail!("container server did not become ready within 10 seconds");
+            return Err(anyhow::anyhow!(
+                "container server did not become ready within 10 seconds"
+            ));
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
@@ -1828,7 +1837,7 @@ fn check_git_ownership_via_pod(
 
     if let Some(ref owner) = stat.owner {
         if owner != expected_user {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "Git directory {} is owned by '{}', but pod is configured to run as '{}'.\n\
                  Please ensure the repository inside the container is owned by the configured user.\n\
                  You can fix this by running: chown -R {} {}",
@@ -1837,7 +1846,7 @@ fn check_git_ownership_via_pod(
                 expected_user,
                 user,
                 container_repo_path.display()
-            );
+            ));
         }
     }
 
@@ -1874,11 +1883,11 @@ fn run_lifecycle_command_via_pod(
             let result = pod.run(&["sh", "-c", s], Some(user), Some(workdir), env, None, None)?;
             if result.exit_code != 0 {
                 let stderr = base64_decode_lossy(&result.stderr);
-                anyhow::bail!(
+                return Err(anyhow::anyhow!(
                     "lifecycle command failed (exit {}): {}",
                     result.exit_code,
                     stderr
-                );
+                ));
             }
         }
         LifecycleCommand::Array(args) => {
@@ -1886,11 +1895,11 @@ fn run_lifecycle_command_via_pod(
             let result = pod.run(&args_ref, Some(user), Some(workdir), env, None, None)?;
             if result.exit_code != 0 {
                 let stderr = base64_decode_lossy(&result.stderr);
-                anyhow::bail!(
+                return Err(anyhow::anyhow!(
                     "lifecycle command failed (exit {}): {}",
                     result.exit_code,
                     stderr
-                );
+                ));
             }
         }
         LifecycleCommand::Object(map) => {
@@ -1917,12 +1926,12 @@ fn run_lifecycle_command_via_pod(
                             pod.run(&args_ref, Some(&u), Some(&wd), &thread_env, None, None)?;
                         if result.exit_code != 0 {
                             let stderr = base64_decode_lossy(&result.stderr);
-                            anyhow::bail!(
+                            return Err(anyhow::anyhow!(
                                 "lifecycle command '{}' failed (exit {}): {}",
                                 task_name,
                                 result.exit_code,
                                 stderr
-                            );
+                            ));
                         }
                         Ok(())
                     })
@@ -2761,12 +2770,12 @@ impl DaemonServer {
         if docker_host.is_remote() {
             for m in &mounts {
                 if m.mount_type == devcontainer::MountType::Bind {
-                    anyhow::bail!(
+                    return Err(anyhow::anyhow!(
                         "bind mounts are not supported with remote Docker hosts. \
                          The source path '{}' would reference the remote filesystem, \
                          not your local machine. Use volume or tmpfs mounts instead.",
                         m.source.as_deref().unwrap_or("<none>")
-                    );
+                    ));
                 }
             }
         }
@@ -2782,14 +2791,14 @@ impl DaemonServer {
                 if existing.host != host_spec {
                     let existing_host: Host =
                         serde_json::from_str(&existing.host).unwrap_or(docker_host.clone());
-                    anyhow::bail!(
+                    return Err(anyhow::anyhow!(
                         "Pod '{}' already exists on {} but was requested on {}.\n\
                          Delete the existing pod first with 'rumpel delete {}'.",
                         pod_name.0,
                         existing_host,
                         docker_host,
                         pod_name.0
-                    );
+                    ));
                 }
             }
         }
@@ -3521,11 +3530,11 @@ impl Daemon for DaemonServer {
             if let Some(record) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
                 let host = serde_json::from_str::<Host>(&record.host)?;
                 if let Host::Kubernetes { .. } = &host {
-                    anyhow::bail!(
+                    return Err(anyhow::anyhow!(
                         "Kubernetes pods cannot be stopped. \
                          Use 'rumpel delete {}' instead.",
                         pod_name.0
-                    );
+                    ));
                 }
             }
         }

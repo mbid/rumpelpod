@@ -771,10 +771,10 @@ fn snapshot_impl(repo_path: &Path, u: Option<&User>) -> Result<Option<Vec<u8>>> 
         .context("git diff")?;
 
     if !output.status.success() {
-        anyhow::bail!(
+        return Err(anyhow::anyhow!(
             "git diff failed: {}",
             String::from_utf8_lossy(&output.stderr)
-        );
+        ));
     }
 
     if output.stdout.is_empty() {
@@ -820,10 +820,10 @@ fn apply_patch_impl(req: &GitApplyPatchRequest, u: Option<&User>) -> Result<()> 
 
     let output = child.wait_with_output().context("waiting for git apply")?;
     if !output.status.success() {
-        anyhow::bail!(
+        return Err(anyhow::anyhow!(
             "git apply failed: {}",
             String::from_utf8_lossy(&output.stderr)
-        );
+        ));
     }
 
     // Best-effort submodule sync
@@ -939,7 +939,7 @@ fn run_impl(req: RunRequest) -> Result<RunResponse> {
     use std::io::Read;
 
     if req.cmd.is_empty() {
-        anyhow::bail!("empty command");
+        return Err(anyhow::anyhow!("empty command"));
     }
 
     let mut cmd = Command::new(&req.cmd[0]);
@@ -1069,11 +1069,11 @@ fn run_git_command(args: &[&str], workdir: Option<&Path>, user: Option<&User>) -
     }
     let output = cmd.output().context("running git command")?;
     if !output.status.success() {
-        anyhow::bail!(
+        return Err(anyhow::anyhow!(
             "git {} failed: {}",
             args.first().unwrap_or(&""),
             String::from_utf8_lossy(&output.stderr)
-        );
+        ));
     }
     Ok(output.stdout)
 }

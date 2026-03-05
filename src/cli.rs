@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 use crate::config::{Host, Model};
@@ -62,7 +62,9 @@ impl HostArgs {
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
             if self.host.is_some() {
-                bail!("--host and --k8s-context are mutually exclusive");
+                return Err(anyhow::anyhow!(
+                    "--host and --k8s-context are mutually exclusive"
+                ));
             }
             Ok(Some(Host::Kubernetes {
                 context: ctx.clone(),

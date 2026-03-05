@@ -1,7 +1,7 @@
 use std::process::Command;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use log::trace;
 
 use crate::cli::ClaudeCommand;
@@ -185,10 +185,10 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let screen_state = screen_state?;
 
     if !screen_state.available {
-        bail!(
+        return Err(anyhow::anyhow!(
             "screen is not installed in the container.\n\
              Add `screen` to your container image to use `rumpel claude`."
-        );
+        ));
     }
 
     // Resolve ${containerEnv:VAR} via the in-container HTTP server (works for all host types).
@@ -308,7 +308,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     };
 
     if !status.success() {
-        bail!("exec exited with status {}", status);
+        return Err(anyhow::anyhow!("exec exited with status {}", status));
     }
 
     Ok(())

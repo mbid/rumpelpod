@@ -399,7 +399,9 @@ pub fn run_grok_agent(
                         println!("[web search]");
                     }
                     ResponseOutputItem::XSearchCall { .. } => {
-                        anyhow::bail!("Unexpected X search call - X search is not enabled");
+                        return Err(anyhow::anyhow!(
+                            "Unexpected X search call - X search is not enabled"
+                        ));
                     }
                     ResponseOutputItem::Reasoning { .. } | ResponseOutputItem::Unknown => {
                         // Skip reasoning and unknown types silently

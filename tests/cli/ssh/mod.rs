@@ -399,7 +399,7 @@ fn get_container_ip(container_id: &str) -> Result<String> {
 
     let ip = String::from_utf8_lossy(&stdout).trim().to_string();
     if ip.is_empty() {
-        anyhow::bail!("container has no IP address");
+        return Err(anyhow::anyhow!("container has no IP address"));
     }
 
     Ok(ip)

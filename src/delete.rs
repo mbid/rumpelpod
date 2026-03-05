@@ -1,6 +1,6 @@
 use std::io::{self, IsTerminal, Write};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use crate::cli::DeleteCommand;
 use crate::daemon;
@@ -67,7 +67,7 @@ pub fn delete(cmd: &DeleteCommand) -> Result<()> {
     }
 
     if failed > 0 {
-        bail!("{} pod(s) could not be deleted", failed);
+        return Err(anyhow::anyhow!("{} pod(s) could not be deleted", failed));
     }
 
     Ok(())

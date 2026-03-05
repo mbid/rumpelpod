@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
@@ -61,12 +61,12 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Frame> {
     let frame_type = hdr[4];
     let payload_len = u32::from_le_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]) as usize;
     if payload_len > MAX_PAYLOAD {
-        bail!(
+        return Err(anyhow::anyhow!(
             "frame payload too large: {} > {} (stream {})",
             payload_len,
             MAX_PAYLOAD,
             stream_id
-        );
+        ));
     }
     let mut payload = vec![0u8; payload_len];
     if payload_len > 0 {
@@ -326,7 +326,9 @@ pub async fn start_tunnel(
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            bail!("timeout waiting for tunnel-server readiness");
+            return Err(anyhow::anyhow!(
+                "timeout waiting for tunnel-server readiness"
+            ));
         }
         let mut tmp = [0u8; 256];
         let n = tokio::time::timeout(remaining, stderr.read(&mut tmp))
@@ -334,7 +336,9 @@ pub async fn start_tunnel(
             .context("timeout reading tunnel stderr")?
             .context("reading tunnel stderr")?;
         if n == 0 {
-            bail!("tunnel-server stderr closed before readiness signal");
+            return Err(anyhow::anyhow!(
+                "tunnel-server stderr closed before readiness signal"
+            ));
         }
         stderr_buf.extend_from_slice(&tmp[..n]);
         if let Ok(s) = std::str::from_utf8(&stderr_buf) {

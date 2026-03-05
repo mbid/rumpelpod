@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::cli::CpCommand;
 use crate::config::Host;
@@ -49,18 +49,14 @@ fn parse_direction(src: &str, dest: &str) -> Result<CopyDirection> {
             local_path: src.to_string(),
             container_path: path.to_string(),
         }),
-        (None, None) => {
-            bail!(
-                "Neither src nor dest uses POD:PATH syntax.\n\
+        (None, None) => Err(anyhow::anyhow!(
+            "Neither src nor dest uses POD:PATH syntax.\n\
                  Exactly one of src or dest must specify a pod, e.g. my-pod:/path/in/container"
-            );
-        }
-        (Some(_), Some(_)) => {
-            bail!(
-                "Both src and dest use POD:PATH syntax.\n\
+        )),
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "Both src and dest use POD:PATH syntax.\n\
                  Exactly one side must be a local path."
-            );
-        }
+        )),
     }
 }
 
@@ -155,7 +151,7 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
     };
 
     if !status.success() {
-        bail!("cp exited with status {}", status);
+        return Err(anyhow::anyhow!("cp exited with status {}", status));
     }
 
     Ok(())

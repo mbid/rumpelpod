@@ -3,7 +3,7 @@
 //! This module handles resolving Docker images for pods, including building
 //! images from devcontainer.json specifications when needed.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -52,11 +52,11 @@ pub fn resolve_image(
 ) -> Result<BuildResult> {
     if let Host::Kubernetes { registry, .. } = docker_host {
         if devcontainer.has_build() && registry.is_none() {
-            bail!(
+            return Err(anyhow::anyhow!(
                 "Building images for Kubernetes requires a registry.\n\
                  Set 'registry' in the [k8s] section of .rumpelpod.toml, \
                  or use --k8s-registry."
-            );
+            ));
         }
     }
 
@@ -124,10 +124,10 @@ pub fn build_devcontainer_image(
 
     let dockerfile_path = repo_root.join(dockerfile);
     if !dockerfile_path.exists() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "Devcontainer Dockerfile '{}' not found",
             dockerfile_path.display()
-        );
+        ));
     }
 
     let context_path = repo_root.join(context);
@@ -232,11 +232,11 @@ pub fn build_devcontainer_image(
     stderr_thread.join().expect("stderr reader panicked");
 
     if !status.success() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "Docker build failed:\nSTDOUT: {}\nSTDERR: {}",
             stdout_buf.lock().unwrap(),
             stderr_buf.lock().unwrap()
-        );
+        ));
     }
 
     Ok(BuildResult {
@@ -257,7 +257,7 @@ pub fn pull_image(image_name: &str, docker_host: &Host) -> Result<()> {
 
     let status = cmd.status()?;
     if !status.success() {
-        bail!("docker pull failed with status {}", status);
+        return Err(anyhow::anyhow!("docker pull failed with status {}", status));
     }
     Ok(())
 }
@@ -281,7 +281,7 @@ pub fn push_to_registry(
         .status()
         .context("running docker tag")?;
     if !status.success() {
-        bail!("docker tag failed with status {}", status);
+        return Err(anyhow::anyhow!("docker tag failed with status {}", status));
     }
 
     // Push (stream output so the user sees upload progress)
@@ -335,11 +335,11 @@ pub fn push_to_registry(
     stderr_thread.join().expect("stderr reader panicked");
 
     if !status.success() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "docker push failed:\nSTDOUT: {}\nSTDERR: {}",
             stdout_buf.lock().unwrap(),
             stderr_buf.lock().unwrap()
-        );
+        ));
     }
 
     // Get the manifest digest via RepoDigests (populated after push)
@@ -354,10 +354,10 @@ pub fn push_to_registry(
         .output()
         .context("running docker image inspect for digest")?;
     if !inspect_output.status.success() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "docker image inspect failed after push: {}",
             String::from_utf8_lossy(&inspect_output.stderr)
-        );
+        ));
     }
 
     let repo_digests: Vec<String> = serde_json::from_slice(&inspect_output.stdout)

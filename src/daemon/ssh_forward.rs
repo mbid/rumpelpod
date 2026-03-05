@@ -425,7 +425,10 @@ impl SshForwardManager {
 
         while start.elapsed() < timeout {
             if let Ok(Some(status)) = process.try_wait() {
-                anyhow::bail!("SSH process exited prematurely with status: {}", status);
+                return Err(anyhow::anyhow!(
+                    "SSH process exited prematurely with status: {}",
+                    status
+                ));
             }
 
             if docker_socket.exists() {
@@ -435,10 +438,10 @@ impl SshForwardManager {
                 if ping_docker_socket(&docker_socket) {
                     // One final check that SSH hasn't exited
                     if let Ok(Some(status)) = process.try_wait() {
-                        anyhow::bail!(
+                        return Err(anyhow::anyhow!(
                             "SSH process exited after establishing socket (status: {})",
                             status
-                        );
+                        ));
                     }
 
                     info!(
@@ -464,12 +467,12 @@ impl SshForwardManager {
         // Timeout - kill the process and return error
         let _ = process.kill();
 
-        anyhow::bail!(
+        Err(anyhow::anyhow!(
             "SSH tunnel to {}:{} failed to establish within {:?}. Check SSH configuration and connectivity. See logs above for SSH error details.",
             host.destination,
             host.port,
             timeout
-        );
+        ))
     }
 
     /// Add a remote port forward using the SSH control socket.
@@ -511,11 +514,11 @@ impl SshForwardManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "Failed to add remote forward -R {}: {}",
                 forward_spec,
                 stderr.trim()
-            );
+            ));
         }
 
         // Parse the allocated port from stdout
@@ -646,11 +649,11 @@ impl SshForwardManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "Failed to add local forward -L {}: {}",
                 forward_spec,
                 stderr.trim()
-            );
+            ));
         }
 
         info!(

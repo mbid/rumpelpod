@@ -374,7 +374,7 @@ impl MountObject {
             Some("bind") => MountType::Bind,
             Some("volume") => MountType::Volume,
             Some("tmpfs") => MountType::Tmpfs,
-            Some(other) => anyhow::bail!("unsupported mount type: {other}"),
+            Some(other) => return Err(anyhow::anyhow!("unsupported mount type: {other}")),
             None => MountType::Bind, // Docker default
         };
 
@@ -847,10 +847,10 @@ impl DevContainer {
                 .flatten()
             {
                 if field.contains("${") {
-                    anyhow::bail!(
+                    return Err(anyhow::anyhow!(
                         "unresolved variable in mount: '{field}'. \
                          Check for typos in variable references."
-                    );
+                    ));
                 }
             }
         }

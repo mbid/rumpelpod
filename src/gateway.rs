@@ -219,10 +219,11 @@ pub fn detect_submodules(repo_path: &Path) -> Vec<SubmoduleInfo> {
 /// For nested submodules it contains `/` separators (e.g. "outer/inner")
 /// which become directory levels under `submodules/`.
 pub fn submodule_gateway_path(repo_path: &Path, displaypath: &str) -> Result<PathBuf> {
-    anyhow::ensure!(
-        !displaypath.split('/').any(|c| c == ".."),
-        "submodule displaypath must not contain '..': {displaypath}"
-    );
+    if displaypath.split('/').any(|c| c == "..") {
+        return Err(anyhow::anyhow!(
+            "submodule displaypath must not contain '..': {displaypath}"
+        ));
+    }
     let state_dir = get_state_dir()?;
     let hash = repo_path_hash(repo_path);
     let mut path = state_dir.join(&hash).join("submodules");

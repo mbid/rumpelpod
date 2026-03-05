@@ -23,5 +23,6 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
 - Multiline strings: Use indoc, formatdoc, printdoc etc.
 - Format strings: Prefer the format!("{var}") variant over format!("{}", v).
   Introduce variables if necessary, e.g. let var = var.display(); for paths.
+- Prefer explicit control flow over anyhow macros like bail! and ensure!.
 - For changes that require testing on macos, log onto a macbook via `ssh macos` and clone your checkout to /tmp/<your-hostname>/rumpelpod.
   If you can't log on but your change should be tested on macos, report to the user.

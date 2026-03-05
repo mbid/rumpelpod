@@ -1,7 +1,7 @@
 use std::io::BufRead;
 use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use crate::cli::{PostCheckoutCommand, ReferenceTransactionCommand};
 use crate::CommandExt;
@@ -172,14 +172,14 @@ fn check_push_access(refname: &str, pod_name: Option<&str>) -> Result<()> {
             if !allowed {
                 eprintln!("error: pod '{name}' cannot push to '{refname}'");
                 eprintln!("error: pods can only push to refs/heads/rumpelpod/*@{name}");
-                bail!("access denied");
+                return Err(anyhow::anyhow!("access denied"));
             }
         }
         None => {
             if !refname.starts_with("refs/heads/host/") {
                 eprintln!("error: host can only push to refs/heads/host/*");
                 eprintln!("error: attempted to push to '{refname}'");
-                bail!("access denied");
+                return Err(anyhow::anyhow!("access denied"));
             }
         }
     }

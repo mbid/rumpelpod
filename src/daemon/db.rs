@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use indoc::indoc;
 use rusqlite::Connection;
@@ -198,19 +198,19 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     match stored_hash {
         Ok(hash) => {
             if hash != current_hash {
-                bail!(
+                return Err(anyhow::anyhow!(
                     indoc! {"
                     Database schema mismatch.
                     Expected hash: {}
                     Found hash:    {}
-                    
+
                     Please delete the database file to start over:
                     rm {}
                 "},
                     current_hash,
                     hash,
                     path.display()
-                );
+                ));
             }
         }
         Err(rusqlite::Error::SqliteFailure(_, _)) | Err(rusqlite::Error::QueryReturnedNoRows) => {

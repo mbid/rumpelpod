@@ -65,11 +65,11 @@ fn run() -> Result<ExitCode> {
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         "rumpel-linux-arm64"
     } else {
-        anyhow::bail!(
+        return Err(anyhow::anyhow!(
             "unsupported host platform: {}/{}",
             std::env::consts::OS,
             std::env::consts::ARCH
-        );
+        ));
     };
     symlink(native_name, tmp.path().join("rumpel"))
         .context("symlinking rumpel to native binary")?;

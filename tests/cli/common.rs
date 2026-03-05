@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::{bail, Context, Error};
+use anyhow::{Context, Error};
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use sha2::{Digest, Sha256};
@@ -651,12 +651,12 @@ fn do_build_docker_image(build: &DockerBuild, dockerfile_hash: &str) -> anyhow::
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("docker build failed: {stderr}");
+        return Err(anyhow::anyhow!("docker build failed: {stderr}"));
     }
 
     let image_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if image_id.is_empty() {
-        bail!("docker build returned empty image ID");
+        return Err(anyhow::anyhow!("docker build returned empty image ID"));
     }
 
     Ok(ImageId(image_id))

@@ -65,11 +65,11 @@ impl PodClient {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
                 _ => {
                     if std::time::Instant::now() >= deadline {
-                        anyhow::bail!(
+                        return Err(anyhow::anyhow!(
                             "container server at {} did not become ready within {:?}",
                             self.url,
                             timeout
-                        );
+                        ));
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }

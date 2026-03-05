@@ -89,7 +89,11 @@ pub fn exec_with_stdin(
 
     if exit_code != 0 {
         let stderr = String::from_utf8_lossy(&output);
-        anyhow::bail!("command exited with code {}: {}", exit_code, stderr.trim());
+        return Err(anyhow::anyhow!(
+            "command exited with code {}: {}",
+            exit_code,
+            stderr.trim()
+        ));
     }
 
     Ok(output)

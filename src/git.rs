@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 
@@ -35,10 +35,10 @@ pub fn get_repo_root() -> Result<PathBuf> {
         Some(workdir) => Ok(workdir.to_path_buf()),
         None => {
             // Repository is bare (no working directory)
-            bail!(
+            Err(anyhow::anyhow!(
                 "Cannot use rumpel in a bare git repository. \
                  Please run from within a repository with a working directory."
-            );
+            ))
         }
     }
 }

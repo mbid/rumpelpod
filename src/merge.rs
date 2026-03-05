@@ -1,6 +1,6 @@
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::cli::MergeCommand;
 use crate::daemon;
@@ -39,7 +39,11 @@ fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<(
             .decode(&run_result.stderr)
             .unwrap_or_default();
         let stderr = String::from_utf8_lossy(&stderr);
-        bail!("git status in pod '{}' failed: {}", pod_name, stderr.trim());
+        return Err(anyhow::anyhow!(
+            "git status in pod '{}' failed: {}",
+            pod_name,
+            stderr.trim()
+        ));
     }
 
     use base64::Engine;
@@ -62,7 +66,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
     // 1. Verify the pod exists in the daemon
     let pods = client.list_pods(repo_root.clone())?;
     if !pods.iter().any(|p| p.name == cmd.name) {
-        bail!("pod '{}' not found", cmd.name);
+        return Err(anyhow::anyhow!("pod '{}' not found", cmd.name));
     }
 
     // 2. Verify the pod ref exists on the host
@@ -78,11 +82,11 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
         .context("Failed to check pod ref")?;
 
     if !ref_check.status.success() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "Pod ref '{}' not found in host repository.\n\
              Make sure the pod has made at least one commit.",
             pod_ref
-        );
+        ));
     }
 
     // 3. Warn about uncommitted changes in the pod
@@ -128,7 +132,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
 
     // 7. Propagate merge failure
     if merge_failed {
-        bail!("git merge failed");
+        return Err(anyhow::anyhow!("git merge failed"));
     }
 
     Ok(())

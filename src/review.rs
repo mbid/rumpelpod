@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use tempfile::TempDir;
 
 use crate::cli::ReviewCommand;
@@ -63,16 +63,16 @@ fn get_difftool_name(repo_root: &std::path::Path) -> Result<String> {
         .context("Failed to query git config for diff.tool")?;
 
     if !output.status.success() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "No difftool configured. Set one with:\n  \
              git config diff.tool <toolname>\n  \
              git config difftool.<toolname>.cmd '<command>'"
-        );
+        ));
     }
 
     let tool = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if tool.is_empty() {
-        bail!("diff.tool is set but empty");
+        return Err(anyhow::anyhow!("diff.tool is set but empty"));
     }
 
     Ok(tool)
@@ -162,7 +162,10 @@ fn get_changed_files(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Failed to get changed files: {}", stderr.trim());
+        return Err(anyhow::anyhow!(
+            "Failed to get changed files: {}",
+            stderr.trim()
+        ));
     }
 
     let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
@@ -304,7 +307,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let client = DaemonClient::new_unix(&socket_path);
     let pods = client.list_pods(repo_root.clone())?;
     if !pods.iter().any(|s| s.name == cmd.name) {
-        bail!("Pod '{}' does not exist.", cmd.name);
+        return Err(anyhow::anyhow!("Pod '{}' does not exist.", cmd.name));
     }
 
     // Verify the pod remote-tracking ref exists on the host
@@ -320,11 +323,11 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         .context("Failed to check pod ref")?;
 
     if !ref_check.status.success() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "Pod ref '{}' not found in host repository.\n\
              Make sure the pod has made at least one commit.",
             pod_ref
-        );
+        ));
     }
 
     // Get the current HEAD commit on the host
@@ -336,7 +339,10 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
     if !head_output.status.success() {
         let stderr = String::from_utf8_lossy(&head_output.stderr);
-        bail!("Failed to get HEAD commit: {}", stderr.trim());
+        return Err(anyhow::anyhow!(
+            "Failed to get HEAD commit: {}",
+            stderr.trim()
+        ));
     }
 
     let host_head = String::from_utf8_lossy(&head_output.stdout)
@@ -352,11 +358,11 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
     if !merge_base_output.status.success() {
         let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
-        bail!(
+        return Err(anyhow::anyhow!(
             "Failed to compute merge base between '{}' and HEAD:\n{}",
             pod_ref,
             stderr.trim()
-        );
+        ));
     }
 
     let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)

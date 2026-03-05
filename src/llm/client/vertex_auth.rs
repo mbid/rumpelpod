@@ -116,10 +116,10 @@ impl VertexConfig {
 
         // Validate key type
         if service_account_key.key_type != "service_account" {
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "Invalid key type '{}' in credentials file, expected 'service_account'",
                 service_account_key.key_type
-            );
+            ));
         }
 
         // Get project ID from env or from the key file
@@ -242,11 +242,11 @@ impl VertexAuthenticator {
         let status = response.status();
         if !status.is_success() {
             let error_text = response.text().unwrap_or_default();
-            anyhow::bail!(
+            return Err(anyhow::anyhow!(
                 "OAuth2 token request failed (status {}): {}",
                 status,
                 error_text
-            );
+            ));
         }
 
         let token_response: TokenResponse = response

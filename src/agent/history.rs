@@ -5,7 +5,7 @@
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 
 use crate::daemon::protocol::{ConversationSummary, Daemon, DaemonClient};
 use crate::daemon::socket_path;
@@ -60,11 +60,11 @@ impl ConversationTracker {
         // Verify the ID is consistent - if we had an ID, it should not change
         if let Some(expected_id) = self.id {
             if returned_id != expected_id {
-                bail!(
+                return Err(anyhow::anyhow!(
                     "Conversation ID changed unexpectedly: expected {}, got {}",
                     expected_id,
                     returned_id
-                );
+                ));
             }
         }
 
@@ -160,14 +160,17 @@ pub fn resolve_conversation(
     if let Some(n) = continue_flag {
         let n = n as usize;
         if conversations.is_empty() {
-            bail!("No conversations exist for pod '{}'.", pod_name);
+            return Err(anyhow::anyhow!(
+                "No conversations exist for pod '{}'.",
+                pod_name
+            ));
         }
         if n >= conversations.len() {
-            bail!(
+            return Err(anyhow::anyhow!(
                 "Conversation index {} out of range. Only {} conversation(s) exist.",
                 n,
                 conversations.len()
-            );
+            ));
         }
         // Conversations are already sorted by updated_at DESC, so index 0 is most recent
         return Ok(ConversationChoice::Resume(conversations[n].id));
@@ -188,11 +191,11 @@ pub fn resolve_conversation(
                 Ok(ConversationChoice::Resume(id))
             } else {
                 // Non-TTY: error with helpful message
-                bail!(
+                Err(anyhow::anyhow!(
                     "Multiple conversations exist for pod '{}'.\n\
                      Use --continue=N to select (0 = most recent), or --new to start fresh.",
                     pod_name
-                );
+                ))
             }
         }
     }

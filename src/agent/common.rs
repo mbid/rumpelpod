@@ -521,7 +521,7 @@ pub fn get_input_via_editor(
             .context("Failed to launch editor")?;
 
         if !status.success() {
-            anyhow::bail!("editor exited with non-zero status");
+            return Err(anyhow::anyhow!("editor exited with non-zero status"));
         }
 
         let edited_content = fs::read_to_string(&temp_file).context("Failed to read temp file")?;

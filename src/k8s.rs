@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Pod;
 use kube::api::{Api, AttachParams, DeleteParams, ListParams, PostParams};
 use kube::config::{KubeConfigOptions, Kubeconfig};
@@ -39,7 +39,10 @@ impl ContainerArch {
         match s.trim() {
             "x86_64" => Ok(Self::Amd64),
             "aarch64" => Ok(Self::Arm64),
-            other => bail!("unsupported container architecture '{}'", other),
+            other => Err(anyhow::anyhow!(
+                "unsupported container architecture '{}'",
+                other
+            )),
         }
     }
 
@@ -329,7 +332,12 @@ impl K8sClient {
                                     let reason = waiting.reason.as_deref().unwrap_or("Unknown");
                                     if reason.contains("Err") || reason.contains("BackOff") {
                                         let msg = waiting.message.as_deref().unwrap_or("");
-                                        bail!("Pod '{}' failed to start: {} {}", name, reason, msg);
+                                        return Err(anyhow::anyhow!(
+                                            "Pod '{}' failed to start: {} {}",
+                                            name,
+                                            reason,
+                                            msg
+                                        ));
                                     }
                                 }
                             }
@@ -337,17 +345,21 @@ impl K8sClient {
                     }
                 }
                 "Failed" | "Succeeded" => {
-                    bail!("Pod '{}' is in terminal phase '{}'", name, phase);
+                    return Err(anyhow::anyhow!(
+                        "Pod '{}' is in terminal phase '{}'",
+                        name,
+                        phase
+                    ));
                 }
                 _ => {}
             }
 
             if std::time::Instant::now() > deadline {
-                bail!(
+                return Err(anyhow::anyhow!(
                     "Timed out waiting for pod '{}' to reach Running phase (current: {})",
                     name,
                     phase
-                );
+                ));
             }
 
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -478,7 +490,7 @@ impl K8sClient {
 
             if let Some(reason) = status.reason {
                 if reason != "Completed" && reason != "ExitCode" {
-                    bail!("exec failed: {}", reason);
+                    return Err(anyhow::anyhow!("exec failed: {}", reason));
                 }
             }
 
@@ -520,7 +532,7 @@ impl K8sClient {
 
             if let Some(reason) = status.reason {
                 if reason != "Completed" && reason != "ExitCode" {
-                    bail!("exec with stdin failed: {}", reason);
+                    return Err(anyhow::anyhow!("exec with stdin failed: {}", reason));
                 }
             }
 
@@ -706,10 +718,10 @@ pub fn resolve_rumpel_binary(arch: &ContainerArch) -> Result<PathBuf> {
     if binary_path.exists() {
         Ok(binary_path)
     } else {
-        bail!(
+        Err(anyhow::anyhow!(
             "Cross-architecture binary '{}' not found at {}",
             arch.binary_name(),
             exe_dir.display()
-        );
+        ))
     }
 }

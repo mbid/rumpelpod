@@ -166,22 +166,22 @@ pub fn agent(cmd: &AgentCommand) -> Result<()> {
                     _ => {
                         // Unknown provider string? fallback or error.
                         // Let's error safe.
-                        anyhow::bail!(
+                        return Err(anyhow::anyhow!(
                             "Unknown provider in conversation history: {}",
                             saved_provider_str
-                        );
+                        ));
                     }
                 }
             };
 
             if current_provider != saved_provider {
-                anyhow::bail!(
+                return Err(anyhow::anyhow!(
                     "Cannot resume conversation started with {} ({}) using {} ({})",
                     saved_model_name,
                     saved_provider,
                     model.api_id(),
                     current_provider
-                );
+                ));
             }
 
             (Some(history), Some(id))

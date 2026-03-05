@@ -326,7 +326,7 @@ pub fn run_gemini_agent(
             };
 
             if response.candidates.is_empty() {
-                anyhow::bail!("No candidates in response");
+                return Err(anyhow::anyhow!("No candidates in response"));
             }
 
             let candidate = &response.candidates[0];

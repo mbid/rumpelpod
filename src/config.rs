@@ -9,7 +9,7 @@
 //! `devcontainer.json`.  The optional `.rumpelpod.toml` provides pod-specific
 //! settings that have no devcontainer equivalent (host, agent).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -155,15 +155,13 @@ impl Host {
                     port,
                 })
             }
-            other => {
-                bail!(
-                    "Unsupported scheme '{}' in host '{}'. \
+            other => Err(anyhow::anyhow!(
+                "Unsupported scheme '{}' in host '{}'. \
                      Use 'ssh://' for remote Docker, or \
                      '--k8s-context' / '[k8s]' for Kubernetes.",
-                    other,
-                    s
-                );
-            }
+                other,
+                s
+            )),
         }
     }
 
@@ -300,10 +298,10 @@ pub fn load_toml_config(repo_root: &Path) -> Result<TomlConfig> {
 
         // host and [k8s] are mutually exclusive
         if config.host.is_some() && config.k8s.is_some() {
-            bail!(
+            return Err(anyhow::anyhow!(
                 "Configuration error: 'host' and '[k8s]' are mutually exclusive in {}.",
                 config_path.display()
-            );
+            ));
         }
 
         // Validate agent model options
@@ -312,7 +310,7 @@ pub fn load_toml_config(repo_root: &Path) -> Result<TomlConfig> {
             + config.agent.custom_gemini_model.is_some() as usize
             + config.agent.custom_xai_model.is_some() as usize;
         if model_options_count > 1 {
-            bail!("Configuration error: Only one of 'model', 'custom-anthropic-model', 'custom-gemini-model', or 'custom-xai-model' can be specified in [agent] section.");
+            return Err(anyhow::anyhow!("Configuration error: Only one of 'model', 'custom-anthropic-model', 'custom-gemini-model', or 'custom-xai-model' can be specified in [agent] section."));
         }
 
         Ok(config)
@@ -393,10 +391,10 @@ pub fn get_runtime_dir() -> Result<PathBuf> {
 pub fn is_direct_git_config_mode() -> Result<bool> {
     match std::env::var("RUMPELPOD_TEST_DIRECT_GIT_CONFIG") {
         Ok(value) if value == "1" => Ok(true),
-        Ok(value) => bail!(
+        Ok(value) => Err(anyhow::anyhow!(
             "RUMPELPOD_TEST_DIRECT_GIT_CONFIG must be '1' if set, got '{}'",
             value
-        ),
+        )),
         Err(std::env::VarError::NotPresent) => Ok(false),
         Err(e) => Err(e).context("failed to read RUMPELPOD_TEST_DIRECT_GIT_CONFIG"),
     }
@@ -411,10 +409,10 @@ pub fn is_direct_git_config_mode() -> Result<bool> {
 pub fn is_deterministic_test_mode() -> Result<bool> {
     match std::env::var("RUMPELPOD_TEST_DETERMINISTIC_IDS") {
         Ok(value) if value == "1" => Ok(true),
-        Ok(value) => bail!(
+        Ok(value) => Err(anyhow::anyhow!(
             "RUMPELPOD_TEST_DETERMINISTIC_IDS must be '1' if set, got '{}'",
             value
-        ),
+        )),
         Err(std::env::VarError::NotPresent) => Ok(false),
         Err(e) => Err(e).context("failed to read RUMPELPOD_TEST_DETERMINISTIC_IDS"),
     }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use log::{info, trace};
 
 use crate::cli::EnterCommand;
@@ -142,10 +142,10 @@ pub fn load_and_resolve(
         .unwrap_or_else(|| (DevContainer::default(), repo_root.to_path_buf()));
 
     if devcontainer.image.is_none() && !devcontainer.has_build() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "No image or build specified.\n\
              Please set image or build.dockerfile in devcontainer.json."
-        );
+        ));
     }
 
     devcontainer.resolve_build_paths(&devcontainer_dir, repo_root);
@@ -176,12 +176,12 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     if docker_host.is_remote() {
         for m in devcontainer.resolved_mounts()? {
             if m.mount_type == MountType::Bind {
-                bail!(
+                return Err(anyhow::anyhow!(
                     "bind mounts are not supported with remote Docker hosts. \
                      The source path '{}' would reference the remote filesystem, \
                      not your local machine. Use volume or tmpfs mounts instead.",
                     m.source.as_deref().unwrap_or("<none>")
-                );
+                ));
             }
         }
     }
@@ -387,10 +387,10 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
                     .status()
                     .context("Failed to create workdir in container")?;
                 if !mkdir_status.success() {
-                    bail!(
+                    return Err(anyhow::anyhow!(
                         "Failed to create workdir {} in container",
                         workdir.display()
-                    );
+                    ));
                 }
             }
 
@@ -417,7 +417,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     };
 
     if !status.success() {
-        bail!("exec exited with status {}", status);
+        return Err(anyhow::anyhow!("exec exited with status {}", status));
     }
 
     Ok(())

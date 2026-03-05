@@ -1,6 +1,6 @@
 //! Handlers for `rumpel image build` and `rumpel image fetch`.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 use crate::cli::{ImageBuildCommand, ImageFetchCommand};
 use crate::config::Host;
@@ -14,10 +14,12 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
 
     let build_opts = match &devcontainer.build {
         Some(b) => b,
-        None => bail!(
-            "This devcontainer uses 'image', not 'build'.\n\
+        None => {
+            return Err(anyhow::anyhow!(
+                "This devcontainer uses 'image', not 'build'.\n\
              Use 'rumpel image fetch' to pull a pre-built image."
-        ),
+            ))
+        }
     };
 
     // K8s has no Docker daemon -- build against the local daemon instead.
@@ -65,17 +67,17 @@ pub fn fetch(cmd: &ImageFetchCommand) -> Result<()> {
     let (devcontainer, docker_host) = load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
 
     if devcontainer.build.is_some() {
-        bail!(
+        return Err(anyhow::anyhow!(
             "This devcontainer uses 'build', not 'image'.\n\
              Use 'rumpel image build' to build from the Dockerfile."
-        );
+        ));
     }
 
     if matches!(docker_host, Host::Kubernetes { .. }) {
-        bail!(
+        return Err(anyhow::anyhow!(
             "'rumpel image fetch' is not supported for Kubernetes hosts.\n\
              Images are pulled directly by the cluster."
-        );
+        ));
     }
 
     let image_name = devcontainer
