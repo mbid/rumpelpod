@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_FILE="$HOME/.aks-cluster"
+RESOURCE_GROUP="rumpelpod-test"
+CLUSTER_NAME="rumpelpod-test"
+LOCATION="westeurope"
+NODE_VM_SIZE="Standard_B2s"
+NODE_COUNT=1
+OS_DISK_SIZE=30
+ACR_SKU="Basic"
+
+if [[ -f "$STATE_FILE" ]]; then
+    echo "Error: A cluster state file already exists at $STATE_FILE"
+    echo "Run deprovision-aks first, or remove the file if the cluster is already gone."
+    exit 1
+fi
+
+if ! command -v az &>/dev/null; then
+    echo "Error: Azure CLI (az) is not installed."
+    echo "Install it: https://learn.microsoft.com/en-us/cli/azure/install-azure-cli"
+    exit 1
+fi
+
+if ! az account show &>/dev/null; then
+    echo "Error: Not logged in to Azure. Run 'az login' first."
+    exit 1
+fi
+
+# ACR names must be globally unique, alphanumeric only, 5-50 chars
+ACR_NAME="rumpelpodtest$(head -c4 /dev/urandom | xxd -p)"
+
+echo "==> Creating resource group $RESOURCE_GROUP in $LOCATION..."
+az group create \
+    --name "$RESOURCE_GROUP" \
+    --location "$LOCATION" \
+    --output none
+
+echo "==> Creating container registry $ACR_NAME (SKU=$ACR_SKU)..."
+az acr create \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$ACR_NAME" \
+    --sku "$ACR_SKU" \
+    --output none
+
+ACR_LOGIN_SERVER=$(az acr show \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$ACR_NAME" \
+    --query loginServer \
+    --output tsv)
+
+echo "==> Creating AKS cluster $CLUSTER_NAME (vm=$NODE_VM_SIZE, nodes=$NODE_COUNT)..."
+echo "    This takes a few minutes."
+az aks create \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$CLUSTER_NAME" \
+    --node-count "$NODE_COUNT" \
+    --node-vm-size "$NODE_VM_SIZE" \
+    --node-osdisk-size "$OS_DISK_SIZE" \
+    --tier free \
+    --attach-acr "$ACR_NAME" \
+    --generate-ssh-keys \
+    --output none
+
+echo "==> Fetching kubeconfig credentials..."
+az aks get-credentials \
+    --resource-group "$RESOURCE_GROUP" \
+    --name "$CLUSTER_NAME" \
+    --overwrite-existing
+
+# The context name az aks get-credentials creates
+KUBE_CONTEXT="$CLUSTER_NAME"
+
+cat > "$STATE_FILE" <<EOF
+RESOURCE_GROUP=$RESOURCE_GROUP
+CLUSTER_NAME=$CLUSTER_NAME
+ACR_NAME=$ACR_NAME
+LOCATION=$LOCATION
+EOF
+
+echo ""
+echo "============================================"
+echo " AKS cluster ready!"
+echo "============================================"
+echo " Resource group : $RESOURCE_GROUP"
+echo " Cluster        : $CLUSTER_NAME"
+echo " Location       : $LOCATION"
+echo " ACR            : $ACR_NAME"
+echo " ACR login      : $ACR_LOGIN_SERVER"
+echo " kubectl context: $KUBE_CONTEXT"
+echo ""
+echo " .rumpelpod.toml snippet:"
+echo ""
+echo "   [kubernetes]"
+echo "   context = \"$KUBE_CONTEXT\""
+echo "   registry = \"$ACR_LOGIN_SERVER\""
+echo ""
+echo " State saved to : $STATE_FILE"
+echo " To deprovision : deprovision-aks"
+echo ""
