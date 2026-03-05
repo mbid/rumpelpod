@@ -247,6 +247,7 @@ fn write_k8s_pod_config(repo: &TestRepo, image_tag: &str, namespace: &str) {
 }
 
 #[test]
+#[ignore]
 fn k8s_enter_smoke() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("enter-smoke");
@@ -281,6 +282,7 @@ fn k8s_enter_smoke() {
 }
 
 #[test]
+#[ignore]
 fn k8s_list_shows_pod() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("list-shows-pod");
@@ -317,6 +319,7 @@ fn k8s_list_shows_pod() {
 }
 
 #[test]
+#[ignore]
 fn k8s_delete_removes_pod() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("delete-removes-pod");
@@ -416,6 +419,7 @@ fn write_k8s_build_config(repo: &TestRepo, namespace: &str) {
 }
 
 #[test]
+#[ignore]
 fn k8s_image_build_no_registry() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("build-no-registry");
@@ -474,6 +478,7 @@ fn k8s_image_build_no_registry() {
 }
 
 #[test]
+#[ignore]
 fn k8s_image_build() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("image-build");
@@ -512,6 +517,7 @@ fn k8s_image_build() {
 }
 
 #[test]
+#[ignore]
 fn k8s_cp_to_and_from_pod() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("cp-to-and-from-pod");
@@ -570,6 +576,7 @@ fn k8s_cp_to_and_from_pod() {
 }
 
 #[test]
+#[ignore]
 fn k8s_mount_volume() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("mount-volume");
@@ -613,6 +620,7 @@ fn k8s_mount_volume() {
 }
 
 #[test]
+#[ignore]
 fn k8s_mount_tmpfs() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("mount-tmpfs");
@@ -649,6 +657,7 @@ fn k8s_mount_tmpfs() {
 }
 
 #[test]
+#[ignore]
 fn k8s_bind_mount_rejected() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("bind-mount-rejected");
@@ -688,6 +697,7 @@ fn k8s_bind_mount_rejected() {
 }
 
 #[test]
+#[ignore]
 fn k8s_privileged() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("privileged");
@@ -714,6 +724,7 @@ fn k8s_privileged() {
 }
 
 #[test]
+#[ignore]
 fn k8s_cap_add() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("cap-add");
@@ -738,6 +749,7 @@ fn k8s_cap_add() {
 }
 
 #[test]
+#[ignore]
 fn k8s_override_command_false() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("override-command-false");
@@ -770,6 +782,7 @@ fn k8s_override_command_false() {
 }
 
 #[test]
+#[ignore]
 fn k8s_host_requirements() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("host-requirements");
@@ -825,6 +838,7 @@ fn k8s_host_requirements() {
 }
 
 #[test]
+#[ignore]
 fn k8s_init_succeeds_despite_unsupported() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("init-unsupported");
@@ -849,6 +863,7 @@ fn k8s_init_succeeds_despite_unsupported() {
 }
 
 #[test]
+#[ignore]
 fn k8s_forward_port() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("forward-port");
@@ -926,6 +941,7 @@ fn k8s_forward_port() {
 }
 
 #[test]
+#[ignore]
 fn k8s_recreate() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("recreate");
@@ -980,6 +996,7 @@ fn k8s_recreate() {
 }
 
 #[test]
+#[ignore]
 fn k8s_tunnel_reconnect() {
     ensure_k3d_cluster();
     let ns = K8sNamespace::new("tunnel-reconnect");
