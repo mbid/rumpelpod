@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_FILE="$HOME/.eks-cluster"
+CLUSTER_NAME="rumpelpod-test"
+REGION="eu-west-1"
+ECR_REPO="rumpelpod-test"
+NODE_TYPE="t3.small"
+NODE_COUNT=1
+
+if [[ -f "$STATE_FILE" ]]; then
+    echo "Error: A cluster state file already exists at $STATE_FILE"
+    echo "Run deprovision-eks first, or remove the file if the cluster is already gone."
+    exit 1
+fi
+
+if ! command -v aws &>/dev/null; then
+    echo "Error: AWS CLI (aws) is not installed."
+    echo "Install it: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+    exit 1
+fi
+
+if ! command -v eksctl &>/dev/null; then
+    echo "Error: eksctl is not installed."
+    echo "Install it: https://eksctl.io/installation/"
+    exit 1
+fi
+
+if ! aws sts get-caller-identity &>/dev/null; then
+    echo "Error: AWS credentials not configured. Run 'aws configure' first."
+    exit 1
+fi
+
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+echo "==> Creating ECR repository $ECR_REPO in $REGION..."
+aws ecr create-repository \
+    --repository-name "$ECR_REPO" \
+    --region "$REGION" \
+    --output none
+
+ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
+
+echo "==> Creating EKS cluster $CLUSTER_NAME (type=$NODE_TYPE, nodes=$NODE_COUNT)..."
+echo "    This takes 15-20 minutes."
+eksctl create cluster \
+    --name "$CLUSTER_NAME" \
+    --region "$REGION" \
+    --node-type "$NODE_TYPE" \
+    --nodes "$NODE_COUNT" \
+    --managed
+
+# eksctl sets the kubectl context automatically
+KUBE_CONTEXT=$(kubectl config current-context)
+
+cat > "$STATE_FILE" <<EOF
+CLUSTER_NAME=$CLUSTER_NAME
+REGION=$REGION
+ECR_REPO=$ECR_REPO
+ACCOUNT_ID=$ACCOUNT_ID
+EOF
+
+echo ""
+echo "============================================"
+echo " EKS cluster ready!"
+echo "============================================"
+echo " Cluster        : $CLUSTER_NAME"
+echo " Region         : $REGION"
+echo " ECR repository : $ECR_REPO"
+echo " ECR URI        : $ECR_URI"
+echo " kubectl context: $KUBE_CONTEXT"
+echo ""
+echo " .rumpelpod.toml snippet:"
+echo ""
+echo "   [k8s]"
+echo "   context = \"$KUBE_CONTEXT\""
+echo "   registry = \"${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com\""
+echo ""
+echo " State saved to : $STATE_FILE"
+echo " To deprovision : deprovision-eks"
+echo ""
