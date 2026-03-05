@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+STATE_DIR="$HOME/.hetzner-k3s-cluster"
+
+if [[ ! -d "$STATE_DIR" ]]; then
+    echo "Error: No cluster state directory found at $STATE_DIR"
+    echo "Nothing to deprovision."
+    exit 1
+fi
+
+if [[ ! -f "$STATE_DIR/config.yaml" ]]; then
+    echo "Error: No config.yaml found in $STATE_DIR"
+    exit 1
+fi
+
+if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
+    echo "Error: HCLOUD_TOKEN environment variable is not set."
+    echo "It is required for cluster destruction."
+    echo ""
+    echo "  export HCLOUD_TOKEN=<your-token>"
+    exit 1
+fi
+
+# The saved config contains the token from provisioning time, but the
+# current HCLOUD_TOKEN may differ (e.g. rotated).  Patch it in so
+# hetzner-k3s uses the live token.
+ESCAPED_TOKEN=$(printf '%s\n' "$HCLOUD_TOKEN" | sed 's/[&/\]/\\&/g')
+sed -i "s|^hetzner_token:.*|hetzner_token: $ESCAPED_TOKEN|" "$STATE_DIR/config.yaml"
+
+echo "==> Destroying Hetzner K3s cluster..."
+echo "    Load balancers and persistent volumes created by workloads"
+echo "    are NOT deleted automatically (data safety)."
+hetzner-k3s delete --config "$STATE_DIR/config.yaml"
+
+rm -rf "$STATE_DIR"
+
+echo ""
+echo "============================================"
+echo " Hetzner K3s cluster deprovisioned"
+echo "============================================"
+echo " State directory removed: $STATE_DIR"
+echo ""

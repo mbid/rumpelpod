@@ -35,7 +35,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
 RUN dpkg_arch=$(dpkg --print-architecture) && \
     curl -fsSL "https://github.com/k3d-io/k3d/releases/download/v5.8.3/k3d-linux-${dpkg_arch}" \
         -o /usr/local/bin/k3d && \
-    chmod +x /usr/local/bin/k3d
+    chmod +x /usr/local/bin/k3d && \
+    curl -fsSL "https://github.com/vitobotta/hetzner-k3s/releases/download/v2.4.6/hetzner-k3s-linux-${dpkg_arch}" \
+        -o /usr/local/bin/hetzner-k3s && \
+    chmod +x /usr/local/bin/hetzner-k3s
 
 # Cross-compiler for the non-native architecture.
 RUN export DEBIAN_FRONTEND=noninteractive && \

@@ -1,0 +1,87 @@
+---
+# Hetzner K3s cluster configuration for rumpelpod.
+# Used by provision-hetzner-k3s / deprovision-hetzner-k3s.
+#
+# Dynamic values (surrounded by __double_underscores__) are substituted
+# by the provision script at runtime.  Edit the static values here to
+# change cluster shape, instance types, scaling behaviour etc.
+
+hetzner_token: __HCLOUD_TOKEN__
+
+cluster_name: rumpelpod
+kubeconfig_path: __KUBECONFIG_PATH__
+k3s_version: v1.34.5+k3s1
+
+networking:
+  ssh:
+    port: 22
+    use_agent: false
+    public_key_path: __SSH_PUBKEY_PATH__
+    private_key_path: __SSH_PRIVKEY_PATH__
+  allowed_networks:
+    ssh:
+      - 0.0.0.0/0
+    api:
+      - 0.0.0.0/0
+  public_network:
+    ipv4: true
+    ipv6: true
+  private_network:
+    enabled: true
+    subnet: 10.0.0.0/16
+  cni:
+    enabled: true
+    mode: flannel
+
+image: ubuntu-24.04
+schedule_workloads_on_masters: false
+protect_against_deletion: false
+
+# Single master, cx33: 4 shared vCPU, 8 GB RAM (~5.49 EUR/month).
+# Low-mid range -- enough headroom for API-heavy workloads without
+# blowing the budget.
+masters_pool:
+  instance_type: cx33
+  instance_count: 1
+  locations:
+    - nbg1
+
+worker_node_pools:
+  # Integration-test runners.
+  # Privileged containers are supported out of the box by K3s.
+  - name: test
+    instance_type: cpx32
+    location: nbg1
+    labels:
+      - key: pool
+        value: test
+    taints:
+      - key: pool
+        value: "test:NoSchedule"
+    autoscaling:
+      enabled: true
+      min_instances: 0
+      max_instances: 2
+
+  # Development / Rust compilation nodes.
+  - name: dev
+    instance_type: cpx42
+    location: nbg1
+    labels:
+      - key: pool
+        value: dev
+    taints:
+      - key: pool
+        value: "dev:NoSchedule"
+    autoscaling:
+      enabled: true
+      min_instances: 0
+      max_instances: 1
+
+# Idle nodes are removed after one hour, not immediately.
+cluster_autoscaler_args:
+  - "--scale-down-unneeded-time=1h"
+
+addons:
+  cluster_autoscaler:
+    enabled: true
