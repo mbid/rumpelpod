@@ -213,22 +213,26 @@ impl ClaudeSession {
         // it starts, so our settings would be overwritten anyway.
 
         let mut cmd = CommandBuilder::new("rumpel");
+        cmd.env_clear();
         cmd.cwd(repo.path());
-        // Isolate from the host user's Claude config so that
-        // copy_claude_config reads our controlled files instead.
+        // PATH is needed so rumpel can find git, docker, etc.
+        cmd.env("PATH", std::env::var("PATH").expect("PATH must be set"));
         cmd.env("HOME", home.to_str().unwrap());
         cmd.env(
             "RUMPELPOD_DAEMON_SOCKET",
             daemon.socket_path.to_str().unwrap(),
         );
+        // Forwarded into the container via ${localEnv:ANTHROPIC_BASE_URL}
+        // in devcontainer.json.
         cmd.env(
             "ANTHROPIC_BASE_URL",
             format!("http://{}:{}", proxy.addr, proxy.port),
         );
 
-        if std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").is_err() {
-            cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
-        }
+        cmd.env(
+            "RUMPELPOD_TEST_LLM_OFFLINE",
+            std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").unwrap_or_else(|_| "1".to_string()),
+        );
 
         cmd.args(["claude", "test", "--", "--model", model]);
         for arg in claude_args {
