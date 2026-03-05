@@ -37,7 +37,7 @@ echo "==> Creating ECR repository $ECR_REPO in $REGION..."
 aws ecr create-repository \
     --repository-name "$ECR_REPO" \
     --region "$REGION" \
-    --output none
+    >/dev/null
 
 ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
 

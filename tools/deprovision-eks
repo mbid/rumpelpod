@@ -23,7 +23,7 @@ if [[ -n "${ECR_REPO:-}" ]]; then
         --repository-name "$ECR_REPO" \
         --region "$REGION" \
         --force \
-        --output none
+        >/dev/null
 fi
 
 echo "==> Deleting EKS cluster $CLUSTER_NAME..."
