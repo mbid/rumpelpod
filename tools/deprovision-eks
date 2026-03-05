@@ -32,10 +32,6 @@ eksctl delete cluster \
     --name "$CLUSTER_NAME" \
     --region "$REGION"
 
-# eksctl removes kubeconfig entries on cluster deletion, but clean up
-# any leftovers just in case.
-kubectl config delete-context "$(kubectl config current-context)" 2>/dev/null || true
-
 rm "$STATE_FILE"
 
 echo ""
