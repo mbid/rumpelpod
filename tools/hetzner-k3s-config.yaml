@@ -34,7 +34,7 @@ networking:
     mode: flannel
 
 image: ubuntu-24.04
-schedule_workloads_on_masters: false
+schedule_workloads_on_masters: true
 protect_against_deletion: false
 
 # Single master, cx33: 4 shared vCPU, 8 GB RAM (~5.49 EUR/month).

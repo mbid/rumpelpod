@@ -46,9 +46,14 @@ hetzner-k3s create --config "$STATE_DIR/config.yaml"
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 
-# Deploy an in-cluster container registry (ClusterIP only, not exposed
-# publicly).  Tests push via kubectl port-forward; pods pull via the
-# cluster-internal DNS name.
+# Tell containerd to use plain HTTP for the in-cluster registry.
+# Without this, image pulls fail because containerd defaults to HTTPS.
+MASTER_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+ssh -o StrictHostKeyChecking=no "root@${MASTER_IP}" bash -s <<'REGISTRIES'
+# Deploy an in-cluster container registry.  The pod uses hostPort so
+# containerd on the node can pull via localhost:5000.  Tests push via
+# kubectl port-forward to the service; pods pull via the cluster-internal
+# DNS name, which the registries.yaml mirror redirects to localhost:5000.
 echo "==> Deploying in-cluster container registry..."
 kubectl apply -f - <<'MANIFEST'
 apiVersion: v1
@@ -74,12 +79,12 @@ spec:
       # Run on the master so the registry is always available, even when
       # all worker nodes have scaled to zero.
       tolerations:
+        - key: CriticalAddonsOnly
+          operator: Exists
         - key: node-role.kubernetes.io/control-plane
           operator: Exists
-          effect: NoSchedule
         - key: node-role.kubernetes.io/master
           operator: Exists
-          effect: NoSchedule
       nodeSelector:
         node-role.kubernetes.io/control-plane: "true"
       containers:
@@ -87,6 +92,7 @@ spec:
           image: registry:2
           ports:
             - containerPort: 5000
+              hostPort: 5000
           volumeMounts:
             - name: data
               mountPath: /var/lib/registry
@@ -107,7 +113,25 @@ spec:
       targetPort: 5000
 MANIFEST
 
-kubectl -n registry rollout status deployment/registry --timeout=60s
+kubectl -n registry rollout status deployment/registry --timeout=120s
+
+# Tell containerd to pull from the registry pod via localhost:5000 (hostPort)
+# when a pod spec references the cluster-internal DNS name.  Without this,
+# containerd tries HTTPS and fails.
+MASTER_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+echo "==> Configuring containerd registry mirror on ${MASTER_IP}..."
+ssh -o StrictHostKeyChecking=no "root@${MASTER_IP}" bash -s <<'REGISTRIES'
+cat > /etc/rancher/k3s/registries.yaml <<'EOF'
+mirrors:
+  "registry.registry.svc.cluster.local:5000":
+    endpoint:
+      - "http://localhost:5000"
+EOF
+systemctl restart k3s
+REGISTRIES
+
+echo "==> Waiting for node to rejoin after k3s restart..."
+kubectl wait --for=condition=Ready node --all --timeout=60s
 
 # Persist just enough state for deprovision to work.
 cat > "$STATE_DIR/state" <<EOF
@@ -140,13 +164,20 @@ echo "       effect: NoSchedule"
 echo ""
 echo " Privileged containers work out of the box."
 echo ""
-echo " In-cluster registry (ClusterIP, not public):"
+echo " In-cluster registry (hostPort on master, not public):"
 echo "   Push:  kubectl -n registry port-forward svc/registry 5000:5000 &"
-echo "          docker push localhost:5000/IMAGE:TAG"
-echo "   Pull (from inside cluster): registry.registry.svc.cluster.local:5000/IMAGE:TAG"
+echo "          docker push localhost:5000/REPO/IMAGE:TAG"
+echo "   Pull (from inside cluster): registry.registry.svc.cluster.local:5000/REPO/IMAGE:TAG"
 echo ""
 echo " Usage:"
 echo "   export KUBECONFIG=$KUBECONFIG_PATH"
+echo ""
+echo " To run k8s integration tests:"
+echo "   kubectl -n registry port-forward svc/registry 5000:5000 &"
+echo "   export RUMPELPOD_TEST_K8S_CONTEXT=${KUBE_CONTEXT:-<see kubeconfig>}"
+echo "   export RUMPELPOD_TEST_PUSH_REGISTRY=localhost:5000/rumpelpod"
+echo "   export RUMPELPOD_TEST_PULL_REGISTRY=registry.registry.svc.cluster.local:5000/rumpelpod"
+echo "   cargo xtest -- k8s --ignored"
 echo ""
 echo " State saved to  : $STATE_DIR"
 echo " To deprovision  : deprovision-hetzner-k3s"
