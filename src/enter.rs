@@ -20,6 +20,11 @@ use crate::devcontainer::{
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
 
+/// Image used when a project has no devcontainer.json.
+///
+/// Built from default-image/Dockerfile in this repository.
+pub const DEFAULT_IMAGE: &str = "ghcr.io/mbid/rumpelpod/default:bookworm";
+
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
 fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
@@ -142,10 +147,11 @@ pub fn load_and_resolve(
         .unwrap_or_else(|| (DevContainer::default(), repo_root.to_path_buf()));
 
     if devcontainer.image.is_none() && !devcontainer.has_build() {
-        return Err(anyhow::anyhow!(
-            "No image or build specified.\n\
-             Please set image or build.dockerfile in devcontainer.json."
-        ));
+        eprintln!(
+            "warning: no image or build configured, using default image '{}'",
+            DEFAULT_IMAGE,
+        );
+        devcontainer.image = Some(DEFAULT_IMAGE.to_string());
     }
 
     devcontainer.resolve_build_paths(&devcontainer_dir, repo_root);

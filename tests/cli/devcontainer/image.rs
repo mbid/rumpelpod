@@ -475,6 +475,25 @@ fn image_fetch_errors_on_build_config() {
     );
 }
 
+// ---- default image tests ----
+
+#[test]
+fn no_devcontainer_uses_default_image() {
+    let repo = TestRepo::new();
+    // No devcontainer.json written -- should fall back to the default image.
+
+    let output = rumpel_cmd(&repo)
+        .args(["image", "build"])
+        .output()
+        .expect("failed to run rumpel");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no image or build configured, using default image"),
+        "expected default-image warning, got: {stderr}",
+    );
+}
+
 // ---- streaming build output tests ----
 
 #[test]
