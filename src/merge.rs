@@ -104,7 +104,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
             "warning: nothing to merge -- host is already up to date with pod '{}'",
             cmd.name
         );
-        client.stop_pod(PodName(cmd.name.clone()), repo_root)?;
+        client.stop_pod(PodName(cmd.name.clone()), repo_root, false)?;
         return Ok(());
     }
 
@@ -128,7 +128,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
     }
 
     // 6. Stop pod unconditionally
-    client.stop_pod(PodName(cmd.name.clone()), repo_root)?;
+    client.stop_pod(PodName(cmd.name.clone()), repo_root, false)?;
 
     // 7. Propagate merge failure
     if merge_failed {

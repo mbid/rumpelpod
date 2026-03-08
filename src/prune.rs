@@ -15,6 +15,7 @@ fn is_prunable(status: &PodStatus) -> bool {
         PodStatus::Broken => true,
         PodStatus::Running => false,
         PodStatus::Disconnected => false,
+        PodStatus::Stopping => false,
         PodStatus::Deleting => false,
     }
 }

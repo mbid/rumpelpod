@@ -486,7 +486,13 @@ fn no_devcontainer_enters_with_default_image() {
     let daemon = TestDaemon::start();
 
     let output = pod_command(&repo, &daemon)
-        .args(["enter", "default-image-test", "--", "echo", "hello from default"])
+        .args([
+            "enter",
+            "default-image-test",
+            "--",
+            "echo",
+            "hello from default",
+        ])
         .output()
         .expect("rumpel enter failed");
 

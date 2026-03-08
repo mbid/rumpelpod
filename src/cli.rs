@@ -299,6 +299,10 @@ pub struct StopCommand {
     /// Name of the pod to stop
     #[arg(help = "Name of the pod to stop", value_parser = validate_pod_name)]
     pub name: String,
+
+    /// Block until the container is fully stopped
+    #[arg(long)]
+    pub wait: bool,
 }
 
 #[derive(Args)]

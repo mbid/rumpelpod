@@ -72,6 +72,8 @@ pub enum PodStatus {
     Gone,
     /// Remote pod where we don't have a connection to check actual status
     Disconnected,
+    /// Container is being stopped in the background
+    Stopping,
     /// Container is being deleted in the background
     Deleting,
     /// Background deletion failed after all retries
@@ -149,6 +151,7 @@ pub struct PodLaunchResponse {
 struct StopPodRequest {
     pod_name: PodName,
     repo_path: PathBuf,
+    wait: bool,
 }
 
 /// Response body for stop_pod endpoint.
@@ -311,8 +314,9 @@ pub trait Daemon: Send + Sync + 'static {
     fn recreate_pod(&self, params: PodLaunchParams) -> Result<Self::Progress>;
 
     // POST /pod/stop
-    // Stops a pod container without removing it.
-    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()>;
+    // Stops a pod container without removing it.  When wait is true, blocks
+    // until the container is fully stopped; otherwise returns immediately.
+    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()>;
 
     // DELETE /pod
     // Stops and removes a pod container.  When wait is true, blocks until the
@@ -565,11 +569,12 @@ impl Daemon for DaemonClient {
         Ok(ClientLaunchProgress::new(response))
     }
 
-    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
+    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let url = self.url.join("/pod/stop")?;
         let request = StopPodRequest {
             pod_name,
             repo_path,
+            wait,
         };
 
         let response = self
@@ -887,7 +892,8 @@ async fn stop_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<StopPodRequest>,
 ) -> Result<Json<StopPodResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.stop_pod(request.pod_name, request.repo_path));
+    let result =
+        block_in_place(|| daemon.stop_pod(request.pod_name, request.repo_path, request.wait));
 
     match result {
         Ok(()) => Ok(Json(StopPodResponse { stopped: true })),

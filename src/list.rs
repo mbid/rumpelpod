@@ -39,6 +39,7 @@ pub fn list() -> Result<()> {
             PodStatus::Stopped => "stopped",
             PodStatus::Gone => "gone",
             PodStatus::Disconnected => "disconnected",
+            PodStatus::Stopping => "stopping",
             PodStatus::Deleting => "deleting",
             PodStatus::Broken => "broken",
         };

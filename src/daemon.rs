@@ -1102,6 +1102,54 @@ fn get_container_status_via_socket(
     Ok(status_map)
 }
 
+/// Stop a Docker container by name, connecting to the right host.
+/// Returns Ok if the container was stopped or already stopped/gone (304/404).
+fn try_stop_container(
+    ssh_forward: &SshForwardManager,
+    host_str: &Option<String>,
+    container_name: &str,
+) -> Result<()> {
+    use bollard::errors::Error as BollardError;
+
+    let socket_path = if let Some(host) = host_str {
+        let host = serde_json::from_str::<Host>(host)?;
+        match &host {
+            Host::Ssh { .. } => ssh_forward.get_socket(&host)?,
+            Host::Localhost => default_docker_socket(),
+            Host::Kubernetes { .. } => {
+                return Err(anyhow::anyhow!(
+                    "try_stop_container called for Kubernetes host"
+                ));
+            }
+        }
+    } else {
+        default_docker_socket()
+    };
+    let docker = Docker::connect_with_socket(
+        socket_path.to_string_lossy().as_ref(),
+        120,
+        bollard::API_DEFAULT_VERSION,
+    )
+    .context("connecting to Docker daemon")?;
+
+    let stop_options = StopContainerOptions {
+        t: Some(0),
+        ..Default::default()
+    };
+    match block_on(docker.stop_container(container_name, Some(stop_options))) {
+        Ok(()) => Ok(()),
+        // Already stopped
+        Err(BollardError::DockerResponseServerError {
+            status_code: 304, ..
+        }) => Ok(()),
+        // Already gone
+        Err(BollardError::DockerResponseServerError {
+            status_code: 404, ..
+        }) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("docker stop failed: {}", e)),
+    }
+}
+
 /// Stop and remove a Docker container by name, connecting to the right host.
 /// Returns Ok if the container was removed or already gone (404).
 fn try_remove_container(
@@ -2981,6 +3029,19 @@ impl DaemonServer {
             Host::Kubernetes { .. } => unreachable!(),
         };
 
+        // Wait for any in-progress background stop to finish so we don't
+        // race against it when trying to (re)start the container.
+        for _ in 0..50 {
+            let conn = self.db.lock().unwrap();
+            let is_stopping = db::get_pod(&conn, &repo_path, &pod_name.0)?
+                .is_some_and(|r| r.status == db::PodStatus::Stopping);
+            drop(conn);
+            if !is_stopping {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
         // TODO: There's a potential race condition between inspect and
         // start/run. Another process could stop/remove the container after we
         // inspect it. For robustness, we'd need to retry on specific failures,
@@ -3638,53 +3699,49 @@ impl Daemon for DaemonServer {
         })
     }
 
-    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf) -> Result<()> {
-        // Check if this is a k8s pod
-        {
-            let conn = self.db.lock().unwrap();
-            if let Some(record) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
-                let host = serde_json::from_str::<Host>(&record.host)?;
-                if let Host::Kubernetes { .. } = &host {
-                    return Err(anyhow::anyhow!(
-                        "Kubernetes pods cannot be stopped. \
-                         Use 'rumpel delete {}' instead.",
-                        pod_name.0
-                    ));
-                }
+    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
+        let conn = self.db.lock().unwrap();
+        let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
+
+        // Reject k8s pods
+        if let Some(ref record) = pod_record {
+            let host = serde_json::from_str::<Host>(&record.host)?;
+            if let Host::Kubernetes { .. } = &host {
+                return Err(anyhow::anyhow!(
+                    "Kubernetes pods cannot be stopped. \
+                     Use 'rumpel delete {}' instead.",
+                    pod_name.0
+                ));
             }
+            db::update_pod_status(&conn, record.id, db::PodStatus::Stopping)?;
         }
+        let host_str = pod_record.map(|r| r.host);
+        drop(conn);
 
-        let name = docker_name(&repo_path, &pod_name);
+        let container_name = docker_name(&repo_path, &pod_name);
 
-        // Determine Docker socket from DB record
-        let docker_socket = {
+        if wait {
+            let result = try_stop_container(&self.ssh_forward, &host_str, &container_name);
             let conn = self.db.lock().unwrap();
-            match db::get_pod(&conn, &repo_path, &pod_name.0)? {
-                Some(record) => {
-                    let host = serde_json::from_str::<Host>(&record.host)?;
-                    match &host {
-                        Host::Ssh { .. } => self.ssh_forward.get_socket(&host)?,
-                        Host::Localhost => default_docker_socket(),
-                        Host::Kubernetes { .. } => unreachable!(),
-                    }
-                }
-                None => default_docker_socket(),
+            if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
+                let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
             }
-        };
-
-        let docker = Docker::connect_with_socket(
-            docker_socket.to_string_lossy().as_ref(),
-            120,
-            bollard::API_DEFAULT_VERSION,
-        )
-        .context("connecting to Docker daemon")?;
-
-        let stop_options = bollard::query_parameters::StopContainerOptions {
-            t: Some(0),
-            ..Default::default()
-        };
-        block_on(docker.stop_container(&name, Some(stop_options)))
-            .with_context(|| format!("stopping container '{}'", name))?;
+            result?;
+        } else {
+            let db = self.db.clone();
+            let ssh_forward = self.ssh_forward.clone();
+            let repo_path = repo_path.clone();
+            let pod_name = pod_name.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = try_stop_container(&ssh_forward, &host_str, &container_name) {
+                    error!("failed to stop pod '{}': {}", pod_name.0, e);
+                }
+                let conn = db.lock().unwrap();
+                if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
+                    let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
+                }
+            });
+        }
 
         Ok(())
     }
@@ -3873,6 +3930,7 @@ impl Daemon for DaemonServer {
                 let cache_key = format!("{}/{}", pod.host, k8s_name);
                 let k8s_status = k8s_status_cache.get(&cache_key).and_then(|s| s.clone());
                 let status = match pod.status {
+                    db::PodStatus::Stopping => PodStatus::Stopping,
                     db::PodStatus::Deleting => PodStatus::Deleting,
                     db::PodStatus::DeleteFailed => PodStatus::Broken,
                     _ => k8s_status.unwrap_or(PodStatus::Disconnected),
@@ -3889,6 +3947,7 @@ impl Daemon for DaemonServer {
                 };
 
                 let status = match pod.status {
+                    db::PodStatus::Stopping => PodStatus::Stopping,
                     db::PodStatus::Deleting => PodStatus::Deleting,
                     db::PodStatus::DeleteFailed => PodStatus::Broken,
                     _ => match container_info {
@@ -3906,7 +3965,9 @@ impl Daemon for DaemonServer {
                                     db::PodStatus::Initializing | db::PodStatus::Error => {
                                         PodStatus::Stopped
                                     }
-                                    db::PodStatus::Deleting | db::PodStatus::DeleteFailed => {
+                                    db::PodStatus::Stopping
+                                    | db::PodStatus::Deleting
+                                    | db::PodStatus::DeleteFailed => {
                                         unreachable!()
                                     }
                                 }

@@ -54,6 +54,8 @@ pub enum PodStatus {
     Ready,
     /// Pod initialization failed
     Error,
+    /// Pod container is being stopped in the background
+    Stopping,
     /// Pod container is being deleted in the background
     Deleting,
     /// Background deletion failed after all retries
@@ -66,6 +68,7 @@ impl PodStatus {
             PodStatus::Initializing => "initializing",
             PodStatus::Ready => "ready",
             PodStatus::Error => "error",
+            PodStatus::Stopping => "stopping",
             PodStatus::Deleting => "deleting",
             PodStatus::DeleteFailed => "delete_failed",
         }
@@ -76,6 +79,7 @@ impl PodStatus {
             "initializing" => Some(PodStatus::Initializing),
             "ready" => Some(PodStatus::Ready),
             "error" => Some(PodStatus::Error),
+            "stopping" => Some(PodStatus::Stopping),
             "deleting" => Some(PodStatus::Deleting),
             "delete_failed" => Some(PodStatus::DeleteFailed),
             _ => None,
