@@ -28,6 +28,8 @@ mod merge;
 mod network;
 #[path = "cli/prune.rs"]
 mod prune;
+#[path = "cli/recreate.rs"]
+mod recreate;
 #[path = "cli/review.rs"]
 mod review;
 #[path = "cli/ssh/mod.rs"]

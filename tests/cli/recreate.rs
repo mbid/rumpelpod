@@ -1,8 +1,6 @@
-//! Integration tests for the `rumpel recreate` subcommand. subcommand.
+//! Integration tests for the `rumpel recreate` subcommand.
 
-use crate::common::{
-    build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo,
-};
+use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
 use rumpelpod::CommandExt;
 
 #[test]
