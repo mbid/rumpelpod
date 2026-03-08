@@ -478,16 +478,17 @@ fn image_fetch_errors_on_build_config() {
 // ---- default image tests ----
 
 #[test]
-fn no_devcontainer_builds_default_image() {
+fn no_devcontainer_enters_with_default_image() {
     let repo = TestRepo::new();
-    // No devcontainer.json written -- should build the default image.
+    write_minimal_pod_toml(&repo);
+    // No devcontainer.json -- should build the default image and enter.
 
-    let output = rumpel_cmd(&repo)
-        .args(["image", "build"])
+    let daemon = TestDaemon::start();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "default-image-test", "--", "echo", "hello from default"])
         .output()
-        .expect("failed to run rumpel");
-
-    assert!(output.status.success(), "image build should succeed");
+        .expect("rumpel enter failed");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -495,11 +496,10 @@ fn no_devcontainer_builds_default_image() {
         "expected default-image warning, got: {stderr}",
     );
 
+    assert!(output.status.success(), "enter failed, stderr: {stderr}");
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Image built:"),
-        "expected 'Image built:' in output, got: {stdout}",
-    );
+    assert_eq!(stdout.trim(), "hello from default");
 }
 
 // ---- streaming build output tests ----

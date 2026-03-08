@@ -38,6 +38,10 @@ const DEFAULT_DOCKERFILE: &str = indoc::indoc! {"
             vim \
             wget \
      && rm -rf /var/lib/apt/lists/*
+
+    RUN useradd -m -s /bin/bash user \
+     && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user
+    USER user
 "};
 
 /// Compute the path relative from `base` to `path`.
