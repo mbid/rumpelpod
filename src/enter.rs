@@ -14,16 +14,16 @@ use crate::daemon::protocol::{
     Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
 };
 use crate::devcontainer::{
-    shell_escape, DevContainer, GpuRequirement, HostRequirements, MountType, SubstitutionContext,
-    UserEnvProbe,
+    shell_escape, BuildOptions, DevContainer, GpuRequirement, HostRequirements, MountType,
+    SubstitutionContext, UserEnvProbe,
 };
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
 
-/// Image used when a project has no devcontainer.json.
+/// Dockerfile used when a project has no devcontainer.json.
 ///
-/// Built from default-image/Dockerfile in this repository.
-pub const DEFAULT_IMAGE: &str = "ghcr.io/mbid/rumpelpod/default:bookworm";
+/// Kept in sync with default-image/Dockerfile.
+const DEFAULT_DOCKERFILE: &str = include_str!("../default-image/Dockerfile");
 
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
@@ -115,11 +115,12 @@ fn check_host_requirements(requirements: &HostRequirements, docker_host: &Host) 
 /// Load devcontainer.json, validate it, and prepare it for the daemon.
 ///
 /// Resolves `${localEnv:...}` and normalizes build paths to repo-root-relative.
-/// Returns the DevContainer and the parsed Host.
+/// Returns the DevContainer, parsed Host, and an optional TempDir that holds the
+/// default Dockerfile (must be kept alive until the build completes).
 pub fn load_and_resolve(
     repo_root: &Path,
     host_override: Option<Host>,
-) -> Result<(DevContainer, Host)> {
+) -> Result<(DevContainer, Host, Option<tempfile::TempDir>)> {
     let toml_config = load_toml_config(repo_root)?;
     let docker_host = if let Some(h) = host_override {
         h
@@ -146,15 +147,21 @@ pub fn load_and_resolve(
         })
         .unwrap_or_else(|| (DevContainer::default(), repo_root.to_path_buf()));
 
-    if devcontainer.image.is_none() && !devcontainer.has_build() {
-        eprintln!(
-            "warning: no image or build configured, using default image '{}'",
-            DEFAULT_IMAGE,
-        );
-        devcontainer.image = Some(DEFAULT_IMAGE.to_string());
-    }
-
-    devcontainer.resolve_build_paths(&devcontainer_dir, repo_root);
+    let default_image_dir = if devcontainer.image.is_none() && !devcontainer.has_build() {
+        let dir = write_default_dockerfile()?;
+        eprintln!("warning: no image or build configured, building default image");
+        let dockerfile = dir.path().join("Dockerfile").to_string_lossy().to_string();
+        let context = dir.path().to_string_lossy().to_string();
+        devcontainer.build = Some(BuildOptions {
+            dockerfile: Some(dockerfile),
+            context: Some(context),
+            ..Default::default()
+        });
+        Some(dir)
+    } else {
+        devcontainer.resolve_build_paths(&devcontainer_dir, repo_root);
+        None
+    };
 
     // Resolve ${localEnv:...} before sending to the daemon, since the daemon
     // does not have access to the calling user's environment variables.
@@ -167,7 +174,15 @@ pub fn load_and_resolve(
         check_host_requirements(requirements, &docker_host);
     }
 
-    Ok((devcontainer, docker_host))
+    Ok((devcontainer, docker_host, default_image_dir))
+}
+
+/// Write the embedded default Dockerfile to a temporary directory.
+fn write_default_dockerfile() -> Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir().context("creating temp dir for default Dockerfile")?;
+    std::fs::write(dir.path().join("Dockerfile"), DEFAULT_DOCKERFILE)
+        .context("writing default Dockerfile")?;
+    Ok(dir)
 }
 
 /// Launch a pod and return the container ID and user.
@@ -175,7 +190,8 @@ pub fn load_and_resolve(
 pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
     let t = Instant::now();
     let repo_root = get_repo_root()?;
-    let (devcontainer, docker_host) = load_and_resolve(&repo_root, host_override)?;
+    let (devcontainer, docker_host, _default_image_dir) =
+        load_and_resolve(&repo_root, host_override)?;
     trace!("launch_pod config: {:?}", t.elapsed());
 
     // Reject bind mounts early for remote Docker
@@ -302,7 +318,8 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let host_override = cmd.host_args.resolve()?;
 
     let t = Instant::now();
-    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, host_override.clone())?;
+    let (devcontainer, _docker_host, _default_image_dir) =
+        load_and_resolve(&repo_root, host_override.clone())?;
     trace!("load_and_resolve: {:?}", t.elapsed());
 
     let container_repo_path = devcontainer.container_repo_path(&repo_root);

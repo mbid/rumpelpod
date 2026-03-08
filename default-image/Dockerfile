@@ -1,4 +1,4 @@
-FROM debian:bookworm-slim
+FROM debian:testing
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -11,6 +11,6 @@ RUN apt-get update \
         screen \
         sudo \
         unzip \
-        vim-tiny \
+        vim \
         wget \
  && rm -rf /var/lib/apt/lists/*

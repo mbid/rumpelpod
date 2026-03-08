@@ -106,7 +106,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     let t = Instant::now();
     let toml_config = load_toml_config(&repo_root)?;
-    let (devcontainer, _docker_host) = load_and_resolve(&repo_root, host_override.clone())?;
+    let (devcontainer, _docker_host, _default_image_dir) =
+        load_and_resolve(&repo_root, host_override.clone())?;
     trace!("load_and_resolve: {:?}", t.elapsed());
 
     // CLI --no-dangerously-skip-permissions wins over the toml setting.

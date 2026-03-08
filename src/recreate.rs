@@ -10,7 +10,8 @@ use crate::image::OutputLine;
 pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
-    let (devcontainer, docker_host) = load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
+    let (devcontainer, docker_host, _default_image_dir) =
+        load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
 
     let host_branch = get_current_branch(&repo_root);
     let git_identity = get_git_user_config(&repo_root);

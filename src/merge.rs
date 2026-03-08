@@ -12,7 +12,7 @@ use crate::git::get_repo_root;
 /// Prints a warning to stderr if the working tree is dirty.
 fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<()> {
     let result = enter::launch_pod(pod_name, None)?;
-    let (devcontainer, _) = enter::load_and_resolve(repo_root, None)?;
+    let (devcontainer, _, _default_image_dir) = enter::load_and_resolve(repo_root, None)?;
     let container_repo_path = devcontainer.container_repo_path(repo_root);
 
     let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;

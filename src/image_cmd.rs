@@ -10,7 +10,8 @@ use crate::image::{self, BuildFlags};
 
 pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
-    let (devcontainer, docker_host) = load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
+    let (devcontainer, docker_host, _default_image_dir) =
+        load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
 
     let build_opts = match &devcontainer.build {
         Some(b) => b,
@@ -64,7 +65,8 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
 
 pub fn fetch(cmd: &ImageFetchCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
-    let (devcontainer, docker_host) = load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
+    let (devcontainer, docker_host, _default_image_dir) =
+        load_and_resolve(&repo_root, cmd.host_args.resolve()?)?;
 
     if devcontainer.build.is_some() {
         return Err(anyhow::anyhow!(

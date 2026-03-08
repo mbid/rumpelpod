@@ -478,19 +478,27 @@ fn image_fetch_errors_on_build_config() {
 // ---- default image tests ----
 
 #[test]
-fn no_devcontainer_uses_default_image() {
+fn no_devcontainer_builds_default_image() {
     let repo = TestRepo::new();
-    // No devcontainer.json written -- should fall back to the default image.
+    // No devcontainer.json written -- should build the default image.
 
     let output = rumpel_cmd(&repo)
         .args(["image", "build"])
         .output()
         .expect("failed to run rumpel");
 
+    assert!(output.status.success(), "image build should succeed");
+
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("no image or build configured, using default image"),
+        stderr.contains("no image or build configured, building default image"),
         "expected default-image warning, got: {stderr}",
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Image built:"),
+        "expected 'Image built:' in output, got: {stdout}",
     );
 }
 

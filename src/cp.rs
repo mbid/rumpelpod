@@ -77,7 +77,7 @@ fn resolve_container_path(container_path: &str, container_repo_path: &Path) -> S
 
 fn container_repo_path() -> Result<PathBuf> {
     let repo_root = get_repo_root()?;
-    let (devcontainer, _) = enter::load_and_resolve(&repo_root, None)?;
+    let (devcontainer, _, _default_image_dir) = enter::load_and_resolve(&repo_root, None)?;
     Ok(devcontainer.container_repo_path(&repo_root))
 }
 
