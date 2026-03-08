@@ -4,13 +4,13 @@ use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use rumpelpod::CommandExt;
 
 use crate::common::{
-    build_docker_image, build_test_image, build_test_image_without_user, pod_command,
-    write_test_pod_config, write_test_pod_config_with_user, DockerBuild, TestDaemon, TestRepo,
-    TEST_REPO_PATH, TEST_USER, TEST_USER_UID,
+    build_docker_image, build_test_image, pod_command, write_test_pod_config,
+    write_test_pod_config_with_user, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+    TEST_USER_UID,
 };
 
 #[test]
@@ -245,61 +245,65 @@ fn enter_uses_image_user_when_not_specified_in_config() {
 }
 
 #[test]
-fn enter_fails_when_image_has_no_user_and_config_omits_user() {
+fn enter_falls_back_to_root_when_image_has_no_user() {
     // When neither the config nor the image specifies a user, the pod
-    // should fail with an error about requiring a non-root user.
+    // should fall back to root (matching VS Code devcontainer behavior).
     let repo = TestRepo::new();
-    // Build an image WITHOUT the USER directive
-    let image_id =
-        build_test_image_without_user(repo.path(), "").expect("Failed to build test image");
+    let image_id = crate::common::build_docker_image(crate::common::DockerBuild {
+        dockerfile: formatdoc! {"
+            FROM debian:13
+            RUN apt-get update && apt-get install -y git
+            COPY . {TEST_REPO_PATH}
+        "},
+        build_context: Some(repo.path().to_path_buf()),
+    })
+    .expect("Failed to build test image");
     write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    let output = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "no-user-test", "--", "whoami"])
-        .output()
-        .expect("Failed to run pod command");
+        .success()
+        .expect("rumpel enter failed");
 
-    assert!(
-        !output.status.success(),
-        "rumpel enter should fail when no user is specified"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("no USER directive") || stderr.contains("non-root user"),
-        "Error should mention missing USER directive or non-root user requirement: {}",
-        stderr
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "root",
+        "Should fall back to root when no user is specified"
     );
 }
 
 #[test]
-fn enter_fails_when_image_has_root_user_and_config_omits_user() {
+fn enter_falls_back_to_root_when_image_user_is_root() {
     // When the image explicitly sets USER to root and the config doesn't
-    // specify a user, the pod should fail.
+    // specify a user, the pod should use root.
     let repo = TestRepo::new();
-    let image_id = build_test_image_without_user(repo.path(), "USER root")
-        .expect("Failed to build test image");
+    let image_id = crate::common::build_docker_image(crate::common::DockerBuild {
+        dockerfile: formatdoc! {"
+            FROM debian:13
+            RUN apt-get update && apt-get install -y git
+            COPY . {TEST_REPO_PATH}
+            USER root
+        "},
+        build_context: Some(repo.path().to_path_buf()),
+    })
+    .expect("Failed to build test image");
     write_test_pod_config(&repo, &image_id);
 
     let daemon = TestDaemon::start();
 
-    let output = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "root-user-test", "--", "whoami"])
-        .output()
-        .expect("Failed to run pod command");
+        .success()
+        .expect("rumpel enter failed");
 
-    assert!(
-        !output.status.success(),
-        "rumpel enter should fail when image USER is root"
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("root") && stderr.contains("non-root user"),
-        "Error should mention root user and non-root requirement: {}",
-        stderr
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(
+        stdout.trim(),
+        "root",
+        "Should use root when image USER is root"
     );
 }
 
@@ -310,12 +314,11 @@ fn enter_allows_explicit_root_user_in_config() {
     let repo = TestRepo::new();
     // Build an image where root owns the repo (COPY without --chown defaults to root)
     let image_id = crate::common::build_docker_image(crate::common::DockerBuild {
-        dockerfile: format!(
-            "FROM debian:13\n\
-             RUN apt-get update && apt-get install -y git\n\
-             COPY . {}\n",
-            TEST_REPO_PATH
-        ),
+        dockerfile: formatdoc! {"
+            FROM debian:13
+            RUN apt-get update && apt-get install -y git
+            COPY . {TEST_REPO_PATH}
+        "},
         build_context: Some(repo.path().to_path_buf()),
     })
     .expect("Failed to build test image");

@@ -353,8 +353,7 @@ fn get_image_architecture(docker: &Docker, image: &str) -> Result<Option<Contain
 /// Resolve the user for a pod.
 ///
 /// If `user` is provided, it is used directly.
-/// Otherwise, the image's USER directive is used.
-/// Returns an error if no user is specified and the image has no USER or uses root.
+/// Otherwise, the image's USER directive is used, falling back to "root".
 fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<String> {
     if let Some(user) = user {
         return Ok(user);
@@ -363,24 +362,8 @@ fn resolve_user(docker: &Docker, user: Option<String>, image: &str) -> Result<St
     let image_user = get_image_user(docker, image)?;
 
     match image_user {
-        Some(user) if user != "root" && !user.starts_with("0:") && user != "0" => Ok(user),
-        Some(user) => {
-            Err(anyhow::anyhow!(
-                "Image '{}' has USER set to '{}' (root). \
-                 For security, pods must run as a non-root user.\n\
-                 Either set 'containerUser' in devcontainer.json, or change the image's USER directive.",
-                image,
-                user
-            ))
-        }
-        None => {
-            Err(anyhow::anyhow!(
-                "Image '{}' has no USER directive (defaults to root). \
-                 For security, pods must run as a non-root user.\n\
-                 Either set 'containerUser' in devcontainer.json, or add a USER directive to the Dockerfile.",
-                image
-            ))
-        }
+        Some(user) if !user.is_empty() => Ok(user),
+        _ => Ok("root".to_string()),
     }
 }
 
@@ -2225,13 +2208,7 @@ impl DaemonServer {
             _ => unreachable!("launch_pod_k8s called with non-Kubernetes host"),
         };
 
-        let user = devcontainer
-            .user()
-            .context(
-                "containerUser is required for Kubernetes hosts \
-                 because we cannot inspect the remote image",
-            )?
-            .to_string();
+        let user = devcontainer.user().unwrap_or("root").to_string();
 
         let container_repo_path = devcontainer.container_repo_path(repo_path);
 
