@@ -36,8 +36,7 @@ const DEFAULT_DOCKERFILE: &str = indoc::indoc! {"
             sudo \
             unzip \
             vim \
-            wget \
-     && rm -rf /var/lib/apt/lists/*
+            wget
 
     RUN useradd -m -s /bin/bash user \
      && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user
