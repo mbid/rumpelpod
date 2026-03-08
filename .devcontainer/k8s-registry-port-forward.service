@@ -1,0 +1,16 @@
+[Unit]
+Description=kubectl port-forward to in-cluster container registry
+# Only start if a kubeconfig was injected by the entrypoint.
+ConditionPathExists=/home/dev/.kube/config
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dev
+ExecStart=/usr/bin/kubectl -n registry port-forward svc/registry 5000:5000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

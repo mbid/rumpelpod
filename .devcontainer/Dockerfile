@@ -143,4 +143,8 @@ RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\n
     > /etc/systemd/system/preload-images.service \
     && systemctl enable preload-images.service
 
-ENTRYPOINT ["/sbin/init"]
+COPY entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
+COPY k8s-registry-port-forward.service /etc/systemd/system/
+RUN systemctl enable k8s-registry-port-forward.service
+
+ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]
