@@ -21,9 +21,24 @@ use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
 
 /// Dockerfile used when a project has no devcontainer.json.
-///
-/// Kept in sync with default-image/Dockerfile.
-const DEFAULT_DOCKERFILE: &str = include_str!("../default-image/Dockerfile");
+const DEFAULT_DOCKERFILE: &str = indoc::indoc! {"
+    FROM debian:testing
+
+    RUN apt-get update \
+     && apt-get install -y --no-install-recommends \
+            ca-certificates \
+            curl \
+            git \
+            jq \
+            less \
+            openssh-client \
+            screen \
+            sudo \
+            unzip \
+            vim \
+            wget \
+     && rm -rf /var/lib/apt/lists/*
+"};
 
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
