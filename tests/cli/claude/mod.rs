@@ -8,3 +8,4 @@ pub(super) mod common;
 pub(super) mod proxy;
 
 mod smoke;
+mod tool_use;
