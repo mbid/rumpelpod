@@ -1399,6 +1399,72 @@ fn copy_claude_history_via_pod(
     Ok(())
 }
 
+/// Snapshot ~/.claude/ and ~/.claude.json from a running container.
+///
+/// Returns the tar archive bytes (rooted at $HOME), or None if neither
+/// exists.  Used by recreate to preserve conversation history across
+/// container resets -- ensure_claude_config layers fresh auth on top
+/// afterwards.
+///
+/// Determines the home directory by looking up the owner of the repo
+/// in /etc/passwd, so this works regardless of whether the devcontainer
+/// config specifies an explicit user.
+fn snapshot_claude_config(pod: &PodClient, container_repo_path: &Path) -> Result<Option<Vec<u8>>> {
+    let repo_display = container_repo_path.display();
+
+    // Collect whichever of ~/.claude/ and ~/.claude.json exist into a
+    // single tar rooted at $HOME.  If neither exists, exit 1 (caught
+    // below as "nothing to snapshot").
+    let script = format!(
+        "u=$(stat -c %U '{repo_display}') && \
+         h=$(awk -F: -v u=\"$u\" '$1==u{{print $6}}' /etc/passwd) && \
+         cd \"$h\" && \
+         items='' && \
+         [ -d .claude ] && items=\"$items .claude\" ; \
+         [ -f .claude.json ] && items=\"$items .claude.json\" ; \
+         [ -n \"$items\" ] && tar -c $items || exit 1"
+    );
+
+    let result = pod.run(&["sh", "-c", &script], None, None, &[], None, Some(30))?;
+
+    if result.exit_code != 0 {
+        return Ok(None);
+    }
+
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&result.stdout)
+        .context("decoding tar output")?;
+
+    if data.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(data))
+}
+
+/// Restore a previously snapshotted ~/.claude/ and ~/.claude.json into
+/// a new container.
+fn restore_claude_config(pod: &PodClient, user: &str, tar_data: &[u8]) -> Result<()> {
+    let user_info = pod.user_info(user)?;
+    let home = &user_info.home;
+
+    let result = pod.run(
+        &["tar", "-x", "-C", home],
+        Some(user),
+        None,
+        &[],
+        Some(tar_data),
+        None,
+    )?;
+    if result.exit_code != 0 {
+        let stderr = base64_decode_lossy(&result.stderr);
+        return Err(anyhow::anyhow!("restoring claude config: {}", stderr));
+    }
+
+    Ok(())
+}
+
 /// Keep only whitelisted keys from ~/.claude.json and remap the per-project
 /// entry for `repo_path` so it appears under `container_repo_path`.
 fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) -> Vec<u8> {
@@ -3419,8 +3485,9 @@ impl DaemonServer {
             let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, repo_path);
             let client = crate::k8s::K8sClient::new(context, namespace)?;
 
-            // 1. Snapshot dirty files if the pod is running
+            // 1. Snapshot dirty files and claude config if the pod is running
             let mut patch: Option<Vec<u8>> = None;
+            let mut claude_snapshot: Option<Vec<u8>> = None;
 
             let status = client.get_pod_status(&k8s_name)?;
             if status == PodStatus::Running {
@@ -3444,6 +3511,10 @@ impl DaemonServer {
                                     snapshot_user.as_deref(),
                                 )
                                 .context("snapshotting dirty files in k8s pod")?;
+
+                            claude_snapshot =
+                                snapshot_claude_config(&old_pod, Path::new(&container_repo_path))
+                                    .context("snapshotting claude config in k8s pod")?;
                         }
                     }
                 }
@@ -3455,20 +3526,28 @@ impl DaemonServer {
             // 3. Create new pod (call impl directly to avoid nested thread)
             let launch_result = self.launch_pod_impl(params, build_tx)?;
 
-            // 4. Apply patch if we have one
-            if let Some(patch_content) = patch {
+            // 4. Restore snapshots
+            if patch.is_some() || claude_snapshot.is_some() {
                 let new_pod =
                     PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
-                let created_files =
-                    get_created_files_from_patch(&patch_content).unwrap_or_default();
-                new_pod
-                    .git_apply_patch(
-                        Path::new(&container_repo_path),
-                        &patch_content,
-                        &created_files,
-                        Some(&launch_result.user),
-                    )
-                    .context("applying snapshot patch to new k8s pod")?;
+
+                if let Some(patch_content) = patch {
+                    let created_files =
+                        get_created_files_from_patch(&patch_content).unwrap_or_default();
+                    new_pod
+                        .git_apply_patch(
+                            Path::new(&container_repo_path),
+                            &patch_content,
+                            &created_files,
+                            Some(&launch_result.user),
+                        )
+                        .context("applying snapshot patch to new k8s pod")?;
+                }
+
+                if let Some(tar_data) = claude_snapshot {
+                    restore_claude_config(&new_pod, &launch_result.user, &tar_data)
+                        .context("restoring claude config in k8s pod")?;
+                }
             }
 
             return Ok(launch_result);
@@ -3488,8 +3567,9 @@ impl DaemonServer {
         )
         .context("connecting to Docker daemon")?;
 
-        // 1. Snapshot dirty files if container exists
+        // 1. Snapshot dirty files and claude config if container exists
         let mut patch: Option<Vec<u8>> = None;
+        let mut claude_snapshot: Option<Vec<u8>> = None;
         let snapshot_user = params.devcontainer.user().map(String::from);
 
         if let Some(state) = inspect_container(&docker, &name)? {
@@ -3511,6 +3591,10 @@ impl DaemonServer {
                             patch = old_pod
                                 .git_snapshot(&container_repo_path, snapshot_user.as_deref())
                                 .context("snapshotting dirty files")?;
+
+                            claude_snapshot =
+                                snapshot_claude_config(&old_pod, &container_repo_path)
+                                    .context("snapshotting claude config")?;
                         }
                     }
                 }
@@ -3523,23 +3607,31 @@ impl DaemonServer {
         // 3. Create new pod (call impl directly to avoid nested thread)
         let launch_result = self.launch_pod_impl(params, build_tx)?;
 
-        // 4. Apply patch if we have one
-        if let Some(patch_content) = patch {
+        // 4. Restore snapshots
+        if patch.is_some() || claude_snapshot.is_some() {
             let new_pod =
                 PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
 
-            // Parse patch to identify files being created that might
-            // already exist (e.g. from image).  Best-effort.
-            let created_files = get_created_files_from_patch(&patch_content).unwrap_or_default();
+            if let Some(patch_content) = patch {
+                // Parse patch to identify files being created that might
+                // already exist (e.g. from image).  Best-effort.
+                let created_files =
+                    get_created_files_from_patch(&patch_content).unwrap_or_default();
 
-            new_pod
-                .git_apply_patch(
-                    &container_repo_path,
-                    &patch_content,
-                    &created_files,
-                    Some(&launch_result.user),
-                )
-                .context("applying snapshot patch")?;
+                new_pod
+                    .git_apply_patch(
+                        &container_repo_path,
+                        &patch_content,
+                        &created_files,
+                        Some(&launch_result.user),
+                    )
+                    .context("applying snapshot patch")?;
+            }
+
+            if let Some(tar_data) = claude_snapshot {
+                restore_claude_config(&new_pod, &launch_result.user, &tar_data)
+                    .context("restoring claude config")?;
+            }
         }
 
         Ok(launch_result)
