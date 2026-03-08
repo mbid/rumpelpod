@@ -127,6 +127,17 @@ fn merge_conflict_warns() {
         stderr
     );
 
+    // Pod should still be running after a failed merge
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "merge-conflict", "--", "true"])
+        .output()
+        .expect("Failed to enter pod");
+    assert!(
+        output.status.success(),
+        "pod should still be accessible after merge failure: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
     // Clean up the merge conflict state for repo cleanup
     Command::new("git")
         .args(["merge", "--abort"])

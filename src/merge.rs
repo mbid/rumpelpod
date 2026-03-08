@@ -119,21 +119,15 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
 
     let merge_status = merge_cmd.status().context("Failed to run git merge")?;
 
-    let merge_failed = !merge_status.success();
-    if merge_failed {
-        eprintln!(
-            "warning: git merge exited with status {}",
+    if !merge_status.success() {
+        return Err(anyhow::anyhow!(
+            "git merge exited with status {}",
             merge_status.code().unwrap_or(-1)
-        );
+        ));
     }
 
-    // 6. Stop pod unconditionally
+    // Only stop pod after successful merge
     client.stop_pod(PodName(cmd.name.clone()), repo_root, false)?;
-
-    // 7. Propagate merge failure
-    if merge_failed {
-        return Err(anyhow::anyhow!("git merge failed"));
-    }
 
     Ok(())
 }
