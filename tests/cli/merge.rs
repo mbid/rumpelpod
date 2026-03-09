@@ -194,7 +194,11 @@ fn merge_nothing_to_merge_warns() {
         .args(["enter", "merge-noop", "--", "true"])
         .output()
         .expect("Failed to re-create pod");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "re-enter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Second merge: nothing to merge
     let output = pod_command(&repo, &daemon)

@@ -146,18 +146,6 @@ impl RemoteHost {
     }
 }
 
-/// Information about remote port forwards for a connection.
-/// These are used to expose the local git HTTP server to remote containers.
-#[derive(Debug, Clone, Default)]
-pub struct RemoteForwards {
-    /// Port on remote's bridge network gateway IP forwarding to local git HTTP socket.
-    pub bridge_port: Option<u16>,
-    /// Port on remote's localhost forwarding to local git HTTP socket.
-    pub localhost_port: Option<u16>,
-    /// The remote's bridge network gateway IP.
-    pub bridge_ip: Option<String>,
-}
-
 /// An active SSH forwarding session.
 struct ForwardSession {
     /// Path to the local Unix socket for Docker.
@@ -172,8 +160,6 @@ struct ForwardSession {
     backoff: Duration,
     /// Number of consecutive failures.
     failures: u32,
-    /// Remote port forwards (for git HTTP server).
-    remote_forwards: RemoteForwards,
 }
 
 impl ForwardSession {
@@ -457,7 +443,6 @@ impl SshForwardManager {
                         last_check: Instant::now(),
                         backoff,
                         failures,
-                        remote_forwards: RemoteForwards::default(),
                     });
                 }
             }
@@ -473,135 +458,6 @@ impl SshForwardManager {
             host.port,
             timeout
         ))
-    }
-
-    /// Add a remote port forward using the SSH control socket.
-    ///
-    /// Uses `-O forward` to dynamically add a forward to an existing connection.
-    /// Returns the allocated port on the remote host.
-    fn add_remote_forward(
-        &self,
-        host: &RemoteHost,
-        control_socket: &Path,
-        remote_bind_addr: &str,
-        local_socket: &Path,
-    ) -> Result<u16> {
-        let forward_spec = format!("{}:0:{}", remote_bind_addr, local_socket.display());
-
-        debug!(
-            "Adding remote forward via control socket: -R {}",
-            forward_spec
-        );
-
-        let mut cmd = Command::new("ssh");
-
-        // Use custom config file if specified (for testing)
-        if let Ok(config_file) = std::env::var(SSH_CONFIG_FILE_ENV) {
-            cmd.args(["-F", &config_file]);
-        }
-
-        cmd.args(["-o", &format!("ControlPath={}", control_socket.display())]);
-        cmd.args(["-O", "forward"]);
-        cmd.args(["-R", &forward_spec]);
-        cmd.arg(&host.destination);
-
-        let output = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .context("Failed to execute ssh -O forward")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!(
-                "Failed to add remote forward -R {}: {}",
-                forward_spec,
-                stderr.trim()
-            ));
-        }
-
-        // Parse the allocated port from stdout
-        // Format: "Allocated port XXXXX for remote forward to /path/to/socket"
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_allocated_port(&stdout).with_context(|| {
-            format!(
-                "Failed to parse allocated port from ssh output: {}",
-                stdout.trim()
-            )
-        })
-    }
-
-    /// Set up remote port forwards for the git HTTP server.
-    ///
-    /// This forwards connections from the remote host (both bridge network IP and localhost)
-    /// to a local unix socket where the git HTTP server is listening.
-    pub fn setup_git_http_forwards(
-        &self,
-        docker_host: &Host,
-        local_git_socket: &Path,
-        remote_bridge_ip: &str,
-    ) -> Result<RemoteForwards> {
-        let host = RemoteHost::from_docker_host(docker_host);
-        let mut connections = self.connections.lock().unwrap();
-
-        let session = connections
-            .get_mut(&host)
-            .context("No SSH connection for this remote host")?;
-
-        // Check if forwards are already set up
-        if session.remote_forwards.bridge_port.is_some() {
-            debug!(
-                "Remote forwards already configured for {}",
-                host.destination
-            );
-            return Ok(session.remote_forwards.clone());
-        }
-
-        // Add forward for bridge network (containers in default network mode)
-        let bridge_port = self.add_remote_forward(
-            &host,
-            &session.control_socket,
-            remote_bridge_ip,
-            local_git_socket,
-        )?;
-        info!(
-            "Remote forward established: {}:{} -> {}",
-            remote_bridge_ip,
-            bridge_port,
-            local_git_socket.display()
-        );
-
-        // Add forward for localhost (containers in unsafe-host network mode)
-        let localhost_port = self.add_remote_forward(
-            &host,
-            &session.control_socket,
-            "127.0.0.1",
-            local_git_socket,
-        )?;
-        info!(
-            "Remote forward established: 127.0.0.1:{} -> {}",
-            localhost_port,
-            local_git_socket.display()
-        );
-
-        session.remote_forwards = RemoteForwards {
-            bridge_port: Some(bridge_port),
-            localhost_port: Some(localhost_port),
-            bridge_ip: Some(remote_bridge_ip.to_string()),
-        };
-
-        Ok(session.remote_forwards.clone())
-    }
-
-    /// Get the current remote forwards for a remote host, if any.
-    pub fn get_remote_forwards(&self, docker_host: &Host) -> Option<RemoteForwards> {
-        let host = RemoteHost::from_docker_host(docker_host);
-        let connections = self.connections.lock().unwrap();
-        connections
-            .get(&host)
-            .map(|s| s.remote_forwards.clone())
-            .filter(|f| f.bridge_port.is_some())
     }
 
     /// Add a local port forward (`-L`) through an existing SSH connection.
@@ -684,35 +540,6 @@ fn next_backoff(current: Duration) -> Duration {
     std::cmp::min(current.saturating_mul(2), MAX_DELAY)
 }
 
-/// Parse the allocated port from SSH's `-O forward` output.
-///
-/// Handles multiple SSH output formats:
-/// - "Allocated port XXXXX for remote forward to ..." (verbose format)
-/// - "XXXXX" (just the port number, some SSH versions)
-fn parse_allocated_port(output: &str) -> Option<u16> {
-    for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Try verbose format: "Allocated port XXXXX for remote forward to ..."
-        if let Some(rest) = line.strip_prefix("Allocated port ") {
-            if let Some(port_str) = rest.split_whitespace().next() {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    return Some(port);
-                }
-            }
-        }
-
-        // Try bare port number format
-        if let Ok(port) = line.parse::<u16>() {
-            return Some(port);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,41 +588,5 @@ mod tests {
 
         let delay = Duration::from_secs(60);
         assert_eq!(next_backoff(delay), Duration::from_secs(60)); // Stays at MAX_DELAY
-    }
-
-    #[test]
-    fn test_parse_allocated_port() {
-        // Standard verbose format from ssh -O forward
-        let output = "Allocated port 43567 for remote forward to /run/rumpelpod/git-http.sock\n";
-        assert_eq!(parse_allocated_port(output), Some(43567));
-
-        // Bare port number format (some SSH versions)
-        let output = "36481\n";
-        assert_eq!(parse_allocated_port(output), Some(36481));
-
-        // Bare port number without newline
-        let output = "12345";
-        assert_eq!(parse_allocated_port(output), Some(12345));
-
-        // With extra lines (verbose format)
-        let output =
-            "Some other output\nAllocated port 12345 for remote forward to /path\nMore stuff";
-        assert_eq!(parse_allocated_port(output), Some(12345));
-
-        // No match
-        let output = "Connection established\n";
-        assert_eq!(parse_allocated_port(output), None);
-
-        // Invalid port number in verbose format
-        let output = "Allocated port notaport for remote forward";
-        assert_eq!(parse_allocated_port(output), None);
-
-        // Empty output
-        let output = "";
-        assert_eq!(parse_allocated_port(output), None);
-
-        // Whitespace only
-        let output = "   \n  \n";
-        assert_eq!(parse_allocated_port(output), None);
     }
 }

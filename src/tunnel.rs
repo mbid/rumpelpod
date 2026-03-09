@@ -1,9 +1,9 @@
-/// Multiplexed TCP tunnel over kubectl exec stdin/stdout.
+/// Multiplexed TCP tunnel over exec stdin/stdout.
 ///
-/// K8s pods cannot reach the host's git HTTP server directly because the
-/// host IP is typically not routable from inside a pod.  This module
-/// implements a framing protocol that carries multiple TCP streams over a
-/// single stdin/stdout pipe established by `kubectl exec`.
+/// Containers (both K8s and Docker) cannot always reach the host's git
+/// HTTP server directly.  This module implements a framing protocol that
+/// carries multiple TCP streams over a single stdin/stdout pipe
+/// established by exec-ing into the container.
 ///
 /// Framing:
 ///   [stream_id: u32 LE] [frame_type: u8] [payload_len: u32 LE] [payload]
@@ -16,15 +16,18 @@
 /// Pod side (`run_tunnel_server`): binds a loopback TCP listener, assigns
 /// stream IDs, and multiplexes accepted connections over stdout.
 ///
-/// Host side (`start_tunnel`): runs `rumpel tunnel-server` inside the pod
-/// via `kubectl exec`, demultiplexes frames from stdout, and opens local
-/// TCP connections to the target address for each stream.
+/// Host side (`start_tunnel` / `start_docker_tunnel`): runs
+/// `rumpel tunnel-server` inside the container via exec, demultiplexes
+/// frames from stdout, and opens local TCP connections to the target
+/// address for each stream.
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 
@@ -265,6 +268,142 @@ impl TunnelHandle {
     }
 }
 
+/// Shared mux loop for the host side of the tunnel.  Reads frames from
+/// the container's stdout, dispatches them to local TCP connections to
+/// `target_addr`, and writes response frames back via the container's
+/// stdin.
+///
+/// `_keepalive` is held for the lifetime of the task (e.g. to prevent
+/// the kube `AttachedProcess` from being dropped, which would close the
+/// WebSocket).
+fn spawn_host_mux(
+    mut pod_stdout: impl AsyncRead + Unpin + Send + 'static,
+    pod_stdin: impl AsyncWriteExt + Unpin + Send + 'static,
+    target_addr: String,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    alive: Arc<AtomicBool>,
+    _keepalive: impl Send + 'static,
+) {
+    let pod_stdin_mu = Arc::new(Mutex::new(pod_stdin));
+
+    type WriteMap = Arc<Mutex<HashMap<u32, tokio::io::WriteHalf<TcpStream>>>>;
+    let writes: WriteMap = Arc::new(Mutex::new(HashMap::new()));
+
+    let stdin_mu = pod_stdin_mu.clone();
+    let writes_clone = writes.clone();
+
+    tokio::spawn(async move {
+        let _keepalive = _keepalive;
+
+        loop {
+            tokio::select! {
+                frame_res = read_frame(&mut pod_stdout) => {
+                    let frame = match frame_res {
+                        Ok(f) => f,
+                        Err(e) => {
+                            log::debug!("tunnel mux: read error: {}", e);
+                            break;
+                        }
+                    };
+                    match frame.frame_type {
+                        FRAME_OPEN => {
+                            let sid = frame.stream_id;
+                            // Connect synchronously so the write half is in the
+                            // map before we read the next frame (which is likely
+                            // a DATA for this same stream).
+                            let tcp = match TcpStream::connect(&target_addr).await {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    log::debug!(
+                                        "tunnel: failed to connect to {}: {}",
+                                        target_addr, e
+                                    );
+                                    let mut w = stdin_mu.lock().await;
+                                    let _ = write_frame(
+                                        &mut *w,
+                                        &Frame {
+                                            stream_id: sid,
+                                            frame_type: FRAME_CLOSE,
+                                            payload: Vec::new(),
+                                        },
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            };
+                            let (read_half, write_half) = tokio::io::split(tcp);
+                            writes_clone.lock().await.insert(sid, write_half);
+
+                            // Spawn reader: local TCP read -> DATA frames back
+                            // to pod, CLOSE on EOF.
+                            let stdin_for_reader = stdin_mu.clone();
+                            let writes_for_reader = writes_clone.clone();
+                            tokio::spawn(async move {
+                                let mut reader = read_half;
+                                let mut buf = vec![0u8; MAX_PAYLOAD];
+                                loop {
+                                    let n = match reader.read(&mut buf).await {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(n) => n,
+                                    };
+                                    let mut w = stdin_for_reader.lock().await;
+                                    if write_frame(
+                                        &mut *w,
+                                        &Frame {
+                                            stream_id: sid,
+                                            frame_type: FRAME_DATA,
+                                            payload: buf[..n].to_vec(),
+                                        },
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                let mut w = stdin_for_reader.lock().await;
+                                let _ = write_frame(
+                                    &mut *w,
+                                    &Frame {
+                                        stream_id: sid,
+                                        frame_type: FRAME_CLOSE,
+                                        payload: Vec::new(),
+                                    },
+                                )
+                                .await;
+                                writes_for_reader.lock().await.remove(&sid);
+                            });
+                        }
+                        FRAME_DATA => {
+                            let mut map = writes_clone.lock().await;
+                            if let Some(writer) = map.get_mut(&frame.stream_id) {
+                                if writer.write_all(&frame.payload).await.is_err() {
+                                    map.remove(&frame.stream_id);
+                                }
+                            }
+                        }
+                        FRAME_CLOSE => {
+                            // Drop the write half so the local TCP connection
+                            // sees EOF on its read side.
+                            writes_clone.lock().await.remove(&frame.stream_id);
+                        }
+                        _ => {
+                            log::debug!(
+                                "tunnel mux: unknown frame type {}",
+                                frame.frame_type
+                            );
+                        }
+                    }
+                }
+                _ = cancel_rx.changed() => {
+                    break;
+                }
+            }
+        }
+        alive.store(false, Ordering::Relaxed);
+    });
+}
+
 /// Start a tunnel into a K8s pod.
 ///
 /// Launches `rumpel tunnel-server` inside the pod via kubectl exec,
@@ -374,136 +513,255 @@ pub async fn start_tunnel(
         }
     });
 
-    let mut pod_stdout = attached.stdout().context("taking tunnel stdout")?;
+    let pod_stdout = attached.stdout().context("taking tunnel stdout")?;
     let pod_stdin = attached.stdin().context("taking tunnel stdin")?;
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let alive = Arc::new(AtomicBool::new(true));
 
-    // Shared write half (stdin to pod) for sending frames back.
-    let pod_stdin_mu = Arc::new(Mutex::new(pod_stdin));
+    spawn_host_mux(
+        pod_stdout,
+        pod_stdin,
+        target_addr,
+        cancel_rx,
+        alive.clone(),
+        attached,
+    );
 
-    // Map of stream_id -> write half of the local TCP connection.
-    type WriteMap = Arc<Mutex<HashMap<u32, tokio::io::WriteHalf<TcpStream>>>>;
-    let writes: WriteMap = Arc::new(Mutex::new(HashMap::new()));
+    Ok(TunnelHandle {
+        port: tunnel_port,
+        alive,
+        _cancel_tx: cancel_tx,
+    })
+}
 
-    let stdin_mu = pod_stdin_mu.clone();
-    let writes_clone = writes.clone();
-    let mut cancel = cancel_rx.clone();
-    let alive_for_mux = alive.clone();
+// ── Docker exec tunnel ────────────────────────────────────────────────
 
-    // Mux task: reads frames from pod stdout, dispatches to local TCP.
-    tokio::spawn(async move {
-        // Keep the AttachedProcess alive so the WebSocket stays open.
-        let _attached = attached;
+/// Adapter that wraps bollard's multiplexed exec output stream into an
+/// `AsyncRead` that only yields stdout bytes.  Stderr chunks are
+/// forwarded to a channel for readiness detection and debug logging.
+struct BollardStdoutReader {
+    stream: Pin<
+        Box<
+            dyn futures_core::Stream<
+                    Item = std::result::Result<
+                        bollard::container::LogOutput,
+                        bollard::errors::Error,
+                    >,
+                > + Send,
+        >,
+    >,
+    /// Leftover bytes from a previous StdOut chunk that did not fit
+    /// into the caller's buffer.
+    pending: Vec<u8>,
+    pending_offset: usize,
+    /// Channel for stderr chunks (readiness + debug).
+    stderr_tx: mpsc::UnboundedSender<Vec<u8>>,
+}
 
-        loop {
-            tokio::select! {
-                frame_res = read_frame(&mut pod_stdout) => {
-                    let frame = match frame_res {
-                        Ok(f) => f,
-                        Err(e) => {
-                            log::debug!("tunnel mux: read error: {}", e);
-                            break;
-                        }
-                    };
-                    match frame.frame_type {
-                        FRAME_OPEN => {
-                            let sid = frame.stream_id;
-                            // Connect synchronously so the write half is in the
-                            // map before we read the next frame (which is likely
-                            // a DATA for this same stream).
-                            let tcp = match TcpStream::connect(&target_addr).await {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    log::debug!(
-                                        "tunnel: failed to connect to {}: {}",
-                                        target_addr, e
-                                    );
-                                    let mut w = stdin_mu.lock().await;
-                                    let _ = write_frame(
-                                        &mut *w,
-                                        &Frame {
-                                            stream_id: sid,
-                                            frame_type: FRAME_CLOSE,
-                                            payload: Vec::new(),
-                                        },
-                                    )
-                                    .await;
-                                    continue;
-                                }
-                            };
-                            let (read_half, write_half) = tokio::io::split(tcp);
-                            writes_clone.lock().await.insert(sid, write_half);
+impl AsyncRead for BollardStdoutReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        // Drain any leftover bytes from a previous chunk first.
+        if self.pending_offset < self.pending.len() {
+            let remaining = &self.pending[self.pending_offset..];
+            let n = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..n]);
+            self.pending_offset += n;
+            if self.pending_offset == self.pending.len() {
+                self.pending.clear();
+                self.pending_offset = 0;
+            }
+            return Poll::Ready(Ok(()));
+        }
 
-                            // Spawn reader: local TCP read -> DATA frames back
-                            // to pod, CLOSE on EOF.
-                            let stdin_for_reader = stdin_mu.clone();
-                            let writes_for_reader = writes_clone.clone();
-                            tokio::spawn(async move {
-                                let mut reader = read_half;
-                                let mut buf = vec![0u8; MAX_PAYLOAD];
-                                loop {
-                                    let n = match reader.read(&mut buf).await {
-                                        Ok(0) | Err(_) => break,
-                                        Ok(n) => n,
-                                    };
-                                    let mut w = stdin_for_reader.lock().await;
-                                    if write_frame(
-                                        &mut *w,
-                                        &Frame {
-                                            stream_id: sid,
-                                            frame_type: FRAME_DATA,
-                                            payload: buf[..n].to_vec(),
-                                        },
-                                    )
-                                    .await
-                                    .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                                let mut w = stdin_for_reader.lock().await;
-                                let _ = write_frame(
-                                    &mut *w,
-                                    &Frame {
-                                        stream_id: sid,
-                                        frame_type: FRAME_CLOSE,
-                                        payload: Vec::new(),
-                                    },
-                                )
-                                .await;
-                                writes_for_reader.lock().await.remove(&sid);
-                            });
-                        }
-                        FRAME_DATA => {
-                            let mut map = writes_clone.lock().await;
-                            if let Some(writer) = map.get_mut(&frame.stream_id) {
-                                if writer.write_all(&frame.payload).await.is_err() {
-                                    map.remove(&frame.stream_id);
-                                }
+        // Poll the underlying stream for the next chunk.
+        match self.stream.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                let (bytes, is_stdout) = match chunk {
+                    bollard::container::LogOutput::StdOut { message } => (message.to_vec(), true),
+                    bollard::container::LogOutput::StdErr { message } => (message.to_vec(), false),
+                    bollard::container::LogOutput::Console { message } => (message.to_vec(), true),
+                    bollard::container::LogOutput::StdIn { .. } => {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                };
+                if !is_stdout {
+                    let _ = self.stderr_tx.send(bytes);
+                    // Re-poll to get actual stdout data.
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                let n = bytes.len().min(buf.remaining());
+                buf.put_slice(&bytes[..n]);
+                if n < bytes.len() {
+                    self.pending = bytes;
+                    self.pending_offset = n;
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(std::io::Error::other(e))),
+            Poll::Ready(None) => Poll::Ready(Ok(())), // EOF
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+/// Start a tunnel into a Docker container.
+///
+/// Launches `rumpel tunnel-server` inside the container via
+/// `docker exec`, waits for the readiness message on stderr, then
+/// spawns a mux task that bridges frames to local TCP connections to
+/// `target_addr`.
+pub async fn start_docker_tunnel(
+    docker: &bollard::Docker,
+    container_id: &str,
+    target_addr: &str,
+    port: u16,
+) -> Result<TunnelHandle> {
+    use bollard::exec::StartExecResults;
+    use bollard::secret::ExecConfig;
+    use tokio_stream::StreamExt;
+
+    let target_addr = target_addr.to_string();
+
+    // Kill any leftover tunnel-server from a previous run.
+    let kill_config = ExecConfig {
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        cmd: Some(vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "pkill -f 'rumpel tunnel-server' 2>/dev/null; sleep 0.1; true".to_string(),
+        ]),
+        ..Default::default()
+    };
+    let kill_exec = docker
+        .create_exec(container_id, kill_config)
+        .await
+        .context("creating kill exec")?;
+    if let StartExecResults::Attached { mut output, .. } = docker
+        .start_exec(&kill_exec.id, None)
+        .await
+        .context("starting kill exec")?
+    {
+        while output.next().await.is_some() {}
+    }
+
+    // Launch the tunnel server.
+    let config = ExecConfig {
+        attach_stdin: Some(true),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        cmd: Some(vec![
+            "/opt/rumpelpod/bin/rumpel".to_string(),
+            "tunnel-server".to_string(),
+            "--port".to_string(),
+            port.to_string(),
+        ]),
+        ..Default::default()
+    };
+    let exec = docker
+        .create_exec(container_id, config)
+        .await
+        .context("creating tunnel exec")?;
+    let (output, input) = match docker
+        .start_exec(&exec.id, None)
+        .await
+        .context("starting tunnel exec")?
+    {
+        StartExecResults::Attached { output, input } => (output, input),
+        StartExecResults::Detached => {
+            return Err(anyhow::anyhow!("tunnel exec started in detached mode"));
+        }
+    };
+
+    // Consume the bollard stream until we see the readiness message on
+    // stderr, buffering any stdout data that arrives alongside it.
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    let mut tunnel_port: u16 = 0;
+    let mut remaining_stream = output;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(anyhow::anyhow!(
+                "timeout waiting for docker tunnel-server readiness"
+            ));
+        }
+        let chunk = tokio::time::timeout(remaining, remaining_stream.next())
+            .await
+            .context("timeout reading docker tunnel output")?;
+        match chunk {
+            Some(Ok(bollard::container::LogOutput::StdErr { message })) => {
+                stderr_buf.extend_from_slice(&message);
+                if let Ok(s) = std::str::from_utf8(&stderr_buf) {
+                    // Only consider newline-terminated lines to avoid
+                    // parsing partial output that Docker may split across
+                    // chunks.
+                    for line in s.lines() {
+                        if let Some(rest) = line.strip_prefix("tunnel listening on port ") {
+                            if let Ok(port) = rest.trim().parse::<u16>() {
+                                tunnel_port = port;
+                                break;
                             }
                         }
-                        FRAME_CLOSE => {
-                            // Drop the write half so the local TCP connection
-                            // sees EOF on its read side.
-                            writes_clone.lock().await.remove(&frame.stream_id);
-                        }
-                        _ => {
-                            log::debug!(
-                                "tunnel mux: unknown frame type {}",
-                                frame.frame_type
-                            );
-                        }
+                    }
+                    if tunnel_port != 0 {
+                        break;
                     }
                 }
-                _ = cancel.changed() => {
-                    break;
+            }
+            Some(Ok(bollard::container::LogOutput::StdOut { message })) => {
+                stdout_buf.extend_from_slice(&message);
+            }
+            Some(Ok(bollard::container::LogOutput::Console { message })) => {
+                stdout_buf.extend_from_slice(&message);
+            }
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                return Err(anyhow::anyhow!("docker exec stream error: {}", e));
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "docker exec stream closed before readiness signal"
+                ));
+            }
+        }
+    }
+
+    // Wrap the remaining bollard stream into an AsyncRead, pre-filling
+    // with any stdout bytes we buffered during the readiness wait.
+    let (stderr_tx, stderr_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let reader = BollardStdoutReader {
+        stream: Box::pin(remaining_stream),
+        pending: stdout_buf,
+        pending_offset: 0,
+        stderr_tx,
+    };
+
+    // Drain stderr from the channel to debug log in background.
+    tokio::spawn(async move {
+        let mut rx = stderr_rx;
+        while let Some(data) = rx.recv().await {
+            if let Ok(s) = std::str::from_utf8(&data) {
+                for line in s.lines() {
+                    log::debug!("docker tunnel-server stderr: {}", line);
                 }
             }
         }
-        alive_for_mux.store(false, Ordering::Relaxed);
     });
+
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let alive = Arc::new(AtomicBool::new(true));
+
+    spawn_host_mux(reader, input, target_addr, cancel_rx, alive.clone(), ());
 
     Ok(TunnelHandle {
         port: tunnel_port,

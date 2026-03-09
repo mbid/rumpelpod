@@ -72,7 +72,6 @@
 //! environment variable which hooks can trust (the client cannot forge it).
 
 use std::fs;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -82,7 +81,7 @@ use log::error;
 use sha2::{Digest, Sha256};
 
 use crate::command_ext::CommandExt;
-use crate::config::{get_state_dir, is_direct_git_config_mode};
+use crate::config::get_state_dir;
 
 /// Name of the remote added to the host repo pointing to the gateway.
 const RUMPELPOD_REMOTE: &str = "rumpelpod";
@@ -287,20 +286,6 @@ fn install_reference_transaction_hook_in_git_dir(git_dir: &Path, rumpel_exe: &st
     Ok(())
 }
 
-/// Append raw config text to a git directory's `config` file.
-/// Works for both bare repos (git_dir == repo) and non-bare repos
-/// (git_dir == repo/.git or an absorbed submodule path).
-fn append_git_config_to_git_dir(git_dir: &Path, content: &str) -> Result<()> {
-    let config_path = git_dir.join("config");
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(&config_path)
-        .with_context(|| format!("failed to open {}", config_path.display()))?;
-    file.write_all(content.as_bytes())
-        .with_context(|| format!("failed to write to {}", config_path.display()))?;
-    Ok(())
-}
-
 /// Check if the given path is inside a git repository.
 fn is_git_repo(path: &Path) -> bool {
     Command::new("git")
@@ -353,40 +338,17 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     // Configure gateway settings (idempotent - safe to run on every call).
     // Enable anonymous pushes via HTTP for pods to push to gateway.
     // This is safe because the gateway is only accessible from our pods.
-    if is_direct_git_config_mode()? {
-        // Bypass `git config` / `git remote` and write directly to the config
-        // files to avoid flaky lock failures on overlay2 under heavy test
-        // parallelism.
-        append_git_config(
-            &gateway,
-            &format!(
-                "[http]\n\treceivepack = true\n\
-                 [remote \"{}\"]\n\turl = {}\n",
-                HOST_REMOTE,
-                repo_path.to_string_lossy(),
-            ),
-        )?;
-        append_git_config(
-            repo_path,
-            &format!(
-                "[remote \"{}\"]\n\turl = {}\n",
-                RUMPELPOD_REMOTE,
-                gateway.to_string_lossy(),
-            ),
-        )?;
-    } else {
-        Command::new("git")
-            .args(["config", "http.receivepack", "true"])
-            .current_dir(&gateway)
-            .success()
-            .context("enabling http.receivepack failed")?;
+    Command::new("git")
+        .args(["config", "http.receivepack", "true"])
+        .current_dir(&gateway)
+        .success()
+        .context("enabling http.receivepack failed")?;
 
-        // Add "rumpelpod" remote to host repo (pointing to gateway)
-        ensure_remote(repo_path, RUMPELPOD_REMOTE, &gateway)?;
+    // Add "rumpelpod" remote to host repo (pointing to gateway)
+    ensure_remote(repo_path, RUMPELPOD_REMOTE, &gateway)?;
 
-        // Add "host" remote to gateway (pointing to host repo)
-        ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
-    }
+    // Add "host" remote to gateway (pointing to host repo)
+    ensure_remote(&gateway, HOST_REMOTE, repo_path)?;
 
     let rumpel_exe = std::env::current_exe()
         .context("resolving rumpel binary path")?
@@ -460,34 +422,14 @@ fn setup_submodule_gateway(
     }
 
     // Configure gateway and submodule remotes
-    if is_direct_git_config_mode()? {
-        append_git_config(
-            &gateway,
-            &format!(
-                "[http]\n\treceivepack = true\n\
-                 [remote \"{}\"]\n\turl = {}\n",
-                HOST_REMOTE,
-                sub_workdir.to_string_lossy(),
-            ),
-        )?;
-        append_git_config_to_git_dir(
-            &sub_git_dir,
-            &format!(
-                "[remote \"{}\"]\n\turl = {}\n",
-                RUMPELPOD_REMOTE,
-                gateway.to_string_lossy(),
-            ),
-        )?;
-    } else {
-        Command::new("git")
-            .args(["config", "http.receivepack", "true"])
-            .current_dir(&gateway)
-            .success()
-            .context("enabling http.receivepack for submodule gateway failed")?;
+    Command::new("git")
+        .args(["config", "http.receivepack", "true"])
+        .current_dir(&gateway)
+        .success()
+        .context("enabling http.receivepack for submodule gateway failed")?;
 
-        ensure_remote(&sub_workdir, RUMPELPOD_REMOTE, &gateway)?;
-        ensure_remote(&gateway, HOST_REMOTE, &sub_workdir)?;
-    }
+    ensure_remote(&sub_workdir, RUMPELPOD_REMOTE, &gateway)?;
+    ensure_remote(&gateway, HOST_REMOTE, &sub_workdir)?;
 
     // Install gateway hooks
     install_gateway_pre_receive_hook(&gateway, rumpel_exe)?;
@@ -535,24 +477,6 @@ fn ensure_remote(repo_path: &Path, remote_name: &str, remote_url: &Path) -> Resu
         }
     }
 
-    Ok(())
-}
-
-/// Append raw config text to a repo's `.git/config` (or `config` for bare repos).
-/// Used in test mode to avoid `git config` lock contention on overlay2.
-fn append_git_config(repo_path: &Path, content: &str) -> Result<()> {
-    // Bare repos store config at `<repo>/config`, non-bare at `<repo>/.git/config`.
-    let config_path = if repo_path.join("HEAD").exists() {
-        repo_path.join("config")
-    } else {
-        repo_path.join(".git/config")
-    };
-    let mut file = fs::OpenOptions::new()
-        .append(true)
-        .open(&config_path)
-        .with_context(|| format!("failed to open {}", config_path.display()))?;
-    file.write_all(content.as_bytes())
-        .with_context(|| format!("failed to write to {}", config_path.display()))?;
     Ok(())
 }
 

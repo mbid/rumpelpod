@@ -57,6 +57,7 @@ rusqlite = { version = ">= 0", features = ["bundled", "chrono"] }
 socket2 = ">= 0"
 tower-service = ">= 0"
 bollard = ">= 0"
+futures-core = ">= 0"
 tokio-stream = ">= 0"
 comfy-table = ">= 0"
 kube = { version = ">= 0", features = ["client", "ws", "rustls-tls"] }

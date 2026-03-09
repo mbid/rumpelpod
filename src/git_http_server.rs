@@ -23,8 +23,6 @@ use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bollard::Docker;
-
 use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, State};
@@ -33,15 +31,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use cgi_service::{CgiConfig, CgiService};
-use hyper::server::conn::http1;
-use hyper_util::rt::TokioIo;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use rand::{distr::Alphanumeric, RngExt};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::task::JoinHandle;
-use tower::ServiceExt;
 use tower_service::Service;
 
 use crate::async_runtime::RUNTIME;
@@ -207,115 +202,6 @@ impl GitHttpServer {
 }
 
 impl Drop for GitHttpServer {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// A git HTTP server listening on a Unix socket.
-/// Used for SSH remote port forwarding to expose the server to remote containers.
-pub struct UnixGitHttpServer {
-    /// Handle to the spawned tokio task running the server.
-    task_handle: JoinHandle<()>,
-    /// The path to the Unix socket.
-    pub socket_path: PathBuf,
-}
-
-impl UnixGitHttpServer {
-    /// Start a new git HTTP server listening on a Unix socket.
-    ///
-    /// The server binds to the specified socket path.
-    /// Returns the server instance.
-    pub fn start(socket_path: &Path, state: SharedGitServerState) -> Result<Self> {
-        let socket_path = socket_path.to_path_buf();
-
-        // Remove stale socket file if it exists
-        if socket_path.exists() {
-            std::fs::remove_file(&socket_path).with_context(|| {
-                format!("Failed to remove stale socket: {}", socket_path.display())
-            })?;
-        }
-
-        debug!(
-            "Starting git HTTP server on Unix socket: {}",
-            socket_path.display()
-        );
-
-        // Bind the Unix socket
-        let listener = std::os::unix::net::UnixListener::bind(&socket_path)
-            .with_context(|| format!("Failed to bind Unix socket: {}", socket_path.display()))?;
-        listener
-            .set_nonblocking(true)
-            .context("Failed to set Unix socket to non-blocking")?;
-
-        let tokio_listener = tokio::net::UnixListener::from_std(listener)
-            .context("Failed to convert to tokio UnixListener")?;
-
-        info!(
-            "Git HTTP server listening on Unix socket: {}",
-            socket_path.display()
-        );
-
-        // Build router with explicit LFS routes before the CGI fallback
-        let app = build_router(state);
-
-        let socket_path_clone = socket_path.clone();
-
-        // Spawn the server in the background
-        let task_handle = RUNTIME.spawn(async move {
-            loop {
-                match tokio_listener.accept().await {
-                    Ok((stream, _)) => {
-                        let app = app.clone();
-                        tokio::spawn(async move {
-                            let io = TokioIo::new(stream);
-                            let service = hyper::service::service_fn(
-                                move |req: Request<hyper::body::Incoming>| {
-                                    // Convert incoming body to axum's Body type
-                                    let (parts, body) = req.into_parts();
-                                    let body = Body::new(body);
-                                    let req = Request::from_parts(parts, body);
-                                    let app = app.clone();
-                                    async move {
-                                        let response: Response =
-                                            app.oneshot(req).await.unwrap_or_else(|e| match e {});
-                                        Ok::<_, std::convert::Infallible>(response)
-                                    }
-                                },
-                            );
-                            if let Err(e) =
-                                http1::Builder::new().serve_connection(io, service).await
-                            {
-                                debug!("Unix socket connection error: {}", e);
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!(
-                            "Unix socket accept error on {}: {}",
-                            socket_path_clone.display(),
-                            e
-                        );
-                    }
-                }
-            }
-        });
-
-        Ok(UnixGitHttpServer {
-            task_handle,
-            socket_path,
-        })
-    }
-
-    /// Stop the server.
-    pub fn stop(&mut self) {
-        self.task_handle.abort();
-        // Clean up socket file
-        let _ = std::fs::remove_file(&self.socket_path);
-    }
-}
-
-impl Drop for UnixGitHttpServer {
     fn drop(&mut self) {
         self.stop();
     }
@@ -676,68 +562,4 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
         Ok(response) => response.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-}
-
-/// Get the gateway IP address for a docker network.
-/// This is the IP address the host uses on the network, which containers can reach.
-pub fn get_network_gateway_ip(network_name: &str) -> Result<String> {
-    use crate::async_runtime::block_on;
-
-    let socket = crate::daemon::default_docker_socket();
-    let docker = Docker::connect_with_socket(
-        socket.to_string_lossy().as_ref(),
-        120,
-        bollard::API_DEFAULT_VERSION,
-    )
-    .context("connecting to Docker daemon")?;
-
-    let network =
-        block_on(docker.inspect_network(network_name, None)).context("inspecting network")?;
-
-    // Find the first gateway IP in the IPAM config
-    let gateway_ip = network
-        .ipam
-        .and_then(|ipam| ipam.config)
-        .and_then(|configs| {
-            configs
-                .into_iter()
-                .find_map(|config| config.gateway.filter(|g| !g.is_empty()))
-        })
-        .with_context(|| format!("no gateway IP found for network {}", network_name))?;
-
-    Ok(gateway_ip)
-}
-
-/// Get the gateway IP address for a docker network via a specific socket.
-/// Used for remote Docker hosts accessed via SSH forwarding.
-pub fn get_network_gateway_ip_via_socket(socket_path: &Path, network_name: &str) -> Result<String> {
-    use crate::async_runtime::block_on;
-
-    let docker = Docker::connect_with_socket(
-        socket_path.to_string_lossy().as_ref(),
-        120,
-        bollard::API_DEFAULT_VERSION,
-    )
-    .context("connecting to Docker daemon via socket")?;
-
-    let network =
-        block_on(docker.inspect_network(network_name, None)).context("inspecting network")?;
-
-    // Find the first gateway IP in the IPAM config
-    let gateway_ip = network
-        .ipam
-        .and_then(|ipam| ipam.config)
-        .and_then(|configs| {
-            configs
-                .into_iter()
-                .find_map(|config| config.gateway.filter(|g| !g.is_empty()))
-        })
-        .with_context(|| format!("no gateway IP found for network {}", network_name))?;
-
-    Ok(gateway_ip)
-}
-
-/// Get the URL for the git HTTP server accessible from within a container.
-pub fn git_http_url(ip: &str, port: u16) -> String {
-    format!("http://{}:{}/gateway.git", ip, port)
 }

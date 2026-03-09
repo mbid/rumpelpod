@@ -284,73 +284,54 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
     let repo_path = &req.repo_path;
     let push_refspec = format!("+refs/heads/*:refs/heads/rumpelpod/*@{}", req.pod_name);
 
-    if req.direct_config {
-        // Append directly to .git/config to avoid lock contention under parallelism.
-        let config_path = repo_path.join(".git/config");
-        let mut config = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("reading {}", config_path.display()))?;
+    run_git_command(
+        &[
+            "config",
+            "http.extraHeader",
+            &format!("Authorization: Bearer {}", req.token),
+        ],
+        Some(repo_path),
+        u,
+    )?;
 
-        use std::fmt::Write;
-        write!(
-            config,
-            "\n[http]\n\textraHeader = Authorization: Bearer {token}\n\
-             [remote \"host\"]\n\turl = {url}\n\tfetch = +refs/heads/host/*:refs/remotes/host/*\n\tpushurl = PUSH_DISABLED\n\
-             [remote \"rumpelpod\"]\n\turl = {url}\n\tpush = {push_refspec}\n",
-            token = req.token,
-            url = req.url,
-        )?;
-        std::fs::write(&config_path, config)
-            .with_context(|| format!("writing {}", config_path.display()))?;
-    } else {
-        run_git_command(
-            &[
-                "config",
-                "http.extraHeader",
-                &format!("Authorization: Bearer {}", req.token),
-            ],
-            Some(repo_path),
-            u,
-        )?;
+    // Set up host remote
+    if run_git_command(&["remote", "add", "host", &req.url], Some(repo_path), u).is_err() {
+        run_git_command(&["remote", "set-url", "host", &req.url], Some(repo_path), u)?;
+    }
+    run_git_command(
+        &[
+            "config",
+            "remote.host.fetch",
+            "+refs/heads/host/*:refs/remotes/host/*",
+        ],
+        Some(repo_path),
+        u,
+    )?;
+    run_git_command(
+        &["config", "remote.host.pushurl", "PUSH_DISABLED"],
+        Some(repo_path),
+        u,
+    )?;
 
-        // Set up host remote
-        if run_git_command(&["remote", "add", "host", &req.url], Some(repo_path), u).is_err() {
-            run_git_command(&["remote", "set-url", "host", &req.url], Some(repo_path), u)?;
-        }
+    // Set up rumpelpod remote
+    if run_git_command(
+        &["remote", "add", "rumpelpod", &req.url],
+        Some(repo_path),
+        u,
+    )
+    .is_err()
+    {
         run_git_command(
-            &[
-                "config",
-                "remote.host.fetch",
-                "+refs/heads/host/*:refs/remotes/host/*",
-            ],
-            Some(repo_path),
-            u,
-        )?;
-        run_git_command(
-            &["config", "remote.host.pushurl", "PUSH_DISABLED"],
-            Some(repo_path),
-            u,
-        )?;
-
-        // Set up rumpelpod remote
-        if run_git_command(
-            &["remote", "add", "rumpelpod", &req.url],
-            Some(repo_path),
-            u,
-        )
-        .is_err()
-        {
-            run_git_command(
-                &["remote", "set-url", "rumpelpod", &req.url],
-                Some(repo_path),
-                u,
-            )?;
-        }
-        run_git_command(
-            &["config", "remote.rumpelpod.push", &push_refspec],
+            &["remote", "set-url", "rumpelpod", &req.url],
             Some(repo_path),
             u,
         )?;
     }
+    run_git_command(
+        &["config", "remote.rumpelpod.push", &push_refspec],
+        Some(repo_path),
+        u,
+    )?;
 
     // Fetch from host
     run_git_command(&["fetch", "host"], Some(repo_path), u)?;
@@ -405,33 +386,11 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
 
     // Write host git identity into the pod's .git/config
     if let Some(ref identity) = req.git_identity {
-        if req.direct_config {
-            let config_path = repo_path.join(".git/config");
-            let mut config = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("reading {}", config_path.display()))?;
-
-            use std::fmt::Write;
-            let has_name = identity.name.is_some();
-            let has_email = identity.email.is_some();
-            if has_name || has_email {
-                write!(config, "\n[user]")?;
-                if let Some(ref name) = identity.name {
-                    write!(config, "\n\tname = {}", name)?;
-                }
-                if let Some(ref email) = identity.email {
-                    write!(config, "\n\temail = {}", email)?;
-                }
-                config.push('\n');
-                std::fs::write(&config_path, config)
-                    .with_context(|| format!("writing {}", config_path.display()))?;
-            }
-        } else {
-            if let Some(ref name) = identity.name {
-                run_git_command(&["config", "user.name", name], Some(repo_path), u)?;
-            }
-            if let Some(ref email) = identity.email {
-                run_git_command(&["config", "user.email", email], Some(repo_path), u)?;
-            }
+        if let Some(ref name) = identity.name {
+            run_git_command(&["config", "user.name", name], Some(repo_path), u)?;
+        }
+        if let Some(ref email) = identity.email {
+            run_git_command(&["config", "user.email", email], Some(repo_path), u)?;
         }
     }
 
@@ -575,68 +534,52 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
             sub_path.join(&git_dir_relative)
         };
 
-        if req.direct_config {
-            let config_path = git_dir.join("config");
-            let mut config = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("reading {}", config_path.display()))?;
+        run_git_command(
+            &[
+                "config",
+                "http.extraHeader",
+                &format!("Authorization: Bearer {}", req.token),
+            ],
+            Some(&sub_path),
+            u,
+        )?;
 
-            use std::fmt::Write;
-            write!(
-                config,
-                "\n[http]\n\textraHeader = Authorization: Bearer {token}\n\
-                 [remote \"host\"]\n\turl = {sub_url}\n\tfetch = +refs/heads/host/*:refs/remotes/host/*\n\tpushurl = PUSH_DISABLED\n\
-                 [remote \"rumpelpod\"]\n\turl = {sub_url}\n\tpush = {push_refspec}\n",
-                token = req.token,
-            )?;
-            std::fs::write(&config_path, config)?;
-        } else {
-            run_git_command(
-                &[
-                    "config",
-                    "http.extraHeader",
-                    &format!("Authorization: Bearer {}", req.token),
-                ],
-                Some(&sub_path),
-                u,
-            )?;
+        if run_git_command(&["remote", "add", "host", &sub_url], Some(&sub_path), u).is_err() {
+            run_git_command(&["remote", "set-url", "host", &sub_url], Some(&sub_path), u)?;
+        }
+        run_git_command(
+            &[
+                "config",
+                "remote.host.fetch",
+                "+refs/heads/host/*:refs/remotes/host/*",
+            ],
+            Some(&sub_path),
+            u,
+        )?;
+        run_git_command(
+            &["config", "remote.host.pushurl", "PUSH_DISABLED"],
+            Some(&sub_path),
+            u,
+        )?;
 
-            if run_git_command(&["remote", "add", "host", &sub_url], Some(&sub_path), u).is_err() {
-                run_git_command(&["remote", "set-url", "host", &sub_url], Some(&sub_path), u)?;
-            }
+        if run_git_command(
+            &["remote", "add", "rumpelpod", &sub_url],
+            Some(&sub_path),
+            u,
+        )
+        .is_err()
+        {
             run_git_command(
-                &[
-                    "config",
-                    "remote.host.fetch",
-                    "+refs/heads/host/*:refs/remotes/host/*",
-                ],
-                Some(&sub_path),
-                u,
-            )?;
-            run_git_command(
-                &["config", "remote.host.pushurl", "PUSH_DISABLED"],
-                Some(&sub_path),
-                u,
-            )?;
-
-            if run_git_command(
-                &["remote", "add", "rumpelpod", &sub_url],
-                Some(&sub_path),
-                u,
-            )
-            .is_err()
-            {
-                run_git_command(
-                    &["remote", "set-url", "rumpelpod", &sub_url],
-                    Some(&sub_path),
-                    u,
-                )?;
-            }
-            run_git_command(
-                &["config", "remote.rumpelpod.push", &push_refspec],
+                &["remote", "set-url", "rumpelpod", &sub_url],
                 Some(&sub_path),
                 u,
             )?;
         }
+        run_git_command(
+            &["config", "remote.rumpelpod.push", &push_refspec],
+            Some(&sub_path),
+            u,
+        )?;
 
         run_git_command(&["fetch", "host"], Some(&sub_path), u)
             .with_context(|| format!("fetching host in submodule '{}'", sub.displaypath))?;

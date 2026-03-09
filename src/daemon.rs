@@ -24,14 +24,14 @@ use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{is_deterministic_test_mode, is_direct_git_config_mode, Host};
+use crate::config::{is_deterministic_test_mode, Host};
 use crate::devcontainer::{
     self, compute_devcontainer_id, shell_escape, substitute_vars, DevContainer, LifecycleCommand,
     Port, PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
 };
 use crate::docker_exec::{exec_command, exec_with_stdin};
 use crate::gateway;
-use crate::git_http_server::{self, GitHttpServer, SharedGitServerState, UnixGitHttpServer};
+use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use protocol::{
     ContainerId, ConversationSummary, Daemon, EnsureClaudeConfigRequest, GetConversationResponse,
     Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
@@ -133,21 +133,13 @@ struct DaemonServer {
     db: Arc<Mutex<Connection>>,
     /// Shared state for the git HTTP server (maps tokens to pod info).
     git_server_state: SharedGitServerState,
-    /// Port the bridge network git HTTP server is listening on.
-    bridge_server_port: u16,
-    /// IP that containers on the bridge network should use to reach the git server.
-    /// On Linux this is the bridge gateway IP (e.g. 172.17.0.1), on macOS Docker
-    /// Desktop it's `host.docker.internal`.
-    bridge_container_ip: String,
-    /// Port the localhost git HTTP server is listening on.
+    /// Port the localhost git HTTP server is listening on (tunnel target).
     localhost_server_port: u16,
     /// Active tokens for each pod: (repo_path, pod_name) -> token
     /// Used to clean up tokens when pods are deleted.
     active_tokens: Arc<Mutex<BTreeMap<(PathBuf, String), String>>>,
     /// SSH forward manager for remote Docker hosts.
     ssh_forward: Arc<SshForwardManager>,
-    /// Path to the Unix socket for the git HTTP server (used for remote forwarding).
-    git_unix_socket: PathBuf,
     /// Active port-forward handles for Kubernetes pods.
     /// Dropping handles cancels the forwards.  The first entry is always
     /// the container-serve forward; additional entries are forwardPorts.
@@ -158,6 +150,11 @@ struct DaemonServer {
     /// the host's git HTTP server on a loopback port.
     #[allow(clippy::type_complexity)]
     k8s_tunnels: Arc<Mutex<HashMap<(PathBuf, String), crate::tunnel::TunnelHandle>>>,
+    /// Active tunnel handles for Docker containers.
+    /// Each tunnel multiplexes TCP over docker exec so the container can
+    /// reach the host's git HTTP server on a loopback port.
+    #[allow(clippy::type_complexity)]
+    docker_tunnels: Arc<Mutex<HashMap<(PathBuf, String), crate::tunnel::TunnelHandle>>>,
 }
 
 /// Label key used to store the repository path on containers.
@@ -2333,7 +2330,6 @@ impl DaemonServer {
 
                     let base_url = format!("http://127.0.0.1:{}", tunnel_port);
                     let url = format!("{}/gateway.git", base_url);
-                    let direct_config = is_direct_git_config_mode()?;
 
                     // Git operations go through the tunnel. If they fail
                     // (e.g. because the tunnel-server died but the mux
@@ -2355,7 +2351,6 @@ impl DaemonServer {
                             &token,
                             &pod_name.0,
                             None,
-                            direct_config,
                             Some(&user),
                             git_identity,
                         )
@@ -2376,7 +2371,6 @@ impl DaemonServer {
                             &token,
                             &pod_name.0,
                             false,
-                            direct_config,
                             Some(&user),
                         )
                         .context("setting up submodules")?;
@@ -2665,7 +2659,6 @@ impl DaemonServer {
 
         let base_url = format!("http://127.0.0.1:{}", tunnel_port);
         let url = format!("{}/gateway.git", base_url);
-        let direct_config = is_direct_git_config_mode().map_err(mark_error)?;
 
         ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)
             .map_err(mark_error)?;
@@ -2677,7 +2670,6 @@ impl DaemonServer {
             &token,
             &pod_name.0,
             host_branch,
-            direct_config,
             Some(&user),
             git_identity,
         )
@@ -2699,7 +2691,6 @@ impl DaemonServer {
             &token,
             &pod_name.0,
             true,
-            direct_config,
             Some(&user),
         )
         .context("setting up submodules")
@@ -2896,7 +2887,6 @@ impl DaemonServer {
         }
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
         let user = devcontainer.user().map(String::from);
-        let host_network = devcontainer.has_host_network();
         let mounts = devcontainer.resolved_mounts()?;
         let forward_ports = devcontainer.forward_ports.clone().unwrap_or_default();
         let ports_attributes = devcontainer.ports_attributes.clone().unwrap_or_default();
@@ -2977,57 +2967,7 @@ impl DaemonServer {
         let name = docker_name(&repo_path, &pod_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
 
-        // Determine the git HTTP server URL based on network config and local/remote
-        let (server_ip, server_port) = match &docker_host {
-            Host::Ssh { .. } => {
-                // Remote Docker: set up SSH remote port forwarding if not already done
-                let forwards = match self.ssh_forward.get_remote_forwards(&docker_host) {
-                    Some(f) => f,
-                    None => {
-                        // Need to set up forwards -- first get the remote's bridge network IP
-                        let remote_bridge_ip = git_http_server::get_network_gateway_ip_via_socket(
-                            &docker_socket,
-                            "bridge",
-                        )
-                        .context("getting remote bridge network gateway IP")?;
-
-                        self.ssh_forward
-                            .setup_git_http_forwards(
-                                &docker_host,
-                                &self.git_unix_socket,
-                                &remote_bridge_ip,
-                            )
-                            .context("setting up git HTTP remote forwards")?
-                    }
-                };
-
-                if host_network {
-                    (
-                        "127.0.0.1".to_string(),
-                        forwards
-                            .localhost_port
-                            .context("localhost forward not set up")?,
-                    )
-                } else {
-                    (
-                        forwards.bridge_ip.context("bridge IP not set")?,
-                        forwards.bridge_port.context("bridge forward not set up")?,
-                    )
-                }
-            }
-            Host::Localhost => {
-                // Local Docker: use the local git HTTP servers directly.
-                // On macOS Docker Desktop, host.docker.internal works for
-                // both bridge and host-network containers since Docker runs
-                // in a VM.
-                if host_network && !cfg!(target_os = "macos") {
-                    ("127.0.0.1".to_string(), self.localhost_server_port)
-                } else {
-                    (self.bridge_container_ip.clone(), self.bridge_server_port)
-                }
-            }
-            Host::Kubernetes { .. } => unreachable!(),
-        };
+        let localhost_server_port = self.localhost_server_port;
 
         // Wait for any in-progress background stop to finish so we don't
         // race against it when trying to (re)start the container.
@@ -3091,51 +3031,93 @@ impl DaemonServer {
                 .unwrap()
                 .insert((repo_path.clone(), pod_name.0.clone()), token.clone());
 
-            let url = git_http_server::git_http_url(&server_ip, server_port);
             let pod = PodClient::new(&container_url, &container_token)?;
-            let direct_config = is_direct_git_config_mode()?;
+
+            // Reuse the existing tunnel if alive, otherwise start a new one.
+            // When the container was stopped, the tunnel-server inside it is
+            // gone even if the mux task hasn't noticed yet, so always start
+            // fresh in that case.
+            let tunnel_key = (repo_path.clone(), pod_name.0.clone());
+            {
+                let mut tunnels = self.docker_tunnels.lock().unwrap();
+                if let Some(handle) = tunnels.get(&tunnel_key) {
+                    if was_stopped || !handle.is_alive() {
+                        tunnels.remove(&tunnel_key);
+                    }
+                }
+            }
+            let tunnel_port = {
+                let tunnels = self.docker_tunnels.lock().unwrap();
+                tunnels.get(&tunnel_key).map(|t| t.port)
+            };
+            let tunnel_port = match tunnel_port {
+                Some(port) => port,
+                None => {
+                    let tunnel = block_on(crate::tunnel::start_docker_tunnel(
+                        &docker,
+                        &state.id,
+                        &format!("127.0.0.1:{localhost_server_port}"),
+                        0,
+                    ))
+                    .context("starting tunnel to existing docker container")?;
+                    let port = tunnel.port;
+
+                    self.docker_tunnels
+                        .lock()
+                        .unwrap()
+                        .insert(tunnel_key.clone(), tunnel);
+                    port
+                }
+            };
+
+            let base_url = format!("http://127.0.0.1:{tunnel_port}");
+            let url = format!("{base_url}/gateway.git");
 
             // Clone repo if not already present (e.g. devcontainer without COPY)
-            ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)?;
+            let git_result: Result<()> = (|| {
+                ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)?;
 
-            // Check .git ownership matches the pod user
-            check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
+                // Check .git ownership matches the pod user
+                check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
 
-            // On re-entry, don't pass host_branch - we don't want to change
-            // the upstream of an existing branch.
-            pod.git_setup(
-                &container_repo_path,
-                &url,
-                &token,
-                &pod_name.0,
-                None,
-                direct_config,
-                Some(&user),
-                git_identity.as_ref(),
-            )
-            .context("configuring git")?;
+                // On re-entry, don't pass host_branch - we don't want to change
+                // the upstream of an existing branch.
+                pod.git_setup(
+                    &container_repo_path,
+                    &url,
+                    &token,
+                    &pod_name.0,
+                    None,
+                    Some(&user),
+                    git_identity.as_ref(),
+                )
+                .context("configuring git")?;
 
-            // Set up submodule repos (re-entry: is_first_entry = false)
-            let sub_entries: Vec<SubmoduleEntry> = submodules
-                .iter()
-                .map(|s| SubmoduleEntry {
-                    name: s.name.clone(),
-                    path: s.path.clone(),
-                    displaypath: s.displaypath.clone(),
-                })
-                .collect();
-            let base_url = url.trim_end_matches("/gateway.git");
-            pod.git_setup_submodules(
-                &container_repo_path,
-                &sub_entries,
-                base_url,
-                &token,
-                &pod_name.0,
-                false,
-                direct_config,
-                Some(&user),
-            )
-            .context("setting up submodules")?;
+                // Set up submodule repos (re-entry: is_first_entry = false)
+                let sub_entries: Vec<SubmoduleEntry> = submodules
+                    .iter()
+                    .map(|s| SubmoduleEntry {
+                        name: s.name.clone(),
+                        path: s.path.clone(),
+                        displaypath: s.displaypath.clone(),
+                    })
+                    .collect();
+                pod.git_setup_submodules(
+                    &container_repo_path,
+                    &sub_entries,
+                    &base_url,
+                    &token,
+                    &pod_name.0,
+                    false,
+                    Some(&user),
+                )
+                .context("setting up submodules")?;
+                Ok(())
+            })();
+            if git_result.is_err() {
+                self.docker_tunnels.lock().unwrap().remove(&tunnel_key);
+            }
+            git_result?;
 
             // Probe user env from shell init files
             let effective_probe = devcontainer
@@ -3276,8 +3258,8 @@ impl DaemonServer {
             compute_publish_ports(&conn, &forward_ports, docker_host.is_remote())?
         };
 
-        let url = git_http_server::git_http_url(&server_ip, server_port);
         let ssh_forward = &self.ssh_forward;
+        let docker_tunnels = &self.docker_tunnels;
 
         // Create container and run initial git setup.  Closure used so we
         // can retry once on overlay2 filesystem errors (see below).
@@ -3309,7 +3291,6 @@ impl DaemonServer {
                 endpoint_inner.container_port,
             )?;
             let pod_inner = PodClient::new(&container_url_inner, &container_token_inner)?;
-            let direct_config = is_direct_git_config_mode()?;
 
             // Fix ownership of mount targets so the container user can write
             // to them.  Docker creates volume/tmpfs mounts as root by default.
@@ -3319,6 +3300,24 @@ impl DaemonServer {
                     .fs_chown(&targets, &user)
                     .context("chown mount targets for container user")?;
             }
+
+            // Start exec tunnel so the container can reach the git HTTP
+            // server on a loopback port.
+            let tunnel = block_on(crate::tunnel::start_docker_tunnel(
+                &docker,
+                &container_id.0,
+                &format!("127.0.0.1:{localhost_server_port}"),
+                0,
+            ))
+            .context("starting tunnel to docker container")?;
+            let tunnel_port = tunnel.port;
+            docker_tunnels
+                .lock()
+                .unwrap()
+                .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
+
+            let base_url = format!("http://127.0.0.1:{tunnel_port}");
+            let url = format!("{base_url}/gateway.git");
 
             ensure_repo_initialized_via_pod(&pod_inner, &url, &token, &container_repo_path, &user)?;
 
@@ -3332,7 +3331,6 @@ impl DaemonServer {
                     &token,
                     &pod_name.0,
                     host_branch.as_deref(),
-                    direct_config,
                     Some(&user),
                     git_identity.as_ref(),
                 )
@@ -3347,16 +3345,14 @@ impl DaemonServer {
                     displaypath: s.displaypath.clone(),
                 })
                 .collect();
-            let base_url = url.trim_end_matches("/gateway.git");
             pod_inner
                 .git_setup_submodules(
                     &container_repo_path,
                     &sub_entries,
-                    base_url,
+                    &base_url,
                     &token,
                     &pod_name.0,
                     true,
-                    direct_config,
                     Some(&user),
                 )
                 .context("setting up submodules")?;
@@ -3804,6 +3800,10 @@ impl Daemon for DaemonServer {
         if wait {
             try_remove_container(&self.ssh_forward, &host_str, &container_name)?;
 
+            self.docker_tunnels
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()));
             if let Some(token) = self
                 .active_tokens
                 .lock()
@@ -3821,6 +3821,12 @@ impl Daemon for DaemonServer {
             // Docker overlay unmounts sometimes take a while on busy systems.
             // Run removal in the background with retries so the CLI returns
             // immediately.
+            // Drop the tunnel handle immediately so the exec process
+            // inside the container is cleaned up before removal.
+            self.docker_tunnels
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()));
             let db = self.db.clone();
             let active_tokens = self.active_tokens.clone();
             let git_server_state = self.git_server_state.clone();
@@ -4106,35 +4112,10 @@ pub fn run_daemon() -> Result<()> {
     // Create shared state for the git HTTP server
     let git_server_state = SharedGitServerState::new();
 
-    // Start git HTTP server for bridge-network containers.
-    // Use port 0 to let the OS auto-assign a port, allowing multiple daemons
-    // (e.g., in tests) to run simultaneously without port conflicts.
-    //
-    // On macOS Docker Desktop, Docker runs in a VM so the bridge gateway IP
-    // is not reachable from the host. We bind to 0.0.0.0 instead and have
-    // containers connect via host.docker.internal.
-    let (bridge_bind_ip, bridge_container_ip) = if cfg!(target_os = "macos") {
-        ("0.0.0.0".to_string(), "host.docker.internal".to_string())
-    } else {
-        let ip = git_http_server::get_network_gateway_ip("bridge")
-            .context("getting bridge network gateway IP")?;
-        (ip.clone(), ip)
-    };
-    let bridge_server = GitHttpServer::start(&bridge_bind_ip, 0, git_server_state.clone())
-        .context("starting git HTTP server on bridge network")?;
-
-    // TODO: Start this lazily only when a pod with unsafe-host network is created,
-    // instead of always starting it.
-    // Start git HTTP server on localhost for unsafe-host network mode
+    // Git HTTP server on localhost, used as the tunnel target.
+    // Containers reach it via the exec tunnel, not directly.
     let localhost_server = GitHttpServer::start("127.0.0.1", 0, git_server_state.clone())
         .context("starting git HTTP server on localhost")?;
-
-    // Start git HTTP server on a Unix socket for SSH remote port forwarding.
-    // This allows the server to be accessed from remote Docker hosts.
-    let runtime_dir = crate::config::get_runtime_dir()?;
-    let git_unix_socket = runtime_dir.join("git-http.sock");
-    let unix_server = UnixGitHttpServer::start(&git_unix_socket, git_server_state.clone())
-        .context("starting git HTTP server on Unix socket")?;
 
     let mut listenfd = ListenFd::from_env();
     let listener = if let Some(listener) = listenfd
@@ -4163,20 +4144,16 @@ pub fn run_daemon() -> Result<()> {
     let daemon = DaemonServer {
         db: Arc::new(Mutex::new(db_conn)),
         git_server_state,
-        bridge_server_port: bridge_server.port,
-        bridge_container_ip,
         localhost_server_port: localhost_server.port,
         active_tokens: Arc::new(Mutex::new(BTreeMap::new())),
         ssh_forward: Arc::new(ssh_forward),
-        git_unix_socket,
         k8s_forwards: Arc::new(Mutex::new(HashMap::new())),
         k8s_tunnels: Arc::new(Mutex::new(HashMap::new())),
+        docker_tunnels: Arc::new(Mutex::new(HashMap::new())),
     };
 
-    // Keep servers alive for the lifetime of the daemon
-    let _bridge_server = bridge_server;
+    // Keep the server alive for the lifetime of the daemon.
     let _localhost_server = localhost_server;
-    let _unix_server = unix_server;
 
     protocol::serve_daemon(daemon, listener);
 }

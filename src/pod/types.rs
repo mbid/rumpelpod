@@ -83,8 +83,6 @@ pub struct GitSetupRequest {
     pub token: String,
     pub pod_name: String,
     pub host_branch: Option<String>,
-    #[serde(default)]
-    pub direct_config: bool,
     /// Run git as this user so fetched objects have correct ownership.
     pub user: Option<String>,
     /// Git user identity from the host to write into the pod's .git/config.
@@ -117,8 +115,6 @@ pub struct GitSetupSubmodulesRequest {
     pub pod_name: String,
     #[serde(default)]
     pub is_first_entry: bool,
-    #[serde(default)]
-    pub direct_config: bool,
     /// Run git as this user so submodule files have correct ownership.
     pub user: Option<String>,
 }

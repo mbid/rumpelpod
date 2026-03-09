@@ -170,7 +170,6 @@ impl PodClient {
         token: &str,
         pod_name: &str,
         host_branch: Option<&str>,
-        direct_config: bool,
         user: Option<&str>,
         git_identity: Option<&GitIdentity>,
     ) -> Result<()> {
@@ -182,7 +181,6 @@ impl PodClient {
                 token: token.to_string(),
                 pod_name: pod_name.to_string(),
                 host_branch: host_branch.map(String::from),
-                direct_config,
                 user: user.map(String::from),
                 git_identity: git_identity.cloned(),
             },
@@ -208,7 +206,6 @@ impl PodClient {
         token: &str,
         pod_name: &str,
         is_first_entry: bool,
-        direct_config: bool,
         user: Option<&str>,
     ) -> Result<()> {
         self.post_unit(
@@ -220,7 +217,6 @@ impl PodClient {
                 token: token.to_string(),
                 pod_name: pod_name.to_string(),
                 is_first_entry,
-                direct_config,
                 user: user.map(String::from),
             },
         )
