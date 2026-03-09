@@ -1,8 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR/.."
+ENV_FILE="$REPO_ROOT/.env"
+
 SCW="$HOME/.local/bin/scw"
 STATE_FILE="$HOME/.scaleway-mac-server"
+
+# Write or update a key=value pair in the .env file.
+set_env() {
+    local key="$1" value="$2"
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+    else
+        echo "${key}=${value}" >> "$ENV_FILE"
+    fi
+}
 ZONE="fr-par-1"
 TYPE="M2-M"  # cheapest available: 8-core M2, 16GB, 256GB SSD, EUR0.17/hr
 MACOS_KEY="$HOME/.ssh/id_ed25519_macos"
@@ -163,8 +177,8 @@ CONTAINER_CONFIG="Host macos
 
 KNOWN_HOSTS_LINE=$(ssh-keyscan -T 5 "$SERVER_IP" 2>/dev/null)
 
-echo " To pass into a devcontainer, paste into your shell:"
-echo ""
-printf '   export MACOS_SSH_PRIVATE_KEY="%s"\n' "$(base64 -w0 < "$MACOS_KEY")"
-printf '   export MACOS_SSH_CONFIG="%s"\n' "$(echo "$CONTAINER_CONFIG" | base64 -w0)"
-printf '   export MACOS_SSH_KNOWN_HOSTS="%s"\n' "$(echo "$KNOWN_HOSTS_LINE" | base64 -w0)"
+touch "$ENV_FILE"
+set_env MACOS_SSH_PRIVATE_KEY "$(base64 -w0 < "$MACOS_KEY")"
+set_env MACOS_SSH_CONFIG "$(echo "$CONTAINER_CONFIG" | base64 -w0)"
+set_env MACOS_SSH_KNOWN_HOSTS "$(echo "$KNOWN_HOSTS_LINE" | base64 -w0)"
+echo " macOS SSH credentials written to $ENV_FILE"

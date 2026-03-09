@@ -147,4 +147,6 @@ COPY entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
 COPY k8s-registry-port-forward.service /etc/systemd/system/
 RUN systemctl enable k8s-registry-port-forward.service
 
+ENV RUMPELPOD_TEST_SYSTEMD=1
+
 ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]

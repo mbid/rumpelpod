@@ -5,21 +5,9 @@
             "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}"
         }
     },
-    "containerEnv": {
-        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
-        "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
-        "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
-        "MACOS_SSH_PRIVATE_KEY": "${localEnv:MACOS_SSH_PRIVATE_KEY}",
-        "MACOS_SSH_CONFIG": "${localEnv:MACOS_SSH_CONFIG}",
-        "MACOS_SSH_KNOWN_HOSTS": "${localEnv:MACOS_SSH_KNOWN_HOSTS}",
-        "RUMPELPOD_K8S_KUBECONFIG": "${localEnv:RUMPELPOD_K8S_KUBECONFIG}",
-        "RUMPELPOD_TEST_K8S_CONTEXT": "${localEnv:RUMPELPOD_TEST_K8S_CONTEXT}",
-        "RUMPELPOD_TEST_PUSH_REGISTRY": "${localEnv:RUMPELPOD_TEST_PUSH_REGISTRY}",
-        "RUMPELPOD_TEST_PULL_REGISTRY": "${localEnv:RUMPELPOD_TEST_PULL_REGISTRY}",
-        "RUMPELPOD_TEST_SYSTEMD": "1"
-    },
     "runArgs": [
-        "--runtime=sysbox-runc"
+        "--runtime=sysbox-runc",
+        "--env-file", ".env"
     ],
     "containerUser": "dev"
 }

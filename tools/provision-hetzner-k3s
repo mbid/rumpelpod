@@ -2,7 +2,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR/.."
+ENV_FILE="$REPO_ROOT/.env"
 CONFIG_TEMPLATE="$SCRIPT_DIR/hetzner-k3s-config.yaml"
+
+# Write or update a key=value pair in the .env file.
+set_env() {
+    local key="$1" value="$2"
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+    else
+        echo "${key}=${value}" >> "$ENV_FILE"
+    fi
+}
 STATE_DIR="$HOME/.hetzner-k3s-cluster"
 SSH_KEY="$HOME/.ssh/id_ed25519"
 
@@ -172,13 +184,14 @@ echo ""
 echo " Usage:"
 echo "   export KUBECONFIG=$KUBECONFIG_PATH"
 echo ""
-echo " To pass cluster into devcontainer (set on the host):"
-echo "   export RUMPELPOD_K8S_KUBECONFIG=\$(base64 -w0 $KUBECONFIG_PATH)"
-echo "   export RUMPELPOD_TEST_K8S_CONTEXT=${KUBE_CONTEXT:-<see kubeconfig>}"
-echo "   export RUMPELPOD_TEST_PUSH_REGISTRY=localhost:5000/rumpelpod"
-echo "   export RUMPELPOD_TEST_PULL_REGISTRY=registry.registry.svc.cluster.local:5000/rumpelpod"
+touch "$ENV_FILE"
+set_env RUMPELPOD_K8S_KUBECONFIG "$(base64 -w0 "$KUBECONFIG_PATH")"
+set_env RUMPELPOD_TEST_K8S_CONTEXT "${KUBE_CONTEXT}"
+set_env RUMPELPOD_TEST_PUSH_REGISTRY "localhost:5000/rumpelpod"
+set_env RUMPELPOD_TEST_PULL_REGISTRY "registry.registry.svc.cluster.local:5000/rumpelpod"
+echo " Cluster credentials written to $ENV_FILE"
 echo ""
-echo " Then inside the devcontainer:"
+echo " Inside the devcontainer:"
 echo "   cargo xtest -- k8s --ignored"
 echo ""
 echo " State saved to  : $STATE_DIR"

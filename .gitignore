@@ -1,3 +1,4 @@
 /target
 /llm-cache/scratch/
 /scratch
+/.env
