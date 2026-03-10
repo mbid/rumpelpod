@@ -1,6 +1,6 @@
 ---
 # Hetzner K3s cluster configuration for rumpelpod.
-# Used by provision-hetzner-k3s / deprovision-hetzner-k3s.
+# Used by provision-hetzner-k3s.
 #
 # Dynamic values (surrounded by __double_underscores__) are substituted
 # by the provision script at runtime.  Edit the static values here to

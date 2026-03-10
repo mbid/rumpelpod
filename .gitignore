@@ -2,3 +2,4 @@
 /llm-cache/scratch/
 /scratch
 /.env
+/hetzner-k3s/
