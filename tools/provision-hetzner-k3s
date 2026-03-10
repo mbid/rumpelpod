@@ -6,7 +6,7 @@ REPO_ROOT="$SCRIPT_DIR/.."
 ENV_FILE="$REPO_ROOT/.env"
 CONFIG_TEMPLATE="$SCRIPT_DIR/hetzner-k3s-config.yaml"
 STATE_DIR="$REPO_ROOT/cloud"
-SSH_KEY="$HOME/.ssh/id_ed25519"
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 
 # Write or update a key=value pair in the .env file.
 set_env() {
