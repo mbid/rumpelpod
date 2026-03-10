@@ -155,6 +155,11 @@ struct DaemonServer {
     /// reach the host's git HTTP server on a loopback port.
     #[allow(clippy::type_complexity)]
     docker_tunnels: Arc<Mutex<HashMap<(PathBuf, String), crate::tunnel::TunnelHandle>>>,
+    /// Active exec proxy handles for Docker containers.
+    /// Each proxy routes HTTP to container-serve via docker exec instead
+    /// of bridge IPs or SSH port forwards.
+    #[allow(clippy::type_complexity)]
+    exec_proxies: Arc<Mutex<HashMap<(PathBuf, String), crate::exec_proxy::ExecProxyHandle>>>,
 }
 
 /// Label key used to store the repository path on containers.
@@ -1618,7 +1623,7 @@ fn inject_statusline(data: &[u8], pod_name: &str) -> Vec<u8> {
     serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| data.to_vec())
 }
 
-const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
+pub(crate) const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
 
 /// Inject a PermissionRequest hook that auto-approves all permission
 /// dialogs via the rumpel binary inside the container.
@@ -1723,12 +1728,16 @@ fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Resul
     Ok(())
 }
 
-/// Get the container's bridge IP.
-fn get_container_bridge_ip(docker: &Docker, container_id: &str) -> Result<Option<String>> {
+/// Determine the port container-serve should bind inside the container.
+///
+/// In host network mode the container shares the host's loopback, so we
+/// allocate an ephemeral port to avoid conflicts between concurrent
+/// containers.  In bridge mode each container has its own namespace and
+/// can safely use the default port.
+fn container_serve_port(docker: &Docker, container_id: &str) -> Result<u16> {
     let inspect = block_on(docker.inspect_container(container_id, None))
-        .context("inspecting container for IP address")?;
+        .context("inspecting container for network mode")?;
 
-    // In host network mode there is no per-container IP.
     let host_mode = inspect
         .host_config
         .as_ref()
@@ -1736,87 +1745,9 @@ fn get_container_bridge_ip(docker: &Docker, container_id: &str) -> Result<Option
         == Some("host");
 
     if host_mode {
-        return Ok(None);
-    }
-
-    Ok(inspect
-        .network_settings
-        .as_ref()
-        .and_then(|ns| ns.networks.as_ref())
-        .and_then(|nets| nets.get("bridge").or_else(|| nets.values().next()))
-        .and_then(|net| net.ip_address.as_deref())
-        .filter(|ip| !ip.is_empty())
-        .map(String::from))
-}
-
-/// Container URL and the port the server should bind inside the container.
-struct ContainerEndpoint {
-    /// URL reachable from the daemon (may go through SSH tunnel).
-    url: String,
-    /// Port the server should bind inside the container's network namespace.
-    container_port: u16,
-}
-
-/// Construct the URL at which the in-container HTTP server is reachable.
-///
-/// For local Docker this is the container's bridge IP.
-/// For host network mode this is localhost with a dynamic port.
-/// For remote Docker (SSH) this sets up an SSH local forward through
-/// the existing SSH connection and returns a localhost URL.
-fn get_container_endpoint(
-    docker: &Docker,
-    container_id: &str,
-    docker_host: &Host,
-    ssh_forward: &SshForwardManager,
-) -> Result<ContainerEndpoint> {
-    let default_port = crate::pod::DEFAULT_PORT;
-
-    match get_container_bridge_ip(docker, container_id)? {
-        None => {
-            // Host network mode: container shares the host's network namespace,
-            // so we pick a dynamic port to avoid conflicts between concurrent
-            // host-network containers.
-            let container_port = allocate_ephemeral_port()?;
-            match docker_host {
-                Host::Localhost => Ok(ContainerEndpoint {
-                    url: format!("http://127.0.0.1:{}", container_port),
-                    container_port,
-                }),
-                Host::Ssh { .. } => {
-                    let local_port = allocate_ephemeral_port()?;
-                    ssh_forward.add_local_forward(
-                        docker_host,
-                        local_port,
-                        "127.0.0.1",
-                        container_port,
-                    )?;
-                    Ok(ContainerEndpoint {
-                        url: format!("http://127.0.0.1:{}", local_port),
-                        container_port,
-                    })
-                }
-                Host::Kubernetes { .. } => Err(anyhow::anyhow!(
-                    "get_container_endpoint called for Kubernetes host"
-                )),
-            }
-        }
-        Some(ip) => match docker_host {
-            Host::Localhost => Ok(ContainerEndpoint {
-                url: format!("http://{}:{}", ip, default_port),
-                container_port: default_port,
-            }),
-            Host::Ssh { .. } => {
-                let local_port = allocate_ephemeral_port()?;
-                ssh_forward.add_local_forward(docker_host, local_port, &ip, default_port)?;
-                Ok(ContainerEndpoint {
-                    url: format!("http://127.0.0.1:{}", local_port),
-                    container_port: default_port,
-                })
-            }
-            Host::Kubernetes { .. } => Err(anyhow::anyhow!(
-                "get_container_endpoint called for Kubernetes host"
-            )),
-        },
+        allocate_ephemeral_port()
+    } else {
+        Ok(crate::pod::DEFAULT_PORT)
     }
 }
 
@@ -2994,18 +2925,46 @@ impl DaemonServer {
                 start_container(&docker, &name)?;
             }
 
-            // Get the container URL (sets up SSH forward if remote)
-            let endpoint =
-                get_container_endpoint(&docker, &state.id, &docker_host, &self.ssh_forward)?;
-            let container_url = endpoint.url;
+            // Route container-serve access through an exec proxy.
+            // Reuse an existing proxy if alive, otherwise start a new one.
+            let proxy_key = (repo_path.clone(), pod_name.0.clone());
+            {
+                let mut proxies = self.exec_proxies.lock().unwrap();
+                if let Some(handle) = proxies.get(&proxy_key) {
+                    if was_stopped || !handle.is_alive() {
+                        proxies.remove(&proxy_key);
+                    }
+                }
+            }
+            let container_url = {
+                let proxies = self.exec_proxies.lock().unwrap();
+                proxies
+                    .get(&proxy_key)
+                    .map(|h| format!("http://127.0.0.1:{}", h.port))
+            };
+            let (container_url, serve_port) = match container_url {
+                Some(url) => {
+                    let serve_port = container_serve_port(&docker, &state.id)?;
+                    (url, serve_port)
+                }
+                None => {
+                    let serve_port = container_serve_port(&docker, &state.id)?;
+                    let proxy = block_on(crate::exec_proxy::start_exec_proxy(
+                        &docker, &state.id, serve_port,
+                    ))
+                    .context("starting exec proxy for existing container")?;
+                    let url = format!("http://127.0.0.1:{}", proxy.port);
+                    self.exec_proxies
+                        .lock()
+                        .unwrap()
+                        .insert(proxy_key.clone(), proxy);
+                    (url, serve_port)
+                }
+            };
 
             // Ensure the in-container HTTP server is running
-            let container_token = start_container_server(
-                &docker,
-                &state.id,
-                &container_url,
-                endpoint.container_port,
-            )?;
+            let container_token =
+                start_container_server(&docker, &state.id, &container_url, serve_port)?;
 
             // Ensure pod record exists in database
             let pod_id = {
@@ -3116,6 +3075,7 @@ impl DaemonServer {
             })();
             if git_result.is_err() {
                 self.docker_tunnels.lock().unwrap().remove(&tunnel_key);
+                self.exec_proxies.lock().unwrap().remove(&proxy_key);
             }
             git_result?;
 
@@ -3258,8 +3218,8 @@ impl DaemonServer {
             compute_publish_ports(&conn, &forward_ports, docker_host.is_remote())?
         };
 
-        let ssh_forward = &self.ssh_forward;
         let docker_tunnels = &self.docker_tunnels;
+        let exec_proxies = &self.exec_proxies;
 
         // Create container and run initial git setup.  Closure used so we
         // can retry once on overlay2 filesystem errors (see below).
@@ -3280,16 +3240,23 @@ impl DaemonServer {
             // that trigger the reference-transaction hook shim.
             copy_rumpel_binary(&docker, &container_id.0, &image.0)?;
 
-            // Get container URL and start the in-container HTTP server
-            let endpoint_inner =
-                get_container_endpoint(&docker, &container_id.0, &docker_host, ssh_forward)?;
-            let container_url_inner = endpoint_inner.url;
-            let container_token_inner = start_container_server(
+            // Route container-serve access through an exec proxy so we
+            // don't need bridge IPs or SSH port forwards.
+            let serve_port = container_serve_port(&docker, &container_id.0)?;
+            let proxy = block_on(crate::exec_proxy::start_exec_proxy(
                 &docker,
                 &container_id.0,
-                &container_url_inner,
-                endpoint_inner.container_port,
-            )?;
+                serve_port,
+            ))
+            .context("starting exec proxy for container-serve")?;
+            let container_url_inner = format!("http://127.0.0.1:{}", proxy.port);
+            exec_proxies
+                .lock()
+                .unwrap()
+                .insert((repo_path.to_path_buf(), pod_name.0.clone()), proxy);
+
+            let container_token_inner =
+                start_container_server(&docker, &container_id.0, &container_url_inner, serve_port)?;
             let pod_inner = PodClient::new(&container_url_inner, &container_token_inner)?;
 
             // Fix ownership of mount targets so the container user can write
@@ -3381,9 +3348,6 @@ impl DaemonServer {
             Err(e) => return Err(mark_error(e)),
         };
 
-        // Reuse the URL from do_create_and_setup rather than re-deriving it,
-        // because get_container_endpoint allocates a new ephemeral port each
-        // time in host-network mode.
         let pod = PodClient::new(&container_url, &container_token)?;
 
         // Probe user env from shell init files
@@ -3608,27 +3572,24 @@ impl DaemonServer {
 
         if let Some(state) = inspect_container(&docker, &name)? {
             if state.status == "running" {
-                // Use the in-container HTTP server to snapshot
-                if let Ok(endpoint) =
-                    get_container_endpoint(&docker, &state.id, docker_host, &self.ssh_forward)
-                {
-                    // Try to connect; if the server is dead, PodClient::new
-                    // fails fast (connection refused) so the 10s timeout is not
-                    // a real delay.
-                    if let Ok(container_token) = start_container_server(
-                        &docker,
-                        &state.id,
-                        &endpoint.url,
-                        endpoint.container_port,
-                    ) {
-                        if let Ok(old_pod) = PodClient::new(&endpoint.url, &container_token) {
-                            patch = old_pod
-                                .git_snapshot(&container_repo_path, snapshot_user.as_deref())
-                                .context("snapshotting dirty files")?;
+                // Use a temporary exec proxy to reach the old container's server.
+                if let Ok(serve_port) = container_serve_port(&docker, &state.id) {
+                    if let Ok(proxy) = block_on(crate::exec_proxy::start_exec_proxy(
+                        &docker, &state.id, serve_port,
+                    )) {
+                        let url = format!("http://127.0.0.1:{}", proxy.port);
+                        if let Ok(container_token) =
+                            start_container_server(&docker, &state.id, &url, serve_port)
+                        {
+                            if let Ok(old_pod) = PodClient::new(&url, &container_token) {
+                                patch = old_pod
+                                    .git_snapshot(&container_repo_path, snapshot_user.as_deref())
+                                    .context("snapshotting dirty files")?;
 
-                            claude_snapshot =
-                                snapshot_claude_config(&old_pod, &container_repo_path)
-                                    .context("snapshotting claude config")?;
+                                claude_snapshot =
+                                    snapshot_claude_config(&old_pod, &container_repo_path)
+                                        .context("snapshotting claude config")?;
+                            }
                         }
                     }
                 }
@@ -3804,6 +3765,10 @@ impl Daemon for DaemonServer {
                 .lock()
                 .unwrap()
                 .remove(&(repo_path.clone(), pod_name.0.clone()));
+            self.exec_proxies
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()));
             if let Some(token) = self
                 .active_tokens
                 .lock()
@@ -3821,9 +3786,13 @@ impl Daemon for DaemonServer {
             // Docker overlay unmounts sometimes take a while on busy systems.
             // Run removal in the background with retries so the CLI returns
             // immediately.
-            // Drop the tunnel handle immediately so the exec process
-            // inside the container is cleaned up before removal.
+            // Drop the tunnel/proxy handles immediately so the exec
+            // processes inside the container are cleaned up before removal.
             self.docker_tunnels
+                .lock()
+                .unwrap()
+                .remove(&(repo_path.clone(), pod_name.0.clone()));
+            self.exec_proxies
                 .lock()
                 .unwrap()
                 .remove(&(repo_path.clone(), pod_name.0.clone()));
@@ -4150,6 +4119,7 @@ pub fn run_daemon() -> Result<()> {
         k8s_forwards: Arc::new(Mutex::new(HashMap::new())),
         k8s_tunnels: Arc::new(Mutex::new(HashMap::new())),
         docker_tunnels: Arc::new(Mutex::new(HashMap::new())),
+        exec_proxies: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Keep the server alive for the lifetime of the daemon.

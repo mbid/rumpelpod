@@ -252,6 +252,14 @@ Examples:
         port: u16,
     },
 
+    /// Bridge stdin/stdout to a TCP connection (internal, started by daemon via exec)
+    #[command(hide = true)]
+    TcpProxy {
+        /// Port to connect to on loopback
+        #[arg(long)]
+        port: u16,
+    },
+
     /// Run the in-container HTTP server (internal, started by daemon)
     #[command(hide = true)]
     ContainerServe {

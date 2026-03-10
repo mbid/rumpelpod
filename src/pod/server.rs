@@ -60,7 +60,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .merge(authenticated_routes);
 
     block_on(async {
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
             .await
             .expect("failed to bind container server port");
 

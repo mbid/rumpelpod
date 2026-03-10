@@ -8,6 +8,7 @@ pub mod config;
 mod cp;
 pub mod devcontainer;
 mod docker_exec;
+mod exec_proxy;
 
 pub use command_ext::CommandExt;
 pub mod daemon;
@@ -30,6 +31,7 @@ mod recreate;
 mod review;
 mod service;
 mod stop;
+mod tcp_proxy;
 mod tunnel;
 
 use anyhow::Result;
@@ -47,6 +49,9 @@ pub fn run() -> Result<()> {
         }
         Command::TunnelServer { port } => {
             tunnel::run_tunnel_server(port);
+        }
+        Command::TcpProxy { port } => {
+            tcp_proxy::run_tcp_proxy(port);
         }
         Command::ContainerServe { port, ref token } => {
             pod::run_container_server(port, token.clone());

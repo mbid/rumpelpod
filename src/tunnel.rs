@@ -540,8 +540,8 @@ pub async fn start_tunnel(
 /// Adapter that wraps bollard's multiplexed exec output stream into an
 /// `AsyncRead` that only yields stdout bytes.  Stderr chunks are
 /// forwarded to a channel for readiness detection and debug logging.
-struct BollardStdoutReader {
-    stream: Pin<
+pub(crate) struct BollardStdoutReader {
+    pub(crate) stream: Pin<
         Box<
             dyn futures_core::Stream<
                     Item = std::result::Result<
@@ -553,10 +553,10 @@ struct BollardStdoutReader {
     >,
     /// Leftover bytes from a previous StdOut chunk that did not fit
     /// into the caller's buffer.
-    pending: Vec<u8>,
-    pending_offset: usize,
+    pub(crate) pending: Vec<u8>,
+    pub(crate) pending_offset: usize,
     /// Channel for stderr chunks (readiness + debug).
-    stderr_tx: mpsc::UnboundedSender<Vec<u8>>,
+    pub(crate) stderr_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl AsyncRead for BollardStdoutReader {
