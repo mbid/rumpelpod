@@ -53,7 +53,20 @@ hetzner-k3s create --config "$CONFIG"
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 
-MASTER_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+# The Cloud Controller Manager needs a moment to annotate the node with
+# its ExternalIP after hetzner-k3s create returns.
+echo "==> Waiting for master node ExternalIP..."
+for i in $(seq 1 30); do
+    MASTER_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
+    if [[ -n "$MASTER_IP" ]]; then
+        break
+    fi
+    sleep 2
+done
+if [[ -z "$MASTER_IP" ]]; then
+    echo "Error: Timed out waiting for master node ExternalIP"
+    exit 1
+fi
 
 REGISTRY_MANIFEST="$STATE_DIR/k8s-registry.yaml"
 cp "$SCRIPT_DIR/k8s-registry.yaml" "$REGISTRY_MANIFEST"
