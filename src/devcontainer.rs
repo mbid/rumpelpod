@@ -777,6 +777,73 @@ impl DevContainer {
         }
     }
 
+    /// Extract `--env-file` entries from `runArgs`, read the referenced files,
+    /// and merge their variables into `container_env`.
+    ///
+    /// Must be called on the client side before sending to the daemon, since
+    /// the env file lives on the client's filesystem and would not be
+    /// accessible on a remote Docker host or in Kubernetes.
+    ///
+    /// File paths are resolved relative to `repo_root`.
+    /// Lines are parsed as `KEY=VALUE`; empty lines and `#` comments are
+    /// skipped. Inline `#` comments after the value are not stripped (matching
+    /// `docker run --env-file` behavior).
+    pub fn resolve_env_files(&mut self, repo_root: &Path) -> Result<()> {
+        let run_args = match self.run_args.take() {
+            Some(args) => args,
+            None => return Ok(()),
+        };
+
+        let mut env_files: Vec<PathBuf> = Vec::new();
+        let mut remaining_args: Vec<String> = Vec::new();
+
+        let mut iter = run_args.into_iter();
+        while let Some(arg) = iter.next() {
+            if let Some(path) = arg.strip_prefix("--env-file=") {
+                env_files.push(repo_root.join(path));
+            } else if arg == "--env-file" {
+                match iter.next() {
+                    Some(path) => env_files.push(repo_root.join(&path)),
+                    None => return Err(anyhow::anyhow!("--env-file requires a value")),
+                }
+            } else {
+                remaining_args.push(arg);
+            }
+        }
+
+        self.run_args = if remaining_args.is_empty() {
+            None
+        } else {
+            Some(remaining_args)
+        };
+
+        for path in &env_files {
+            let contents = std::fs::read_to_string(path)
+                .with_context(|| format!("reading env file {}", path.display()))?;
+
+            let env_map = self.container_env.get_or_insert_with(HashMap::new);
+            for line in contents.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                // containerEnv takes precedence: only insert if the key
+                // was not already set explicitly.
+                if let Some((key, value)) = trimmed.split_once('=') {
+                    env_map
+                        .entry(key.to_string())
+                        .or_insert_with(|| value.to_string());
+                } else {
+                    // Bare KEY without = is treated as KEY with empty value,
+                    // matching docker run --env-file behavior.
+                    env_map.entry(trimmed.to_string()).or_default();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Normalize build paths: merge legacy `dockerfile`/`context` into the
     /// `build` struct and make all paths relative to `repo_root`.
     ///

@@ -188,6 +188,14 @@ pub fn load_and_resolve(
         ..Default::default()
     });
 
+    // Read --env-file entries from runArgs on the client side and merge them
+    // into containerEnv. This must happen after localEnv substitution (env
+    // file paths may use ${localEnv:...}) and before sending to the daemon,
+    // since the files live on the client's filesystem.
+    devcontainer
+        .resolve_env_files(repo_root)
+        .context("resolving --env-file from runArgs")?;
+
     if let Some(ref requirements) = devcontainer.host_requirements {
         check_host_requirements(requirements, &docker_host);
     }

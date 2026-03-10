@@ -1,4 +1,4 @@
-use indoc::formatdoc;
+use indoc::{formatdoc, indoc};
 use rumpelpod::CommandExt;
 use std::fs;
 
@@ -169,4 +169,207 @@ fn container_env_recreate() {
         .success()
         .expect("rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "value2");
+}
+
+// ---------------------------------------------------------------------------
+// --env-file in runArgs
+// ---------------------------------------------------------------------------
+
+fn write_devcontainer_with_env_file(repo: &TestRepo, env_file_run_arg: &str) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
+
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u 1000 {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        USER {TEST_USER}
+    "#};
+    fs::write(devcontainer_dir.join("Dockerfile"), dockerfile).expect("Failed to write Dockerfile");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "build": {{
+                "dockerfile": "Dockerfile",
+                "context": ".."
+            }},
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "containerUser": "{TEST_USER}",
+            "runArgs": ["--runtime=runc", {env_file_run_arg}]
+        }}
+    "#};
+
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+}
+
+/// An .env file referenced via `--env-file` in runArgs should be read on the
+/// client side and its variables injected into the container.
+#[test]
+fn env_file_basic() {
+    let repo = TestRepo::new();
+
+    fs::write(
+        repo.path().join(".env"),
+        indoc! {"
+            MY_SECRET=hunter2
+            OTHER_VAR=hello world
+        "},
+    )
+    .expect("Failed to write .env");
+
+    write_devcontainer_with_env_file(&repo, r#""--env-file", ".env""#);
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "env-file-basic",
+            "--",
+            "sh",
+            "-c",
+            "echo $MY_SECRET $OTHER_VAR",
+        ])
+        .success()
+        .expect("rumpel enter failed");
+
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).trim(),
+        "hunter2 hello world"
+    );
+}
+
+/// Comments and blank lines in .env files should be ignored.
+#[test]
+fn env_file_comments_and_blanks() {
+    let repo = TestRepo::new();
+
+    fs::write(
+        repo.path().join(".env"),
+        indoc! {"
+            # This is a comment
+            KEEP=yes
+
+            # Another comment
+            ALSO_KEEP=also yes
+        "},
+    )
+    .expect("Failed to write .env");
+
+    write_devcontainer_with_env_file(&repo, r#""--env-file", ".env""#);
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "env-file-comments",
+            "--",
+            "sh",
+            "-c",
+            "echo $KEEP $ALSO_KEEP",
+        ])
+        .success()
+        .expect("rumpel enter failed");
+
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "yes also yes");
+}
+
+/// --env-file=path (equals form) should work the same as --env-file path.
+#[test]
+fn env_file_equals_form() {
+    let repo = TestRepo::new();
+
+    fs::write(repo.path().join(".env"), "EQ_VAR=from_equals\n").expect("Failed to write .env");
+
+    write_devcontainer_with_env_file(&repo, r#""--env-file=.env""#);
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "env-file-eq", "--", "printenv", "EQ_VAR"])
+        .success()
+        .expect("rumpel enter failed");
+
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "from_equals");
+}
+
+/// Variables from --env-file should be merged with containerEnv.
+/// containerEnv values should take precedence over --env-file values
+/// since containerEnv is more explicit.
+#[test]
+fn env_file_merged_with_container_env() {
+    let repo = TestRepo::new();
+
+    fs::write(
+        repo.path().join(".env"),
+        indoc! {"
+            FROM_FILE=file_value
+            SHARED=from_file
+        "},
+    )
+    .expect("Failed to write .env");
+
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
+
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u 1000 {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        USER {TEST_USER}
+    "#};
+    fs::write(devcontainer_dir.join("Dockerfile"), dockerfile).expect("Failed to write Dockerfile");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "build": {{
+                "dockerfile": "Dockerfile",
+                "context": ".."
+            }},
+            "containerEnv": {{
+                "FROM_JSON": "json_value",
+                "SHARED": "from_json"
+            }},
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "containerUser": "{TEST_USER}",
+            "runArgs": ["--runtime=runc", "--env-file", ".env"]
+        }}
+    "#};
+
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+
+    write_minimal_pod_toml(&repo);
+
+    let daemon = TestDaemon::start();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "env-file-merge",
+            "--",
+            "sh",
+            "-c",
+            "echo $FROM_FILE $FROM_JSON $SHARED",
+        ])
+        .success()
+        .expect("rumpel enter failed");
+
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).trim(),
+        "file_value json_value from_json"
+    );
 }
