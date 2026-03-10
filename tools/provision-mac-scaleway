@@ -6,7 +6,8 @@ REPO_ROOT="$SCRIPT_DIR/.."
 ENV_FILE="$REPO_ROOT/.env"
 
 SCW="$HOME/.local/bin/scw"
-STATE_FILE="$HOME/.scaleway-mac-server"
+STATE_DIR="$REPO_ROOT/cloud"
+STATE_FILE="$STATE_DIR/scaleway-mac-server.json"
 
 # Write or update a key=value pair in the .env file.
 set_env() {
@@ -47,6 +48,7 @@ SERVER_ID=$(echo "$SERVER_JSON" | jq -r '.id')
 SERVER_IP=$(echo "$SERVER_JSON" | jq -r '.ip')
 VNC_URL=$(echo "$SERVER_JSON" | jq -r '.vnc_url // empty')
 
+mkdir -p "$STATE_DIR"
 echo "$SERVER_JSON" > "$STATE_FILE"
 
 echo "==> Server created: $SERVER_ID"
@@ -166,7 +168,6 @@ else
     echo "   The VNC password is shown in the Scaleway console overview page."
 fi
 echo " State saved to: $STATE_FILE"
-echo " To deprovision: deprovision-mac-scaleway"
 echo ""
 # The container config references ~/.ssh/macos_id where the
 # postStartCommand writes the decoded private key.
