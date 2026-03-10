@@ -34,8 +34,8 @@ if [[ ! -f "$SSH_KEY" ]]; then
 fi
 
 mkdir -p "$STATE_DIR"
-CONFIG="$STATE_DIR/config.yaml"
-KUBECONFIG_PATH="$STATE_DIR/kubeconfig"
+CONFIG="$STATE_DIR/hetzner-k3s-config.yaml"
+KUBECONFIG_PATH="$STATE_DIR/hetzner-k3s-kubeconfig"
 
 # Resolve the template into a runtime config with all placeholders
 # replaced by actual values.
