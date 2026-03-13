@@ -53,21 +53,6 @@ hetzner-k3s create --config "$CONFIG"
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 
-# The Cloud Controller Manager needs a moment to annotate the node with
-# its ExternalIP after hetzner-k3s create returns.
-echo "==> Waiting for master node ExternalIP..."
-for i in $(seq 1 30); do
-    MASTER_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}')
-    if [[ -n "$MASTER_IP" ]]; then
-        break
-    fi
-    sleep 2
-done
-if [[ -z "$MASTER_IP" ]]; then
-    echo "Error: Timed out waiting for master node ExternalIP"
-    exit 1
-fi
-
 REGISTRY_MANIFEST="$STATE_DIR/k8s-registry.yaml"
 cp "$SCRIPT_DIR/k8s-registry.yaml" "$REGISTRY_MANIFEST"
 
@@ -75,23 +60,6 @@ echo "==> Deploying in-cluster container registry..."
 kubectl apply -f "$REGISTRY_MANIFEST"
 
 kubectl -n registry rollout status deployment/registry --timeout=120s
-
-# Tell containerd to pull from the registry pod via localhost:5000 (hostPort)
-# when a pod spec references the cluster-internal DNS name.  Without this,
-# containerd tries HTTPS and fails.
-echo "==> Configuring containerd registry mirror on ${MASTER_IP}..."
-ssh -o StrictHostKeyChecking=no "root@${MASTER_IP}" bash -s <<'REMOTE'
-cat > /etc/rancher/k3s/registries.yaml <<'EOF'
-mirrors:
-  "registry.registry.svc.cluster.local:5000":
-    endpoint:
-      - "http://localhost:5000"
-EOF
-systemctl restart k3s
-REMOTE
-
-echo "==> Waiting for node to rejoin after k3s restart..."
-kubectl wait --for=condition=Ready node --all --timeout=60s
 
 KUBE_CONTEXT=$(KUBECONFIG="$KUBECONFIG_PATH" kubectl config current-context 2>/dev/null || true)
 
