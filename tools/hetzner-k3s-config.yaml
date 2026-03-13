@@ -37,9 +37,6 @@ image: ubuntu-24.04
 schedule_workloads_on_masters: true
 protect_against_deletion: false
 
-embedded_registry_mirror:
-  enabled: true
-
 # Every node needs this so containerd uses HTTP for our in-cluster
 # registry.  post_create_commands runs on each node at creation time,
 # including autoscaled workers.
