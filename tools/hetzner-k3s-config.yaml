@@ -44,14 +44,7 @@ embedded_registry_mirror:
 # registry.  post_create_commands runs on each node at creation time,
 # including autoscaled workers.
 post_create_commands:
-  - |
-    mkdir -p /etc/rancher/k3s
-    cat > /etc/rancher/k3s/registries.yaml <<'EOF'
-    mirrors:
-      "registry.registry.svc.cluster.local:5000":
-        endpoint:
-          - "http://localhost:5000"
-    EOF
+  - 'mkdir -p /etc/rancher/k3s && printf "mirrors:\n  \"registry.registry.svc.cluster.local:5000\":\n    endpoint:\n      - \"http://localhost:5000\"\n" > /etc/rancher/k3s/registries.yaml'
 
 # Single master, cx33: 4 shared vCPU, 8 GB RAM (~5.49 EUR/month).
 # Low-mid range -- enough headroom for API-heavy workloads without
