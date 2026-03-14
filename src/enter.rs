@@ -46,8 +46,11 @@ const DEFAULT_DOCKERFILE: &str = indoc::indoc! {"
 /// Compute the path relative from `base` to `path`.
 /// Both paths must be absolute and `path` must be under `base`.
 fn relative_path<'a>(base: &Path, path: &'a Path) -> Result<&'a Path> {
-    path.strip_prefix(base)
-        .with_context(|| format!("{} is not under {}", path.display(), base.display()))
+    path.strip_prefix(base).with_context(|| {
+        let path = path.display();
+        let base = base.display();
+        format!("{path} is not under {base}")
+    })
 }
 
 /// Map the host's current directory into the corresponding container path.
@@ -87,26 +90,26 @@ fn check_host_requirements(requirements: &HostRequirements, docker_host: &Host) 
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(cpus) = requirements.cpus {
-        parts.push(format!("cpus={}", cpus));
+        parts.push(format!("cpus={cpus}"));
     }
     if let Some(ref memory) = requirements.memory {
         match parse_size_string(memory) {
-            Some(bytes) => parts.push(format!("memory={} ({} bytes)", memory, bytes)),
-            None => parts.push(format!("memory={} (unparseable)", memory)),
+            Some(bytes) => parts.push(format!("memory={memory} ({bytes} bytes)")),
+            None => parts.push(format!("memory={memory} (unparseable)")),
         }
     }
     if let Some(ref storage) = requirements.storage {
         match parse_size_string(storage) {
-            Some(bytes) => parts.push(format!("storage={} ({} bytes)", storage, bytes)),
-            None => parts.push(format!("storage={} (unparseable)", storage)),
+            Some(bytes) => parts.push(format!("storage={storage} ({bytes} bytes)")),
+            None => parts.push(format!("storage={storage} (unparseable)")),
         }
     }
     if let Some(ref gpu) = requirements.gpu {
         match gpu {
             GpuRequirement::Required(true) => parts.push("gpu=required".to_string()),
             GpuRequirement::Required(false) => {}
-            GpuRequirement::Optional(s) => parts.push(format!("gpu={}", s)),
-            GpuRequirement::Detailed(details) => parts.push(format!("gpu={:?}", details)),
+            GpuRequirement::Optional(s) => parts.push(format!("gpu={s}")),
+            GpuRequirement::Detailed(details) => parts.push(format!("gpu={details:?}")),
         }
     }
 
@@ -114,7 +117,8 @@ fn check_host_requirements(requirements: &HostRequirements, docker_host: &Host) 
         return;
     }
 
-    info!("hostRequirements: {}", parts.join(", "));
+    let parts = parts.join(", ");
+    info!("hostRequirements: {parts}");
 
     // Localhost and remote Docker: the user controls their hardware, so we
     // only log.  A future orchestrator backend (e.g. Kubernetes) should match
@@ -220,17 +224,18 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let repo_root = get_repo_root()?;
     let (devcontainer, docker_host, _default_image_dir) =
         load_and_resolve(&repo_root, host_override)?;
-    trace!("launch_pod config: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("launch_pod config: {elapsed:?}");
 
     // Reject bind mounts early for remote Docker
     if docker_host.is_remote() {
         for m in devcontainer.resolved_mounts()? {
             if m.mount_type == MountType::Bind {
+                let source = m.source.as_deref().unwrap_or("<none>");
                 return Err(anyhow::anyhow!(
                     "bind mounts are not supported with remote Docker hosts. \
-                     The source path '{}' would reference the remote filesystem, \
-                     not your local machine. Use volume or tmpfs mounts instead.",
-                    m.source.as_deref().unwrap_or("<none>")
+                     The source path '{source}' would reference the remote filesystem, \
+                     not your local machine. Use volume or tmpfs mounts instead."
                 ));
             }
         }
@@ -253,12 +258,13 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     })?;
     for line in &mut progress {
         match line {
-            OutputLine::Stdout(s) => println!("{}", s),
-            OutputLine::Stderr(s) => eprintln!("{}", s),
+            OutputLine::Stdout(s) => println!("{s}"),
+            OutputLine::Stderr(s) => eprintln!("{s}"),
         }
     }
     let result = progress.finish()?;
-    trace!("launch_pod daemon RPC: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("launch_pod daemon RPC: {elapsed:?}");
 
     Ok(result)
 }
@@ -341,14 +347,16 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
     let t = Instant::now();
     let repo_root = get_repo_root()?;
-    trace!("get_repo_root: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("get_repo_root: {elapsed:?}");
 
     let host_override = cmd.host_args.resolve()?;
 
     let t = Instant::now();
     let (devcontainer, _docker_host, _default_image_dir) =
         load_and_resolve(&repo_root, host_override.clone())?;
-    trace!("load_and_resolve: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("load_and_resolve: {elapsed:?}");
 
     let container_repo_path = devcontainer.container_repo_path(&repo_root);
     let workdir = container_workdir(&devcontainer, &repo_root)?;
@@ -361,7 +369,8 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
     let t = Instant::now();
     let result = launch_pod(&cmd.name, host_override)?;
-    trace!("launch_pod: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("launch_pod: {elapsed:?}");
 
     let mut command = cmd.command.clone();
     if command.is_empty() {
@@ -383,7 +392,10 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
             // kubectl exec has no --workdir or -e, so wrap in sh -c
             let env_prefix: String = merged_env
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, shell_escape(v)))
+                .map(|(k, v)| {
+                    let v = shell_escape(v);
+                    format!("{k}={v}")
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             let cmd_str = command
@@ -391,19 +403,11 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
                 .map(|s| shell_escape(s))
                 .collect::<Vec<_>>()
                 .join(" ");
+            let workdir_escaped = shell_escape(&workdir.to_string_lossy());
             let wrapper = if env_prefix.is_empty() {
-                format!(
-                    "cd {} && exec {}",
-                    shell_escape(&workdir.to_string_lossy()),
-                    cmd_str
-                )
+                format!("cd {workdir_escaped} && exec {cmd_str}")
             } else {
-                format!(
-                    "cd {} && exec env {} {}",
-                    shell_escape(&workdir.to_string_lossy()),
-                    env_prefix,
-                    cmd_str,
-                )
+                format!("cd {workdir_escaped} && exec env {env_prefix} {cmd_str}")
             };
 
             let mut kubectl = Command::new("kubectl");
@@ -418,7 +422,8 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
             kubectl.arg(&result.container_id.0);
             kubectl.args(["--", "sh", "-c", &wrapper]);
 
-            trace!("total enter startup: {:?}", t_total.elapsed());
+            let elapsed = t_total.elapsed();
+            trace!("total enter startup: {elapsed:?}");
             kubectl.status()?
         }
 
@@ -430,7 +435,8 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
 
             // The host subdir may not exist in the container yet
             if workdir != container_repo_path {
-                let docker_host_arg = format!("unix://{}", docker_socket.display());
+                let docker_socket_display = docker_socket.display();
+                let docker_host_arg = format!("unix://{docker_socket_display}");
                 let mkdir_status = Command::new("docker")
                     .args(["-H", &docker_host_arg])
                     .args(["exec", "--user", &result.user, &result.container_id.0])
@@ -438,21 +444,22 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
                     .status()
                     .context("Failed to create workdir in container")?;
                 if !mkdir_status.success() {
+                    let workdir = workdir.display();
                     return Err(anyhow::anyhow!(
-                        "Failed to create workdir {} in container",
-                        workdir.display()
+                        "Failed to create workdir {workdir} in container"
                     ));
                 }
             }
 
             let mut docker_cmd = Command::new("docker");
-            docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
+            let docker_socket_display = docker_socket.display();
+            docker_cmd.args(["-H", &format!("unix://{docker_socket_display}")]);
             docker_cmd.arg("exec");
             docker_cmd.args(["--user", &result.user]);
             docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
             for (key, value) in &merged_env {
-                docker_cmd.args(["-e", &format!("{}={}", key, value)]);
+                docker_cmd.args(["-e", &format!("{key}={value}")]);
             }
 
             docker_cmd.arg("-i");
@@ -462,13 +469,14 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
             docker_cmd.arg(&result.container_id.0);
             docker_cmd.args(&command);
 
-            trace!("total enter startup: {:?}", t_total.elapsed());
+            let elapsed = t_total.elapsed();
+            trace!("total enter startup: {elapsed:?}");
             docker_cmd.status()?
         }
     };
 
     if !status.success() {
-        return Err(anyhow::anyhow!("exec exited with status {}", status));
+        return Err(anyhow::anyhow!("exec exited with status {status}"));
     }
 
     Ok(())

@@ -33,7 +33,7 @@ impl std::fmt::Display for Model {
             Model::Gemini3Pro => "gemini-3-pro-preview",
             Model::Custom(s) => s,
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 

@@ -29,7 +29,7 @@ impl std::fmt::Display for Model {
             Model::Haiku => "claude-haiku-4-5",
             Model::Custom(s) => s,
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 

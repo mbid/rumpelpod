@@ -124,7 +124,7 @@ pub fn run_claude_agent(
                 // Extract the text from the last user message
                 for block in &last_msg.content {
                     if let ContentBlock::Text { text, .. } = block {
-                        editable_last_message = Some(format!("{}\n", text));
+                        editable_last_message = Some(format!("{text}\n"));
                         break;
                     }
                 }
@@ -353,7 +353,7 @@ pub fn run_claude_agent(
                         println!("{text}");
                     }
                     ContentBlock::Thinking { thinking, .. } => {
-                        println!("<thinking>\n{}\n</thinking>", thinking);
+                        println!("<thinking>\n{thinking}\n</thinking>");
                     }
                     ContentBlock::RedactedThinking { .. } => {
                         println!("<thinking>\n[redacted]\n</thinking>");
@@ -361,7 +361,7 @@ pub fn run_claude_agent(
                     ContentBlock::ToolUse { id, name, input } => {
                         has_tool_use = true;
                         let tool_name = ToolName::from_str(name)
-                            .map_err(|_| anyhow::anyhow!("Unknown tool: {}", name))?;
+                            .map_err(|_| anyhow::anyhow!("Unknown tool: {name}"))?;
 
                         let (output, success) = match tool_name {
                             ToolName::Bash => {
@@ -550,7 +550,7 @@ fn format_anthropic_history(messages: &[Message]) -> String {
                             }
                         }
                         ContentBlock::Thinking { thinking, .. } => {
-                            output.push_str(&format!("<thinking>\n{}\n</thinking>\n", thinking));
+                            output.push_str(&format!("<thinking>\n{thinking}\n</thinking>\n"));
                         }
                         ContentBlock::RedactedThinking { .. } => {
                             output.push_str("<thinking>\n[redacted]\n</thinking>\n");

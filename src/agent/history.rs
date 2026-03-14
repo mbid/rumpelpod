@@ -61,9 +61,7 @@ impl ConversationTracker {
         if let Some(expected_id) = self.id {
             if returned_id != expected_id {
                 return Err(anyhow::anyhow!(
-                    "Conversation ID changed unexpectedly: expected {}, got {}",
-                    expected_id,
-                    returned_id
+                    "Conversation ID changed unexpectedly: expected {expected_id}, got {returned_id}"
                 ));
             }
         }
@@ -86,7 +84,7 @@ pub enum ConversationChoice {
 /// Takes an ISO 8601 timestamp and formats it as "Mon-DD HH:MM".
 fn format_timestamp(iso: &str) -> Result<String> {
     let dt = chrono::DateTime::parse_from_rfc3339(iso)
-        .with_context(|| format!("Failed to parse timestamp: {}", iso))?;
+        .with_context(|| format!("Failed to parse timestamp: {iso}"))?;
     Ok(dt.format("%b-%d %H:%M").to_string())
 }
 
@@ -103,7 +101,8 @@ fn show_picker(conversations: &[ConversationSummary]) -> Result<i64> {
 
     for (i, conv) in conversations.iter().enumerate() {
         let timestamp = format_timestamp(&conv.updated_at)?;
-        println!("  {}) {} [{}]", i, timestamp, conv.model);
+        let model = &conv.model;
+        println!("  {i}) {timestamp} [{model}]");
     }
 
     // Picker is only shown when there are 2+ conversations
@@ -113,7 +112,7 @@ fn show_picker(conversations: &[ConversationSummary]) -> Result<i64> {
     );
     let max_index = conversations.len() - 1;
     loop {
-        print!("Select [0-{}] (default 0): ", max_index);
+        print!("Select [0-{max_index}] (default 0): ");
         stdout.flush()?;
 
         let mut input = String::new();
@@ -166,10 +165,9 @@ pub fn resolve_conversation(
             ));
         }
         if n >= conversations.len() {
+            let len = conversations.len();
             return Err(anyhow::anyhow!(
-                "Conversation index {} out of range. Only {} conversation(s) exist.",
-                n,
-                conversations.len()
+                "Conversation index {n} out of range. Only {len} conversation(s) exist."
             ));
         }
         // Conversations are already sorted by updated_at DESC, so index 0 is most recent
@@ -207,6 +205,6 @@ pub fn load_conversation(id: i64) -> Result<(serde_json::Value, String, String)>
     let client = DaemonClient::new_unix(&socket);
     let response = client
         .get_conversation(id)?
-        .with_context(|| format!("Conversation {} not found", id))?;
+        .with_context(|| format!("Conversation {id} not found"))?;
     Ok((response.history, response.model, response.provider))
 }

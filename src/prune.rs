@@ -51,40 +51,37 @@ pub fn prune(cmd: &PruneCommand) -> Result<()> {
         if !cmd.force && is_ahead(pod.repo_state.as_deref()) {
             let state = pod.repo_state.as_deref().unwrap_or("");
             if io::stdin().is_terminal() && io::stderr().is_terminal() {
-                eprint!(
-                    "pod '{}' has unmerged commits ({}), delete anyway? [y/N] ",
-                    pod.name, state
-                );
+                let name = &pod.name;
+                eprint!("pod '{name}' has unmerged commits ({state}), delete anyway? [y/N] ");
                 io::stderr().flush()?;
 
                 let mut answer = String::new();
                 io::stdin().read_line(&mut answer)?;
                 if !answer.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("skipping pod '{}'", pod.name);
+                    eprintln!("skipping pod '{name}'");
                     continue;
                 }
             } else {
-                eprintln!(
-                    "pod '{}' has unmerged commits ({}); use --force to delete",
-                    pod.name, state
-                );
+                let name = &pod.name;
+                eprintln!("pod '{name}' has unmerged commits ({state}); use --force to delete");
                 failed += 1;
                 continue;
             }
         }
 
         if let Err(e) = client.delete_pod(PodName(pod.name.clone()), repo_path.clone(), true) {
-            eprintln!("failed to delete pod '{}': {}", pod.name, e);
+            let name = &pod.name;
+            eprintln!("failed to delete pod '{name}': {e}");
             failed += 1;
         } else {
             deleted += 1;
         }
     }
 
-    eprintln!("Deleted {} pod(s).", deleted);
+    eprintln!("Deleted {deleted} pod(s).");
 
     if failed > 0 {
-        return Err(anyhow::anyhow!("{} pod(s) could not be deleted", failed));
+        return Err(anyhow::anyhow!("{failed} pod(s) could not be deleted"));
     }
 
     Ok(())

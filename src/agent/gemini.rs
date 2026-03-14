@@ -169,7 +169,7 @@ pub fn run_gemini_agent(
                 for part in &last_content.parts {
                     if let PartContent::Text(text) = &part.content {
                         if !text.is_empty() {
-                            editable_last_message = Some(format!("{}\n", text));
+                            editable_last_message = Some(format!("{text}\n"));
                             break;
                         }
                     }
@@ -339,7 +339,7 @@ pub fn run_gemini_agent(
                     _ => {
                         println!("[finish_reason] {:?}", reason);
                         if let Some(msg) = &candidate.finish_message {
-                            println!("[finish_message] {}", msg);
+                            println!("[finish_message] {msg}");
                         }
                     }
                 }
@@ -463,7 +463,8 @@ pub fn run_gemini_agent(
                                 }
                             }
                             Err(_) => {
-                                let error_msg = format!("Unknown tool: {}", fc.name);
+                                let name = &fc.name;
+                                let error_msg = format!("Unknown tool: {name}");
                                 println!("[error] {error_msg}");
                                 (error_msg, false)
                             }

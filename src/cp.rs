@@ -117,15 +117,16 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
         Host::Kubernetes {
             context, namespace, ..
         } => {
+            let container_id = &result.container_id.0;
             let (k8s_src, k8s_dest) = if from_pod {
                 (
-                    format!("{}:{container_path}", result.container_id.0),
+                    format!("{container_id}:{container_path}"),
                     local_path.clone(),
                 )
             } else {
                 (
                     local_path.clone(),
-                    format!("{}:{container_path}", result.container_id.0),
+                    format!("{container_id}:{container_path}"),
                 )
             };
 
@@ -143,20 +144,22 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
                 .as_ref()
                 .context("docker_socket is required for Docker hosts")?;
 
+            let container_id = &result.container_id.0;
             let (docker_src, docker_dest) = if from_pod {
                 (
-                    format!("{}:{container_path}", result.container_id.0),
+                    format!("{container_id}:{container_path}"),
                     local_path.clone(),
                 )
             } else {
                 (
                     local_path.clone(),
-                    format!("{}:{container_path}", result.container_id.0),
+                    format!("{container_id}:{container_path}"),
                 )
             };
 
             let mut docker_cmd = Command::new("docker");
-            docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
+            let docker_socket_display = docker_socket.display();
+            docker_cmd.args(["-H", &format!("unix://{docker_socket_display}")]);
             docker_cmd.arg("cp");
 
             if cmd.archive {
@@ -176,7 +179,7 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
     };
 
     if !status.success() {
-        return Err(anyhow::anyhow!("cp exited with status {}", status));
+        return Err(anyhow::anyhow!("cp exited with status {status}"));
     }
 
     // When copying into the pod, fix ownership so files belong to the container user
@@ -197,7 +200,8 @@ fn chown_in_container(result: &LaunchResult, container_path: &str) -> Result<()>
             // Wrap in sh so we can run as root via the container's entrypoint
             // mechanism; kubectl exec has no --user flag, but pods launched by
             // rumpelpod include a root-capable shell.
-            let chown_cmd = format!("chown -R {} {container_path}", result.user);
+            let user = &result.user;
+            let chown_cmd = format!("chown -R {user} {container_path}");
             let mut kubectl = Command::new("kubectl");
             kubectl.args(["--context", context]);
             kubectl.args(["--namespace", namespace]);
@@ -212,7 +216,8 @@ fn chown_in_container(result: &LaunchResult, container_path: &str) -> Result<()>
                 .context("docker_socket is required for Docker hosts")?;
 
             let mut docker_cmd = Command::new("docker");
-            docker_cmd.args(["-H", &format!("unix://{}", docker_socket.display())]);
+            let docker_socket_display = docker_socket.display();
+            docker_cmd.args(["-H", &format!("unix://{docker_socket_display}")]);
             docker_cmd.args(["exec", "--user", "root", &result.container_id.0]);
             docker_cmd.args(["chown", "-R", &result.user, container_path]);
             docker_cmd.status()?

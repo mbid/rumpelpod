@@ -189,10 +189,10 @@ impl ToolName {
 
 /// Read AGENTS.md from the pod if it exists.
 pub fn read_agents_md(pod: &PodClient, repo_path: &Path) -> Option<String> {
-    debug!("Reading {} from pod", AGENTS_MD_PATH);
+    debug!("Reading {AGENTS_MD_PATH} from pod");
     let agents_path = repo_path.join(AGENTS_MD_PATH);
     let data = pod.fs_read(&agents_path).ok()?;
-    debug!("{} loaded successfully", AGENTS_MD_PATH);
+    debug!("{AGENTS_MD_PATH} loaded successfully");
     String::from_utf8(data).ok()
 }
 
@@ -212,7 +212,7 @@ pub fn execute_edit_in_pod(
 ) -> Result<(String, bool)> {
     let full_path = repo_path.join(file_path);
 
-    debug!("Reading file for edit: {}", file_path);
+    debug!("Reading file for edit: {file_path}");
     let output = match pod.fs_read(&full_path) {
         Ok(output) => output,
         Err(e) => return Ok((format!("Error reading file: {e}"), false)),
@@ -242,7 +242,7 @@ pub fn execute_edit_in_pod(
 
     let new_content = content.replacen(old_string, new_string, 1);
 
-    debug!("Writing edited file: {}", file_path);
+    debug!("Writing edited file: {file_path}");
     if let Err(e) = pod.fs_write(&full_path, new_content.as_bytes(), None, false) {
         return Ok((format!("Error writing file: {e}"), false));
     }
@@ -259,7 +259,7 @@ pub fn execute_write_in_pod(
 ) -> Result<(String, bool)> {
     let full_path = repo_path.join(file_path);
 
-    debug!("Checking if file exists: {}", file_path);
+    debug!("Checking if file exists: {file_path}");
     match pod.fs_stat(&full_path) {
         Ok(stat) if stat.exists => {
             return Ok((format!("File {file_path} already exists"), false));
@@ -267,7 +267,7 @@ pub fn execute_write_in_pod(
         _ => {}
     }
 
-    debug!("Writing new file: {}", file_path);
+    debug!("Writing new file: {file_path}");
     // create_parents: true will create parent directories
     if let Err(e) = pod.fs_write(&full_path, content.as_bytes(), None, true) {
         return Ok((format!("Error writing file: {e}"), false));
@@ -315,7 +315,7 @@ pub fn execute_bash_in_pod(
     };
     let output_file = format!("/tmp/agent/bash-{id}.log");
 
-    debug!("Executing bash in pod: {}", command);
+    debug!("Executing bash in pod: {command}");
 
     // In test mode, set ns_last_pid to get a deterministic PID for this command.
     if let Some(next_pid) = deterministic_pid {
@@ -452,7 +452,8 @@ pub fn execute_bash_in_pod(
 
     // If command failed with no output, report the exit status
     if !success && combined.is_empty() {
-        return Ok((format!("exited with status {}", result.exit_code), false));
+        let exit_code = result.exit_code;
+        return Ok((format!("exited with status {exit_code}"), false));
     }
 
     Ok((combined, success))
@@ -505,7 +506,7 @@ pub fn get_input_via_editor(
         let temp_file = temp_dir.join(format!("rumpelpod-chat-{pod_name}-{pid}.txt"));
 
         let initial_content = if let Some(suffix) = editable_suffix {
-            format!("{}{}", chat_history, suffix)
+            format!("{chat_history}{suffix}")
         } else {
             chat_history.to_string()
         };

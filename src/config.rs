@@ -76,7 +76,7 @@ impl std::fmt::Display for Model {
             Model::Grok41Fast => "grok-4-1-fast-reasoning",
             Model::Grok41FastNonReasoning => "grok-4-1-fast-non-reasoning",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -135,12 +135,11 @@ impl Host {
         let url = Url::parse(s).with_context(|| {
             if !s.contains("://") {
                 format!(
-                    "Invalid host '{}'. Use 'localhost' for local Docker \
-                     or 'ssh://host' for remote Docker.",
-                    s
+                    "Invalid host '{s}'. Use 'localhost' for local Docker \
+                     or 'ssh://host' for remote Docker."
                 )
             } else {
-                format!("Invalid URL: {}", s)
+                format!("Invalid URL: {s}")
             }
         })?;
 
@@ -148,12 +147,12 @@ impl Host {
             "ssh" => {
                 let host = url
                     .host_str()
-                    .ok_or_else(|| anyhow::anyhow!("URL must have a host: {}", s))?;
+                    .ok_or_else(|| anyhow::anyhow!("URL must have a host: {s}"))?;
                 let port = url.port().unwrap_or(22);
                 let username = url.username();
 
                 let ssh_destination = if !username.is_empty() {
-                    format!("{}@{}", username, host)
+                    format!("{username}@{host}")
                 } else {
                     host.to_string()
                 };
@@ -164,11 +163,9 @@ impl Host {
                 })
             }
             other => Err(anyhow::anyhow!(
-                "Unsupported scheme '{}' in host '{}'. \
+                "Unsupported scheme '{other}' in host '{s}'. \
                      Use 'ssh://' for remote Docker, or \
-                     '--k8s-context' / '[k8s]' for Kubernetes.",
-                other,
-                s
+                     '--k8s-context' / '[k8s]' for Kubernetes."
             )),
         }
     }
@@ -221,7 +218,7 @@ impl Host {
             Host::Ssh {
                 ssh_destination,
                 port,
-            } => Some(format!("ssh://{}:{}", ssh_destination, port)),
+            } => Some(format!("ssh://{ssh_destination}:{port}")),
             Host::Kubernetes { .. } => {
                 panic!("docker_host_uri() called on Kubernetes host")
             }
@@ -239,20 +236,20 @@ impl std::fmt::Display for Host {
                 port,
             } => {
                 if *port == 22 {
-                    write!(f, "ssh://{}", ssh_destination)
+                    write!(f, "ssh://{ssh_destination}")
                 } else if let Some((user, host)) = ssh_destination.split_once('@') {
-                    write!(f, "ssh://{}@{}:{}", user, host, port)
+                    write!(f, "ssh://{user}@{host}:{port}")
                 } else {
-                    write!(f, "ssh://{}:{}", ssh_destination, port)
+                    write!(f, "ssh://{ssh_destination}:{port}")
                 }
             }
             Host::Kubernetes {
                 context, namespace, ..
             } => {
                 if namespace == "default" {
-                    write!(f, "k8s:{}", context)
+                    write!(f, "k8s:{context}")
                 } else {
-                    write!(f, "k8s:{}/{}", context, namespace)
+                    write!(f, "k8s:{context}/{namespace}")
                 }
             }
         }
@@ -317,16 +314,16 @@ pub struct TomlConfig {
 pub fn load_toml_config(repo_root: &Path) -> Result<TomlConfig> {
     let config_path = repo_root.join(".rumpelpod.toml");
     if config_path.exists() {
+        let config_path_display = config_path.display();
         let contents = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+            .with_context(|| format!("Failed to read {config_path_display}"))?;
         let config: TomlConfig = toml::from_str(&contents)
-            .with_context(|| format!("Failed to parse {}", config_path.display()))?;
+            .with_context(|| format!("Failed to parse {config_path_display}"))?;
 
         // host and [k8s] are mutually exclusive
         if config.host.is_some() && config.k8s.is_some() {
             return Err(anyhow::anyhow!(
-                "Configuration error: 'host' and '[k8s]' are mutually exclusive in {}.",
-                config_path.display()
+                "Configuration error: 'host' and '[k8s]' are mutually exclusive in {config_path_display}."
             ));
         }
 
@@ -398,7 +395,7 @@ pub fn get_runtime_dir() -> Result<PathBuf> {
         .unwrap_or_else(|_| {
             // Fallback to /tmp/rumpelpod-<uid>
             let uid = unsafe { libc::getuid() };
-            PathBuf::from(format!("/tmp/rumpelpod-{}", uid))
+            PathBuf::from(format!("/tmp/rumpelpod-{uid}"))
         });
 
     Ok(runtime_base.join("rumpelpod"))
@@ -414,8 +411,7 @@ pub fn is_deterministic_test_mode() -> Result<bool> {
     match std::env::var("RUMPELPOD_TEST_DETERMINISTIC_IDS") {
         Ok(value) if value == "1" => Ok(true),
         Ok(value) => Err(anyhow::anyhow!(
-            "RUMPELPOD_TEST_DETERMINISTIC_IDS must be '1' if set, got '{}'",
-            value
+            "RUMPELPOD_TEST_DETERMINISTIC_IDS must be '1' if set, got '{value}'"
         )),
         Err(std::env::VarError::NotPresent) => Ok(false),
         Err(e) => Err(e).context("failed to read RUMPELPOD_TEST_DETERMINISTIC_IDS"),
@@ -469,8 +465,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("ssh://"),
-            "error should suggest ssh:// prefix: {}",
-            msg
+            "error should suggest ssh:// prefix: {msg}"
         );
     }
 
@@ -480,8 +475,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("Unsupported scheme"),
-            "unexpected error: {}",
-            msg
+            "unexpected error: {msg}"
         );
     }
 
@@ -491,8 +485,7 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains("k8s-context"),
-            "error should suggest --k8s-context: {}",
-            msg
+            "error should suggest --k8s-context: {msg}"
         );
     }
 
@@ -574,7 +567,7 @@ mod tests {
         for host in hosts {
             let json = serde_json::to_string(&host).unwrap();
             let roundtripped: Host = serde_json::from_str(&json).unwrap();
-            assert_eq!(host, roundtripped, "roundtrip failed for {:?}", host);
+            assert_eq!(host, roundtripped, "roundtrip failed for {host:?}");
         }
     }
 

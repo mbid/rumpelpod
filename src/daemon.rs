@@ -122,7 +122,7 @@ pub fn socket_path() -> Result<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let uid = unsafe { libc::getuid() };
-            PathBuf::from(format!("/tmp/rumpelpod-{}", uid))
+            PathBuf::from(format!("/tmp/rumpelpod-{uid}"))
         });
     Ok(runtime_dir.join("rumpelpod.sock"))
 }
@@ -238,7 +238,8 @@ fn docker_name(repo_path: &Path, pod_name: &PodName) -> String {
     let hash = hex::encode(hasher.finalize());
     let hash_prefix = &hash[..12];
 
-    sanitize_docker_name(&format!("{}-{}-{}", repo_dir, pod_name.0, hash_prefix))
+    let pod = &pod_name.0;
+    sanitize_docker_name(&format!("{repo_dir}-{pod}-{hash_prefix}"))
 }
 
 /// Resolve daemon-side variables: `${containerWorkspaceFolder}`,
@@ -305,7 +306,7 @@ struct ContainerState {
 /// Returns None if the image has no USER set (defaults to root).
 fn get_image_user(docker: &Docker, image: &str) -> Result<Option<String>> {
     let inspect = block_on(docker.inspect_image(image))
-        .with_context(|| format!("Failed to inspect image '{}'", image))?;
+        .with_context(|| format!("Failed to inspect image '{image}'"))?;
 
     let user = inspect.config.and_then(|c| c.user).unwrap_or_default();
 
@@ -345,7 +346,7 @@ impl ContainerArch {
 
 fn get_image_architecture(docker: &Docker, image: &str) -> Result<Option<ContainerArch>> {
     let inspect = block_on(docker.inspect_image(image))
-        .with_context(|| format!("Failed to inspect image '{}'", image))?;
+        .with_context(|| format!("Failed to inspect image '{image}'"))?;
     inspect
         .architecture
         .map(|s| ContainerArch::from_docker(&s))
@@ -405,7 +406,8 @@ fn start_container(docker: &Docker, container_name: &str) -> Result<()> {
 /// and corresponding remote-tracking refs from `host_repo_path`, including
 /// the alias symref `rumpelpod/<pod_name>`.
 fn cleanup_pod_refs_in_gateway(gateway_path: &Path, host_repo_path: &Path, pod_name: &PodName) {
-    let pattern = format!("refs/heads/rumpelpod/*@{}", pod_name.0);
+    let pod = &pod_name.0;
+    let pattern = format!("refs/heads/rumpelpod/*@{pod}");
     if let Ok(output) = Command::new("git")
         .args(["for-each-ref", "--format=%(refname)", &pattern])
         .current_dir(gateway_path)
@@ -421,20 +423,20 @@ fn cleanup_pod_refs_in_gateway(gateway_path: &Path, host_repo_path: &Path, pod_n
 
                 let branch = ref_name.strip_prefix("refs/heads/").unwrap_or(ref_name);
                 let _ = Command::new("git")
-                    .args(["update-ref", "-d", &format!("refs/remotes/{}", branch)])
+                    .args(["update-ref", "-d", &format!("refs/remotes/{branch}")])
                     .current_dir(host_repo_path)
                     .output();
             }
         }
     }
 
-    let alias_ref = format!("refs/heads/rumpelpod/{}", pod_name.0);
+    let alias_ref = format!("refs/heads/rumpelpod/{pod}");
     let _ = Command::new("git")
         .args(["symbolic-ref", "--delete", &alias_ref])
         .current_dir(gateway_path)
         .output();
 
-    let alias_remote_ref = format!("refs/remotes/rumpelpod/{}", pod_name.0);
+    let alias_remote_ref = format!("refs/remotes/rumpelpod/{pod}");
     let _ = Command::new("git")
         .args(["update-ref", "-d", &alias_remote_ref])
         .current_dir(host_repo_path)
@@ -544,7 +546,7 @@ fn parse_run_args_for_docker(args: &[String]) -> DockerRunArgs {
 /// Strip `--flag=` prefix and return the value, or None if the arg doesn't
 /// start with `--flag=`.
 fn strip_flag<'a>(arg: &'a str, flag: &str) -> Option<&'a str> {
-    let prefix = format!("{}=", flag);
+    let prefix = format!("{flag}=");
     arg.strip_prefix(&prefix)
 }
 
@@ -613,7 +615,7 @@ fn create_container(
     let env_vec = match env {
         Some(e) if !e.is_empty() => Some(
             e.iter()
-                .map(|(k, v)| format!("{}={}", k, v))
+                .map(|(k, v)| format!("{k}={v}"))
                 .collect::<Vec<_>>(),
         ),
         _ => None,
@@ -675,7 +677,7 @@ fn create_container(
     let port_bindings: HashMap<String, Option<Vec<PortBinding>>> = publish_ports
         .iter()
         .map(|(&container_port, &host_port)| {
-            let key = format!("{}/tcp", container_port);
+            let key = format!("{container_port}/tcp");
             let binding = PortBinding {
                 host_ip: Some("127.0.0.1".to_string()),
                 host_port: Some(host_port.to_string()),
@@ -715,7 +717,7 @@ fn create_container(
         Some(
             publish_ports
                 .keys()
-                .map(|port| format!("{}/tcp", port))
+                .map(|port| format!("{port}/tcp"))
                 .collect(),
         )
     };
@@ -782,7 +784,7 @@ fn force_remove_container(docker: &Docker, name: &str) {
         ..Default::default()
     };
     if let Err(e) = block_on(docker.stop_container(name, Some(stop_options))) {
-        error!("failed to stop broken container {}: {}", name, e);
+        error!("failed to stop broken container {name}: {e}");
     }
 
     let remove_options = RemoveContainerOptions {
@@ -790,7 +792,7 @@ fn force_remove_container(docker: &Docker, name: &str) {
         ..Default::default()
     };
     if let Err(e) = block_on(docker.remove_container(name, Some(remove_options))) {
-        error!("failed to remove broken container {}: {}", name, e);
+        error!("failed to remove broken container {name}: {e}");
     }
 }
 
@@ -955,9 +957,7 @@ fn setup_port_forwarding(
                 };
             ssh_forward
                 .add_local_forward(docker_host, local, "127.0.0.1", docker_host_port)
-                .with_context(|| {
-                    format!("SSH forward {}->127.0.0.1:{}", local, docker_host_port)
-                })?;
+                .with_context(|| format!("SSH forward {local}->127.0.0.1:{docker_host_port}"))?;
             local
         } else {
             docker_host_port
@@ -972,7 +972,7 @@ fn setup_port_forwarding(
 
 /// Check if a local port is available for binding.
 fn is_port_available(port: u16) -> bool {
-    std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
+    std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok()
 }
 
 /// Check if a local port is already in use.
@@ -1016,7 +1016,7 @@ fn compute_git_info(repo_path: &Path, pod_name: &str) -> Option<PodGitInfo> {
     let host_oid = head.target()?;
 
     // Get the pod's primary branch ref: refs/remotes/rumpelpod/<pod_name>
-    let remote_ref_name = format!("refs/remotes/rumpelpod/{}", pod_name);
+    let remote_ref_name = format!("refs/remotes/rumpelpod/{pod_name}");
     let remote_ref = repo.find_reference(&remote_ref_name).ok()?;
     let pod_oid = remote_ref.target()?;
 
@@ -1032,9 +1032,9 @@ fn compute_git_info(repo_path: &Path, pod_name: &str) -> Option<PodGitInfo> {
 
         match (ahead, behind) {
             (0, 0) => "up to date".to_string(),
-            (a, 0) => format!("ahead {}", a),
-            (0, b) => format!("behind {}", b),
-            (a, b) => format!("ahead {}, behind {}", a, b),
+            (a, 0) => format!("ahead {a}"),
+            (0, b) => format!("behind {b}"),
+            (a, b) => format!("ahead {a}, behind {b}"),
         }
     };
 
@@ -1062,10 +1062,10 @@ fn get_container_status_via_socket(
 
     // Filter by label to find containers for this repo
     let mut filters = HashMap::new();
-    filters.insert(
-        "label".to_string(),
-        vec![format!("{}={}", REPO_PATH_LABEL, repo_path.display())],
-    );
+    filters.insert("label".to_string(), {
+        let repo_path = repo_path.display();
+        vec![format!("{REPO_PATH_LABEL}={repo_path}")]
+    });
 
     let options = ListContainersOptions {
         all: true, // Include stopped containers
@@ -1148,7 +1148,7 @@ fn try_stop_container(
         Err(BollardError::DockerResponseServerError {
             status_code: 404, ..
         }) => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("docker stop failed: {}", e)),
+        Err(e) => Err(anyhow::anyhow!("docker stop failed: {e}")),
     }
 }
 
@@ -1201,7 +1201,7 @@ fn try_remove_container(
         Err(BollardError::DockerResponseServerError {
             status_code: 404, ..
         }) => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("docker rm failed: {}", e)),
+        Err(e) => Err(anyhow::anyhow!("docker rm failed: {e}")),
     }
 }
 
@@ -1233,7 +1233,7 @@ fn copy_claude_config_via_pod(
     match std::fs::read(host_home.join(".claude.json")) {
         Ok(data) => {
             let minimal = strip_claude_json(&data, repo_path, container_repo_path);
-            let dest = format!("{}/.claude.json", container_home);
+            let dest = format!("{container_home}/.claude.json");
             pod.fs_write(Path::new(&dest), &minimal, Some(user), true)
                 .context("writing .claude.json")?;
         }
@@ -1244,14 +1244,14 @@ fn copy_claude_config_via_pod(
     // We always need ~/.claude/settings.json for the statusline,
     // so create the directory unconditionally.
     let claude_dir = host_home.join(".claude");
-    let container_claude_dir = format!("{}/.claude", container_home);
+    let container_claude_dir = format!("{container_home}/.claude");
     pod.fs_mkdir(Path::new(&container_claude_dir), Some(user))
         .context("creating .claude directory")?;
 
     // Copy credentials if present.
     match std::fs::read(claude_dir.join(".credentials.json")) {
         Ok(data) => {
-            let dest = format!("{}/.claude/.credentials.json", container_home);
+            let dest = format!("{container_home}/.claude/.credentials.json");
             pod.fs_write(Path::new(&dest), &data, Some(user), false)
                 .context("writing .claude/.credentials.json")?;
         }
@@ -1272,7 +1272,7 @@ fn copy_claude_config_via_pod(
     } else {
         data
     };
-    let dest = format!("{}/.claude/settings.json", container_home);
+    let dest = format!("{container_home}/.claude/settings.json");
     pod.fs_write(Path::new(&dest), &data, Some(user), false)
         .context("writing .claude/settings.json")?;
 
@@ -1332,8 +1332,7 @@ fn copy_claude_project_dir_via_pod(
         return Ok(());
     }
 
-    let container_project_dir =
-        format!("{}/.claude/projects/{}", container_home, container_dir_name);
+    let container_project_dir = format!("{container_home}/.claude/projects/{container_dir_name}");
 
     pod.fs_mkdir(Path::new(&container_project_dir), Some(user))
         .context("creating claude project directory")?;
@@ -1425,7 +1424,7 @@ fn copy_claude_history_via_pod(
         return Ok(());
     }
 
-    let dest = format!("{}/.claude/history.jsonl", container_home);
+    let dest = format!("{container_home}/.claude/history.jsonl");
     pod.fs_write(Path::new(&dest), &filtered, Some(user), false)
         .context("writing .claude/history.jsonl")?;
 
@@ -1492,7 +1491,7 @@ fn restore_claude_config(pod: &PodClient, user: &str, tar_data: &[u8]) -> Result
     )?;
     if result.exit_code != 0 {
         let stderr = base64_decode_lossy(&result.stderr);
-        return Err(anyhow::anyhow!("restoring claude config: {}", stderr));
+        return Err(anyhow::anyhow!("restoring claude config: {stderr}"));
     }
 
     Ok(())
@@ -1611,7 +1610,7 @@ fn inject_statusline(data: &[u8], pod_name: &str) -> Vec<u8> {
     }
 
     let escaped = pod_name.replace('\'', "'\\''");
-    let cmd = format!("echo 'Rumpelpod: {}'", escaped);
+    let cmd = format!("echo 'Rumpelpod: {escaped}'");
     let mut sl = serde_json::Map::new();
     sl.insert(
         "type".to_string(),
@@ -1633,7 +1632,7 @@ fn inject_hooks(data: &[u8]) -> Vec<u8> {
         return data.to_vec();
     };
 
-    let command = format!("{} claude-hook permission-request", RUMPEL_CONTAINER_BIN);
+    let command = format!("{RUMPEL_CONTAINER_BIN} claude-hook permission-request");
     let hook_entry = serde_json::json!({
         "matcher": "",
         "hooks": [
@@ -1691,7 +1690,8 @@ fn resolve_rumpel_binary(container_arch: Option<ContainerArch>) -> Result<PathBu
 fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Result<()> {
     let container_arch = get_image_architecture(docker, image)?;
     let bin = resolve_rumpel_binary(container_arch)?;
-    let data = std::fs::read(&bin).with_context(|| format!("reading {}", bin.display()))?;
+    let bin_display = bin.display();
+    let data = std::fs::read(&bin).with_context(|| format!("reading {bin_display}"))?;
 
     exec_command(
         docker,
@@ -1703,7 +1703,8 @@ fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Resul
     )
     .context("creating /opt/rumpelpod/bin")?;
 
-    let cmd = format!("cat > {}", shell_escape("/opt/rumpelpod/bin/rumpel"));
+    let escaped_path = shell_escape("/opt/rumpelpod/bin/rumpel");
+    let cmd = format!("cat > {escaped_path}");
     exec_with_stdin(
         docker,
         container_id,
@@ -1780,7 +1781,7 @@ fn start_container_server(
         .build()
         .unwrap();
     if poll_client
-        .get(format!("{}/health", url))
+        .get(format!("{url}/health"))
         .send()
         .is_ok_and(|r| r.status().is_success())
     {
@@ -1831,7 +1832,7 @@ fn start_container_server(
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         if poll_client
-            .get(format!("{}/health", url))
+            .get(format!("{url}/health"))
             .send()
             .is_ok_and(|r| r.status().is_success())
         {
@@ -1884,7 +1885,7 @@ fn ensure_repo_initialized_via_pod(
     pod.fs_chown(&[parent], user)?;
 
     // Clone from the git-http bridge with auth header
-    let auth_header = format!("Authorization: Bearer {}", token);
+    let auth_header = format!("Authorization: Bearer {token}");
     pod.git_clone(
         git_http_url,
         container_repo_path,
@@ -2050,7 +2051,7 @@ fn spawn_background_lifecycle_commands_via_pod(
         };
         for (label, cmd) in &commands {
             if let Err(e) = run_lifecycle_command_via_pod(&pod, &user, &workdir, cmd, &env) {
-                error!("background {} failed: {:#}", label, e);
+                error!("background {label} failed: {e:#}");
                 break;
             }
         }
@@ -2215,7 +2216,8 @@ impl DaemonServer {
                     let pf = client
                         .port_forward(&k8s_name, crate::pod::DEFAULT_PORT)
                         .context("re-establishing port forward to existing k8s pod")?;
-                    let container_url = format!("http://127.0.0.1:{}", pf.local_port);
+                    let local_port = pf.local_port;
+                    let container_url = format!("http://127.0.0.1:{local_port}");
 
                     // Read token from the pod, then let PodClient::new
                     // handle the readiness poll.
@@ -2242,7 +2244,8 @@ impl DaemonServer {
                         let mut tunnels = self.k8s_tunnels.lock().unwrap();
                         if let Some(handle) = tunnels.get(&tunnel_key) {
                             if !handle.is_alive() {
-                                log::warn!("k8s tunnel for {} is dead, reconnecting", pod_name.0);
+                                let name = &pod_name.0;
+                                log::warn!("k8s tunnel for {name} is dead, reconnecting");
                                 // Drop the stale handle (and its _cancel_tx) before
                                 // start_tunnel runs pkill inside the pod.
                                 tunnels.remove(&tunnel_key);
@@ -2257,10 +2260,10 @@ impl DaemonServer {
                         Some(port) => port,
                         None => {
                             let tunnel = client
-                                .start_tunnel(
-                                    &k8s_name,
-                                    &format!("127.0.0.1:{}", self.localhost_server_port),
-                                )
+                                .start_tunnel(&k8s_name, {
+                                    let port = self.localhost_server_port;
+                                    &format!("127.0.0.1:{port}")
+                                })
                                 .context("starting tunnel to existing k8s pod")?;
                             let port = tunnel.port;
                             self.k8s_tunnels.lock().unwrap().insert(tunnel_key, tunnel);
@@ -2268,8 +2271,8 @@ impl DaemonServer {
                         }
                     };
 
-                    let base_url = format!("http://127.0.0.1:{}", tunnel_port);
-                    let url = format!("{}/gateway.git", base_url);
+                    let base_url = format!("http://127.0.0.1:{tunnel_port}");
+                    let url = format!("{base_url}/gateway.git");
 
                     // Git operations go through the tunnel. If they fail
                     // (e.g. because the tunnel-server died but the mux
@@ -2444,13 +2447,13 @@ impl DaemonServer {
             .filter_map(|(i, m)| {
                 match m.mount_type {
                     devcontainer::MountType::Volume => Some(crate::k8s::K8sVolumeMount {
-                        name: format!("vol-{}", i),
+                        name: format!("vol-{i}"),
                         mount_path: m.target.clone(),
                         read_only: m.read_only.unwrap_or(false),
                         medium: None,
                     }),
                     devcontainer::MountType::Tmpfs => Some(crate::k8s::K8sVolumeMount {
-                        name: format!("vol-{}", i),
+                        name: format!("vol-{i}"),
                         mount_path: m.target.clone(),
                         read_only: m.read_only.unwrap_or(false),
                         medium: Some("Memory".to_string()),
@@ -2458,7 +2461,8 @@ impl DaemonServer {
                     devcontainer::MountType::Bind => {
                         // Should not reach here due to is_remote() check, but
                         // be explicit rather than silently dropping.
-                        log::warn!("bind mount '{}' ignored on Kubernetes", m.target);
+                        let target = &m.target;
+                        log::warn!("bind mount '{target}' ignored on Kubernetes");
                         None
                     }
                 }
@@ -2482,7 +2486,7 @@ impl DaemonServer {
             } else if opt == "apparmor=unconfined" || opt == "apparmor:unconfined" {
                 apparmor_unconfined = true;
             } else {
-                log::warn!("unrecognized security_opt '{}' ignored on Kubernetes", opt);
+                log::warn!("unrecognized security_opt '{opt}' ignored on Kubernetes");
             }
         }
 
@@ -2551,7 +2555,10 @@ impl DaemonServer {
 
         let bin_path = crate::k8s::resolve_rumpel_binary(&arch).map_err(mark_error)?;
         let bin_data = std::fs::read(&bin_path)
-            .with_context(|| format!("reading {}", bin_path.display()))
+            .with_context(|| {
+                let bin_path = bin_path.display();
+                format!("reading {bin_path}")
+            })
             .map_err(mark_error)?;
 
         client
@@ -2582,16 +2589,17 @@ impl DaemonServer {
         let pf = client
             .port_forward(&k8s_name, crate::pod::DEFAULT_PORT)
             .map_err(|e| mark_error(e.context("setting up port forward")))?;
-        let container_url = format!("http://127.0.0.1:{}", pf.local_port);
+        let local_port = pf.local_port;
+        let container_url = format!("http://127.0.0.1:{local_port}");
 
         // PodClient::new polls /health until the server is ready.
         let pod = PodClient::new(&container_url, &token).map_err(mark_error)?;
 
         let tunnel = client
-            .start_tunnel(
-                &k8s_name,
-                &format!("127.0.0.1:{}", self.localhost_server_port),
-            )
+            .start_tunnel(&k8s_name, &{
+                let port = self.localhost_server_port;
+                format!("127.0.0.1:{port}")
+            })
             .map_err(|e| mark_error(e.context("starting tunnel to k8s pod")))?;
         let tunnel_port = tunnel.port;
         self.k8s_tunnels
@@ -2599,8 +2607,8 @@ impl DaemonServer {
             .unwrap()
             .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
 
-        let base_url = format!("http://127.0.0.1:{}", tunnel_port);
-        let url = format!("{}/gateway.git", base_url);
+        let base_url = format!("http://127.0.0.1:{tunnel_port}");
+        let url = format!("{base_url}/gateway.git");
 
         ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)
             .map_err(mark_error)?;
@@ -2928,9 +2936,10 @@ impl DaemonServer {
             }
             let container_url = {
                 let proxies = self.exec_proxies.lock().unwrap();
-                proxies
-                    .get(&proxy_key)
-                    .map(|h| format!("http://127.0.0.1:{}", h.port))
+                proxies.get(&proxy_key).map(|h| {
+                    let port = h.port;
+                    format!("http://127.0.0.1:{port}")
+                })
             };
             let (container_url, serve_port) = match container_url {
                 Some(url) => {
@@ -2943,7 +2952,8 @@ impl DaemonServer {
                         &docker, &state.id, serve_port,
                     ))
                     .context("starting exec proxy for existing container")?;
-                    let url = format!("http://127.0.0.1:{}", proxy.port);
+                    let port = proxy.port;
+                    let url = format!("http://127.0.0.1:{port}");
                     self.exec_proxies
                         .lock()
                         .unwrap()
@@ -3239,7 +3249,8 @@ impl DaemonServer {
                 serve_port,
             ))
             .context("starting exec proxy for container-serve")?;
-            let container_url_inner = format!("http://127.0.0.1:{}", proxy.port);
+            let port = proxy.port;
+            let container_url_inner = format!("http://127.0.0.1:{port}");
             exec_proxies
                 .lock()
                 .unwrap()
@@ -3414,7 +3425,7 @@ impl DaemonServer {
                     &docker_host,
                 )
                 .map_err(|e| {
-                    error!("port forwarding setup failed: {}", e);
+                    error!("port forwarding setup failed: {e}");
                     e
                 })?;
             }
@@ -3487,7 +3498,7 @@ impl DaemonServer {
                     .and_then(|handles| handles.first().map(|h| h.local_port));
 
                 if let Some(port) = local_port {
-                    let container_url = format!("http://127.0.0.1:{}", port);
+                    let container_url = format!("http://127.0.0.1:{port}");
                     if let Ok(token_bytes) =
                         client.exec_output(&k8s_name, &["cat", crate::pod::TOKEN_FILE])
                     {
@@ -3567,7 +3578,8 @@ impl DaemonServer {
                     if let Ok(proxy) = block_on(crate::exec_proxy::start_exec_proxy(
                         &docker, &state.id, serve_port,
                     )) {
-                        let url = format!("http://127.0.0.1:{}", proxy.port);
+                        let port = proxy.port;
+                        let url = format!("http://127.0.0.1:{port}");
                         if let Ok(container_token) =
                             start_container_server(&docker, &state.id, &url, serve_port)
                         {
@@ -3681,7 +3693,8 @@ impl Daemon for DaemonServer {
             let pod_name = pod_name.clone();
             std::thread::spawn(move || {
                 if let Err(e) = try_stop_container(&ssh_forward, &host_str, &container_name) {
-                    error!("failed to stop pod '{}': {}", pod_name.0, e);
+                    let name = &pod_name.0;
+                    error!("failed to stop pod '{name}': {e}");
                 }
                 let conn = db.lock().unwrap();
                 if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
@@ -3717,7 +3730,7 @@ impl Daemon for DaemonServer {
 
             // Delete the k8s pod (ignore "not found" since it may already be gone)
             if let Err(e) = client.delete_pod(&k8s_name) {
-                error!("failed to delete k8s pod '{}': {}", k8s_name, e);
+                error!("failed to delete k8s pod '{k8s_name}': {e}");
             }
 
             // Drop the port-forward and tunnel handles
@@ -3824,7 +3837,8 @@ impl Daemon for DaemonServer {
                         }
                     }
                 }
-                error!("all delete attempts failed for pod '{}'", pod_name.0);
+                let name = &pod_name.0;
+                error!("all delete attempts failed for pod '{name}'");
                 let conn = db.lock().unwrap();
                 if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
                     let _ = db::update_pod_status(&conn, record.id, db::PodStatus::DeleteFailed);
@@ -3859,7 +3873,8 @@ impl Daemon for DaemonServer {
                     ..
                 }) => {
                     let k8s_name = crate::k8s::k8s_pod_name(&pod.name, &repo_path);
-                    let cache_key = format!("{}/{}", pod.host, k8s_name);
+                    let host = &pod.host;
+                    let cache_key = format!("{host}/{k8s_name}");
                     k8s_status_cache.entry(cache_key).or_insert_with(|| {
                         crate::k8s::K8sClient::new(context, namespace)
                             .and_then(|c| c.get_pod_status(&k8s_name))
@@ -3892,7 +3907,8 @@ impl Daemon for DaemonServer {
 
             let (status, container_id) = if is_k8s {
                 let k8s_name = crate::k8s::k8s_pod_name(&pod.name, &repo_path);
-                let cache_key = format!("{}/{}", pod.host, k8s_name);
+                let host = &pod.host;
+                let cache_key = format!("{host}/{k8s_name}");
                 let k8s_status = k8s_status_cache.get(&cache_key).and_then(|s| s.clone());
                 let status = match pod.status {
                     db::PodStatus::Stopping => PodStatus::Stopping,
@@ -4088,16 +4104,20 @@ pub fn run_daemon() -> Result<()> {
 
         // The fallback socket dir (/tmp/rumpelpod-<uid>/) may not exist yet
         if let Some(parent) = socket.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                let parent = parent.display();
+                format!("Failed to create {parent}")
+            })?;
         }
 
         // Remove stale socket file if it exists
         if socket.exists() {
             std::fs::remove_file(&socket)?;
         }
-        UnixListener::bind(&socket)
-            .with_context(|| format!("Failed to bind to {}", socket.display()))?
+        UnixListener::bind(&socket).with_context(|| {
+            let socket = socket.display();
+            format!("Failed to bind to {socket}")
+        })?
     };
 
     let daemon = DaemonServer {
@@ -4134,7 +4154,7 @@ mod tests {
         assert_eq!(inner.len(), 1);
         assert_eq!(
             inner[0]["command"],
-            format!("{} claude-hook permission-request", RUMPEL_CONTAINER_BIN)
+            format!("{RUMPEL_CONTAINER_BIN} claude-hook permission-request")
         );
     }
 

@@ -420,10 +420,7 @@ impl Iterator for ClientLaunchProgress {
             let line = match self.lines.next()? {
                 Ok(l) => l,
                 Err(e) => {
-                    self.result = Some(Err(anyhow::anyhow!(
-                        "Failed to read response stream: {}",
-                        e
-                    )));
+                    self.result = Some(Err(anyhow::anyhow!("Failed to read response stream: {e}")));
                     return None;
                 }
             };
@@ -442,7 +439,7 @@ impl Iterator for ClientLaunchProgress {
             let data_line = match self.lines.next() {
                 Some(Ok(l)) => l,
                 Some(Err(e)) => {
-                    self.result = Some(Err(anyhow::anyhow!("Failed to read data line: {}", e)));
+                    self.result = Some(Err(anyhow::anyhow!("Failed to read data line: {e}")));
                     return None;
                 }
                 None => {
@@ -457,8 +454,7 @@ impl Iterator for ClientLaunchProgress {
                 Some(d) => d,
                 None => {
                     self.result = Some(Err(anyhow::anyhow!(
-                        "Expected 'data: ' line, got: {}",
-                        data_line
+                        "Expected 'data: ' line, got: {data_line}"
                     )));
                     return None;
                 }
@@ -477,8 +473,7 @@ impl Iterator for ClientLaunchProgress {
                         }
                         Err(e) => {
                             self.result = Some(Err(anyhow::anyhow!(
-                                "Failed to parse build output data: {}",
-                                e
+                                "Failed to parse build output data: {e}"
                             )));
                             return None;
                         }
@@ -501,7 +496,7 @@ impl Iterator for ClientLaunchProgress {
                         }
                         Err(e) => {
                             self.result =
-                                Some(Err(anyhow::anyhow!("Failed to parse result data: {}", e)));
+                                Some(Err(anyhow::anyhow!("Failed to parse result data: {e}")));
                         }
                     }
                     return None;
@@ -509,17 +504,18 @@ impl Iterator for ClientLaunchProgress {
                 "error" => {
                     match serde_json::from_str::<ErrorResponse>(data) {
                         Ok(err) => {
-                            self.result = Some(Err(anyhow::anyhow!("Server error: {}", err.error)));
+                            let msg = &err.error;
+                            self.result = Some(Err(anyhow::anyhow!("Server error: {msg}")));
                         }
                         Err(e) => {
                             self.result =
-                                Some(Err(anyhow::anyhow!("Failed to parse error data: {}", e)));
+                                Some(Err(anyhow::anyhow!("Failed to parse error data: {e}")));
                         }
                     }
                     return None;
                 }
                 other => {
-                    self.result = Some(Err(anyhow::anyhow!("Unknown SSE event type: {}", other)));
+                    self.result = Some(Err(anyhow::anyhow!("Unknown SSE event type: {other}")));
                     return None;
                 }
             }
@@ -551,7 +547,7 @@ impl Daemon for DaemonClient {
             .put(url)
             .json(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         Ok(ClientLaunchProgress::new(response))
     }
@@ -564,7 +560,7 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         Ok(ClientLaunchProgress::new(response))
     }
@@ -582,7 +578,7 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status().is_success() {
             Ok(())
@@ -590,7 +586,8 @@ impl Daemon for DaemonClient {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 
@@ -607,7 +604,7 @@ impl Daemon for DaemonClient {
             .delete(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status().is_success() {
             Ok(())
@@ -615,7 +612,8 @@ impl Daemon for DaemonClient {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 
@@ -628,18 +626,19 @@ impl Daemon for DaemonClient {
             .get(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status().is_success() {
             let body: ListPodsResponse = response
                 .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
             Ok(body.pods)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 
@@ -655,18 +654,19 @@ impl Daemon for DaemonClient {
             .get(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status().is_success() {
             let body: ListPortsResponse = response
                 .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
             Ok(body.ports)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 
@@ -694,18 +694,19 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status().is_success() {
             let body: SaveConversationResponse = response
                 .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
             Ok(body.id)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 
@@ -725,29 +726,30 @@ impl Daemon for DaemonClient {
             .get(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status().is_success() {
             let body: ListConversationsResponse = response
                 .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
             Ok(body.conversations)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 
     fn get_conversation(&self, id: i64) -> Result<Option<GetConversationResponse>> {
-        let url = self.url.join(&format!("/conversation/{}", id))?;
+        let url = self.url.join(&format!("/conversation/{id}"))?;
 
         let response = self
             .client
             .get(url)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -756,13 +758,14 @@ impl Daemon for DaemonClient {
         if response.status().is_success() {
             let body: GetConversationResponse = response
                 .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
             Ok(Some(body))
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 
@@ -774,7 +777,7 @@ impl Daemon for DaemonClient {
             .put(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
 
         if response.status().is_success() {
             Ok(())
@@ -782,14 +785,15 @@ impl Daemon for DaemonClient {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("Server error: {}", error.error))
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
 }
 
 /// Format a single SSE event with the given type and JSON-encoded data.
 fn sse_event(event_type: &str, data: &str) -> String {
-    format!("event: {}\ndata: {}\n\n", event_type, data)
+    format!("event: {event_type}\ndata: {data}\n\n")
 }
 
 /// Build an SSE streaming response for launch/recreate endpoints.
@@ -812,7 +816,7 @@ fn streaming_launch_response<D: Daemon>(
                 let msg = sse_event(
                     "error",
                     &serde_json::to_string(&ErrorResponse {
-                        error: format!("{:#}", e),
+                        error: format!("{e:#}"),
                     })
                     .expect("ErrorResponse is always serializable"),
                 );
@@ -854,7 +858,7 @@ fn streaming_launch_response<D: Daemon>(
             Err(e) => sse_event(
                 "error",
                 &serde_json::to_string(&ErrorResponse {
-                    error: format!("{:#}", e),
+                    error: format!("{e:#}"),
                 })
                 .expect("ErrorResponse is always serializable"),
             ),
@@ -900,7 +904,7 @@ async fn stop_pod_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }
@@ -919,7 +923,7 @@ async fn delete_pod_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }
@@ -937,7 +941,7 @@ async fn list_pods_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }
@@ -955,7 +959,7 @@ async fn list_ports_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }
@@ -982,7 +986,7 @@ async fn save_conversation_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }
@@ -1000,7 +1004,7 @@ async fn list_conversations_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }
@@ -1018,13 +1022,13 @@ async fn get_conversation_handler<D: Daemon>(
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
-                error: format!("Conversation {} not found", id),
+                error: format!("Conversation {id} not found"),
             }),
         )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }
@@ -1042,7 +1046,7 @@ async fn ensure_claude_config_handler<D: Daemon>(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("{:#}", e),
+                error: format!("{e:#}"),
             }),
         )),
     }

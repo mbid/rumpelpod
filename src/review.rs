@@ -85,7 +85,7 @@ fn get_difftool_name(repo_root: &std::path::Path) -> Result<String> {
 /// 3. Fall back to translate_tool_path()
 fn get_tool_path(repo_root: &std::path::Path, tool: &str) -> Result<String> {
     // First check difftool.<tool>.path
-    let difftool_path_key = format!("difftool.{}.path", tool);
+    let difftool_path_key = format!("difftool.{tool}.path");
     let output = Command::new("git")
         .args(["config", "--get", &difftool_path_key])
         .current_dir(repo_root)
@@ -100,7 +100,7 @@ fn get_tool_path(repo_root: &std::path::Path, tool: &str) -> Result<String> {
     }
 
     // Then check mergetool.<tool>.path
-    let mergetool_path_key = format!("mergetool.{}.path", tool);
+    let mergetool_path_key = format!("mergetool.{tool}.path");
     let output = Command::new("git")
         .args(["config", "--get", &mergetool_path_key])
         .current_dir(repo_root)
@@ -121,7 +121,7 @@ fn get_tool_path(repo_root: &std::path::Path, tool: &str) -> Result<String> {
 /// Get the command for a difftool from git config.
 /// Returns None if no custom command is configured (meaning it's a built-in tool).
 fn get_difftool_cmd(repo_root: &std::path::Path, tool: &str) -> Result<Option<String>> {
-    let config_key = format!("difftool.{}.cmd", tool);
+    let config_key = format!("difftool.{tool}.cmd");
     let output = Command::new("git")
         .args(["config", "--get", &config_key])
         .current_dir(repo_root)
@@ -162,10 +162,8 @@ fn get_changed_files(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!(
-            "Failed to get changed files: {}",
-            stderr.trim()
-        ));
+        let stderr = stderr.trim();
+        return Err(anyhow::anyhow!("Failed to get changed files: {stderr}"));
     }
 
     let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
@@ -185,7 +183,7 @@ fn get_file_at_commit(
     file_path: &str,
 ) -> Result<Option<Vec<u8>>> {
     let output = Command::new("git")
-        .args(["show", &format!("{}:{}", commit, file_path)])
+        .args(["show", &format!("{commit}:{file_path}")])
         .current_dir(repo_root)
         .output()
         .context("Failed to get file content from commit")?;
@@ -278,13 +276,9 @@ fn prompt_for_file(
     total_files: usize,
     tool: &str,
 ) -> Result<bool> {
-    println!(
-        "\nViewing ({}/{}): '{}'",
-        file_index + 1,
-        total_files,
-        file_path
-    );
-    print!("Launch '{}' [Y/n]? ", tool);
+    let display_index = file_index + 1;
+    println!("\nViewing ({display_index}/{total_files}): '{file_path}'");
+    print!("Launch '{tool}' [Y/n]? ");
     io::stdout().flush().context("Failed to flush stdout")?;
 
     let mut input = String::new();
@@ -307,26 +301,23 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let client = DaemonClient::new_unix(&socket_path);
     let pods = client.list_pods(repo_root.clone())?;
     if !pods.iter().any(|s| s.name == cmd.name) {
-        return Err(anyhow::anyhow!("Pod '{}' does not exist.", cmd.name));
+        let name = &cmd.name;
+        return Err(anyhow::anyhow!("Pod '{name}' does not exist."));
     }
 
     // Verify the pod remote-tracking ref exists on the host
-    let pod_ref = format!("rumpelpod/{}", cmd.name);
+    let name = &cmd.name;
+    let pod_ref = format!("rumpelpod/{name}");
     let ref_check = Command::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            &format!("refs/remotes/{}", pod_ref),
-        ])
+        .args(["rev-parse", "--verify", &format!("refs/remotes/{pod_ref}")])
         .current_dir(&repo_root)
         .output()
         .context("Failed to check pod ref")?;
 
     if !ref_check.status.success() {
         return Err(anyhow::anyhow!(
-            "Pod ref '{}' not found in host repository.\n\
-             Make sure the pod has made at least one commit.",
-            pod_ref
+            "Pod ref '{pod_ref}' not found in host repository.\n\
+             Make sure the pod has made at least one commit."
         ));
     }
 
@@ -339,10 +330,8 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
     if !head_output.status.success() {
         let stderr = String::from_utf8_lossy(&head_output.stderr);
-        return Err(anyhow::anyhow!(
-            "Failed to get HEAD commit: {}",
-            stderr.trim()
-        ));
+        let stderr = stderr.trim();
+        return Err(anyhow::anyhow!("Failed to get HEAD commit: {stderr}"));
     }
 
     let host_head = String::from_utf8_lossy(&head_output.stdout)
@@ -358,10 +347,9 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
     if !merge_base_output.status.success() {
         let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
+        let stderr = stderr.trim();
         return Err(anyhow::anyhow!(
-            "Failed to compute merge base between '{}' and HEAD:\n{}",
-            pod_ref,
-            stderr.trim()
+            "Failed to compute merge base between '{pod_ref}' and HEAD:\n{stderr}"
         ));
     }
 

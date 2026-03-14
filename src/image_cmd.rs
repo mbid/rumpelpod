@@ -30,8 +30,8 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
 
     let on_output: Option<image::BuildOutputFn> =
         Some(Box::new(|line: image::OutputLine| match line {
-            image::OutputLine::Stdout(s) => println!("{}", s),
-            image::OutputLine::Stderr(s) => eprintln!("{}", s),
+            image::OutputLine::Stdout(s) => println!("{s}"),
+            image::OutputLine::Stderr(s) => eprintln!("{s}"),
         }));
 
     // For k8s, build in-cluster via buildx (pushes directly to registry).
@@ -43,10 +43,10 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
     } = docker_host
     {
         let pull_reg = pull_registry.as_deref().unwrap_or(push_reg);
-        let result = image::buildx_build(
-            build_opts, context, pull_reg, &repo_root, &flags, on_output,
-        )?;
-        println!("Image built and pushed: {}", result.image.0);
+        let result =
+            image::buildx_build(build_opts, context, pull_reg, &repo_root, &flags, on_output)?;
+        let image = &result.image.0;
+        println!("Image built and pushed: {image}");
         return Ok(());
     }
 
@@ -60,7 +60,8 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
 
     let result =
         image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags, on_output)?;
-    println!("Image built: {}", result.image.0);
+    let image = &result.image.0;
+    println!("Image built: {image}");
 
     Ok(())
 }
@@ -90,7 +91,7 @@ pub fn fetch(cmd: &ImageFetchCommand) -> Result<()> {
         .expect("either image or build must be set");
 
     image::pull_image(image_name, &docker_host)?;
-    println!("Image pulled: {}", image_name);
+    println!("Image pulled: {image_name}");
 
     Ok(())
 }

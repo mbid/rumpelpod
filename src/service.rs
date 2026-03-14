@@ -164,8 +164,9 @@ fn launchd_install() -> Result<()> {
     let plist_dir = plist_path
         .parent()
         .context("Could not determine LaunchAgents directory")?;
+    let plist_dir_display = plist_dir.display();
     fs::create_dir_all(plist_dir)
-        .with_context(|| format!("Failed to create {}", plist_dir.display()))?;
+        .with_context(|| format!("Failed to create {plist_dir_display}"))?;
 
     let content = launchd_plist_content()?;
     let display = plist_path.display();
@@ -252,7 +253,8 @@ fn systemctl(args: &[&str]) -> Result<()> {
         .context("Failed to run systemctl")?;
 
     if !status.success() {
-        return Err(anyhow!("systemctl --user {} failed", args.join(" ")));
+        let args = args.join(" ");
+        return Err(anyhow!("systemctl --user {args} failed"));
     }
     Ok(())
 }

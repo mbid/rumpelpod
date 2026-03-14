@@ -61,7 +61,8 @@ impl PodClient {
             .expect("failed to build poll client");
 
         loop {
-            match poll_client.get(format!("{}/health", self.url)).send() {
+            let url = &self.url;
+            match poll_client.get(format!("{url}/health")).send() {
                 Ok(resp) if resp.status().is_success() => return Ok(()),
                 _ => {
                     if std::time::Instant::now() >= deadline {
@@ -323,24 +324,27 @@ impl PodClient {
         path: &str,
         body: &Req,
     ) -> Result<Resp> {
-        let url = format!("{}{}", self.url, path);
+        let base = &self.url;
+        let token = &self.token;
+        let url = format!("{base}{path}");
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Authorization", format!("Bearer {token}"))
             .json(body)
             .send()
-            .with_context(|| format!("sending request to {}", url))?;
+            .with_context(|| format!("sending request to {url}"))?;
 
         if response.status().is_success() {
             response
                 .json()
-                .with_context(|| format!("parsing response from {}", path))
+                .with_context(|| format!("parsing response from {path}"))
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "unknown error".to_string(),
             });
-            Err(anyhow::anyhow!("{}: {}", path, error.error))
+            let err = &error.error;
+            Err(anyhow::anyhow!("{path}: {err}"))
         }
     }
 

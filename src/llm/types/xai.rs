@@ -26,7 +26,7 @@ impl std::fmt::Display for Model {
             Model::Grok41FastNonReasoning => "grok-4-1-fast-non-reasoning",
             Model::Custom(s) => s,
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 

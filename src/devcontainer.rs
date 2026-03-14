@@ -462,7 +462,8 @@ impl UserEnvProbe {
 
 /// Escape a string for safe embedding inside single-quoted shell arguments.
 pub fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{escaped}'")
 }
 
 /// Shutdown action when the tool window is closed.
@@ -512,10 +513,15 @@ pub enum WaitFor {
 impl DevContainer {
     /// Load a devcontainer.json from the given path using json5 (supports comments).
     pub fn load(path: &Path) -> Result<Self> {
-        let contents = std::fs::read_to_string(path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let contents = std::fs::read_to_string(path).with_context(|| {
+            let path = path.display();
+            format!("Failed to read {path}")
+        })?;
 
-        json5::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
+        json5::from_str(&contents).with_context(|| {
+            let path = path.display();
+            format!("Failed to parse {path}")
+        })
     }
 
     /// Find and load a devcontainer.json from standard locations in the repo.
@@ -607,7 +613,7 @@ impl DevContainer {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| "workspace".to_string());
-                PathBuf::from(format!("/workspaces/{}", basename))
+                PathBuf::from(format!("/workspaces/{basename}"))
             })
     }
 
@@ -818,8 +824,10 @@ impl DevContainer {
         };
 
         for path in &env_files {
-            let contents = std::fs::read_to_string(path)
-                .with_context(|| format!("reading env file {}", path.display()))?;
+            let contents = std::fs::read_to_string(path).with_context(|| {
+                let path = path.display();
+                format!("reading env file {path}")
+            })?;
 
             let env_map = self.container_env.get_or_insert_with(HashMap::new);
             for line in contents.lines() {
@@ -1003,7 +1011,9 @@ pub fn substitute_vars(value: &str, ctx: &SubstitutionContext) -> String {
         let replacement = resolve_variable(inner, ctx);
         match replacement {
             Some(val) => {
-                result = format!("{}{}{}", &result[..start], val, &result[close + 1..]);
+                let before = &result[..start];
+                let after = &result[close + 1..];
+                result = format!("{before}{val}{after}");
                 i = start + val.len();
             }
             None => {

@@ -73,7 +73,7 @@ impl Client {
         let http_client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {e}")))?;
 
         // Try Vertex AI first (preferred backend)
         let vertex_config = if offline_test_mode {
@@ -83,10 +83,9 @@ impl Client {
         };
 
         if let Some(config) = vertex_config {
-            info!(
-                "Using Vertex AI backend (project: {}, location: {})",
-                config.project_id, config.location
-            );
+            let project_id = &config.project_id;
+            let location = &config.location;
+            info!("Using Vertex AI backend (project: {project_id}, location: {location})");
             let vertex_auth = VertexAuthenticator::new(config, http_client.clone());
             return Ok(Self {
                 api_key: None,
@@ -135,24 +134,17 @@ impl Client {
             Backend::AiStudio => {
                 // API key is passed as query parameter for AI Studio
                 if let Some(ref api_key) = self.api_key {
-                    format!(
-                        "{}/{}:generateContent?key={}",
-                        AISTUDIO_API_BASE_URL, model, api_key
-                    )
+                    format!("{AISTUDIO_API_BASE_URL}/{model}:generateContent?key={api_key}")
                 } else {
-                    format!("{}/{}:generateContent", AISTUDIO_API_BASE_URL, model)
+                    format!("{AISTUDIO_API_BASE_URL}/{model}:generateContent")
                 }
             }
             Backend::VertexAi => {
                 // Vertex AI uses a different URL format with project/location
                 let auth = self.vertex_auth.as_ref().unwrap();
-                format!(
-                    "{}/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
-                    VERTEX_API_BASE_URL,
-                    auth.project_id(),
-                    auth.location(),
-                    model
-                )
+                let project_id = auth.project_id();
+                let location = auth.location();
+                format!("{VERTEX_API_BASE_URL}/projects/{project_id}/locations/{location}/publishers/google/models/{model}:generateContent")
             }
         }
     }
@@ -161,7 +153,7 @@ impl Client {
     fn build_cache_url(&self, model: &str) -> String {
         // Use a consistent URL format for caching regardless of backend
         // This allows cache hits when switching between backends
-        format!("{}/{}:generateContent", AISTUDIO_API_BASE_URL, model)
+        format!("{AISTUDIO_API_BASE_URL}/{model}:generateContent")
     }
 
     /// Build headers for the API request.
@@ -172,7 +164,7 @@ impl Client {
         if self.backend == Backend::VertexAi {
             let auth = self.vertex_auth.as_ref().unwrap();
             let token = auth.get_access_token()?;
-            headers.push(("authorization", format!("Bearer {}", token)));
+            headers.push(("authorization", format!("Bearer {token}")));
         }
 
         Ok(headers)
@@ -191,7 +183,7 @@ impl Client {
     ) -> Result<GenerateContentResponse, LlmError> {
         // Serialize request body to a string once
         let body = serde_json::to_string(&request)
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {e}")))?;
 
         // Build cache key using URL without credentials + body
         // Use only content-type header for cache key (not auth headers)
@@ -205,7 +197,7 @@ impl Client {
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response = GenerateContentResponse::from_response_json(&cached_response)
                     .map_err(|e| {
-                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {}", e))
+                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {e}"))
                     })?;
                 return Ok(response);
             }
@@ -244,7 +236,7 @@ impl Client {
         let response = req.send()?;
 
         let status = response.status();
-        debug!("Gemini API response status: {}", status);
+        debug!("Gemini API response status: {status}");
 
         // Check for rate limiting before consuming response body
         if status.as_u16() == 429 {
@@ -278,34 +270,30 @@ impl Client {
             // For non-retryable errors, convert to LlmError::Other
             match response.error_for_status() {
                 Ok(r) => r,
-                Err(e) => return Err(LlmError::Other(anyhow::anyhow!("Gemini API error: {}", e))),
+                Err(e) => return Err(LlmError::Other(anyhow::anyhow!("Gemini API error: {e}"))),
             }
         };
 
         let response_text = response
             .text()
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {e}")))?;
 
         if let Some(ref cache) = self.cache {
             let cache_key = cache.compute_key(&cache_url, &cache_headers, &body);
             cache
                 .put(&cache_key, &response_text)
-                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {}", e)))?;
+                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {e}")))?;
         }
 
         let response =
             GenerateContentResponse::from_response_json(&response_text).map_err(|e| {
-                LlmError::Other(anyhow::anyhow!(
-                    "Failed to parse Gemini API response: {}",
-                    e
-                ))
+                LlmError::Other(anyhow::anyhow!("Failed to parse Gemini API response: {e}"))
             })?;
 
         if let Some(ref usage) = response.usage_metadata {
-            debug!(
-                "Gemini API request successful: {:?} prompt tokens, {:?} completion tokens",
-                usage.prompt_token_count, usage.candidates_token_count
-            );
+            let prompt_token_count = &usage.prompt_token_count;
+            let candidates_token_count = &usage.candidates_token_count;
+            debug!("Gemini API request successful: {prompt_token_count:?} prompt tokens, {candidates_token_count:?} completion tokens");
         }
         Ok(response)
     }

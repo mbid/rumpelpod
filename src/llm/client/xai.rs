@@ -47,7 +47,7 @@ impl Client {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {e}")))?;
 
         Ok(Self {
             api_key,
@@ -74,8 +74,8 @@ impl Client {
     pub fn create_response(&self, request: ResponseRequest) -> Result<ResponseResponse, LlmError> {
         // Serialize request body to a string once
         let body = serde_json::to_string(&request)
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
-        debug!("Request body: {}", body);
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {e}")))?;
+        debug!("Request body: {body}");
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
         let cache_headers = self.build_headers(true);
@@ -91,7 +91,7 @@ impl Client {
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response: ResponseResponse =
                     serde_json::from_str(&cached_response).map_err(|e| {
-                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {}", e))
+                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {e}"))
                     })?;
                 return Ok(response);
             }
@@ -124,7 +124,7 @@ impl Client {
         let response = req.send()?;
 
         let status = response.status();
-        debug!("xAI API response status: {}", status);
+        debug!("xAI API response status: {status}");
 
         // Check for rate limiting before consuming response body
         if status.as_u16() == 429 {
@@ -148,26 +148,26 @@ impl Client {
             // For non-retryable errors, convert to LlmError::Other
             match response.error_for_status() {
                 Ok(r) => r,
-                Err(e) => return Err(LlmError::Other(anyhow::anyhow!("xAI API error: {}", e))),
+                Err(e) => return Err(LlmError::Other(anyhow::anyhow!("xAI API error: {e}"))),
             }
         };
 
         let response_text = response
             .text()
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {e}")))?;
 
         if let Some(ref cache) = self.cache {
             // Include URL in cache key (same as cache lookup)
             let cache_key = cache.compute_key(XAI_API_URL, &cache_header_refs, &body);
             cache
                 .put(&cache_key, &response_text)
-                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {}", e)))?;
+                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {e}")))?;
         }
 
-        println!("xAI API response body: {}", response_text);
+        println!("xAI API response body: {response_text}");
 
         let response: ResponseResponse = serde_json::from_str(&response_text).map_err(|e| {
-            LlmError::Other(anyhow::anyhow!("Failed to parse xAI API response: {}", e))
+            LlmError::Other(anyhow::anyhow!("Failed to parse xAI API response: {e}"))
         })?;
 
         debug!("xAI API request successful");

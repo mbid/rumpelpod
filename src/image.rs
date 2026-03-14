@@ -145,9 +145,9 @@ pub fn build_devcontainer_image(
 
     let dockerfile_path = repo_root.join(dockerfile);
     if !dockerfile_path.exists() {
+        let path = dockerfile_path.display();
         return Err(anyhow::anyhow!(
-            "Devcontainer Dockerfile '{}' not found",
-            dockerfile_path.display()
+            "Devcontainer Dockerfile '{path}' not found"
         ));
     }
 
@@ -170,12 +170,13 @@ pub fn build_devcontainer_image(
     if flags.pull {
         cmd.arg("--pull");
     }
-    cmd.arg(format!("-t={}", image_name));
-    cmd.arg(format!("-f={}", dockerfile_path.display()));
+    cmd.arg(format!("-t={image_name}"));
+    let dockerfile = dockerfile_path.display();
+    cmd.arg(format!("-f={dockerfile}"));
 
     if let Some(args) = &build.args {
         for (k, v) in args {
-            cmd.arg("--build-arg").arg(format!("{}={}", k, v));
+            cmd.arg("--build-arg").arg(format!("{k}={v}"));
         }
     }
 
@@ -253,10 +254,10 @@ pub fn build_devcontainer_image(
     stderr_thread.join().expect("stderr reader panicked");
 
     if !status.success() {
+        let stdout = stdout_buf.lock().unwrap();
+        let stderr = stderr_buf.lock().unwrap();
         return Err(anyhow::anyhow!(
-            "Docker build failed:\nSTDOUT: {}\nSTDERR: {}",
-            stdout_buf.lock().unwrap(),
-            stderr_buf.lock().unwrap()
+            "Docker build failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}"
         ));
     }
 
@@ -278,7 +279,7 @@ pub fn pull_image(image_name: &str, docker_host: &Host) -> Result<()> {
 
     let status = cmd.status()?;
     if !status.success() {
-        return Err(anyhow::anyhow!("docker pull failed with status {}", status));
+        return Err(anyhow::anyhow!("docker pull failed with status {status}"));
     }
     Ok(())
 }
@@ -349,10 +350,8 @@ fn ensure_buildx_builder(context: &str, registry: &str) -> Result<String> {
         .context("running docker buildx create")?;
 
     if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "docker buildx create failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("docker buildx create failed: {stderr}"));
     }
 
     Ok(name)
@@ -401,7 +400,8 @@ pub fn buildx_build(
     cmd.args(["buildx", "build"]);
     cmd.args(["--builder", &builder]);
     cmd.arg(format!("--output=type=image,name={dest},push=true"));
-    cmd.arg(format!("-f={}", dockerfile_path.display()));
+    let dockerfile = dockerfile_path.display();
+    cmd.arg(format!("-f={dockerfile}"));
 
     if flags.no_cache {
         cmd.arg("--no-cache");
@@ -488,10 +488,10 @@ pub fn buildx_build(
     stderr_thread.join().expect("stderr reader panicked");
 
     if !status.success() {
+        let stdout = stdout_buf.lock().unwrap();
+        let stderr = stderr_buf.lock().unwrap();
         return Err(anyhow::anyhow!(
-            "docker buildx build failed:\nSTDOUT: {}\nSTDERR: {}",
-            stdout_buf.lock().unwrap(),
-            stderr_buf.lock().unwrap()
+            "docker buildx build failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}"
         ));
     }
 
@@ -560,5 +560,5 @@ fn compute_image_tag(build: &BuildOptions, dockerfile_path: &Path) -> Result<Str
     }
 
     let hash = hex::encode(&hasher.finalize()[..8]);
-    Ok(format!("rumpelpod-devcontainer-{}", hash))
+    Ok(format!("rumpelpod-devcontainer-{hash}"))
 }

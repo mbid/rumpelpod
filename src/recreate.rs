@@ -29,13 +29,14 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     })?;
     for line in &mut progress {
         match line {
-            OutputLine::Stdout(s) => println!("{}", s),
-            OutputLine::Stderr(s) => eprintln!("{}", s),
+            OutputLine::Stdout(s) => println!("{s}"),
+            OutputLine::Stderr(s) => eprintln!("{s}"),
         }
     }
     progress.finish()?;
 
-    println!("Pod '{}' recreated successfully.", cmd.name);
+    let name = &cmd.name;
+    println!("Pod '{name}' recreated successfully.");
 
     Ok(())
 }

@@ -39,10 +39,9 @@ fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<(
             .decode(&run_result.stderr)
             .unwrap_or_default();
         let stderr = String::from_utf8_lossy(&stderr);
+        let stderr = stderr.trim();
         return Err(anyhow::anyhow!(
-            "git status in pod '{}' failed: {}",
-            pod_name,
-            stderr.trim()
+            "git status in pod '{pod_name}' failed: {stderr}"
         ));
     }
 
@@ -52,7 +51,7 @@ fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<(
         .unwrap_or_default();
     let stdout = String::from_utf8_lossy(&stdout);
     if !stdout.trim().is_empty() {
-        eprintln!("warning: pod '{}' has uncommitted changes", pod_name);
+        eprintln!("warning: pod '{pod_name}' has uncommitted changes");
     }
 
     Ok(())
@@ -66,26 +65,23 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
     // 1. Verify the pod exists in the daemon
     let pods = client.list_pods(repo_root.clone())?;
     if !pods.iter().any(|p| p.name == cmd.name) {
-        return Err(anyhow::anyhow!("pod '{}' not found", cmd.name));
+        let name = &cmd.name;
+        return Err(anyhow::anyhow!("pod '{name}' not found"));
     }
 
     // 2. Verify the pod ref exists on the host
-    let pod_ref = format!("rumpelpod/{}", cmd.name);
+    let name = &cmd.name;
+    let pod_ref = format!("rumpelpod/{name}");
     let ref_check = Command::new("git")
-        .args([
-            "rev-parse",
-            "--verify",
-            &format!("refs/remotes/{}", pod_ref),
-        ])
+        .args(["rev-parse", "--verify", &format!("refs/remotes/{pod_ref}")])
         .current_dir(&repo_root)
         .output()
         .context("Failed to check pod ref")?;
 
     if !ref_check.status.success() {
         return Err(anyhow::anyhow!(
-            "Pod ref '{}' not found in host repository.\n\
-             Make sure the pod has made at least one commit.",
-            pod_ref
+            "Pod ref '{pod_ref}' not found in host repository.\n\
+             Make sure the pod has made at least one commit."
         ));
     }
 
@@ -100,10 +96,8 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
         .context("Failed to run merge-base --is-ancestor")?;
 
     if ancestor_check.success() {
-        eprintln!(
-            "warning: nothing to merge -- host is already up to date with pod '{}'",
-            cmd.name
-        );
+        let name = &cmd.name;
+        eprintln!("warning: nothing to merge -- host is already up to date with pod '{name}'");
         client.stop_pod(PodName(cmd.name.clone()), repo_root, false)?;
         return Ok(());
     }
@@ -120,10 +114,8 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
     let merge_status = merge_cmd.status().context("Failed to run git merge")?;
 
     if !merge_status.success() {
-        return Err(anyhow::anyhow!(
-            "git merge exited with status {}",
-            merge_status.code().unwrap_or(-1)
-        ));
+        let code = merge_status.code().unwrap_or(-1);
+        return Err(anyhow::anyhow!("git merge exited with status {code}"));
     }
 
     // Only stop pod after successful merge

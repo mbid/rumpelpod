@@ -14,7 +14,10 @@ pub fn ports(cmd: &PortsCommand) -> Result<()> {
 
     println!("{:<12} {:<8} LABEL", "CONTAINER", "LOCAL");
     for p in &ports {
-        println!("{:<12} {:<8} {}", p.container_port, p.local_port, p.label);
+        let container_port = p.container_port;
+        let local_port = p.local_port;
+        let label = &p.label;
+        println!("{container_port:<12} {local_port:<8} {label}");
     }
 
     Ok(())

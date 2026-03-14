@@ -176,16 +176,20 @@ fn get_schema_hash() -> String {
 pub fn open_db(path: &Path) -> Result<Connection> {
     // Ensure parent directory exists
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            let parent = parent.display();
+            format!("Failed to create directory {parent}")
+        })?;
     }
 
     if !path.exists() {
         return create_and_init_db(path);
     }
 
-    let conn = Connection::open(path)
-        .with_context(|| format!("Failed to open database at {}", path.display()))?;
+    let conn = Connection::open(path).with_context(|| {
+        let path = path.display();
+        format!("Failed to open database at {path}")
+    })?;
 
     // Enable foreign key enforcement
     conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -202,18 +206,14 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     match stored_hash {
         Ok(hash) => {
             if hash != current_hash {
+                let path = path.display();
                 return Err(anyhow::anyhow!(
-                    indoc! {"
-                    Database schema mismatch.
-                    Expected hash: {}
-                    Found hash:    {}
-
-                    Please delete the database file to start over:
-                    rm {}
-                "},
-                    current_hash,
-                    hash,
-                    path.display()
+                    "Database schema mismatch.\n\
+                    Expected hash: {current_hash}\n\
+                    Found hash:    {hash}\n\
+                    \n\
+                    Please delete the database file to start over:\n\
+                    rm {path}"
                 ));
             }
         }
@@ -222,7 +222,8 @@ pub fn open_db(path: &Path) -> Result<Connection> {
             // Close connection, delete file, and start over.
             drop(conn);
             std::fs::remove_file(path).with_context(|| {
-                format!("Failed to remove outdated database at {}", path.display())
+                let path = path.display();
+                format!("Failed to remove outdated database at {path}")
             })?;
             return create_and_init_db(path);
         }
@@ -236,8 +237,10 @@ pub fn open_db(path: &Path) -> Result<Connection> {
 }
 
 fn create_and_init_db(path: &Path) -> Result<Connection> {
-    let mut conn = Connection::open(path)
-        .with_context(|| format!("Failed to open new database at {}", path.display()))?;
+    let mut conn = Connection::open(path).with_context(|| {
+        let path = path.display();
+        format!("Failed to open new database at {path}")
+    })?;
 
     // Enable foreign key enforcement
     conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -509,7 +512,7 @@ pub fn save_conversation(
     } else {
         // Get pod - it must exist
         let pod = get_pod(conn, repo_path, pod_name)?
-            .with_context(|| format!("Pod '{}' not found", pod_name))?;
+            .with_context(|| format!("Pod '{pod_name}' not found"))?;
 
         // Insert new conversation
         conn.execute(

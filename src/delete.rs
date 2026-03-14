@@ -30,7 +30,7 @@ pub fn delete(cmd: &DeleteCommand) -> Result<()> {
         let pod = pods.iter().find(|p| p.name == *name);
 
         let Some(pod) = pod else {
-            eprintln!("pod '{}' not found", name);
+            eprintln!("pod '{name}' not found");
             failed += 1;
             continue;
         };
@@ -38,36 +38,30 @@ pub fn delete(cmd: &DeleteCommand) -> Result<()> {
         if !cmd.force && is_ahead(pod.repo_state.as_deref()) {
             let state = pod.repo_state.as_deref().unwrap_or("");
             if io::stdin().is_terminal() && io::stderr().is_terminal() {
-                eprint!(
-                    "pod '{}' has unmerged commits ({}), delete anyway? [y/N] ",
-                    name, state
-                );
+                eprint!("pod '{name}' has unmerged commits ({state}), delete anyway? [y/N] ");
                 io::stderr().flush()?;
 
                 let mut answer = String::new();
                 io::stdin().read_line(&mut answer)?;
                 if !answer.trim().eq_ignore_ascii_case("y") {
-                    eprintln!("skipping pod '{}'", name);
+                    eprintln!("skipping pod '{name}'");
                     continue;
                 }
             } else {
-                eprintln!(
-                    "pod '{}' has unmerged commits ({}); use --force to delete",
-                    name, state
-                );
+                eprintln!("pod '{name}' has unmerged commits ({state}); use --force to delete");
                 failed += 1;
                 continue;
             }
         }
 
         if let Err(e) = client.delete_pod(PodName(name.clone()), repo_path.clone(), cmd.wait) {
-            eprintln!("failed to delete pod '{}': {}", name, e);
+            eprintln!("failed to delete pod '{name}': {e}");
             failed += 1;
         }
     }
 
     if failed > 0 {
-        return Err(anyhow::anyhow!("{} pod(s) could not be deleted", failed));
+        return Err(anyhow::anyhow!("{failed} pod(s) could not be deleted"));
     }
 
     Ok(())

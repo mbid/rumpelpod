@@ -119,7 +119,8 @@ pub fn repo_path_hash(repo_path: &std::path::Path) -> String {
 /// max 63 chars, start and end with alphanumeric.
 pub fn k8s_pod_name(pod_name: &str, repo_path: &std::path::Path) -> String {
     let hash = repo_path_hash(repo_path);
-    let prefix = format!("rp-{}", pod_name.to_lowercase());
+    let lower = pod_name.to_lowercase();
+    let prefix = format!("rp-{lower}");
     // Truncate prefix to leave room for the hash suffix
     let max_prefix = 63 - 1 - hash.len(); // 1 for the hyphen
     let prefix = if prefix.len() > max_prefix {
@@ -127,7 +128,7 @@ pub fn k8s_pod_name(pod_name: &str, repo_path: &std::path::Path) -> String {
     } else {
         &prefix
     };
-    format!("{}-{}", prefix, hash)
+    format!("{prefix}-{hash}")
 }
 
 impl K8sClient {
@@ -327,7 +328,7 @@ impl K8sClient {
             Ok::<_, anyhow::Error>(())
         })?;
 
-        info!("Created k8s pod '{}'", name);
+        info!("Created k8s pod '{name}'");
         Ok(())
     }
 
@@ -338,8 +339,7 @@ impl K8sClient {
         let deadline = std::time::Instant::now() + timeout;
 
         loop {
-            let pod =
-                block_on(pods.get(name)).with_context(|| format!("getting pod '{}'", name))?;
+            let pod = block_on(pods.get(name)).with_context(|| format!("getting pod '{name}'"))?;
 
             let phase = pod
                 .status
@@ -410,7 +410,7 @@ impl K8sClient {
             Ok::<_, anyhow::Error>(())
         })?;
 
-        info!("Deleted k8s pod '{}'", name);
+        info!("Deleted k8s pod '{name}'");
         Ok(())
     }
 
@@ -518,7 +518,7 @@ impl K8sClient {
 
             if let Some(reason) = status.reason {
                 if reason != "Completed" && reason != "ExitCode" {
-                    return Err(anyhow::anyhow!("exec failed: {}", reason));
+                    return Err(anyhow::anyhow!("exec failed: {reason}"));
                 }
             }
 
@@ -560,7 +560,7 @@ impl K8sClient {
 
             if let Some(reason) = status.reason {
                 if reason != "Completed" && reason != "ExitCode" {
-                    return Err(anyhow::anyhow!("exec with stdin failed: {}", reason));
+                    return Err(anyhow::anyhow!("exec with stdin failed: {reason}"));
                 }
             }
 
@@ -571,7 +571,7 @@ impl K8sClient {
     /// Start a detached background process in the pod.
     /// Uses nohup + background to detach from the exec session.
     pub fn exec_detached(&self, name: &str, cmd: &str) -> Result<()> {
-        let wrapped = format!("nohup {} </dev/null >/dev/null 2>&1 &", cmd);
+        let wrapped = format!("nohup {cmd} </dev/null >/dev/null 2>&1 &");
         self.exec_output(name, &["sh", "-c", &wrapped])?;
         Ok(())
     }
@@ -725,13 +725,13 @@ pub fn convert_memory_to_k8s(s: &str) -> Option<String> {
     for (suffix, k8s_suffix) in suffixes {
         if let Some(num_str) = s.strip_suffix(suffix) {
             let num: u64 = num_str.trim().parse().ok()?;
-            return Some(format!("{}{}", num, k8s_suffix));
+            return Some(format!("{num}{k8s_suffix}"));
         }
     }
 
     // No suffix -- treat as raw bytes
     let bytes: u64 = s.parse().ok()?;
-    Some(format!("{}", bytes))
+    Some(format!("{bytes}"))
 }
 
 /// Resolve the rumpel binary path for a given container architecture.

@@ -75,8 +75,11 @@ fn run() -> Result<ExitCode> {
             .join("debug")
             .join("rumpel");
         let dst = tmp.path().join(name);
-        std::fs::copy(&src, &dst)
-            .with_context(|| format!("copying {} -> {}", src.display(), dst.display()))?;
+        std::fs::copy(&src, &dst).with_context(|| {
+            let src = src.display();
+            let dst = dst.display();
+            format!("copying {src} -> {dst}")
+        })?;
     }
 
     let native_name = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -96,7 +99,8 @@ fn run() -> Result<ExitCode> {
         .context("symlinking rumpel to native binary")?;
 
     let path = std::env::var("PATH").context("PATH not set")?;
-    let path = format!("{}:{path}", tmp.path().display());
+    let tmp_path = tmp.path().display();
+    let path = format!("{tmp_path}:{path}");
 
     let status = cargo_cmd()
         .arg("test")

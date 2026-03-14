@@ -65,10 +65,7 @@ async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Frame> {
     let payload_len = u32::from_le_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]) as usize;
     if payload_len > MAX_PAYLOAD {
         return Err(anyhow::anyhow!(
-            "frame payload too large: {} > {} (stream {})",
-            payload_len,
-            MAX_PAYLOAD,
-            stream_id
+            "frame payload too large: {payload_len} > {MAX_PAYLOAD} (stream {stream_id})"
         ));
     }
     let mut payload = vec![0u8; payload_len];
@@ -116,7 +113,7 @@ pub fn run_tunnel_server(port: u16) -> ! {
 }
 
 async fn run_tunnel_server_async(port: u16) {
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .expect("binding tunnel listener");
 
@@ -126,7 +123,7 @@ async fn run_tunnel_server_async(port: u16) {
         .local_addr()
         .expect("getting listener address")
         .port();
-    eprintln!("tunnel listening on port {}", actual_port);
+    eprintln!("tunnel listening on port {actual_port}");
 
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
 
@@ -301,7 +298,7 @@ fn spawn_host_mux(
                     let frame = match frame_res {
                         Ok(f) => f,
                         Err(e) => {
-                            log::debug!("tunnel mux: read error: {}", e);
+                            log::debug!("tunnel mux: read error: {e}");
                             break;
                         }
                     };
@@ -315,8 +312,7 @@ fn spawn_host_mux(
                                 Ok(s) => s,
                                 Err(e) => {
                                     log::debug!(
-                                        "tunnel: failed to connect to {}: {}",
-                                        target_addr, e
+                                        "tunnel: failed to connect to {target_addr}: {e}"
                                     );
                                     let mut w = stdin_mu.lock().await;
                                     let _ = write_frame(
@@ -388,9 +384,9 @@ fn spawn_host_mux(
                             writes_clone.lock().await.remove(&frame.stream_id);
                         }
                         _ => {
+                            let frame_type = frame.frame_type;
                             log::debug!(
-                                "tunnel mux: unknown frame type {}",
-                                frame.frame_type
+                                "tunnel mux: unknown frame type {frame_type}"
                             );
                         }
                     }
@@ -505,7 +501,7 @@ pub async fn start_tunnel(
                 Ok(n) => {
                     if let Ok(s) = std::str::from_utf8(&buf[..n]) {
                         for line in s.lines() {
-                            log::debug!("tunnel-server stderr: {}", line);
+                            log::debug!("tunnel-server stderr: {line}");
                         }
                     }
                 }
@@ -726,7 +722,7 @@ pub async fn start_docker_tunnel(
             }
             Some(Ok(_)) => {}
             Some(Err(e)) => {
-                return Err(anyhow::anyhow!("docker exec stream error: {}", e));
+                return Err(anyhow::anyhow!("docker exec stream error: {e}"));
             }
             None => {
                 return Err(anyhow::anyhow!(
@@ -752,7 +748,7 @@ pub async fn start_docker_tunnel(
         while let Some(data) = rx.recv().await {
             if let Ok(s) = std::str::from_utf8(&data) {
                 for line in s.lines() {
-                    log::debug!("docker tunnel-server stderr: {}", line);
+                    log::debug!("docker tunnel-server stderr: {line}");
                 }
             }
         }

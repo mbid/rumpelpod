@@ -51,7 +51,7 @@ fn git_http_backend_path() -> &'static str {
         {
             if output.status.success() {
                 let exec_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let path = format!("{}/git-http-backend", exec_path);
+                let path = format!("{exec_path}/git-http-backend");
                 if Path::new(&path).exists() {
                     return path;
                 }
@@ -139,7 +139,7 @@ impl GitHttpServer {
     /// The server binds to the specified address. If port is 0, a random port is assigned.
     /// Returns the server instance.
     pub fn start(bind_address: &str, port: u16, state: SharedGitServerState) -> Result<Self> {
-        let addr: SocketAddr = format!("{}:{}", bind_address, port)
+        let addr: SocketAddr = format!("{bind_address}:{port}")
             .parse()
             .context("parsing bind address")?;
 
@@ -185,7 +185,7 @@ impl GitHttpServer {
         // Spawn the server in the background
         let task_handle = RUNTIME.spawn(async move {
             if let Err(e) = axum::serve(listener, app).await {
-                error!("Git HTTP server error: {}", e);
+                error!("Git HTTP server error: {e}");
             }
         });
 
@@ -332,7 +332,7 @@ async fn lfs_batch_handler(
         .unwrap_or("localhost")
         .to_string();
 
-    let auth_value = format!("Bearer {}", token);
+    let auth_value = format!("Bearer {token}");
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 1024 * 1024).await {
         Ok(b) => b,
@@ -423,7 +423,10 @@ async fn lfs_batch_handler(
                     actions: None,
                     error: Some(LfsError {
                         code: 400,
-                        message: format!("Unknown operation: {}", batch_req.operation),
+                        message: {
+                            let operation = &batch_req.operation;
+                            format!("Unknown operation: {operation}")
+                        },
                     }),
                 });
             }
@@ -472,7 +475,7 @@ async fn lfs_download_handler(
         )
             .into_response(),
         Err(e) => {
-            warn!("Failed to read LFS object {}: {}", oid, e);
+            warn!("Failed to read LFS object {oid}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
@@ -508,7 +511,7 @@ async fn lfs_upload_handler(
     let obj_path = lfs_object_path(&info.gateway_path, &oid);
     if let Some(parent) = obj_path.parent() {
         if let Err(e) = tokio::fs::create_dir_all(parent).await {
-            warn!("Failed to create LFS object directory: {}", e);
+            warn!("Failed to create LFS object directory: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     }
@@ -516,7 +519,7 @@ async fn lfs_upload_handler(
     match tokio::fs::write(&obj_path, &body_bytes).await {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => {
-            warn!("Failed to write LFS object {}: {}", oid, e);
+            warn!("Failed to write LFS object {oid}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

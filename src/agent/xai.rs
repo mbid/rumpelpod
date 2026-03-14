@@ -107,7 +107,7 @@ pub fn run_grok_agent(
                 // Extract the text from the last user message
                 if let Some(MessageContent::Text(text)) = &last_msg.content {
                     if !text.is_empty() {
-                        editable_last_message = Some(format!("{}\n", text));
+                        editable_last_message = Some(format!("{text}\n"));
                     }
                 }
                 // Pop the last user message so it can be edited
@@ -208,7 +208,7 @@ pub fn run_grok_agent(
             // For the very first request, include system prompt
             // Note: We already added System message to state.messages for display.
             // Here we ensure the model gets it.
-            (format!("{}\n\n{}", system_prompt, user_input), None)
+            (format!("{system_prompt}\n\n{user_input}"), None)
         } else {
             (user_input, state.response_id.clone())
         };
@@ -290,7 +290,7 @@ pub fn run_grok_agent(
             for item in items {
                 match item {
                     ResponseOutputItem::Text { text } => {
-                        println!("{}", text);
+                        println!("{text}");
                         assistant_text_parts.push(text);
                     }
                     ResponseOutputItem::FunctionCall {
@@ -385,7 +385,7 @@ pub fn run_grok_agent(
                         for part in content {
                             match part {
                                 MessageContentPart::OutputText { text } => {
-                                    println!("{}", text);
+                                    println!("{text}");
                                     assistant_text_parts.push(text);
                                 }
                                 MessageContentPart::Unknown => {

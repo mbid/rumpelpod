@@ -71,7 +71,7 @@ fn ping_docker_socket(socket_path: &Path) -> bool {
         Ok(result) => result,
         Err(_) => {
             // Timeout or channel closed - assume the ping failed
-            debug!("ping_docker_socket timed out after {:?}", PING_TIMEOUT);
+            debug!("ping_docker_socket timed out after {PING_TIMEOUT:?}");
             false
         }
     }
@@ -137,12 +137,14 @@ impl RemoteHost {
 
     /// Generate a unique socket filename for the Docker socket forward.
     fn docker_socket_name(&self) -> String {
-        format!("docker-{}.sock", self.hash_prefix())
+        let hash = self.hash_prefix();
+        format!("docker-{hash}.sock")
     }
 
     /// Generate a unique socket filename for the SSH control socket.
     fn control_socket_name(&self) -> String {
-        format!("ssh-ctl-{}.sock", self.hash_prefix())
+        let hash = self.hash_prefix();
+        format!("ssh-ctl-{hash}.sock")
     }
 }
 
@@ -201,16 +203,13 @@ impl Drop for ForwardSession {
                 Ok(None) => {
                     // Still running
                     if start.elapsed() > timeout {
-                        warn!(
-                            "SSH process did not exit within {:?} after SIGKILL",
-                            timeout
-                        );
+                        warn!("SSH process did not exit within {timeout:?} after SIGKILL");
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
-                    warn!("Error waiting for SSH process: {}", e);
+                    warn!("Error waiting for SSH process: {e}");
                     break;
                 }
             }
@@ -240,10 +239,8 @@ impl SshForwardManager {
 
         // Ensure the socket directory exists
         std::fs::create_dir_all(&socket_dir).with_context(|| {
-            format!(
-                "Failed to create socket directory: {}",
-                socket_dir.display()
-            )
+            let socket_dir = socket_dir.display();
+            format!("Failed to create socket directory: {socket_dir}")
         })?;
 
         Ok(Self {
@@ -284,18 +281,16 @@ impl SshForwardManager {
         if let Some(session) = connections.get_mut(host) {
             if session.is_alive() {
                 session.last_check = Instant::now();
-                debug!(
-                    "Reusing existing SSH connection to {}:{}",
-                    host.destination, host.port
-                );
+                let destination = &host.destination;
+                let port = host.port;
+                debug!("Reusing existing SSH connection to {destination}:{port}");
                 return Ok(session.docker_socket.clone());
             }
 
             // Connection died, remove it and reconnect with backoff
-            warn!(
-                "SSH connection to {}:{} died, reconnecting...",
-                host.destination, host.port
-            );
+            let destination = &host.destination;
+            let port = host.port;
+            warn!("SSH connection to {destination}:{port} died, reconnecting...");
             let old_session = connections.remove(host).unwrap();
             let backoff = next_backoff(old_session.backoff);
             let failures = old_session.failures + 1;
@@ -307,10 +302,7 @@ impl SshForwardManager {
 
             // Apply backoff delay
             if failures > 1 {
-                info!(
-                    "Waiting {:?} before reconnecting (attempt {})",
-                    backoff, failures
-                );
+                info!("Waiting {backoff:?} before reconnecting (attempt {failures})");
                 std::thread::sleep(backoff);
             }
 
@@ -322,10 +314,9 @@ impl SshForwardManager {
         }
 
         // No existing connection, start a new one
-        info!(
-            "Establishing SSH connection to {}:{}",
-            host.destination, host.port
-        );
+        let destination = &host.destination;
+        let port = host.port;
+        info!("Establishing SSH connection to {destination}:{port}");
         let session = self.start_forwarding(host, INITIAL_DELAY, 0)?;
         let socket = session.docker_socket.clone();
         connections.insert(host.clone(), session);
@@ -345,15 +336,14 @@ impl SshForwardManager {
         // Remove stale socket files if they exist
         if docker_socket.exists() {
             std::fs::remove_file(&docker_socket).with_context(|| {
-                format!("Failed to remove stale socket: {}", docker_socket.display())
+                let docker_socket = docker_socket.display();
+                format!("Failed to remove stale socket: {docker_socket}")
             })?;
         }
         if control_socket.exists() {
             std::fs::remove_file(&control_socket).with_context(|| {
-                format!(
-                    "Failed to remove stale control socket: {}",
-                    control_socket.display()
-                )
+                let control_socket = control_socket.display();
+                format!("Failed to remove stale control socket: {control_socket}")
             })?;
         }
 
@@ -368,18 +358,16 @@ impl SshForwardManager {
         cmd.arg("-N");
 
         // Enable control socket for multiplexing (allows adding forwards later)
-        cmd.args(["-o", &format!("ControlPath={}", control_socket.display())]);
+        let control_socket_display = control_socket.display();
+        cmd.args(["-o", &format!("ControlPath={control_socket_display}")]);
         cmd.args(["-o", "ControlMaster=yes"]);
         // Do not fork to background
         cmd.args(["-o", "ControlPersist=no"]);
 
         // Local socket forwarding: local_socket -> remote docker socket
         cmd.arg("-L");
-        cmd.arg(format!(
-            "{}:{}",
-            docker_socket.display(),
-            REMOTE_DOCKER_SOCKET
-        ));
+        let docker_socket_display = docker_socket.display();
+        cmd.arg(format!("{docker_socket_display}:{REMOTE_DOCKER_SOCKET}"));
 
         // SSH options for reliable connection handling
         cmd.args(["-o", "ServerAliveInterval=5"]);
@@ -393,17 +381,16 @@ impl SshForwardManager {
         // Target: destination (user@host or host)
         cmd.arg(&host.destination);
 
-        debug!("Starting SSH: {:?}", cmd);
+        debug!("Starting SSH: {cmd:?}");
 
         cmd.stdin(Stdio::null());
 
-        let ssh_target = format!("SSH {}:{}", host.destination, host.port);
-        let mut process = cmd.spawn_with_logging(&ssh_target).with_context(|| {
-            format!(
-                "Failed to spawn SSH process for {}:{}",
-                host.destination, host.port
-            )
-        })?;
+        let destination = &host.destination;
+        let port = host.port;
+        let ssh_target = format!("SSH {destination}:{port}");
+        let mut process = cmd
+            .spawn_with_logging(&ssh_target)
+            .with_context(|| format!("Failed to spawn SSH process for {destination}:{port}"))?;
 
         // Wait for the docker socket to appear (SSH needs time to establish the tunnel)
         let start = Instant::now();
@@ -412,8 +399,7 @@ impl SshForwardManager {
         while start.elapsed() < timeout {
             if let Ok(Some(status)) = process.try_wait() {
                 return Err(anyhow::anyhow!(
-                    "SSH process exited prematurely with status: {}",
-                    status
+                    "SSH process exited prematurely with status: {status}"
                 ));
             }
 
@@ -425,16 +411,13 @@ impl SshForwardManager {
                     // One final check that SSH hasn't exited
                     if let Ok(Some(status)) = process.try_wait() {
                         return Err(anyhow::anyhow!(
-                            "SSH process exited after establishing socket (status: {})",
-                            status
+                            "SSH process exited after establishing socket (status: {status})"
                         ));
                     }
 
+                    let docker_socket_display = docker_socket.display();
                     info!(
-                        "SSH tunnel established to {}:{} -> {}",
-                        host.destination,
-                        host.port,
-                        docker_socket.display()
+                        "SSH tunnel established to {destination}:{port} -> {docker_socket_display}"
                     );
                     return Ok(ForwardSession {
                         docker_socket,
@@ -453,10 +436,7 @@ impl SshForwardManager {
         let _ = process.kill();
 
         Err(anyhow::anyhow!(
-            "SSH tunnel to {}:{} failed to establish within {:?}. Check SSH configuration and connectivity. See logs above for SSH error details.",
-            host.destination,
-            host.port,
-            timeout
+            "SSH tunnel to {destination}:{port} failed to establish within {timeout:?}. Check SSH configuration and connectivity. See logs above for SSH error details."
         ))
     }
 
@@ -475,12 +455,9 @@ impl SshForwardManager {
             .get(&host)
             .context("No SSH connection for this remote host")?;
 
-        let forward_spec = format!("127.0.0.1:{}:{}:{}", local_port, remote_addr, remote_port);
+        let forward_spec = format!("127.0.0.1:{local_port}:{remote_addr}:{remote_port}");
 
-        debug!(
-            "Adding local forward via control socket: -L {}",
-            forward_spec
-        );
+        debug!("Adding local forward via control socket: -L {forward_spec}");
 
         let mut cmd = Command::new("ssh");
 
@@ -488,10 +465,8 @@ impl SshForwardManager {
             cmd.args(["-F", &config_file]);
         }
 
-        cmd.args([
-            "-o",
-            &format!("ControlPath={}", session.control_socket.display()),
-        ]);
+        let control_socket_display = session.control_socket.display();
+        cmd.args(["-o", &format!("ControlPath={control_socket_display}")]);
         cmd.args(["-O", "forward"]);
         cmd.args(["-L", &forward_spec]);
         cmd.arg(&host.destination);
@@ -505,17 +480,14 @@ impl SshForwardManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
             return Err(anyhow::anyhow!(
-                "Failed to add local forward -L {}: {}",
-                forward_spec,
-                stderr.trim()
+                "Failed to add local forward -L {forward_spec}: {stderr}"
             ));
         }
 
-        info!(
-            "SSH local forward active: -L {} via {}",
-            forward_spec, host.destination
-        );
+        let destination = &host.destination;
+        info!("SSH local forward active: -L {forward_spec} via {destination}");
 
         Ok(())
     }
@@ -526,10 +498,9 @@ impl Drop for SshForwardManager {
         // Clean up all connections
         let mut connections = self.connections.lock().unwrap();
         for (host, session) in connections.drain() {
-            debug!(
-                "Closing SSH connection to {}:{}",
-                host.destination, host.port
-            );
+            let destination = &host.destination;
+            let port = host.port;
+            debug!("Closing SSH connection to {destination}:{port}");
             drop(session); // ForwardSession::drop will kill the process
         }
     }

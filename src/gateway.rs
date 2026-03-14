@@ -77,6 +77,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use indoc::formatdoc;
 use log::error;
 use sha2::{Digest, Sha256};
 
@@ -93,11 +94,11 @@ const HOST_REMOTE: &str = "host";
 /// The rumpel binary path is resolved at install time and embedded in the shim.
 fn hook_shim(rumpel_path: &str, signature: &str, subcommand: &str, use_exec: bool) -> String {
     let invoke = if use_exec { "exec " } else { "" };
-    format!(
-        "#!/bin/sh\n\
-         # {signature}\n\
-         {invoke}{rumpel_path} git-hook {subcommand} \"$@\"\n"
-    )
+    formatdoc! {"
+        #!/bin/sh
+        # {signature}
+        {invoke}{rumpel_path} git-hook {subcommand} \"$@\"
+    "}
 }
 
 /// Compute a hash of the repo path for use in the gateway directory name.
@@ -180,11 +181,9 @@ pub fn detect_submodules(repo_path: &Path) -> Vec<SubmoduleInfo> {
         Ok(o) if o.status.success() => o,
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
-            error!(
-                "git submodule foreach failed (exit {}): {}",
-                o.status.code().unwrap_or(-1),
-                stderr.trim()
-            );
+            let exit_code = o.status.code().unwrap_or(-1);
+            let stderr = stderr.trim();
+            error!("git submodule foreach failed (exit {exit_code}): {stderr}");
             return Vec::new();
         }
         Err(e) => {
@@ -260,23 +259,32 @@ fn install_reference_transaction_hook_in_git_dir(git_dir: &Path, rumpel_exe: &st
     let signature = "Installed by rumpelpod to sync branch updates";
     let shim = hook_shim(rumpel_exe, signature, "host-reference-transaction", false);
 
-    fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+    fs::create_dir_all(&hooks_dir).with_context(|| {
+        let hooks_dir = hooks_dir.display();
+        format!("Failed to create hooks directory: {hooks_dir}")
+    })?;
 
     if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path)
-            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+        let existing = fs::read_to_string(&hook_path).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to read existing hook: {hook_path}")
+        })?;
 
         if existing.contains(signature) {
             return Ok(());
         }
 
-        let combined = format!("{}\n\n{}", existing.trim_end(), shim);
-        fs::write(&hook_path, combined)
-            .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
+        let existing = existing.trim_end();
+        let combined = format!("{existing}\n\n{shim}");
+        fs::write(&hook_path, combined).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to update hook: {hook_path}")
+        })?;
     } else {
-        fs::write(&hook_path, shim)
-            .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+        fs::write(&hook_path, shim).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to write hook: {hook_path}")
+        })?;
     }
 
     let mut perms = fs::metadata(&hook_path)?.permissions();
@@ -325,7 +333,8 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     // Create gateway directory and initialize bare repo if needed
     if is_first_setup {
         fs::create_dir_all(&gateway).with_context(|| {
-            format!("Failed to create gateway directory: {}", gateway.display())
+            let gateway = gateway.display();
+            format!("Failed to create gateway directory: {gateway}")
         })?;
 
         Command::new("git")
@@ -399,19 +408,15 @@ fn setup_submodule_gateway(
     let sub_workdir = repo_path.join(&submodule.displaypath);
     let gateway = submodule_gateway_path(repo_path, &submodule.displaypath)?;
     let sub_git_dir = resolve_git_dir(&sub_workdir).with_context(|| {
-        format!(
-            "resolving git dir for submodule '{}'",
-            submodule.displaypath
-        )
+        let displaypath = &submodule.displaypath;
+        format!("resolving git dir for submodule '{displaypath}'")
     })?;
 
     // Create bare gateway if needed
     if !gateway.exists() {
         fs::create_dir_all(&gateway).with_context(|| {
-            format!(
-                "Failed to create submodule gateway directory: {}",
-                gateway.display()
-            )
+            let gateway = gateway.display();
+            format!("Failed to create submodule gateway directory: {gateway}")
         })?;
 
         Command::new("git")
@@ -509,12 +514,16 @@ fn install_gateway_hook(gateway_path: &Path, hook_name: &str, hook_content: &str
     let hook_path = hooks_dir.join(hook_name);
 
     // Ensure hooks directory exists
-    fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+    fs::create_dir_all(&hooks_dir).with_context(|| {
+        let hooks_dir = hooks_dir.display();
+        format!("Failed to create hooks directory: {hooks_dir}")
+    })?;
 
     // Always overwrite the hook (we own this file completely)
-    fs::write(&hook_path, hook_content)
-        .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+    fs::write(&hook_path, hook_content).with_context(|| {
+        let hook_path = hook_path.display();
+        format!("Failed to write hook: {hook_path}")
+    })?;
 
     // Make hook executable
     let mut perms = fs::metadata(&hook_path)?.permissions();
@@ -536,12 +545,16 @@ fn install_reference_transaction_hook(repo_path: &Path, rumpel_exe: &str) -> Res
     let shim = hook_shim(rumpel_exe, signature, "host-reference-transaction", false);
 
     // Ensure hooks directory exists
-    fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+    fs::create_dir_all(&hooks_dir).with_context(|| {
+        let hooks_dir = hooks_dir.display();
+        format!("Failed to create hooks directory: {hooks_dir}")
+    })?;
 
     if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path)
-            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+        let existing = fs::read_to_string(&hook_path).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to read existing hook: {hook_path}")
+        })?;
 
         // Check if our hook is already installed (look for our signature comment)
         if existing.contains(signature) {
@@ -550,13 +563,18 @@ fn install_reference_transaction_hook(repo_path: &Path, rumpel_exe: &str) -> Res
         }
 
         // Append our hook to the existing one
-        let combined = format!("{}\n\n{}", existing.trim_end(), shim);
-        fs::write(&hook_path, combined)
-            .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
+        let existing = existing.trim_end();
+        let combined = format!("{existing}\n\n{shim}");
+        fs::write(&hook_path, combined).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to update hook: {hook_path}")
+        })?;
     } else {
         // Create new hook
-        fs::write(&hook_path, shim)
-            .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+        fs::write(&hook_path, shim).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to write hook: {hook_path}")
+        })?;
     }
 
     // Make hook executable
@@ -611,23 +629,32 @@ fn install_post_checkout_hook(repo_path: &Path, rumpel_exe: &str) -> Result<()> 
         false,
     );
 
-    fs::create_dir_all(&hooks_dir)
-        .with_context(|| format!("Failed to create hooks directory: {}", hooks_dir.display()))?;
+    fs::create_dir_all(&hooks_dir).with_context(|| {
+        let hooks_dir = hooks_dir.display();
+        format!("Failed to create hooks directory: {hooks_dir}")
+    })?;
 
     if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path)
-            .with_context(|| format!("Failed to read existing hook: {}", hook_path.display()))?;
+        let existing = fs::read_to_string(&hook_path).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to read existing hook: {hook_path}")
+        })?;
 
         if existing.contains(POST_CHECKOUT_SIGNATURE) {
             return Ok(());
         }
 
-        let combined = format!("{}\n\n{}", existing.trim_end(), shim);
-        fs::write(&hook_path, combined)
-            .with_context(|| format!("Failed to update hook: {}", hook_path.display()))?;
+        let existing = existing.trim_end();
+        let combined = format!("{existing}\n\n{shim}");
+        fs::write(&hook_path, combined).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to update hook: {hook_path}")
+        })?;
     } else {
-        fs::write(&hook_path, shim)
-            .with_context(|| format!("Failed to write hook: {}", hook_path.display()))?;
+        fs::write(&hook_path, shim).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to write hook: {hook_path}")
+        })?;
     }
 
     let mut perms = fs::metadata(&hook_path)?.permissions();
@@ -654,10 +681,7 @@ fn push_all_branches(repo_path: &Path) -> Result<()> {
     let branches: Vec<&str> = output_str.lines().filter(|s| !s.is_empty()).collect();
 
     // Build refspecs for all branches: branch:host/branch
-    let mut refspecs: Vec<String> = branches
-        .iter()
-        .map(|b| format!("{}:host/{}", b, b))
-        .collect();
+    let mut refspecs: Vec<String> = branches.iter().map(|b| format!("{b}:host/{b}")).collect();
 
     // Also push HEAD to host/HEAD so pods can find the current commit.
     // We use the fully qualified ref path because when HEAD is detached (pointing

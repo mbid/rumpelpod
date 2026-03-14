@@ -51,7 +51,7 @@ impl Client {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to build HTTP client: {e}")))?;
 
         Ok(Self {
             api_key,
@@ -102,7 +102,7 @@ impl Client {
 
         // Serialize request body to a string once
         let body = serde_json::to_string(&request)
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to serialize request: {e}")))?;
 
         // Build headers for cache key computation (excludes API key for consistent cache lookups)
         let cache_headers = self.build_headers(true, enable_thinking, enable_effort);
@@ -118,7 +118,7 @@ impl Client {
             if let Some(cached_response) = cache.get(&cache_key) {
                 let response: MessagesResponse =
                     serde_json::from_str(&cached_response).map_err(|e| {
-                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {}", e))
+                        LlmError::Other(anyhow::anyhow!("Failed to parse cached response: {e}"))
                     })?;
                 return Ok(response);
             }
@@ -151,7 +151,7 @@ impl Client {
         let response = req.send()?;
 
         let status = response.status();
-        debug!("API response status: {}", status);
+        debug!("API response status: {status}");
 
         // Check for rate limiting before consuming response body
         if status.as_u16() == 429 {
@@ -177,9 +177,7 @@ impl Client {
                 .text()
                 .unwrap_or_else(|_| "(failed to read body)".to_string());
             return Err(LlmError::Other(anyhow::anyhow!(
-                "Anthropic API error ({}): {}",
-                status,
-                body
+                "Anthropic API error ({status}): {body}"
             )));
         } else {
             response
@@ -187,25 +185,25 @@ impl Client {
 
         let response_text = response
             .text()
-            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {}", e)))?;
+            .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to read response body: {e}")))?;
 
         if let Some(ref cache) = self.cache {
             // Include base URL in cache key (same as cache lookup)
             let cache_key = cache.compute_key(&self.base_url, &cache_header_refs, &body);
             cache
                 .put(&cache_key, &response_text)
-                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {}", e)))?;
+                .map_err(|e| LlmError::Other(anyhow::anyhow!("Failed to cache response: {e}")))?;
         }
 
         let response: MessagesResponse = serde_json::from_str(&response_text).map_err(|e| {
             LlmError::Other(anyhow::anyhow!(
-                "Failed to parse Anthropic API response: {}",
-                e
+                "Failed to parse Anthropic API response: {e}"
             ))
         })?;
+        let input_tokens = response.usage.input_tokens;
+        let output_tokens = response.usage.output_tokens;
         debug!(
-            "API request successful: {} input tokens, {} output tokens",
-            response.usage.input_tokens, response.usage.output_tokens
+            "API request successful: {input_tokens} input tokens, {output_tokens} output tokens"
         );
         Ok(response)
     }

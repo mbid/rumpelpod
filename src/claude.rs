@@ -100,7 +100,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     let t = Instant::now();
     let repo_root = get_repo_root()?;
-    trace!("get_repo_root: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("get_repo_root: {elapsed:?}");
 
     let host_override = cmd.host_args.resolve()?;
 
@@ -108,7 +109,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let toml_config = load_toml_config(&repo_root)?;
     let (devcontainer, _docker_host, _default_image_dir) =
         load_and_resolve(&repo_root, host_override.clone())?;
-    trace!("load_and_resolve: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("load_and_resolve: {elapsed:?}");
 
     // CLI --no-dangerously-skip-permissions wins over the toml setting.
     let skip_permissions_hook = !cmd.no_dangerously_skip_permissions
@@ -120,7 +122,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     let t = Instant::now();
     let result = launch_pod(&cmd.name, host_override)?;
-    trace!("launch_pod: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("launch_pod: {elapsed:?}");
 
     // Run screen preparation and config copy in parallel to avoid
     // sequential round trips.
@@ -141,7 +144,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
                 container_token: result.container_token.clone(),
                 auto_approve_hook: skip_permissions_hook,
             });
-            trace!("ensure_claude_config: {:?}", tc.elapsed());
+            let elapsed = tc.elapsed();
+            trace!("ensure_claude_config: {elapsed:?}");
             cfg_result
         });
 
@@ -171,16 +175,19 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
                         );
                     }
                 };
-                let docker_host = format!("unix://{}", docker_socket.display());
+                let docker_socket_display = docker_socket.display();
+                let docker_host = format!("unix://{docker_socket_display}");
                 prepare_screen(&docker_host, &result.container_id.0, &result.user)
             }
         };
-        trace!("prepare_screen: {:?}", ts.elapsed());
+        let elapsed = ts.elapsed();
+        trace!("prepare_screen: {elapsed:?}");
 
         let config_result = config_handle.join().unwrap();
         (screen_state, config_result)
     });
-    trace!("parallel screen+config: {:?}", t.elapsed());
+    let elapsed = t.elapsed();
+    trace!("parallel screen+config: {elapsed:?}");
 
     config_result?;
     let screen_state = screen_state?;
@@ -205,7 +212,10 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             // since kubectl exec has no --workdir or -e flags.
             let env_prefix: String = merged_env
                 .iter()
-                .map(|(k, v)| format!("{}={}", k, shell_escape(v)))
+                .map(|(k, v)| {
+                    let escaped = shell_escape(v);
+                    format!("{k}={escaped}")
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
 
@@ -250,7 +260,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             kubectl.arg(&result.container_id.0);
             kubectl.args(["--", "sh", "-c", &wrapper]);
 
-            trace!("total claude startup: {:?}", t_total.elapsed());
+            let elapsed = t_total.elapsed();
+            trace!("total claude startup: {elapsed:?}");
             kubectl.status()?
         }
 
@@ -259,7 +270,8 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
                 .docker_socket
                 .as_ref()
                 .context("docker_socket is required for Docker hosts")?;
-            let docker_host = format!("unix://{}", docker_socket.display());
+            let docker_socket_display = docker_socket.display();
+            let docker_host = format!("unix://{docker_socket_display}");
 
             let mut docker_cmd = Command::new("docker");
             docker_cmd.args(["-H", &docker_host]);
@@ -268,7 +280,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             docker_cmd.args(["--workdir", &workdir.to_string_lossy()]);
 
             for (key, value) in &merged_env {
-                docker_cmd.args(["-e", &format!("{}={}", key, value)]);
+                docker_cmd.args(["-e", &format!("{key}={value}")]);
             }
 
             docker_cmd.args(["-it"]);
@@ -303,13 +315,14 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
                 docker_cmd.args(&cmd.args);
             }
 
-            trace!("total claude startup: {:?}", t_total.elapsed());
+            let elapsed = t_total.elapsed();
+            trace!("total claude startup: {elapsed:?}");
             docker_cmd.status()?
         }
     };
 
     if !status.success() {
-        return Err(anyhow::anyhow!("exec exited with status {}", status));
+        return Err(anyhow::anyhow!("exec exited with status {status}"));
     }
 
     Ok(())

@@ -7,7 +7,8 @@ fn main() -> ExitCode {
             eprintln!("Error: {e:?}");
             let has_backtrace = env::var("RUST_BACKTRACE").as_ref().map(|s| s.as_str()) == Ok("1");
             if has_backtrace {
-                eprintln!("Backtrace:\n{}", e.backtrace());
+                let bt = e.backtrace();
+                eprintln!("Backtrace:\n{bt}");
             }
 
             ExitCode::FAILURE

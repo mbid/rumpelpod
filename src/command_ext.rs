@@ -83,10 +83,10 @@ impl CommandExt for Command {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let exit_info = match output.status.code() {
-                Some(code) => format!("exit code: {}", code),
+                Some(code) => format!("exit code: {code}"),
                 None => "killed by signal".to_string(),
             };
-            Err(anyhow!("$ {:?}\n{}{}{}", self, stdout, stderr, exit_info))
+            Err(anyhow!("$ {self:?}\n{stdout}{stderr}{exit_info}"))
         }
     }
 
@@ -99,7 +99,7 @@ impl CommandExt for Command {
         let prefix = prefix.to_string();
 
         let stdout = child.stdout.take().expect("stdout not captured");
-        let thread_name = format!("{}-stdout", prefix);
+        let thread_name = format!("{prefix}-stdout");
         let prefix_clone = prefix.clone();
         thread::Builder::new()
             .name(thread_name.clone())
@@ -109,17 +109,17 @@ impl CommandExt for Command {
                     match line {
                         Ok(line) => {
                             if !line.trim().is_empty() {
-                                info!("{}: {}", prefix_clone, line);
+                                info!("{prefix_clone}: {line}");
                             }
                         }
                         Err(_) => break,
                     }
                 }
             })
-            .with_context(|| format!("Failed to spawn {} thread", thread_name))?;
+            .with_context(|| format!("Failed to spawn {thread_name} thread"))?;
 
         let stderr = child.stderr.take().expect("stderr not captured");
-        let thread_name = format!("{}-stderr", prefix);
+        let thread_name = format!("{prefix}-stderr");
         thread::Builder::new()
             .name(thread_name.clone())
             .spawn(move || {
@@ -128,14 +128,14 @@ impl CommandExt for Command {
                     match line {
                         Ok(line) => {
                             if !line.trim().is_empty() {
-                                error!("{}: {}", prefix, line);
+                                error!("{prefix}: {line}");
                             }
                         }
                         Err(_) => break,
                     }
                 }
             })
-            .with_context(|| format!("Failed to spawn {} thread", thread_name))?;
+            .with_context(|| format!("Failed to spawn {thread_name} thread"))?;
 
         Ok(child)
     }
