@@ -914,6 +914,118 @@ fn k8s_recreate() {
     );
 }
 
+/// Write .rumpelpod.toml with custom TOML content and devcontainer.json for a
+/// k8s test. Unlike `write_k8s_pod_config_with_extras`, this lets the caller
+/// control the full .rumpelpod.toml (e.g. for node-selector / tolerations).
+fn write_k8s_pod_config_custom_toml(
+    repo: &TestRepo,
+    pull_ref: &str,
+    toml_content: &str,
+    extra_json: &str,
+) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
+
+    let comma = if extra_json.is_empty() { "" } else { "," };
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "image": "{pull_ref}",
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "containerUser": "{TEST_USER}"{comma}
+            {extra_json}
+        }}
+    "#};
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+
+    std::fs::write(repo.path().join(".rumpelpod.toml"), toml_content)
+        .expect("Failed to write .rumpelpod.toml");
+}
+
+#[test]
+#[ignore]
+fn k8s_node_selector_and_tolerations() {
+    let cluster = k8s_cluster_config();
+    let ns = K8sNamespace::new(&cluster, "node-selector");
+
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+
+    let pull_ref = push_image(&cluster, &image_id, "k8s-nodeselector");
+
+    let context = &cluster.context;
+    let namespace = &ns.name;
+    let toml_config = formatdoc! {r#"
+        [k8s]
+        context = "{context}"
+        namespace = "{namespace}"
+
+        [k8s.node-selector]
+        kubernetes.io/os = "linux"
+
+        [[k8s.tolerations]]
+        key = "example.com/test"
+        value = "yes"
+        effect = "NoSchedule"
+    "#};
+
+    write_k8s_pod_config_custom_toml(&repo, &pull_ref, &toml_config, "");
+
+    let daemon = TestDaemon::start();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "k8s-ns-test", "--", "true"])
+        .success()
+        .expect("rumpel enter with node-selector failed");
+
+    // Verify nodeSelector via kubectl
+    let kubectl_output = Command::new("kubectl")
+        .args(["--context", context])
+        .args(["--namespace", namespace])
+        .args([
+            "get",
+            "pod",
+            "-l",
+            "rumpelpod/pod-name=k8s-ns-test",
+            "-o",
+            "jsonpath={.items[0].spec.nodeSelector}",
+        ])
+        .output()
+        .expect("kubectl get failed");
+
+    let node_selector = String::from_utf8_lossy(&kubectl_output.stdout);
+    assert!(
+        node_selector.contains("kubernetes.io/os"),
+        "nodeSelector should include kubernetes.io/os: {}",
+        node_selector,
+    );
+
+    // Verify our custom toleration is present
+    let kubectl_output = Command::new("kubectl")
+        .args(["--context", context])
+        .args(["--namespace", namespace])
+        .args([
+            "get",
+            "pod",
+            "-l",
+            "rumpelpod/pod-name=k8s-ns-test",
+            "-o",
+            "jsonpath={.items[0].spec.tolerations}",
+        ])
+        .output()
+        .expect("kubectl get tolerations failed");
+
+    let tolerations = String::from_utf8_lossy(&kubectl_output.stdout);
+    assert!(
+        tolerations.contains("example.com/test"),
+        "tolerations should include example.com/test: {}",
+        tolerations,
+    );
+}
+
 // Broken: after killing the tunnel-server, the daemon reconnects the tunnel
 // but the git gateway port cached by the pod is stale, so git fetch fails
 // with "Could not connect to server".  Needs investigation.

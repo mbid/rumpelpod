@@ -9,6 +9,8 @@
 //! `devcontainer.json`.  The optional `.rumpelpod.toml` provides pod-specific
 //! settings that have no devcontainer equivalent (host, agent).
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -108,6 +110,12 @@ pub enum Host {
         /// Registry address for pods to pull from (defaults to `registry`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pull_registry: Option<String>,
+        /// Node selector labels for pod scheduling.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node_selector: Option<BTreeMap<String, String>>,
+        /// Tolerations for pod scheduling.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tolerations: Option<Vec<K8sToleration>>,
     },
 }
 
@@ -251,6 +259,18 @@ impl std::fmt::Display for Host {
     }
 }
 
+/// A single Kubernetes toleration from `[[k8s.tolerations]]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct K8sToleration {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub effect: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<String>,
+}
+
 /// Kubernetes target from `[k8s]` in `.rumpelpod.toml`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
@@ -263,6 +283,12 @@ pub struct K8sConfig {
     pub registry: Option<String>,
     /// Registry address for pods to pull from (defaults to `registry`).
     pub pull_registry: Option<String>,
+    /// Node selector labels for pod scheduling.
+    #[serde(default)]
+    pub node_selector: Option<BTreeMap<String, String>>,
+    /// Tolerations for pod scheduling.
+    #[serde(default)]
+    pub tolerations: Option<Vec<K8sToleration>>,
 }
 
 /// Configuration from `.rumpelpod.toml`.
@@ -491,6 +517,8 @@ mod tests {
             namespace: "default".to_string(),
             registry: None,
             pull_registry: None,
+            node_selector: None,
+            tolerations: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster");
     }
@@ -502,6 +530,8 @@ mod tests {
             namespace: "staging".to_string(),
             registry: None,
             pull_registry: None,
+            node_selector: None,
+            tolerations: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster/staging");
     }
@@ -513,6 +543,8 @@ mod tests {
             namespace: "default".to_string(),
             registry: None,
             pull_registry: None,
+            node_selector: None,
+            tolerations: None,
         };
         assert!(host.is_remote());
         assert!(!host.is_docker());
@@ -535,6 +567,8 @@ mod tests {
                 namespace: "staging".to_string(),
                 registry: None,
                 pull_registry: None,
+                node_selector: None,
+                tolerations: None,
             },
         ];
         for host in hosts {
@@ -542,5 +576,53 @@ mod tests {
             let roundtripped: Host = serde_json::from_str(&json).unwrap();
             assert_eq!(host, roundtripped, "roundtrip failed for {:?}", host);
         }
+    }
+
+    #[test]
+    fn parse_k8s_node_selector_and_tolerations() {
+        let toml_str = indoc::indoc! {r#"
+            [k8s]
+            context = "test-cluster"
+
+            [k8s.node-selector]
+            pool = "test"
+
+            [[k8s.tolerations]]
+            key = "pool"
+            value = "test"
+            effect = "NoSchedule"
+        "#};
+        let config: TomlConfig = toml::from_str(toml_str).unwrap();
+        let k8s = config.k8s.unwrap();
+        let ns = k8s.node_selector.unwrap();
+        assert_eq!(ns.get("pool"), Some(&"test".to_string()));
+        let tols = k8s.tolerations.unwrap();
+        assert_eq!(tols.len(), 1);
+        assert_eq!(tols[0].key, "pool");
+        assert_eq!(tols[0].value.as_deref(), Some("test"));
+        assert_eq!(tols[0].effect, "NoSchedule");
+        assert_eq!(tols[0].operator, None);
+    }
+
+    #[test]
+    fn k8s_host_roundtrip_with_node_selector() {
+        let mut ns = BTreeMap::new();
+        ns.insert("pool".to_string(), "test".to_string());
+        let host = Host::Kubernetes {
+            context: "cluster".to_string(),
+            namespace: "default".to_string(),
+            registry: None,
+            pull_registry: None,
+            node_selector: Some(ns),
+            tolerations: Some(vec![K8sToleration {
+                key: "pool".to_string(),
+                value: Some("test".to_string()),
+                effect: "NoSchedule".to_string(),
+                operator: None,
+            }]),
+        };
+        let json = serde_json::to_string(&host).unwrap();
+        let roundtripped: Host = serde_json::from_str(&json).unwrap();
+        assert_eq!(host, roundtripped);
     }
 }

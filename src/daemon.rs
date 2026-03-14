@@ -2177,10 +2177,19 @@ impl DaemonServer {
         image_built: bool,
         git_identity: Option<&crate::git::GitIdentity>,
     ) -> Result<LaunchResult> {
-        let (context, namespace) = match docker_host {
+        let (context, namespace, node_selector, tolerations) = match docker_host {
             Host::Kubernetes {
-                context, namespace, ..
-            } => (context.as_str(), namespace.as_str()),
+                context,
+                namespace,
+                node_selector,
+                tolerations,
+                ..
+            } => (
+                context.as_str(),
+                namespace.as_str(),
+                node_selector.clone(),
+                tolerations.clone(),
+            ),
             _ => unreachable!("launch_pod_k8s called with non-Kubernetes host"),
         };
 
@@ -2516,6 +2525,8 @@ impl DaemonServer {
             apparmor_unconfined,
             override_command,
             resource_requests,
+            node_selector,
+            tolerations,
         };
 
         client

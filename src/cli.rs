@@ -71,6 +71,8 @@ impl HostArgs {
                 namespace,
                 registry: self.k8s_registry.clone(),
                 pull_registry: self.k8s_pull_registry.clone(),
+                node_selector: None,
+                tolerations: None,
             }))
         } else if let Some(ref h) = self.host {
             Ok(Some(Host::parse(h)?))

@@ -153,6 +153,8 @@ pub fn load_and_resolve(
                 .unwrap_or_else(|| "default".to_string()),
             registry: k8s.registry.clone(),
             pull_registry: k8s.pull_registry.clone(),
+            node_selector: k8s.node_selector.clone(),
+            tolerations: k8s.tolerations.clone(),
         }
     } else {
         Host::Localhost

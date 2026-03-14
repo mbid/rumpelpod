@@ -64,6 +64,8 @@ pub struct K8sPodOptions {
     pub apparmor_unconfined: bool,
     pub override_command: bool,
     pub resource_requests: Option<K8sResourceRequests>,
+    pub node_selector: Option<BTreeMap<String, String>>,
+    pub tolerations: Option<Vec<crate::config::K8sToleration>>,
 }
 
 impl Default for K8sPodOptions {
@@ -76,6 +78,8 @@ impl Default for K8sPodOptions {
             apparmor_unconfined: false,
             override_command: true,
             resource_requests: None,
+            node_selector: None,
+            tolerations: None,
         }
     }
 }
@@ -275,7 +279,7 @@ impl K8sClient {
             );
         }
 
-        let pod_spec = serde_json::json!({
+        let mut pod_spec = serde_json::json!({
             "apiVersion": "v1",
             "kind": "Pod",
             "metadata": {
@@ -289,6 +293,30 @@ impl K8sClient {
                 "restartPolicy": "Never",
             }
         });
+
+        if let Some(ref ns) = options.node_selector {
+            pod_spec["spec"]["nodeSelector"] = serde_json::json!(ns);
+        }
+
+        if let Some(ref tolerations) = options.tolerations {
+            let vals: Vec<serde_json::Value> = tolerations
+                .iter()
+                .map(|t| {
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("key".to_string(), serde_json::json!(t.key));
+                    obj.insert("effect".to_string(), serde_json::json!(t.effect));
+                    if let Some(ref v) = t.value {
+                        obj.insert("value".to_string(), serde_json::json!(v));
+                    }
+                    obj.insert(
+                        "operator".to_string(),
+                        serde_json::json!(t.operator.as_deref().unwrap_or("Equal")),
+                    );
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+            pod_spec["spec"]["tolerations"] = serde_json::json!(vals);
+        }
 
         let pod: Pod = serde_json::from_value(pod_spec).context("serializing pod spec")?;
 
