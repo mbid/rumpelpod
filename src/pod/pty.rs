@@ -138,6 +138,15 @@ impl PtySessions {
                     }
                 }
 
+                // Defaults so programs emit color/cursor codes.
+                // The caller's env list can override these.
+                if std::env::var_os("TERM").is_none() {
+                    std::env::set_var("TERM", "xterm-256color");
+                }
+                if std::env::var_os("COLORTERM").is_none() {
+                    std::env::set_var("COLORTERM", "truecolor");
+                }
+
                 if cmd.is_empty() {
                     eprintln!("pty: empty command");
                     std::process::exit(1);
@@ -165,23 +174,6 @@ impl PtySessions {
                 sessions.insert(name, session);
                 Ok(true)
             }
-        }
-    }
-
-    /// Check whether a session exists and its child is still alive.
-    /// Cleans up dead sessions as a side effect.
-    async fn exists(&self, name: &str) -> bool {
-        let mut sessions = self.inner.lock().await;
-        match sessions.get(name) {
-            Some(s) => {
-                if child_is_alive(s.child_pid) {
-                    true
-                } else {
-                    sessions.remove(name);
-                    false
-                }
-            }
-            None => false,
         }
     }
 
@@ -270,16 +262,6 @@ struct PtySpawnResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PtyStatusRequest {
-    pub name: String,
-}
-
-#[derive(Debug, Serialize)]
-struct PtyStatusResponse {
-    exists: bool,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct PtyAttachQuery {
     pub name: String,
 }
@@ -305,14 +287,6 @@ async fn pty_spawn_handler(
         .await
         .map_err(err_json)?;
     Ok(Json(PtySpawnResponse { created }))
-}
-
-async fn pty_status_handler(
-    State(sessions): State<PtySessions>,
-    Json(req): Json<PtyStatusRequest>,
-) -> Result<Json<PtyStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let exists = sessions.exists(&req.name).await;
-    Ok(Json(PtyStatusResponse { exists }))
 }
 
 async fn pty_attach_handler(
@@ -484,7 +458,6 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: S
 pub fn pty_routes(sessions: PtySessions) -> Router {
     Router::new()
         .route("/pty/spawn", post(pty_spawn_handler))
-        .route("/pty/status", post(pty_status_handler))
         .route("/pty/attach", any(pty_attach_handler))
         .with_state(sessions)
 }

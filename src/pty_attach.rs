@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use log::trace;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{ClientRequestBuilder, Message, WebSocket};
 
@@ -19,7 +20,9 @@ const MSG_DATA: u8 = 0x00;
 /// Message type prefix for resize notifications.
 const MSG_RESIZE: u8 = 0x01;
 
-/// Ctrl-a (0x01) is the first byte of the detach sequence.
+/// Ctrl-a (0x01) is the first byte of the detach sequence (same as
+/// GNU screen). Ctrl+letter works on all keyboard layouts, unlike
+/// Ctrl+punctuation which breaks on non-US layouts in gnome-terminal.
 const DETACH_PREFIX: u8 = 0x01;
 /// 'd' (0x64) completes the detach sequence after Ctrl-a.
 const DETACH_SUFFIX: u8 = b'd';
@@ -131,26 +134,12 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
     // Channel for the stdin thread to send data to the WS loop.
     let (outbound_tx, outbound_rx) = std::sync::mpsc::channel::<Outbound>();
 
-    // -- SIGWINCH handling ----------------------------------------------
-    //
-    // Block SIGWINCH so signalfd can receive it instead of the default
-    // handler. The stdin reader thread polls the signalfd with a
-    // non-blocking read.
-
-    let mut winch_mask = nix::sys::signal::SigSet::empty();
-    winch_mask.add(nix::sys::signal::Signal::SIGWINCH);
-    winch_mask.thread_block().context("blocking SIGWINCH")?;
-
-    let winch_fd = nix::sys::signalfd::SignalFd::with_flags(
-        &winch_mask,
-        nix::sys::signalfd::SfdFlags::SFD_NONBLOCK | nix::sys::signalfd::SfdFlags::SFD_CLOEXEC,
-    )
-    .context("creating signalfd for SIGWINCH")?;
-
     // -- Stdin reader thread --------------------------------------------
     //
     // Reads from stdin and forwards data through the channel.
-    // Also polls signalfd for SIGWINCH and sends resize messages.
+    // Detects terminal resizes by polling get_terminal_size() each
+    // iteration rather than using signalfd, which breaks when other
+    // threads (e.g. reqwest workers) have SIGWINCH unblocked.
 
     let done_stdin = Arc::clone(&done);
     let detached_flag = Arc::clone(&detached);
@@ -162,22 +151,27 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
         // Detach-key state machine: tracks whether we just saw Ctrl-a.
         let mut saw_ctrl_a = false;
 
+        // Track last known terminal size to detect resizes.
+        let mut last_size = get_terminal_size().ok();
+
         loop {
             if done_stdin.load(Ordering::Relaxed) {
                 break;
             }
 
-            // Check for pending SIGWINCH.
-            if let Ok(Some(_)) = winch_fd.read_signal() {
-                if let Ok((cols, rows)) = get_terminal_size() {
+            // Detect terminal resize by comparing current size to last known.
+            let current_size = get_terminal_size().ok();
+            if current_size != last_size {
+                if let Some((cols, rows)) = current_size {
                     if outbound_tx.send(Outbound::Resize(cols, rows)).is_err() {
                         break;
                     }
                 }
+                last_size = current_size;
             }
 
             // Use poll(2) to wait for stdin with a short timeout so we
-            // can re-check for signals and the done flag periodically.
+            // can re-check for resizes and the done flag periodically.
             let mut poll_fd = libc::pollfd {
                 fd: stdin_fd,
                 events: libc::POLLIN,
@@ -205,6 +199,7 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
             };
 
             let data = &buf[..n];
+            trace!("stdin: read {n} bytes: {data:02x?}");
 
             // Process input through the detach-key state machine.
             let mut to_send = Vec::with_capacity(n + 1);
@@ -212,6 +207,7 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
                 if saw_ctrl_a {
                     saw_ctrl_a = false;
                     if byte == DETACH_SUFFIX {
+                        trace!("detach sequence complete");
                         detached_flag.store(true, Ordering::Relaxed);
                         done_stdin.store(true, Ordering::Relaxed);
                         break;
@@ -225,6 +221,7 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
                         to_send.push(byte);
                     }
                 } else if byte == DETACH_PREFIX {
+                    trace!("detach prefix byte received");
                     saw_ctrl_a = true;
                 } else {
                     to_send.push(byte);

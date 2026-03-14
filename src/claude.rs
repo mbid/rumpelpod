@@ -76,54 +76,49 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
     let merged_env = merge_env(result.probed_env, remote_env);
 
-    let env_strings: Vec<String> = merged_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let mut env_strings: Vec<String> = merged_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
-    // Check for an existing PTY session; spawn one if needed.
+    // Forward terminal capability vars from the host so the PTY child
+    // matches the user's actual terminal. The defaults in pty.rs only
+    // apply when these are truly absent (e.g. headless invocation).
+    for var in ["TERM", "COLORTERM"] {
+        if !merged_env.iter().any(|(k, _)| k == var) {
+            if let Ok(val) = std::env::var(var) {
+                env_strings.push(format!("{var}={val}"));
+            }
+        }
+    }
+
+    // Spawn is idempotent: returns created=false if the session is
+    // already running, so the client doesn't need a separate status check.
     let container_url = &result.container_url;
     let container_token = &result.container_token;
-    let status_resp: serde_json::Value = reqwest::blocking::Client::new()
-        .post(format!("{container_url}/pty/status"))
+    let (cols, rows) = pty_attach::get_terminal_size().unwrap_or((80, 24));
+
+    let mut claude_cmd = vec!["claude".to_string()];
+    if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
+        claude_cmd.push("--dangerously-skip-permissions".to_string());
+    }
+    claude_cmd.extend(cmd.args.clone());
+
+    let spawn_resp = reqwest::blocking::Client::new()
+        .post(format!("{container_url}/pty/spawn"))
         .header("Authorization", format!("Bearer {container_token}"))
-        .json(&serde_json::json!({ "name": PTY_SESSION_NAME }))
+        .json(&serde_json::json!({
+            "name": PTY_SESSION_NAME,
+            "cmd": claude_cmd,
+            "user": result.user,
+            "workdir": workdir,
+            "env": env_strings,
+            "cols": cols,
+            "rows": rows,
+        }))
         .send()
-        .context("checking pty session status")?
-        .json()
-        .context("parsing pty status response")?;
+        .context("spawning pty session")?;
 
-    let session_exists = status_resp
-        .get("exists")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if !session_exists {
-        // Get terminal size for the new session.
-        let (cols, rows) = pty_attach::get_terminal_size().unwrap_or((80, 24));
-
-        let mut claude_cmd = vec!["claude".to_string()];
-        if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
-            claude_cmd.push("--dangerously-skip-permissions".to_string());
-        }
-        claude_cmd.extend(cmd.args.clone());
-
-        let spawn_resp = reqwest::blocking::Client::new()
-            .post(format!("{container_url}/pty/spawn"))
-            .header("Authorization", format!("Bearer {container_token}"))
-            .json(&serde_json::json!({
-                "name": PTY_SESSION_NAME,
-                "cmd": claude_cmd,
-                "user": result.user,
-                "workdir": workdir,
-                "env": env_strings,
-                "cols": cols,
-                "rows": rows,
-            }))
-            .send()
-            .context("spawning pty session")?;
-
-        if !spawn_resp.status().is_success() {
-            let body = spawn_resp.text().unwrap_or_default();
-            return Err(anyhow::anyhow!("failed to spawn pty session: {body}"));
-        }
+    if !spawn_resp.status().is_success() {
+        let body = spawn_resp.text().unwrap_or_default();
+        return Err(anyhow::anyhow!("failed to spawn pty session: {body}"));
     }
 
     let elapsed = t_total.elapsed();
