@@ -150,6 +150,14 @@ fn write_k8s_pod_config_with_extras(
         [k8s]
         context = "{context}"
         namespace = "{namespace}"
+
+        [k8s.node-selector]
+        pool = "test"
+
+        [[k8s.tolerations]]
+        key = "pool"
+        value = "test"
+        effect = "NoSchedule"
     "#};
     std::fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");
@@ -958,16 +966,24 @@ fn k8s_node_selector_and_tolerations() {
 
     let context = &cluster.context;
     let namespace = &ns.name;
+    // Target the test pool so the pod actually schedules on a worker,
+    // and add an extra label/toleration to verify both appear in the spec.
     let toml_config = formatdoc! {r#"
         [k8s]
         context = "{context}"
         namespace = "{namespace}"
 
         [k8s.node-selector]
+        pool = "test"
         kubernetes.io/os = "linux"
 
         [[k8s.tolerations]]
-        key = "example.com/test"
+        key = "pool"
+        value = "test"
+        effect = "NoSchedule"
+
+        [[k8s.tolerations]]
+        key = "example.com/extra"
         value = "yes"
         effect = "NoSchedule"
     "#};
@@ -981,7 +997,7 @@ fn k8s_node_selector_and_tolerations() {
         .success()
         .expect("rumpel enter with node-selector failed");
 
-    // Verify nodeSelector via kubectl
+    // Verify both nodeSelector labels appear
     let kubectl_output = Command::new("kubectl")
         .args(["--context", context])
         .args(["--namespace", namespace])
@@ -1002,8 +1018,13 @@ fn k8s_node_selector_and_tolerations() {
         "nodeSelector should include kubernetes.io/os: {}",
         node_selector,
     );
+    assert!(
+        node_selector.contains("pool"),
+        "nodeSelector should include pool: {}",
+        node_selector,
+    );
 
-    // Verify our custom toleration is present
+    // Verify our custom toleration is present alongside the pool one
     let kubectl_output = Command::new("kubectl")
         .args(["--context", context])
         .args(["--namespace", namespace])
@@ -1020,8 +1041,8 @@ fn k8s_node_selector_and_tolerations() {
 
     let tolerations = String::from_utf8_lossy(&kubectl_output.stdout);
     assert!(
-        tolerations.contains("example.com/test"),
-        "tolerations should include example.com/test: {}",
+        tolerations.contains("example.com/extra"),
+        "tolerations should include example.com/extra: {}",
         tolerations,
     );
 }
