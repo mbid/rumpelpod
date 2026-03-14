@@ -32,7 +32,7 @@ json5 = ">= 0"
 notify = ">= 0"
 tokio = { version = ">= 0", features = ["full"] }
 dirs = ">= 0"
-nix = { version = ">= 0", features = ["user", "fs"] }
+nix = { version = ">= 0", features = ["user", "fs", "process", "term", "ioctl", "signal"] }
 chrono = { version = ">= 0", features = ["serde"] }
 libc = ">= 0"
 reflink-copy = ">= 0"
@@ -48,7 +48,8 @@ rand = ">= 0"
 tempfile = ">= 0"
 listenfd = ">= 0"
 url = ">= 0"
-axum = ">= 0"
+axum = { version = ">= 0", features = ["ws"] }
+tungstenite = ">= 0"
 hyper = { version = ">= 0", features = ["server", "http1"] }
 hyper-util = { version = ">= 0", features = ["tokio"] }
 tower = { version = ">= 0", features = ["util"] }

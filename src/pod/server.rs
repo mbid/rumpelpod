@@ -33,6 +33,8 @@ struct ErrorResponse {
 // ---------------------------------------------------------------------------
 
 pub fn run_container_server(port: u16, token: String) -> ! {
+    let pty_sessions = super::pty::PtySessions::new();
+
     // POST routes require bearer token authentication
     let authenticated_routes = Router::new()
         .route("/fs/read", post(fs_read_handler))
@@ -51,6 +53,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/env/probe", post(env_probe_handler))
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
+        .merge(super::pty::pty_routes(pty_sessions))
         .layer(axum::middleware::from_fn_with_state(
             token.clone(),
             require_bearer_token,

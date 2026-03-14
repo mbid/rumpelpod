@@ -65,7 +65,7 @@ pub fn build_claude_test_image(repo: &TestRepo) -> ImageId {
     // check from running inside the container.
     let extra = formatdoc! {r#"
         USER root
-        RUN apt-get update && apt-get install -y screen nodejs curl
+        RUN apt-get update && apt-get install -y nodejs curl
         RUN curl -fsSL "{tarball_url}" \
             | tar xz -C /usr/local/lib --transform='s,^package,claude-code,' \
             && ln -s /usr/local/lib/claude-code/cli.js /usr/local/bin/claude \

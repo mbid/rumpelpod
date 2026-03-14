@@ -32,7 +32,6 @@ const DEFAULT_DOCKERFILE: &str = indoc::indoc! {"
             jq \
             less \
             openssh-client \
-            screen \
             sudo \
             unzip \
             vim \

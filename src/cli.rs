@@ -217,15 +217,13 @@ Examples:
 ")]
     Cp(CpCommand),
 
-    /// Launch Claude Code in a persistent screen session inside a pod
+    /// Launch Claude Code in a persistent session inside a pod
     #[command(
-        long_about = "Launch Claude Code CLI inside a persistent screen session in a pod.
+        long_about = "Launch Claude Code CLI inside a persistent session in a pod.
 
-On first run, copies Claude Code config files (~/.claude.json, ~/.claude/settings.json) from the host into the container. Then attaches to or creates a GNU screen session running Claude Code.
+On first run, copies Claude Code config files (~/.claude.json, ~/.claude/settings.json) from the host into the container. Then attaches to or creates a persistent PTY session running Claude Code.
 
-Detach with Ctrl-a d to leave Claude Code running in the background. Re-run the same command to reattach. If Claude Code exits (e.g. /exit), the screen session ends and the next invocation creates a fresh one.
-
-Requires 'screen' to be installed in the container image.
+Detach with Ctrl-a d to leave Claude Code running in the background. Re-run the same command to reattach. If Claude Code exits (e.g. /exit), the session ends and the next invocation creates a fresh one.
 
 Examples:
   rumpel claude dev                    # Launch Claude Code in 'dev' pod

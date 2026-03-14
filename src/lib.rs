@@ -27,6 +27,7 @@ mod merge;
 pub mod pod;
 mod ports;
 mod prune;
+mod pty_attach;
 mod recreate;
 mod review;
 mod service;
