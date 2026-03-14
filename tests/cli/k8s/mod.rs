@@ -975,7 +975,7 @@ fn k8s_node_selector_and_tolerations() {
 
         [k8s.node-selector]
         pool = "test"
-        kubernetes.io/os = "linux"
+        "kubernetes.io/os" = "linux"
 
         [[k8s.tolerations]]
         key = "pool"

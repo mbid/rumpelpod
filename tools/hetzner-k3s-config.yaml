@@ -41,10 +41,14 @@ embedded_registry_mirror:
   enabled: true
 
 # Every node needs this so containerd uses HTTP for our in-cluster
-# registry.  post_create_commands runs on each node at creation time,
-# including autoscaled workers.
+# registry.  The fixed ClusterIP (10.43.0.100) is routable from every
+# node via kube-proxy, unlike localhost which only works on master.
+# The "*": entry is the embedded registry mirror (Spegel) -- without
+# it, Spegel overwrites the file on agent restart and drops our mirror.
+# post_create_commands runs on each node at creation time, including
+# autoscaled workers.
 post_create_commands:
-  - 'mkdir -p /etc/rancher/k3s && printf "mirrors:\n  \"registry.registry.svc.cluster.local:5000\":\n    endpoint:\n      - \"http://localhost:5000\"\n" > /etc/rancher/k3s/registries.yaml'
+  - 'mkdir -p /etc/rancher/k3s && printf "mirrors:\n  \"*\":\n  \"registry.registry.svc.cluster.local:5000\":\n    endpoint:\n      - \"http://10.43.0.100:5000\"\n" > /etc/rancher/k3s/registries.yaml'
 
 # Single master, cx33: 4 shared vCPU, 8 GB RAM (~5.49 EUR/month).
 # Low-mid range -- enough headroom for API-heavy workloads without

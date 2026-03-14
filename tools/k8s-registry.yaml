@@ -1,9 +1,12 @@
 # In-cluster container registry for rumpelpod.
 #
-# The pod uses hostPort so containerd on the node can pull via
-# localhost:5000.  Tests push via kubectl port-forward to the service;
-# pods pull via the cluster-internal DNS name, which the
-# registries.yaml mirror redirects to localhost:5000.
+# Tests push via kubectl port-forward to the service; pods pull via the
+# cluster-internal DNS name, which the registries.yaml mirror on each
+# node redirects to the fixed ClusterIP below.
+#
+# The fixed ClusterIP (10.43.0.100) is routable from every node via
+# kube-proxy iptables rules, so containerd can pull images regardless
+# of which node the registry pod runs on.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -40,7 +43,6 @@ spec:
           image: registry:2
           ports:
             - containerPort: 5000
-              hostPort: 5000
           volumeMounts:
             - name: data
               mountPath: /var/lib/registry
@@ -54,6 +56,7 @@ metadata:
   name: registry
   namespace: registry
 spec:
+  clusterIP: 10.43.0.100
   selector:
     app: registry
   ports:
