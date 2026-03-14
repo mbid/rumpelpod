@@ -2793,7 +2793,6 @@ impl DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
-        let push_tx = build_tx.clone();
         let on_output: Option<crate::image::BuildOutputFn> = {
             let tx = build_tx;
             Some(Box::new(move |line: crate::image::OutputLine| {
@@ -2801,32 +2800,12 @@ impl DaemonServer {
             }) as crate::image::BuildOutputFn)
         };
 
+        // For k8s with a build section, resolve_image uses buildx to build
+        // in-cluster and push directly to the registry in one step.
         let build_result =
             crate::image::resolve_image(&devcontainer, &docker_host, &repo_path, on_output)?;
-        let mut image = build_result.image;
+        let image = build_result.image;
         let image_built = build_result.built;
-
-        // For K8s with a built image, push to the configured registry
-        if let Host::Kubernetes {
-            ref registry,
-            ref pull_registry,
-            ..
-        } = docker_host
-        {
-            if devcontainer.has_build() {
-                let push_reg = registry
-                    .as_deref()
-                    .expect("registry validated in resolve_image");
-                let pull_reg = pull_registry.as_deref().unwrap_or(push_reg);
-                let on_push: Option<crate::image::BuildOutputFn> = {
-                    let tx = push_tx;
-                    Some(Box::new(move |line: crate::image::OutputLine| {
-                        let _ = tx.send(line);
-                    }))
-                };
-                image = crate::image::push_to_registry(&image, push_reg, pull_reg, on_push)?;
-            }
-        }
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
         let user = devcontainer.user().map(String::from);
         let mounts = devcontainer.resolved_mounts()?;

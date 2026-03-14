@@ -23,12 +23,6 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
         }
     };
 
-    // K8s has no Docker daemon -- build against the local daemon instead.
-    let build_host = match &docker_host {
-        Host::Kubernetes { .. } => &Host::Localhost,
-        other => other,
-    };
-
     let flags = BuildFlags {
         no_cache: cmd.no_cache,
         pull: cmd.pull,
@@ -39,26 +33,34 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
             image::OutputLine::Stdout(s) => println!("{}", s),
             image::OutputLine::Stderr(s) => eprintln!("{}", s),
         }));
-    let result =
-        image::build_devcontainer_image(build_opts, build_host, &repo_root, &flags, on_output)?;
-    println!("Image built: {}", result.image.0);
 
-    // For K8s with a registry, push the built image
+    // For k8s, build in-cluster via buildx (pushes directly to registry).
     if let Host::Kubernetes {
+        ref context,
         registry: Some(ref push_reg),
         ref pull_registry,
         ..
     } = docker_host
     {
         let pull_reg = pull_registry.as_deref().unwrap_or(push_reg);
-        let on_push: Option<image::BuildOutputFn> =
-            Some(Box::new(|line: image::OutputLine| match line {
-                image::OutputLine::Stdout(s) => println!("{}", s),
-                image::OutputLine::Stderr(s) => eprintln!("{}", s),
-            }));
-        let pushed = image::push_to_registry(&result.image, push_reg, pull_reg, on_push)?;
-        println!("Image pushed: {}", pushed.0);
+        let result = image::buildx_build(
+            build_opts, context, pull_reg, &repo_root, &flags, on_output,
+        )?;
+        println!("Image built and pushed: {}", result.image.0);
+        return Ok(());
     }
+
+    if matches!(docker_host, Host::Kubernetes { registry: None, .. }) {
+        return Err(anyhow::anyhow!(
+            "Building images for Kubernetes requires a registry.\n\
+             Set 'registry' in the [k8s] section of .rumpelpod.toml, \
+             or use --k8s-registry."
+        ));
+    }
+
+    let result =
+        image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags, on_output)?;
+    println!("Image built: {}", result.image.0);
 
     Ok(())
 }
