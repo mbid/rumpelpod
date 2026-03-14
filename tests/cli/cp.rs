@@ -165,6 +165,62 @@ fn cp_directory_from_pod() {
 }
 
 #[test]
+fn cp_directory_to_pod() {
+    let repo = TestRepo::new();
+    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
+    write_test_pod_config(&repo, &image_id);
+
+    let daemon = TestDaemon::start();
+
+    // Ensure pod exists
+    pod_command(&repo, &daemon)
+        .args(["enter", "cp-dir-in-test", "--", "true"])
+        .success()
+        .expect("failed to start pod");
+
+    // Create a local directory with files
+    let local_dir = daemon.temp_dir().join("upload-dir");
+    fs::create_dir(&local_dir).unwrap();
+    fs::write(local_dir.join("x.txt"), "xxx\n").unwrap();
+    fs::write(local_dir.join("y.txt"), "yyy\n").unwrap();
+
+    // Copy directory into the pod
+    pod_command(&repo, &daemon)
+        .args([
+            "cp",
+            local_dir.to_str().unwrap(),
+            "cp-dir-in-test:/tmp/upload-dir",
+        ])
+        .success()
+        .expect("rumpel cp directory to pod failed");
+
+    // Verify files inside the pod
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-dir-in-test",
+            "--",
+            "cat",
+            "/tmp/upload-dir/x.txt",
+        ])
+        .success()
+        .expect("failed to read x.txt in pod");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "xxx");
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-dir-in-test",
+            "--",
+            "cat",
+            "/tmp/upload-dir/y.txt",
+        ])
+        .success()
+        .expect("failed to read y.txt in pod");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "yyy");
+}
+
+#[test]
 fn cp_with_flags() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
@@ -185,14 +241,13 @@ fn cp_with_flags() {
         .success()
         .expect("failed to create file in pod");
 
-    // Copy with -a -L -q flags
+    // Copy with -a -L flags
     let host_dest = daemon.temp_dir().join("flagcopy.txt");
     pod_command(&repo, &daemon)
         .args([
             "cp",
             "-a",
             "-L",
-            "-q",
             "cp-flags-test:/tmp/flagfile.txt",
             host_dest.to_str().unwrap(),
         ])

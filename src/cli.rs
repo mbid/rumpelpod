@@ -477,10 +477,6 @@ pub struct CpCommand {
     #[arg(short = 'L', long = "follow-link")]
     pub follow_link: bool,
 
-    /// Suppress progress output
-    #[arg(short = 'q', long = "quiet")]
-    pub quiet: bool,
-
     /// Source: either POD:PATH or a local path
     #[arg(value_name = "SRC")]
     pub src: String,
