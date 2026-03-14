@@ -204,6 +204,31 @@ pub struct RunResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Copy (tar-based file transfer)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CpDownloadRequest {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub follow_symlinks: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CpDownloadResponse {
+    /// Base64-encoded gzip-compressed tar archive.
+    pub archive: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CpUploadRequest {
+    pub path: PathBuf,
+    /// Base64-encoded gzip-compressed tar archive.
+    pub archive: String,
+    pub owner: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 

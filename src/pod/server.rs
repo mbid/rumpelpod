@@ -49,6 +49,8 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/git/apply-patch", post(git_apply_patch_handler))
         .route("/env/user-info", post(env_user_info_handler))
         .route("/env/probe", post(env_probe_handler))
+        .route("/cp/download", post(cp_download_handler))
+        .route("/cp/upload", post(cp_upload_handler))
         .route("/run", post(run_handler))
         .layer(axum::middleware::from_fn_with_state(
             token.clone(),
@@ -853,6 +855,98 @@ fn parse_null_delimited_env(data: &[u8]) -> HashMap<String, String> {
         }
     }
     map
+}
+
+async fn cp_download_handler(
+    Json(req): Json<CpDownloadRequest>,
+) -> Result<Json<CpDownloadResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(|| cp_download_impl(req))
+        .await
+        .expect("cp_download_impl panicked");
+    match result {
+        Ok(resp) => ok_json(resp),
+        Err(e) => Err(err_json(e)),
+    }
+}
+
+fn cp_download_impl(req: CpDownloadRequest) -> Result<CpDownloadResponse> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let path = &req.path;
+    let path_display = path.display();
+
+    let buf = Vec::new();
+    let encoder = GzEncoder::new(buf, Compression::fast());
+    let mut archive = tar::Builder::new(encoder);
+    archive.follow_symlinks(req.follow_symlinks);
+
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path_display}"))?;
+
+    if meta.is_dir() {
+        archive
+            .append_dir_all(".", path)
+            .with_context(|| format!("archiving directory {path_display}"))?;
+    } else {
+        let name = path
+            .file_name()
+            .with_context(|| format!("no file name in {path_display}"))?;
+        archive
+            .append_path_with_name(path, name)
+            .with_context(|| format!("archiving file {path_display}"))?;
+    }
+
+    let encoder = archive
+        .into_inner()
+        .with_context(|| format!("finalizing tar for {path_display}"))?;
+    let compressed = encoder.finish().context("finishing gzip")?;
+
+    Ok(CpDownloadResponse {
+        archive: base64_encode(&compressed),
+    })
+}
+
+async fn cp_upload_handler(
+    Json(req): Json<CpUploadRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(|| cp_upload_impl(req))
+        .await
+        .expect("cp_upload_impl panicked");
+    result.map_err(err_json)?;
+    ok_json(serde_json::json!({}))
+}
+
+fn cp_upload_impl(req: CpUploadRequest) -> Result<()> {
+    use flate2::read::GzDecoder;
+
+    let data = base64_decode(&req.archive)?;
+    let decoder = GzDecoder::new(data.as_slice());
+    let mut archive = tar::Archive::new(decoder);
+
+    let dest = &req.path;
+    let dest_display = dest.display();
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("creating destination {dest_display}"))?;
+
+    archive
+        .unpack(dest)
+        .with_context(|| format!("extracting archive to {dest_display}"))?;
+
+    if let Some(ref owner) = req.owner {
+        chown_recursive(dest, owner).with_context(|| format!("chown {dest_display} to {owner}"))?;
+    }
+
+    Ok(())
+}
+
+/// Recursively chown a path and all its descendants.
+fn chown_recursive(path: &Path, owner: &str) -> Result<()> {
+    let user = resolve_user(owner)?;
+    for entry in walkdir::WalkDir::new(path) {
+        let entry = entry?;
+        nix::unistd::chown(entry.path(), Some(user.uid), Some(user.gid))?;
+    }
+    Ok(())
 }
 
 async fn run_handler(

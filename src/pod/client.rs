@@ -290,6 +290,34 @@ impl PodClient {
     }
 
     // -------------------------------------------------------------------
+    // Copy (tar-based file transfer)
+    // -------------------------------------------------------------------
+
+    /// Download a file or directory from the container as a gzip-compressed tar archive.
+    pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<Vec<u8>> {
+        let resp: CpDownloadResponse = self.post(
+            "/cp/download",
+            &CpDownloadRequest {
+                path: path.to_path_buf(),
+                follow_symlinks,
+            },
+        )?;
+        base64_decode(&resp.archive)
+    }
+
+    /// Upload a gzip-compressed tar archive and extract it at `path` in the container.
+    pub fn cp_upload(&self, path: &Path, archive: &[u8], owner: Option<&str>) -> Result<()> {
+        self.post_unit(
+            "/cp/upload",
+            &CpUploadRequest {
+                path: path.to_path_buf(),
+                archive: base64_encode(archive),
+                owner: owner.map(String::from),
+            },
+        )
+    }
+
+    // -------------------------------------------------------------------
     // Command execution
     // -------------------------------------------------------------------
 

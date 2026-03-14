@@ -1,13 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result};
 
 use crate::cli::CpCommand;
-use crate::config::Host;
-use crate::daemon::protocol::LaunchResult;
 use crate::enter;
 use crate::git::get_repo_root;
+use crate::pod::PodClient;
 
 #[derive(Debug)]
 enum CopyDirection {
@@ -81,6 +79,102 @@ fn container_repo_path() -> Result<PathBuf> {
     Ok(devcontainer.container_repo_path(&repo_root))
 }
 
+/// Create a gzip-compressed tar archive of a local path.
+fn tar_local_path(local_path: &str, follow_symlinks: bool) -> Result<Vec<u8>> {
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    let path = Path::new(local_path);
+    let path_display = path.display();
+    let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path_display}"))?;
+
+    let buf = Vec::new();
+    let encoder = GzEncoder::new(buf, Compression::fast());
+    let mut archive = tar::Builder::new(encoder);
+    archive.follow_symlinks(follow_symlinks);
+
+    if meta.is_dir() {
+        archive
+            .append_dir_all(".", path)
+            .with_context(|| format!("archiving directory {path_display}"))?;
+    } else {
+        let name = path
+            .file_name()
+            .with_context(|| format!("no file name in {path_display}"))?;
+        archive
+            .append_path_with_name(path, name)
+            .with_context(|| format!("archiving file {path_display}"))?;
+    }
+
+    let encoder = archive
+        .into_inner()
+        .with_context(|| format!("finalizing tar for {path_display}"))?;
+    encoder.finish().context("finishing gzip")
+}
+
+/// Extract a gzip-compressed tar archive to a local path.
+fn untar_to_local(archive_data: &[u8], local_path: &str) -> Result<()> {
+    use flate2::read::GzDecoder;
+
+    let dest = Path::new(local_path);
+
+    // If the archive contains a single file (not a directory), the caller
+    // may have passed a file path as destination. Detect this by peeking
+    // at the archive entries.
+    let decoder = GzDecoder::new(archive_data);
+    let mut peek_archive = tar::Archive::new(decoder);
+    let entries: Vec<_> = peek_archive
+        .entries()
+        .context("reading tar entries")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("iterating tar entries")?;
+
+    let single_file = entries.len() == 1 && entries[0].header().entry_type().is_file();
+
+    if single_file {
+        // Extract the single file: if dest looks like a directory (exists and is_dir),
+        // extract into it; otherwise treat dest as the target file path.
+        let decoder = GzDecoder::new(archive_data);
+        let mut archive = tar::Archive::new(decoder);
+        let mut entries = archive.entries().context("reading tar entries")?;
+        let mut entry = entries.next().unwrap()?;
+
+        if dest.is_dir() {
+            let name = entry.path()?.into_owned();
+            let target = dest.join(name);
+            let target_display = target.display();
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent for {target_display}"))?;
+            }
+            entry
+                .unpack(&target)
+                .with_context(|| format!("extracting to {target_display}"))?;
+        } else {
+            let dest_display = dest.display();
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent for {dest_display}"))?;
+            }
+            entry
+                .unpack(dest)
+                .with_context(|| format!("extracting to {dest_display}"))?;
+        }
+    } else {
+        // Directory archive: extract into dest
+        let dest_display = dest.display();
+        std::fs::create_dir_all(dest)
+            .with_context(|| format!("creating destination {dest_display}"))?;
+        let decoder = GzDecoder::new(archive_data);
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .unpack(dest)
+            .with_context(|| format!("extracting archive to {dest_display}"))?;
+    }
+
+    Ok(())
+}
+
 pub fn cp(cmd: &CpCommand) -> Result<()> {
     let direction = parse_direction(&cmd.src, &cmd.dest)?;
     let repo_path = container_repo_path()?;
@@ -91,143 +185,45 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
     };
 
     let result = enter::launch_pod(pod_name, cmd.host_args.resolve()?)?;
+    let client = PodClient::new(&result.container_url, &result.container_token)?;
 
-    let (container_path, local_path, from_pod) = match &direction {
+    match &direction {
         CopyDirection::FromPod {
             container_path,
             local_path,
             ..
-        } => (
-            resolve_container_path(container_path, &repo_path),
-            local_path.clone(),
-            true,
-        ),
+        } => {
+            let resolved = resolve_container_path(container_path, &repo_path);
+            let archive = client.cp_download(Path::new(&resolved), cmd.follow_link)?;
+            untar_to_local(&archive, local_path)?;
+        }
         CopyDirection::ToPod {
             local_path,
             container_path,
             ..
-        } => (
-            resolve_container_path(container_path, &repo_path),
-            local_path.clone(),
-            false,
-        ),
-    };
-
-    let status = match &result.host {
-        Host::Kubernetes {
-            context, namespace, ..
         } => {
-            let container_id = &result.container_id.0;
-            let (k8s_src, k8s_dest) = if from_pod {
-                (
-                    format!("{container_id}:{container_path}"),
-                    local_path.clone(),
-                )
+            let resolved = resolve_container_path(container_path, &repo_path);
+            let archive = tar_local_path(local_path, cmd.follow_link)?;
+            let owner = if cmd.archive {
+                None
             } else {
-                (
-                    local_path.clone(),
-                    format!("{container_id}:{container_path}"),
-                )
+                Some(result.user.as_str())
             };
-
-            let mut kubectl = Command::new("kubectl");
-            kubectl.args(["--context", context]);
-            kubectl.args(["--namespace", namespace]);
-            kubectl.arg("cp");
-            kubectl.arg(&k8s_src);
-            kubectl.arg(&k8s_dest);
-            kubectl.status()?
-        }
-        Host::Localhost | Host::Ssh { .. } => {
-            let docker_socket = result
-                .docker_socket
-                .as_ref()
-                .context("docker_socket is required for Docker hosts")?;
-
-            let container_id = &result.container_id.0;
-            let (docker_src, docker_dest) = if from_pod {
-                (
-                    format!("{container_id}:{container_path}"),
-                    local_path.clone(),
-                )
+            // For a single file, the destination is the target path directly.
+            // The upload endpoint extracts the archive into a directory, so
+            // figure out the parent.
+            let local = Path::new(local_path);
+            let local_meta = std::fs::symlink_metadata(local)?;
+            let dest = if local_meta.is_dir() {
+                Path::new(&resolved).to_path_buf()
             } else {
-                (
-                    local_path.clone(),
-                    format!("{container_id}:{container_path}"),
-                )
+                Path::new(&resolved)
+                    .parent()
+                    .unwrap_or(Path::new("/"))
+                    .to_path_buf()
             };
-
-            let mut docker_cmd = Command::new("docker");
-            let docker_socket_display = docker_socket.display();
-            docker_cmd.args(["-H", &format!("unix://{docker_socket_display}")]);
-            docker_cmd.arg("cp");
-
-            if cmd.archive {
-                docker_cmd.arg("-a");
-            }
-            if cmd.follow_link {
-                docker_cmd.arg("-L");
-            }
-            if cmd.quiet {
-                docker_cmd.arg("-q");
-            }
-
-            docker_cmd.arg(&docker_src);
-            docker_cmd.arg(&docker_dest);
-            docker_cmd.status()?
+            client.cp_upload(&dest, &archive, owner)?;
         }
-    };
-
-    if !status.success() {
-        return Err(anyhow::anyhow!("cp exited with status {status}"));
-    }
-
-    // When copying into the pod, fix ownership so files belong to the container user
-    // rather than root (which is what docker/kubectl cp produces by default).
-    if !from_pod && !cmd.archive {
-        chown_in_container(&result, &container_path)?;
-    }
-
-    Ok(())
-}
-
-/// After copying files into a container, chown them to the container user.
-fn chown_in_container(result: &LaunchResult, container_path: &str) -> Result<()> {
-    let status = match &result.host {
-        Host::Kubernetes {
-            context, namespace, ..
-        } => {
-            // Wrap in sh so we can run as root via the container's entrypoint
-            // mechanism; kubectl exec has no --user flag, but pods launched by
-            // rumpelpod include a root-capable shell.
-            let user = &result.user;
-            let chown_cmd = format!("chown -R {user} {container_path}");
-            let mut kubectl = Command::new("kubectl");
-            kubectl.args(["--context", context]);
-            kubectl.args(["--namespace", namespace]);
-            kubectl.args(["exec", &result.container_id.0, "--"]);
-            kubectl.args(["sh", "-c", &chown_cmd]);
-            kubectl.status()?
-        }
-        Host::Localhost | Host::Ssh { .. } => {
-            let docker_socket = result
-                .docker_socket
-                .as_ref()
-                .context("docker_socket is required for Docker hosts")?;
-
-            let mut docker_cmd = Command::new("docker");
-            let docker_socket_display = docker_socket.display();
-            docker_cmd.args(["-H", &format!("unix://{docker_socket_display}")]);
-            docker_cmd.args(["exec", "--user", "root", &result.container_id.0]);
-            docker_cmd.args(["chown", "-R", &result.user, container_path]);
-            docker_cmd.status()?
-        }
-    };
-
-    if !status.success() {
-        return Err(anyhow::anyhow!(
-            "chown in container exited with status {status}"
-        ));
     }
 
     Ok(())
@@ -309,5 +305,36 @@ mod tests {
             resolve_container_path("file.txt", repo),
             "/workspaces/myrepo/file.txt"
         );
+    }
+
+    #[test]
+    fn tar_roundtrip_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("test.txt");
+        std::fs::write(&src, "hello").unwrap();
+
+        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
+
+        let dest = dir.path().join("out.txt");
+        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello");
+    }
+
+    #[test]
+    fn tar_roundtrip_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("srcdir");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "aaa").unwrap();
+        std::fs::write(src.join("b.txt"), "bbb").unwrap();
+
+        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
+
+        let dest = dir.path().join("destdir");
+        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "aaa");
+        assert_eq!(std::fs::read_to_string(dest.join("b.txt")).unwrap(), "bbb");
     }
 }

@@ -62,6 +62,9 @@ tokio-stream = ">= 0"
 comfy-table = ">= 0"
 kube = { version = ">= 0", features = ["client", "ws", "rustls-tls"] }
 k8s-openapi = { version = ">= 0", features = ["latest"] }
+tar = ">= 0"
+flate2 = ">= 0"
+walkdir = ">= 0"
 
 [build-dependencies]
 sha2 = ">= 0"

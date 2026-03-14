@@ -208,7 +208,7 @@ Requires ANTHROPIC_API_KEY, XAI_API_KEY, or GEMINI_API_KEY environment variable 
     /// Copy files between host and a pod
     #[command(long_about = "Copy files between the host and a pod container.
 
-Wraps 'docker cp' or 'kubectl cp' but uses pod names instead of container IDs. Exactly one of src or dest must use POD:PATH syntax to identify the pod.
+Uses the in-container HTTP server to transfer tar archives, so no docker or kubectl CLI is needed on the host. Exactly one of src or dest must use POD:PATH syntax to identify the pod.
 
 Examples:
   rumpel cp dev:/app/output.txt ./output.txt   # Copy from pod to host
