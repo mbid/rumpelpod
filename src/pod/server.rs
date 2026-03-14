@@ -859,17 +859,21 @@ fn parse_null_delimited_env(data: &[u8]) -> HashMap<String, String> {
 
 async fn cp_download_handler(
     Json(req): Json<CpDownloadRequest>,
-) -> Result<Json<CpDownloadResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     let result = tokio::task::spawn_blocking(|| cp_download_impl(req))
         .await
         .expect("cp_download_impl panicked");
     match result {
-        Ok(resp) => ok_json(resp),
+        Ok((data, is_dir)) => Ok(axum::response::Response::builder()
+            .header("X-Is-Dir", if is_dir { "true" } else { "false" })
+            .header("Content-Type", "application/gzip")
+            .body(axum::body::Body::from(data))
+            .unwrap()),
         Err(e) => Err(err_json(e)),
     }
 }
 
-fn cp_download_impl(req: CpDownloadRequest) -> Result<CpDownloadResponse> {
+fn cp_download_impl(req: CpDownloadRequest) -> Result<(Vec<u8>, bool)> {
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
@@ -882,8 +886,9 @@ fn cp_download_impl(req: CpDownloadRequest) -> Result<CpDownloadResponse> {
     archive.follow_symlinks(req.follow_symlinks);
 
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path_display}"))?;
+    let is_dir = meta.is_dir();
 
-    if meta.is_dir() {
+    if is_dir {
         archive
             .append_dir_all(".", path)
             .with_context(|| format!("archiving directory {path_display}"))?;
@@ -901,39 +906,60 @@ fn cp_download_impl(req: CpDownloadRequest) -> Result<CpDownloadResponse> {
         .with_context(|| format!("finalizing tar for {path_display}"))?;
     let compressed = encoder.finish().context("finishing gzip")?;
 
-    Ok(CpDownloadResponse {
-        archive: base64_encode(&compressed),
-    })
+    Ok((compressed, is_dir))
 }
 
 async fn cp_upload_handler(
-    Json(req): Json<CpUploadRequest>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let result = tokio::task::spawn_blocking(|| cp_upload_impl(req))
-        .await
-        .expect("cp_upload_impl panicked");
+    let path = headers
+        .get("X-Path")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| err_json(anyhow::anyhow!("missing X-Path header")))?;
+    let path = PathBuf::from(path);
+    let owner = headers
+        .get("X-Owner")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let is_dir = headers.get("X-Is-Dir").and_then(|v| v.to_str().ok()) == Some("true");
+
+    let data = body.to_vec();
+    let result =
+        tokio::task::spawn_blocking(move || cp_upload_impl(&path, &data, owner.as_deref(), is_dir))
+            .await
+            .expect("cp_upload_impl panicked");
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn cp_upload_impl(req: CpUploadRequest) -> Result<()> {
+fn cp_upload_impl(path: &Path, data: &[u8], owner: Option<&str>, is_dir: bool) -> Result<()> {
     use flate2::read::GzDecoder;
 
-    let data = base64_decode(&req.archive)?;
-    let decoder = GzDecoder::new(data.as_slice());
+    let decoder = GzDecoder::new(data);
     let mut archive = tar::Archive::new(decoder);
 
-    let dest = &req.path;
-    let dest_display = dest.display();
-    std::fs::create_dir_all(dest)
-        .with_context(|| format!("creating destination {dest_display}"))?;
+    // For directories the archive contents go directly into path.
+    // For files the archive contains a single named entry; extract
+    // into the parent so the entry name lands at path.
+    let extract_dir = if is_dir {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(Path::new("/")).to_path_buf()
+    };
+
+    let extract_dir_display = extract_dir.display();
+    std::fs::create_dir_all(&extract_dir)
+        .with_context(|| format!("creating destination {extract_dir_display}"))?;
 
     archive
-        .unpack(dest)
-        .with_context(|| format!("extracting archive to {dest_display}"))?;
+        .unpack(&extract_dir)
+        .with_context(|| format!("extracting archive to {extract_dir_display}"))?;
 
-    if let Some(ref owner) = req.owner {
-        chown_recursive(dest, owner).with_context(|| format!("chown {dest_display} to {owner}"))?;
+    if let Some(owner) = owner {
+        let target_display = path.display();
+        chown_recursive(path, owner)
+            .with_context(|| format!("chown {target_display} to {owner}"))?;
     }
 
     Ok(())

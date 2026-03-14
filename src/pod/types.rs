@@ -214,19 +214,9 @@ pub struct CpDownloadRequest {
     pub follow_symlinks: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CpDownloadResponse {
-    /// Base64-encoded gzip-compressed tar archive.
-    pub archive: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CpUploadRequest {
-    pub path: PathBuf,
-    /// Base64-encoded gzip-compressed tar archive.
-    pub archive: String,
-    pub owner: Option<String>,
-}
+// CpDownloadResponse and CpUploadRequest are not needed: download returns
+// raw gzip bytes with X-Is-Dir header, upload sends raw gzip bytes with
+// metadata in request headers (X-Path, X-Owner, X-Is-Dir).
 
 // ---------------------------------------------------------------------------
 // Health

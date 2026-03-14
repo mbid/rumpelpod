@@ -294,27 +294,78 @@ impl PodClient {
     // -------------------------------------------------------------------
 
     /// Download a file or directory from the container as a gzip-compressed tar archive.
-    pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<Vec<u8>> {
-        let resp: CpDownloadResponse = self.post(
-            "/cp/download",
-            &CpDownloadRequest {
+    /// Returns `(archive_bytes, is_dir)`.
+    pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<(Vec<u8>, bool)> {
+        let base = &self.url;
+        let token = &self.token;
+        let url = format!("{base}/cp/download");
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&CpDownloadRequest {
                 path: path.to_path_buf(),
                 follow_symlinks,
-            },
-        )?;
-        base64_decode(&resp.archive)
+            })
+            .send()
+            .with_context(|| format!("sending request to {url}"))?;
+
+        if !response.status().is_success() {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "unknown error".to_string(),
+            });
+            let err = &error.error;
+            return Err(anyhow::anyhow!("/cp/download: {err}"));
+        }
+
+        let is_dir = response
+            .headers()
+            .get("X-Is-Dir")
+            .and_then(|v| v.to_str().ok())
+            == Some("true");
+        let data = response
+            .bytes()
+            .context("reading download response body")?
+            .to_vec();
+        Ok((data, is_dir))
     }
 
     /// Upload a gzip-compressed tar archive and extract it at `path` in the container.
-    pub fn cp_upload(&self, path: &Path, archive: &[u8], owner: Option<&str>) -> Result<()> {
-        self.post_unit(
-            "/cp/upload",
-            &CpUploadRequest {
-                path: path.to_path_buf(),
-                archive: base64_encode(archive),
-                owner: owner.map(String::from),
-            },
-        )
+    pub fn cp_upload(
+        &self,
+        path: &Path,
+        archive: &[u8],
+        owner: Option<&str>,
+        is_dir: bool,
+    ) -> Result<()> {
+        let base = &self.url;
+        let token = &self.token;
+        let url = format!("{base}/cp/upload");
+        let path_display = path.display();
+        let mut req = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/gzip")
+            .header("X-Path", format!("{path_display}"))
+            .header("X-Is-Dir", if is_dir { "true" } else { "false" });
+        if let Some(owner) = owner {
+            req = req.header("X-Owner", owner);
+        }
+        let response = req
+            .body(archive.to_vec())
+            .send()
+            .with_context(|| format!("sending request to {url}"))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "unknown error".to_string(),
+            });
+            let err = &error.error;
+            Err(anyhow::anyhow!("/cp/upload: {err}"))
+        }
     }
 
     // -------------------------------------------------------------------
