@@ -131,7 +131,7 @@ RUN git clone https://github.com/mbid/rumpelpod /workspaces/rumpelpod
 WORKDIR /workspaces/rumpelpod
 
 # Initialize cargo crate registry, populate target/ so that incremental builds will be fast.
-RUN cargo build; cargo test --no-run; true
+RUN cargo xtest --no-run; true
 
 USER root
 

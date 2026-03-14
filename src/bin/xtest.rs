@@ -28,6 +28,27 @@ fn main() -> ExitCode {
     }
 }
 
+/// `cargo run` injects CARGO_PKG_*, CARGO_MANIFEST_DIR, OUT_DIR, etc. into
+/// the binary it launches.  Child cargo processes inherit these, and Cargo
+/// fingerprints them into dependency build scripts.  On the next `cargo xtest`
+/// (launched from a shell without those vars) the fingerprints mismatch and
+/// ring + its dependents recompile.  Strip everything Cargo injects.
+fn cargo_cmd() -> Command {
+    let mut cmd = Command::new("cargo");
+    for (key, _) in std::env::vars() {
+        let dominated = key.starts_with("CARGO_")
+            || key.starts_with("DEP_")
+            || matches!(
+                key.as_str(),
+                "OUT_DIR" | "TARGET" | "HOST" | "NUM_JOBS" | "OPT_LEVEL" | "PROFILE" | "DEBUG"
+            );
+        if dominated {
+            cmd.env_remove(&key);
+        }
+    }
+    cmd
+}
+
 fn run() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -39,7 +60,7 @@ fn run() -> Result<ExitCode> {
 
     for (triple, _) in &targets {
         eprint!("Building rumpel for {triple}... ");
-        Command::new("cargo")
+        cargo_cmd()
             .args(["build", "--bin", "rumpel", "--target", triple])
             .success()
             .with_context(|| format!("building rumpel for {triple}"))?;
@@ -77,7 +98,7 @@ fn run() -> Result<ExitCode> {
     let path = std::env::var("PATH").context("PATH not set")?;
     let path = format!("{}:{path}", tmp.path().display());
 
-    let status = Command::new("cargo")
+    let status = cargo_cmd()
         .arg("test")
         .args(&args)
         .env("PATH", &path)
