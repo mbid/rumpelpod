@@ -2,6 +2,8 @@
 //!
 //! Replaces GNU screen: the in-container server holds PTY sessions
 //! open across client disconnections, allowing detach/reattach.
+//! A virtual terminal buffer (vt100) tracks the screen state so the
+//! full TUI can be replayed instantly when a new client attaches.
 
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -48,6 +50,12 @@ struct PtySession {
     child_pid: Pid,
     #[allow(dead_code)]
     created_at: std::time::Instant,
+    /// Virtual terminal buffer tracking the screen state for replay
+    /// on reattach, like screen/tmux.
+    screen: Arc<Mutex<vt100::Parser>>,
+    /// Broadcast channel carrying raw PTY output bytes.  Connected
+    /// clients subscribe; the persistent reader task is the sole sender.
+    output_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 }
 
 #[derive(Clone)]
@@ -165,11 +173,29 @@ impl PtySessions {
                 nix::fcntl::fcntl(&master, nix::fcntl::FcntlArg::F_SETFL(oflags))
                     .context("fcntl F_SETFL O_NONBLOCK")?;
 
+                let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+                let (output_tx, _) = tokio::sync::broadcast::channel(256);
+
+                // Spawn persistent reader: continuously drains PTY output,
+                // updates the screen buffer, and broadcasts to clients.
+                // Runs even when no client is attached so the child never
+                // blocks on write() and the screen buffer stays current.
+                let reader_fd = nix::unistd::dup(&master).context("dup master for reader")?;
+                spawn_persistent_reader(
+                    reader_fd,
+                    Arc::clone(&screen),
+                    output_tx.clone(),
+                    self.clone(),
+                    name.clone(),
+                );
+
                 let session = PtySession {
                     name: name.clone(),
                     master_fd: master,
                     child_pid: child,
                     created_at: std::time::Instant::now(),
+                    screen,
+                    output_tx,
                 };
                 sessions.insert(name, session);
                 Ok(true)
@@ -177,17 +203,25 @@ impl PtySessions {
         }
     }
 
-    /// Return a dup'd fd for the master side, suitable for async I/O,
-    /// plus the child PID (for sending SIGWINCH on reattach).
+    /// Return a dup'd fd for writing input to the PTY, plus the screen
+    /// buffer for replay and a broadcast receiver for live output.
     /// The original fd stays in the session so the PTY survives detach.
-    async fn attach(&self, name: &str) -> Result<(OwnedFd, Pid)> {
+    async fn attach(
+        &self,
+        name: &str,
+    ) -> Result<(
+        OwnedFd,
+        Arc<Mutex<vt100::Parser>>,
+        tokio::sync::broadcast::Receiver<Vec<u8>>,
+    )> {
         let sessions = self.inner.lock().await;
         let session = sessions
             .get(name)
             .with_context(|| format!("no such pty session: {name}"))?;
 
         let duped = nix::unistd::dup(&session.master_fd).context("dup master fd")?;
-        Ok((duped, session.child_pid))
+        let rx = session.output_tx.subscribe();
+        Ok((duped, Arc::clone(&session.screen), rx))
     }
 
     async fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
@@ -195,7 +229,14 @@ impl PtySessions {
         let session = sessions
             .get(name)
             .with_context(|| format!("no such pty session: {name}"))?;
-        set_winsize(session.master_fd.as_raw_fd(), cols, rows)
+        set_winsize(session.master_fd.as_raw_fd(), cols, rows)?;
+        session
+            .screen
+            .lock()
+            .await
+            .screen_mut()
+            .set_size(rows, cols);
+        Ok(())
     }
 
     /// Remove a dead session from the registry.
@@ -207,6 +248,68 @@ impl PtySessions {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent PTY reader
+// ---------------------------------------------------------------------------
+
+/// Background task that continuously reads PTY output, updates the
+/// screen buffer, and broadcasts to any connected WebSocket clients.
+fn spawn_persistent_reader(
+    fd: OwnedFd,
+    screen: Arc<Mutex<vt100::Parser>>,
+    tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    sessions: PtySessions,
+    name: String,
+) {
+    tokio::spawn(async move {
+        let async_fd = match AsyncFd::new(fd) {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("pty: persistent reader AsyncFd::new failed: {e}");
+                return;
+            }
+        };
+
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let mut ready = match async_fd.readable().await {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+
+            match ready.try_io(|inner| {
+                let fd = inner.as_raw_fd();
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+                if n > 0 {
+                    Ok(n as usize)
+                } else if n == 0 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "pty eof",
+                    ))
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            }) {
+                Ok(Ok(n)) => {
+                    let data = &buf[..n];
+                    screen.lock().await.process(data);
+                    // Send returns Err only when there are no receivers,
+                    // which is normal when no client is attached.
+                    let _ = tx.send(data.to_vec());
+                }
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    sessions.remove_if_dead(&name).await;
+                    break;
+                }
+                Ok(Err(_)) => break,
+                // WouldBlock -- AsyncFd will re-poll
+                Err(_) => continue,
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +326,28 @@ fn child_is_alive(pid: Pid) -> bool {
         // Other errors are unexpected; treat as dead to avoid leaking
         Err(_) => false,
     }
+}
+
+/// Build the escape sequence stream that reconstructs the full terminal
+/// state for a new client: alternate screen mode, screen contents with
+/// formatting, input modes, cursor position, and cursor visibility.
+fn build_screen_replay(screen: &vt100::Screen) -> Vec<u8> {
+    let mut out = Vec::new();
+
+    // Switch to alternate screen first so the content lands in the
+    // right buffer (TUI apps like ink use alternate screen).
+    if screen.alternate_screen() {
+        out.extend_from_slice(b"\x1b[?1049h");
+    }
+
+    // state_formatted() = contents (clear + cells with colors) + input
+    // modes (application keypad/cursor, bracketed paste, mouse protocol).
+    out.extend_from_slice(&screen.state_formatted());
+
+    // cursor_state_formatted() = cursor visibility + cursor position.
+    out.extend_from_slice(&screen.cursor_state_formatted());
+
+    out
 }
 
 fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> Result<()> {
@@ -309,95 +434,51 @@ const MSG_DATA: u8 = 0x00;
 const MSG_RESIZE: u8 = 0x01;
 
 async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: String) {
-    let (master_fd, child_pid) = match sessions.attach(&name).await {
-        Ok(pair) => pair,
+    let (write_fd, screen, mut output_rx) = match sessions.attach(&name).await {
+        Ok(tuple) => tuple,
         Err(e) => {
             eprintln!("pty attach failed for '{name}': {e:#}");
             return;
         }
     };
 
-    // Nudge the child to re-render by sending SIGWINCH.  TUI apps
-    // redraw on window-size changes, so this makes the screen appear
-    // immediately after reattach instead of staying blank.
-    let _ = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGWINCH);
-
-    let raw_fd = master_fd.as_raw_fd();
-    let async_fd = match AsyncFd::new(master_fd) {
-        Ok(fd) => Arc::new(fd),
-        Err(e) => {
-            eprintln!("pty: AsyncFd::new failed: {e}");
-            return;
-        }
-    };
-
-    // Channel for PTY output that needs to be sent over the WebSocket.
-    // Bounded to provide backpressure if the WebSocket consumer is slow.
-    let (pty_tx, mut pty_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
-
-    // Task: read from PTY master fd and forward to channel
-    let read_fd = Arc::clone(&async_fd);
-    let read_name = name.clone();
-    let read_sessions = sessions.clone();
-    let pty_reader = tokio::spawn(async move {
-        let mut buf = vec![0u8; 4096];
-        loop {
-            let mut ready = match read_fd.readable().await {
-                Ok(r) => r,
-                Err(_) => break,
-            };
-
-            match ready.try_io(|inner| {
-                let fd = inner.as_raw_fd();
-                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-                if n > 0 {
-                    Ok(n as usize)
-                } else if n == 0 {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "pty eof",
-                    ))
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            }) {
-                Ok(Ok(n)) => {
-                    let mut msg = Vec::with_capacity(1 + n);
-                    msg.push(MSG_DATA);
-                    msg.extend_from_slice(&buf[..n]);
-                    if pty_tx.send(msg).await.is_err() {
-                        // WebSocket side dropped the receiver
-                        break;
-                    }
-                }
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    // Child exited
-                    read_sessions.remove_if_dead(&read_name).await;
-                    break;
-                }
-                Ok(Err(_)) => break,
-                // WouldBlock -- AsyncFd will re-poll
-                Err(_) => continue,
+    // Replay the current screen state so the client sees the full TUI
+    // immediately, like screen/tmux do on reattach.
+    {
+        let parser = screen.lock().await;
+        let replay = build_screen_replay(parser.screen());
+        if !replay.is_empty() {
+            let mut msg = Vec::with_capacity(1 + replay.len());
+            msg.push(MSG_DATA);
+            msg.extend_from_slice(&replay);
+            if socket.send(Message::Binary(msg.into())).await.is_err() {
+                return;
             }
         }
-    });
+    }
 
-    // Main loop: multiplex between PTY output (via channel) and WebSocket input.
-    // Owning the WebSocket in a single task avoids needing futures_util::StreamExt::split.
+    let raw_fd = write_fd.as_raw_fd();
+
+    // Main loop: multiplex between broadcast output and WebSocket input.
     let ws_sessions = sessions.clone();
     let ws_name = name.clone();
     loop {
         tokio::select! {
-            // PTY produced output -> send to WebSocket
-            pty_msg = pty_rx.recv() => {
-                match pty_msg {
-                    Some(data) => {
-                        if socket.send(Message::Binary(data.into())).await.is_err() {
+            // Persistent reader produced output -> forward to WebSocket
+            output = output_rx.recv() => {
+                match output {
+                    Ok(data) => {
+                        let mut msg = Vec::with_capacity(1 + data.len());
+                        msg.push(MSG_DATA);
+                        msg.extend_from_slice(&data);
+                        if socket.send(Message::Binary(msg.into())).await.is_err() {
                             break;
                         }
                     }
-                    // PTY reader task exited (child died or error)
-                    None => break,
+                    // Lagged: we missed some output, not fatal for a terminal
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Sender dropped: child exited
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
 
@@ -451,10 +532,8 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: S
         }
     }
 
-    // Stop the PTY reader; we do NOT close the session's master fd --
-    // only the dup'd fd (inside async_fd) is dropped when this function
-    // returns, preserving the session for future reattach.
-    pty_reader.abort();
+    // The dup'd write_fd is dropped here; the session's master_fd and
+    // the persistent reader's fd keep the PTY alive for future reattach.
 }
 
 // ---------------------------------------------------------------------------

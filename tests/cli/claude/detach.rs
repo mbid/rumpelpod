@@ -1,5 +1,5 @@
 //! Test detach (Ctrl-a d) and reattach: verify the PTY session
-//! survives across client disconnections and typed text persists.
+//! survives across client disconnections and the screen is replayed.
 
 use super::common::{setup_claude_test_repo, ClaudeSession};
 use super::proxy::claude_proxy;
@@ -31,11 +31,11 @@ fn claude_detach_reattach() {
     // The rumpel process should exit after detaching.
     session.wait_for_exit();
 
-    // -- Second session: reattach and verify Claude is still alive ----
+    // -- Second session: reattach and verify screen replay -------------
     //
-    // The server sends SIGWINCH on attach, which makes TUI apps
-    // re-render.  We verify the session is alive by typing new text
-    // and checking that Claude's TUI renders it.
+    // The server maintains a virtual terminal buffer (like screen/tmux)
+    // and replays the screen contents on attach, so the client sees the
+    // full TUI immediately without the app needing to re-render.
 
     let mut session2 = ClaudeSession::spawn(
         &repo,
@@ -46,8 +46,6 @@ fn claude_detach_reattach() {
         &[],
     );
 
-    // Verify the session is alive: type new text and check it appears.
-    let marker = "reattach_test_42";
-    session2.write_raw(marker.as_bytes());
-    session2.wait_for(marker);
+    // The screen replay should restore the prompt without any user input.
+    session2.wait_for("~/workspace");
 }

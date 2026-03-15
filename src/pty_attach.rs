@@ -23,8 +23,10 @@ const MSG_RESIZE: u8 = 0x01;
 /// GNU screen). Ctrl+letter works on all keyboard layouts, unlike
 /// Ctrl+punctuation which breaks on non-US layouts in gnome-terminal.
 const DETACH_PREFIX: u8 = 0x01;
-/// 'd' (0x64) completes the detach sequence after Ctrl-a.
+/// 'd' (0x64) or Ctrl-d (0x04) completes the detach sequence after
+/// Ctrl-a, so it works whether the user releases Ctrl or not.
 const DETACH_SUFFIX: u8 = b'd';
+const DETACH_SUFFIX_CTRL: u8 = 0x04;
 
 pub enum AttachOutcome {
     /// User pressed the detach sequence; session still running.
@@ -85,6 +87,8 @@ enum Outbound {
 /// stdin/stdout to the WebSocket until the user detaches (Ctrl-a d)
 /// or the remote session ends.
 pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcome> {
+    eprintln!("[Ctrl-a d to detach]");
+
     // -- Terminal setup -------------------------------------------------
 
     let original_termios =
@@ -116,8 +120,6 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
     // drain outbound messages and check shutdown flags without blocking
     // indefinitely on read().
     set_read_timeout(&ws, Some(Duration::from_millis(50)))?;
-
-    eprintln!("[Ctrl-a then d to detach]");
 
     // -- Initial resize -------------------------------------------------
 
@@ -206,7 +208,7 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
             for &byte in data {
                 if saw_ctrl_a {
                     saw_ctrl_a = false;
-                    if byte == DETACH_SUFFIX {
+                    if byte == DETACH_SUFFIX || byte == DETACH_SUFFIX_CTRL {
                         detached_flag.store(true, Ordering::Relaxed);
                         done_stdin.store(true, Ordering::Relaxed);
                         break;
