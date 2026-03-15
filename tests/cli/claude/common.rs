@@ -11,7 +11,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
 use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH};
-use crate::executor::TestPod;
+use crate::executor::{executor_mode, ExecutorMode, TestPod};
 
 use super::proxy::ClaudeTestProxy;
 
@@ -87,13 +87,13 @@ pub fn build_claude_test_image(repo: &TestRepo) -> ImageId {
 /// the proxy's base URL into the container environment.
 ///
 /// Only writes devcontainer.json; .rumpelpod.toml is handled by TestPod.
-pub fn write_claude_test_config(repo: &TestRepo, image_id: &ImageId) {
+fn write_claude_test_config(repo: &TestRepo, image_ref: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer dir");
 
     let devcontainer_json = formatdoc! {r#"
         {{
-            "image": "{image_id}",
+            "image": "{image_ref}",
             "workspaceFolder": "{TEST_REPO_PATH}",
             "runArgs": ["--runtime=runc"],
             "remoteEnv": {{
@@ -142,6 +142,16 @@ fn create_controlled_home() -> TempDir {
     )
     .expect("write controlled .credentials.json");
 
+    // On k8s, the daemon needs kubeconfig to talk to the cluster.
+    // Copy it from the real HOME into the fake one.
+    let real_kube = std::path::PathBuf::from(std::env::var("HOME").expect("HOME must be set"))
+        .join(".kube/config");
+    if let Ok(kubeconfig) = std::fs::read(&real_kube) {
+        let kube_dir = home.path().join(".kube");
+        std::fs::create_dir_all(&kube_dir).expect("create .kube dir");
+        std::fs::write(kube_dir.join("config"), kubeconfig).expect("write kubeconfig");
+    }
+
     home
 }
 
@@ -157,7 +167,18 @@ pub fn setup_claude_test_repo(
     let _ = proxy; // used only to ensure the proxy is started first
     let repo = TestRepo::new();
     let image_id = build_claude_test_image(&repo);
-    write_claude_test_config(&repo, &image_id);
+
+    // On k8s the local Docker image must be pushed to the in-cluster
+    // registry; write devcontainer.json with the registry reference.
+    let image_ref = match executor_mode() {
+        ExecutorMode::K8s => {
+            let cluster = crate::k8s::k8s_cluster_config();
+            crate::k8s::push_image(&cluster, &image_id, test_name)
+        }
+        ExecutorMode::Docker | ExecutorMode::Ssh => image_id.to_string(),
+    };
+    write_claude_test_config(&repo, &image_ref);
+
     // Create the controlled home before starting the pod so
     // copy_claude_config (which runs in the daemon) reads our files.
     let fake_home = create_controlled_home();

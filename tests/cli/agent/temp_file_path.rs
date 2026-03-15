@@ -74,7 +74,9 @@ fi
         pod.daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_script_path.to_str().unwrap());
-    cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
+    if crate::executor::executor_supports_deterministic_ids() {
+        cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
+    }
     cmd.args([
         "agent",
         "my-test-pod",

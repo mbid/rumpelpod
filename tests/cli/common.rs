@@ -104,9 +104,13 @@ impl TestDaemon {
         let mut cmd = Command::new("rumpel");
         cmd.env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
-            .env("XDG_RUNTIME_DIR", &runtime_dir)
-            // Enable deterministic PIDs for test reproducibility
-            .env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
+            .env("XDG_RUNTIME_DIR", &runtime_dir);
+
+        // Enable deterministic PIDs for test reproducibility.
+        // K8s pods run unprivileged and cannot write ns_last_pid.
+        if super::executor::executor_supports_deterministic_ids() {
+            cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
+        }
 
         if let Some(config_path) = ssh_config {
             cmd.env(SSH_CONFIG_FILE_ENV, config_path);

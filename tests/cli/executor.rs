@@ -40,6 +40,14 @@ pub fn executor_supports_stop() -> bool {
     !matches!(executor_mode(), ExecutorMode::K8s)
 }
 
+/// Returns `true` when deterministic PIDs can be used.
+///
+/// Deterministic PIDs require writing to /proc/sys/kernel/ns_last_pid,
+/// which needs SYS_ADMIN (privileged mode). K8s pods run unprivileged.
+pub fn executor_supports_deterministic_ids() -> bool {
+    !matches!(executor_mode(), ExecutorMode::K8s)
+}
+
 // ---------------------------------------------------------------------------
 // TestPod -- executor-agnostic test environment
 // ---------------------------------------------------------------------------
@@ -87,6 +95,17 @@ impl TestPod {
         Self::start_inner(repo, image_id, test_name, Some(user))
     }
 
+    /// Like [`start`](Self::start) but with a custom HOME directory,
+    /// isolating the daemon from the host user's config files.
+    pub fn start_with_home(
+        repo: &TestRepo,
+        image_id: &ImageId,
+        test_name: &str,
+        home: &Path,
+    ) -> Self {
+        Self::start_inner_with_home(repo, image_id, test_name, None, Some(home))
+    }
+
     /// Executor setup for tests that write their own devcontainer.json.
     ///
     /// Sets up .rumpelpod.toml and daemon for the active executor but does
@@ -116,28 +135,55 @@ impl TestPod {
         test_name: &str,
         user: Option<&str>,
     ) -> Self {
+        Self::start_inner_with_home(repo, image_id, test_name, user, None)
+    }
+
+    fn start_inner_with_home(
+        repo: &TestRepo,
+        image_id: &ImageId,
+        test_name: &str,
+        user: Option<&str>,
+        home: Option<&Path>,
+    ) -> Self {
         match executor_mode() {
-            ExecutorMode::Docker => Self::start_docker(repo, image_id, user),
-            ExecutorMode::Ssh => Self::start_ssh(repo, image_id, user),
-            ExecutorMode::K8s => Self::start_k8s(repo, image_id, test_name, user),
+            ExecutorMode::Docker => Self::start_docker(repo, image_id, user, home),
+            ExecutorMode::Ssh => Self::start_ssh(repo, image_id, user, home),
+            ExecutorMode::K8s => Self::start_k8s(repo, image_id, test_name, user, home),
         }
     }
 
-    fn start_docker(repo: &TestRepo, image_id: &ImageId, user: Option<&str>) -> Self {
+    fn start_docker(
+        repo: &TestRepo,
+        image_id: &ImageId,
+        user: Option<&str>,
+        home: Option<&Path>,
+    ) -> Self {
         write_docker_config(repo, &image_id.to_string(), user);
+        let daemon = match home {
+            Some(h) => TestDaemon::start_with_home(h),
+            None => TestDaemon::start(),
+        };
         TestPod {
-            daemon: TestDaemon::start(),
+            daemon,
             _resources: Box::new(DockerResources),
         }
     }
 
-    fn start_ssh(repo: &TestRepo, image_id: &ImageId, user: Option<&str>) -> Self {
+    fn start_ssh(
+        repo: &TestRepo,
+        image_id: &ImageId,
+        user: Option<&str>,
+        home: Option<&Path>,
+    ) -> Self {
         let remote = super::ssh::SshRemoteHost::start();
         let remote_image_id = remote
             .load_image(image_id)
             .expect("Failed to load image into remote Docker");
         let ssh_config = super::ssh::create_ssh_config(&[&remote]);
-        let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
+        let daemon = match home {
+            Some(h) => TestDaemon::start_with_ssh_config_and_home(&ssh_config.path, h),
+            None => TestDaemon::start_with_ssh_config(&ssh_config.path),
+        };
 
         write_docker_config(repo, &remote_image_id.to_string(), user);
 
@@ -158,7 +204,13 @@ impl TestPod {
         }
     }
 
-    fn start_k8s(repo: &TestRepo, image_id: &ImageId, test_name: &str, user: Option<&str>) -> Self {
+    fn start_k8s(
+        repo: &TestRepo,
+        image_id: &ImageId,
+        test_name: &str,
+        user: Option<&str>,
+        home: Option<&Path>,
+    ) -> Self {
         let cluster = super::k8s::k8s_cluster_config();
         let ns = super::k8s::K8sNamespace::new(&cluster, test_name);
         let pull_ref = super::k8s::push_image(&cluster, image_id, test_name);
@@ -171,8 +223,12 @@ impl TestPod {
         );
         super::k8s::write_k8s_pod_config(repo, &cluster, &pull_ref, &ns.name);
 
+        let daemon = match home {
+            Some(h) => TestDaemon::start_with_home(h),
+            None => TestDaemon::start(),
+        };
         TestPod {
-            daemon: TestDaemon::start(),
+            daemon,
             _resources: Box::new(K8sResources { _namespace: ns }),
         }
     }

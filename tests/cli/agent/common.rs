@@ -239,12 +239,13 @@ pub fn run_agent_interactive_model_args_env(
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
-    // Ensure deterministic IDs for output files in tests
-    cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
-    // Use a directory inside the daemon's temp dir for deterministic PID files.
-    // This isolates PIDs per daemon (and thus per test).
-    let pid_dir = daemon.temp_dir().join("deterministic-pids");
-    cmd.env("DETERMINISTIC_PID_DIR", pid_dir.to_str().unwrap());
+    // Deterministic PIDs require writing ns_last_pid, which needs SYS_ADMIN.
+    // K8s pods run unprivileged so we skip deterministic mode there.
+    if crate::executor::executor_supports_deterministic_ids() {
+        cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
+        let pid_dir = daemon.temp_dir().join("deterministic-pids");
+        cmd.env("DETERMINISTIC_PID_DIR", pid_dir.to_str().unwrap());
+    }
 
     // Default to offline mode for tests unless explicitly configured.
     // This ensures tests don't accidentally depend on ambient API keys.
@@ -388,11 +389,11 @@ pub fn run_agent_expecting_picker(
         daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
-    // Ensure deterministic IDs for output files in tests
-    cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
-    // Use a directory inside the daemon's temp dir for deterministic PID files.
-    let pid_dir = daemon.temp_dir().join("deterministic-pids");
-    cmd.env("DETERMINISTIC_PID_DIR", pid_dir.to_str().unwrap());
+    if crate::executor::executor_supports_deterministic_ids() {
+        cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
+        let pid_dir = daemon.temp_dir().join("deterministic-pids");
+        cmd.env("DETERMINISTIC_PID_DIR", pid_dir.to_str().unwrap());
+    }
 
     // Default to offline mode for tests unless explicitly configured.
     // This ensures tests don't accidentally depend on ambient API keys.
