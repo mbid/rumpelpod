@@ -14,12 +14,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use crate::common::{
-    build_docker_image, pod_command, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
-    TEST_USER_UID,
-};
-use crate::executor::TestExecutor;
-use crate::ssh::{create_ssh_config, SshRemoteHost};
+use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 /// Write a devcontainer.json with port forwarding configuration.
 fn write_devcontainer_with_ports(repo: &TestRepo, ports_config: &str) {
@@ -301,89 +297,31 @@ fn extract_local_port(output: &str, container_port: u16) -> u16 {
     );
 }
 
-/// Write a devcontainer.json with forwardPorts and a .rumpelpod.toml pointing
-/// to a remote Docker host with a pre-built image.
-fn write_remote_config_with_ports(
-    repo: &TestRepo,
-    image_id: &crate::common::ImageId,
-    remote_spec: &str,
-    ports_config: &str,
-) {
-    let devcontainer_dir = repo.path().join(".devcontainer");
-    fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
-
-    // Use a pre-built image rather than building via docker -H ssh://
-    // because docker's own SSH client doesn't share our test SSH config.
-    let devcontainer_json = formatdoc! {r#"
-        {{
-            "image": "{image_id}",
-            {ports_config}
-            "workspaceFolder": "{TEST_REPO_PATH}",
-            "containerUser": "{TEST_USER}",
-            "runArgs": ["--runtime=runc"]
-        }}
-    "#};
-    fs::write(
-        devcontainer_dir.join("devcontainer.json"),
-        devcontainer_json,
-    )
-    .expect("Failed to write devcontainer.json");
-
-    let config = formatdoc! {r#"
-        host = "{remote_spec}"
-
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 #[test]
 fn forward_port_remote_ssh() {
     let repo = TestRepo::new();
 
-    // Build a test image locally that includes socat for echo testing.
-    // socat must be installed before USER so it's available as root.
-    let image_id = build_docker_image(DockerBuild {
-        dockerfile: formatdoc! {r#"
-            FROM debian:13
-            RUN apt-get update && apt-get install -y git socat
-            RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
-            COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
-            USER {TEST_USER}
-        "#},
-        build_context: Some(repo.path().to_path_buf()),
-    })
-    .expect("Failed to build test image");
-
-    // Start a remote Docker host (Docker-in-Docker via SSH)
-    let remote = SshRemoteHost::start();
-    let remote_image_id = remote
-        .load_image(&image_id)
-        .expect("Failed to load image into remote Docker");
-
-    let ssh_config = create_ssh_config(&[&remote]);
-    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
-
-    write_remote_config_with_ports(
+    // Install socat before switching to testuser so the install runs as root.
+    write_test_devcontainer(
         &repo,
-        &remote_image_id,
-        &remote.ssh_spec(),
-        r#""forwardPorts": [9500],"#,
+        "USER root\nRUN apt-get update && apt-get install -y socat\nUSER testuser\n",
+        r#","forwardPorts": [9500]"#,
     );
 
-    pod_command(&repo, &daemon)
+    let exec = TestExecutor::start("fwd-remote-ssh");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+
+    pod_command(&repo, &exec.daemon)
         .args(["enter", "fwd-remote", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     // Start an echo server on port 9500 inside the remote container
-    start_echo_server_in_container(&repo, &daemon, "fwd-remote", 9500);
+    start_echo_server_in_container(&repo, &exec.daemon, "fwd-remote", 9500);
 
     // The port should be forwarded via SSH tunnel from localhost to the
     // container's port 9500 on the remote host's Docker network.
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["ports", "fwd-remote"])
         .success()
         .expect("rumpel ports failed");

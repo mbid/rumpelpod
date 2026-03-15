@@ -5,8 +5,9 @@
 //!   - `ssh`              -- remote Docker via SSH tunnel
 //!   - `k8s`              -- Kubernetes cluster
 //!
-//! [`TestPod`] sets up image distribution, config files, and daemon for any
-//! executor, letting the same test body run against all three.
+//! [`TestExecutor`] starts a daemon and returns the `.rumpelpod.toml`
+//! section for the active executor.  Tests splice this into their own
+//! `.rumpelpod.toml`, keeping the config fully visible in the test body.
 
 #![allow(dead_code)]
 
@@ -14,7 +15,7 @@ use std::path::Path;
 
 use indoc::formatdoc;
 
-use super::common::{ImageId, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use super::common::{TestDaemon, TestRepo};
 
 // ---------------------------------------------------------------------------
 // Executor mode
@@ -49,20 +50,21 @@ pub fn executor_supports_deterministic_ids() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// TestPod -- executor-agnostic test environment
+// TestExecutor -- daemon + executor-specific .rumpelpod.toml
 // ---------------------------------------------------------------------------
 
-/// Fully-configured test environment.
+/// Running daemon plus executor resources (SSH remote, K8s namespace)
+/// that must stay alive for the duration of the test.
 ///
-/// Holds the daemon and any executor-specific resources that must stay alive
-/// for the duration of the test (SSH remote host, K8s namespace, etc.).
-pub struct TestPod {
+/// The `.rumpelpod.toml` content is in [`toml`]; tests write it to disk
+/// themselves so the config is visible in the test body.
+pub struct TestExecutor {
     pub daemon: TestDaemon,
+    /// Executor-specific `.rumpelpod.toml` content.
+    pub toml: String,
     /// Prevent the compiler from dropping resources too early.
     _resources: Box<dyn std::any::Any>,
 }
-
-struct DockerResources;
 
 struct SshResources {
     _remote: super::ssh::SshRemoteHost,
@@ -73,130 +75,57 @@ struct K8sResources {
     _namespace: super::k8s::K8sNamespace,
 }
 
-impl TestPod {
-    /// Standard setup with the default test user from the image.
+impl TestExecutor {
+    /// Start a test executor for the given test name.
     ///
-    /// Writes devcontainer.json referencing the pre-built image and sets up
-    /// .rumpelpod.toml + daemon for the active executor.
-    ///
-    /// `test_name` must be unique per test; it is used as the K8s namespace
-    /// suffix and registry tag.
-    pub fn start(repo: &TestRepo, image_id: &ImageId, test_name: &str) -> Self {
-        Self::start_inner(repo, image_id, test_name, None)
-    }
-
-    /// Setup with an explicit `containerUser` in devcontainer.json.
-    pub fn start_with_user(
-        repo: &TestRepo,
-        image_id: &ImageId,
-        test_name: &str,
-        user: &str,
-    ) -> Self {
-        Self::start_inner(repo, image_id, test_name, Some(user))
+    /// `test_name` must be unique per test; it is used as the K8s
+    /// namespace suffix.
+    pub fn start(test_name: &str) -> Self {
+        Self::start_inner(test_name, None)
     }
 
     /// Like [`start`](Self::start) but with a custom HOME directory,
     /// isolating the daemon from the host user's config files.
-    pub fn start_with_home(
-        repo: &TestRepo,
-        image_id: &ImageId,
-        test_name: &str,
-        home: &Path,
-    ) -> Self {
-        Self::start_inner_with_home(repo, image_id, test_name, None, Some(home))
+    pub fn start_with_home(test_name: &str, home: &Path) -> Self {
+        Self::start_inner(test_name, Some(home))
     }
 
-    /// Executor setup for tests that write their own devcontainer.json.
-    ///
-    /// Sets up .rumpelpod.toml and daemon for the active executor but does
-    /// NOT write devcontainer.json.  The caller is responsible for writing
-    /// devcontainer.json (typically with a Dockerfile build section).
-    pub fn start_build(repo: &TestRepo, test_name: &str) -> Self {
-        Self::start_build_inner(repo, test_name, None)
-    }
-
-    /// Like [`start_build`](Self::start_build) but with a custom HOME
-    /// directory, isolating the daemon from the host user's config files.
-    pub fn start_build_with_home(repo: &TestRepo, test_name: &str, home: &Path) -> Self {
-        Self::start_build_inner(repo, test_name, Some(home))
-    }
-
-    fn start_build_inner(repo: &TestRepo, test_name: &str, home: Option<&Path>) -> Self {
+    fn start_inner(test_name: &str, home: Option<&Path>) -> Self {
         match executor_mode() {
-            ExecutorMode::Docker => Self::build_docker(repo, home),
-            ExecutorMode::Ssh => Self::build_ssh(repo, home),
-            ExecutorMode::K8s => Self::build_k8s(repo, test_name, home),
+            ExecutorMode::Docker => Self::docker(home),
+            ExecutorMode::Ssh => Self::ssh(home),
+            ExecutorMode::K8s => Self::k8s(test_name, home),
         }
     }
 
-    fn start_inner(
-        repo: &TestRepo,
-        image_id: &ImageId,
-        test_name: &str,
-        user: Option<&str>,
-    ) -> Self {
-        Self::start_inner_with_home(repo, image_id, test_name, user, None)
-    }
-
-    fn start_inner_with_home(
-        repo: &TestRepo,
-        image_id: &ImageId,
-        test_name: &str,
-        user: Option<&str>,
-        home: Option<&Path>,
-    ) -> Self {
-        match executor_mode() {
-            ExecutorMode::Docker => Self::start_docker(repo, image_id, user, home),
-            ExecutorMode::Ssh => Self::start_ssh(repo, image_id, user, home),
-            ExecutorMode::K8s => Self::start_k8s(repo, image_id, test_name, user, home),
-        }
-    }
-
-    fn start_docker(
-        repo: &TestRepo,
-        image_id: &ImageId,
-        user: Option<&str>,
-        home: Option<&Path>,
-    ) -> Self {
-        write_docker_config(repo, &image_id.to_string(), user);
+    fn docker(home: Option<&Path>) -> Self {
         let daemon = match home {
             Some(h) => TestDaemon::start_with_home(h),
             None => TestDaemon::start(),
         };
-        TestPod {
+        TestExecutor {
             daemon,
-            _resources: Box::new(DockerResources),
+            toml: String::new(),
+            _resources: Box::new(()),
         }
     }
 
-    fn start_ssh(
-        repo: &TestRepo,
-        image_id: &ImageId,
-        user: Option<&str>,
-        home: Option<&Path>,
-    ) -> Self {
+    fn ssh(home: Option<&Path>) -> Self {
         let remote = super::ssh::SshRemoteHost::start();
-        let remote_image_id = remote
-            .load_image(image_id)
-            .expect("Failed to load image into remote Docker");
         let ssh_config = super::ssh::create_ssh_config(&[&remote]);
         let daemon = match home {
             Some(h) => TestDaemon::start_with_ssh_config_and_home(&ssh_config.path, h),
             None => TestDaemon::start_with_ssh_config(&ssh_config.path),
         };
 
-        write_docker_config(repo, &remote_image_id.to_string(), user);
-
-        // Override .rumpelpod.toml with the SSH host.
         let remote_spec = remote.ssh_spec();
-        let config = formatdoc! {r#"
+        let toml = formatdoc! {r#"
             host = "{remote_spec}"
         "#};
-        std::fs::write(repo.path().join(".rumpelpod.toml"), config)
-            .expect("Failed to write .rumpelpod.toml");
 
-        TestPod {
+        TestExecutor {
             daemon,
+            toml,
             _resources: Box::new(SshResources {
                 _remote: remote,
                 _ssh_config: ssh_config,
@@ -204,75 +133,7 @@ impl TestPod {
         }
     }
 
-    fn start_k8s(
-        repo: &TestRepo,
-        image_id: &ImageId,
-        test_name: &str,
-        user: Option<&str>,
-        home: Option<&Path>,
-    ) -> Self {
-        let cluster = super::k8s::k8s_cluster_config();
-        let ns = super::k8s::K8sNamespace::new(&cluster, test_name);
-        let pull_ref = super::k8s::push_image(&cluster, image_id, test_name);
-
-        // write_k8s_pod_config already sets containerUser to TEST_USER.
-        // A custom user override would require refactoring the template.
-        assert!(
-            user.is_none() || user == Some(TEST_USER),
-            "custom containerUser not yet supported on k8s executor"
-        );
-        super::k8s::write_k8s_pod_config(repo, &cluster, &pull_ref, &ns.name);
-
-        let daemon = match home {
-            Some(h) => TestDaemon::start_with_home(h),
-            None => TestDaemon::start(),
-        };
-        TestPod {
-            daemon,
-            _resources: Box::new(K8sResources { _namespace: ns }),
-        }
-    }
-
-    // -- build variants: set up executor without writing devcontainer.json --
-
-    fn build_docker(repo: &TestRepo, home: Option<&Path>) -> Self {
-        write_pod_toml(repo, "");
-        let daemon = match home {
-            Some(h) => TestDaemon::start_with_home(h),
-            None => TestDaemon::start(),
-        };
-        TestPod {
-            daemon,
-            _resources: Box::new(DockerResources),
-        }
-    }
-
-    fn build_ssh(repo: &TestRepo, home: Option<&Path>) -> Self {
-        let remote = super::ssh::SshRemoteHost::start();
-        let ssh_config = super::ssh::create_ssh_config(&[&remote]);
-        let daemon = match home {
-            Some(h) => TestDaemon::start_with_ssh_config_and_home(&ssh_config.path, h),
-            None => TestDaemon::start_with_ssh_config(&ssh_config.path),
-        };
-
-        let remote_spec = remote.ssh_spec();
-        write_pod_toml(
-            repo,
-            &formatdoc! {r#"
-            host = "{remote_spec}"
-        "#},
-        );
-
-        TestPod {
-            daemon,
-            _resources: Box::new(SshResources {
-                _remote: remote,
-                _ssh_config: ssh_config,
-            }),
-        }
-    }
-
-    fn build_k8s(repo: &TestRepo, test_name: &str, home: Option<&Path>) -> Self {
+    fn k8s(test_name: &str, home: Option<&Path>) -> Self {
         let cluster = super::k8s::k8s_cluster_config();
         let ns = super::k8s::K8sNamespace::new(&cluster, test_name);
 
@@ -280,9 +141,7 @@ impl TestPod {
         let namespace = &ns.name;
         let push_registry = &cluster.push_registry;
         let pull_registry = &cluster.pull_registry;
-        write_pod_toml(
-            repo,
-            &formatdoc! {r#"
+        let toml = formatdoc! {r#"
             [k8s]
             context = "{context}"
             namespace = "{namespace}"
@@ -296,52 +155,60 @@ impl TestPod {
             key = "pool"
             value = "test"
             effect = "NoSchedule"
-        "#},
-        );
+        "#};
 
         let daemon = match home {
             Some(h) => TestDaemon::start_with_home(h),
             None => TestDaemon::start(),
         };
-        TestPod {
+        TestExecutor {
             daemon,
+            toml,
             _resources: Box::new(K8sResources { _namespace: ns }),
         }
     }
 }
 
-/// Write .rumpelpod.toml with executor-specific config.
-fn write_pod_toml(repo: &TestRepo, executor_config: &str) {
-    std::fs::write(repo.path().join(".rumpelpod.toml"), executor_config)
-        .expect("Failed to write .rumpelpod.toml");
-}
+// ---------------------------------------------------------------------------
+// Standard test devcontainer
+// ---------------------------------------------------------------------------
 
-/// Write devcontainer.json and .rumpelpod.toml for Docker/SSH executors.
-fn write_docker_config(repo: &TestRepo, image_ref: &str, user: Option<&str>) {
+use super::common::{TEST_REPO_PATH, TEST_USER, TEST_USER_UID};
+
+/// Write a standard test devcontainer.json with a Dockerfile build section.
+///
+/// Creates a Dockerfile that installs git, creates the test user, and
+/// COPYs the repo.  The devcontainer.json uses a build section so the
+/// image is built on first `rumpel enter` (with buildkit layer caching).
+///
+/// `extra_dockerfile` is appended after the USER directive.
+/// `extra_json` is spliced into the devcontainer.json object (include
+/// a leading comma if non-empty).
+pub fn write_test_devcontainer(repo: &TestRepo, extra_dockerfile: &str, extra_json: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
 
-    let user_field = match user {
-        Some(u) => format!(
-            r#",
-            "containerUser": "{u}""#
-        ),
-        None => String::new(),
-    };
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        USER {TEST_USER}
+        {extra_dockerfile}
+    "#};
+    std::fs::write(devcontainer_dir.join("Dockerfile"), dockerfile)
+        .expect("Failed to write Dockerfile");
 
     let devcontainer_json = formatdoc! {r#"
         {{
-            "image": "{image_ref}",
+            "build": {{
+                "dockerfile": "Dockerfile",
+                "context": ".."
+            }},
             "workspaceFolder": "{TEST_REPO_PATH}",
-            "runArgs": ["--runtime=runc"]{user_field}
+            "runArgs": ["--runtime=runc"]{extra_json}
         }}
     "#};
-    std::fs::write(
-        devcontainer_dir.join("devcontainer.json"),
-        devcontainer_json,
-    )
-    .expect("Failed to write devcontainer.json");
-
-    std::fs::write(repo.path().join(".rumpelpod.toml"), "\n")
-        .expect("Failed to write .rumpelpod.toml");
+    std::fs::write(devcontainer_dir.join("devcontainer.json"), devcontainer_json)
+        .expect("Failed to write devcontainer.json");
 }

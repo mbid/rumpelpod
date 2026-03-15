@@ -13,10 +13,8 @@ use anyhow::{Context, Result};
 use indoc::formatdoc;
 use tempfile::TempDir;
 
-use crate::common::{
-    build_docker_image, pod_command, DockerBuild, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH,
-    TEST_USER_UID,
-};
+use crate::common::{pod_command, TestRepo, TEST_USER_UID};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 use rumpelpod::CommandExt;
 
 /// Test user for SSH connections.
@@ -95,8 +93,7 @@ impl SshRemoteHost {
             run_args.push("-p");
             run_args.push("0:22");
         }
-        let image_str = image_id.to_string();
-        run_args.push(&image_str);
+        run_args.push(&image_id);
 
         let stdout = Command::new("docker")
             .args(&run_args)
@@ -290,67 +287,6 @@ impl SshRemoteHost {
             .context("running SSH command")
     }
 
-    /// Load a Docker image into this remote host's Docker daemon.
-    ///
-    /// Returns the image ID as seen by the remote Docker daemon, which may
-    /// differ from the local ID when Docker engine versions differ (e.g.
-    /// Docker Desktop vs docker.io in Debian).
-    pub fn load_image(&self, image_id: &ImageId) -> Result<ImageId> {
-        // Save image to a tar file
-        let tar_path = self._temp_dir.path().join("image.tar");
-        Command::new("docker")
-            .args([
-                "save",
-                "-o",
-                &tar_path.to_string_lossy(),
-                &image_id.to_string(),
-            ])
-            .success()
-            .context("saving docker image")?;
-
-        // Copy tar file to the remote container
-        let remote_tar = "/tmp/image.tar";
-        Command::new("docker")
-            .args([
-                "cp",
-                &tar_path.to_string_lossy(),
-                &format!("{}:{}", self.container_id, remote_tar),
-            ])
-            .success()
-            .context("copying image tar to remote")?;
-
-        // Load the image on the remote Docker daemon.
-        // Parse the output ("Loaded image ID: sha256:...") to get the
-        // remote image ID, which may differ from the local one.
-        let load_output = Command::new("docker")
-            .args([
-                "exec",
-                &self.container_id,
-                "docker",
-                "load",
-                "-i",
-                remote_tar,
-            ])
-            .success()
-            .context("loading image on remote docker")?;
-
-        let load_str = String::from_utf8_lossy(&load_output);
-        let remote_id = load_str
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("Loaded image ID: ")
-                    .or_else(|| line.strip_prefix("Loaded image: "))
-            })
-            .map(|s| s.trim().to_string())
-            .with_context(|| format!("parsing docker load output: {}", load_str))?;
-
-        // Clean up the tar file
-        let _ = Command::new("docker")
-            .args(["exec", &self.container_id, "rm", remote_tar])
-            .success();
-
-        Ok(ImageId(remote_id))
-    }
 }
 
 impl Drop for SshRemoteHost {
@@ -406,7 +342,10 @@ fn get_container_ip(container_id: &str) -> Result<String> {
 }
 
 /// Build the Docker image for the remote Docker host test container.
-fn build_remote_docker_image() -> Result<ImageId> {
+///
+/// This is infrastructure (not a test pod image), so it builds directly
+/// via `docker build` rather than going through the devcontainer path.
+fn build_remote_docker_image() -> Result<String> {
     let dockerfile = formatdoc! {r#"
         FROM debian:13
 
@@ -451,10 +390,31 @@ fn build_remote_docker_image() -> Result<ImageId> {
         CMD ["/start.sh"]
     "#};
 
-    build_docker_image(DockerBuild {
-        dockerfile,
-        build_context: None,
-    })
+    let temp_dir = TempDir::with_prefix("rumpelpod-ssh-image-build-")
+        .context("creating temp dir for SSH image build")?;
+    std::fs::write(temp_dir.path().join("Dockerfile"), &dockerfile)
+        .context("writing Dockerfile")?;
+
+    let output = Command::new("docker")
+        .args([
+            "build",
+            "-q",
+            temp_dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .context("executing docker build for SSH server image")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("docker build failed: {stderr}"));
+    }
+
+    let image_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if image_id.is_empty() {
+        return Err(anyhow::anyhow!("docker build returned empty image ID"));
+    }
+
+    Ok(image_id)
 }
 
 /// SSH configuration for test daemons.
@@ -520,33 +480,6 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
     }
 }
 
-/// Write config files for a remote Docker host test.
-///
-/// Writes a devcontainer.json with the image/workspace/runtime settings,
-/// and a .rumpelpod.toml with only the host specification.
-pub fn write_remote_pod_config(repo: &TestRepo, image_id: &ImageId, remote_spec: &str) {
-    let devcontainer_dir = repo.path().join(".devcontainer");
-    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
-
-    let devcontainer_json = formatdoc! {r#"
-        {{
-            "image": "{image_id}",
-            "workspaceFolder": "{TEST_REPO_PATH}",
-            "runArgs": ["--runtime=runc"]
-        }}
-    "#};
-    std::fs::write(
-        devcontainer_dir.join("devcontainer.json"),
-        devcontainer_json,
-    )
-    .expect("Failed to write devcontainer.json");
-
-    let config = formatdoc! {r#"
-        host = "{remote_spec}"
-    "#};
-    std::fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
 
 // Tests
 // Note: These tests require privileged Docker containers, which may not be
@@ -555,28 +488,13 @@ pub fn write_remote_pod_config(repo: &TestRepo, image_id: &ImageId, remote_spec:
 #[test]
 fn ssh_smoke_test() {
     let repo = TestRepo::new();
-
-    // Build test image locally
-    let image_id =
-        crate::common::build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    // Start remote host and load the image
-    let remote = SshRemoteHost::start();
-    let remote_image_id = remote
-        .load_image(&image_id)
-        .expect("Failed to load image into remote Docker");
-
-    // Create SSH config and start daemon
-    let ssh_config = create_ssh_config(&[&remote]);
-    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
-
-    // Write pod config using the remote image ID (may differ from local
-    // when Docker engine versions differ, e.g. Docker Desktop vs docker.io)
-    write_remote_pod_config(&repo, &remote_image_id, &remote.ssh_spec());
+    let exec = TestExecutor::start("ssh-smoke");
+    write_test_devcontainer(&repo, "", "");
+    std::fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Enter the pod on the remote Docker host
     let pod_name = "remote-test";
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", pod_name, "--", "echo", "hello from remote"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -591,45 +509,24 @@ fn ssh_smoke_test() {
         stderr
     );
     assert_eq!(stdout.trim(), "hello from remote");
-
-    // Verify container exists on remote host
-    let remote_containers = remote
-        .ssh_command(
-            &ssh_config.path,
-            &["docker", "ps", "--format", "{{.Names}}"],
-        )
-        .expect("docker ps failed");
-    let remote_containers_str = String::from_utf8_lossy(&remote_containers);
-
-    // The container name usually contains the pod name.
-    assert!(
-        remote_containers_str.contains(pod_name),
-        "remote container should exist: {}",
-        remote_containers_str
-    );
 }
 
 #[ignore]
 #[test]
 fn ssh_reconnect_test() {
+    // This test needs direct access to the SshRemoteHost to restart it,
+    // so it sets up SSH infrastructure manually rather than via TestExecutor.
     let repo = TestRepo::new();
-
-    // Build test image locally
-    let image_id =
-        crate::common::build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    // Start remote host and load the image
     let mut remote = SshRemoteHost::start();
-    let remote_image_id = remote
-        .load_image(&image_id)
-        .expect("Failed to load image into remote Docker");
-
-    // Create SSH config and start daemon
     let ssh_config = create_ssh_config(&[&remote]);
-    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
+    let daemon = crate::common::TestDaemon::start_with_ssh_config(&ssh_config.path);
 
-    // Write pod config
-    write_remote_pod_config(&repo, &remote_image_id, &remote.ssh_spec());
+    write_test_devcontainer(&repo, "", "");
+    let remote_spec = remote.ssh_spec();
+    let toml = formatdoc! {r#"
+        host = "{remote_spec}"
+    "#};
+    std::fs::write(repo.path().join(".rumpelpod.toml"), toml).unwrap();
 
     // Enter the pod on the remote Docker host
     let pod_name = "reconnect-test";

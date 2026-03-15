@@ -10,17 +10,15 @@ use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use rumpelpod::CommandExt;
-
-use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH};
-use crate::executor::{executor_mode, ExecutorMode, TestExecutor};
+use crate::common::{TestDaemon, TestRepo};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 use super::proxy::ClaudeTestProxy;
 
 /// Pinned Claude Code version for deterministic tests.
 const CLAUDE_CODE_VERSION: &str = "2.1.63";
 
-/// Fixed date injected via a Node.js Date override (see build_claude_test_image).
+/// Fixed date injected via a Node.js Date override (see write_claude_test_devcontainer).
 /// Ensures prompts that include the current date produce stable cache keys.
 const FAKE_DATE: &str = "2026-02-01 00:00:00";
 
@@ -50,23 +48,25 @@ fn claude_code_tarball_url() -> String {
     format!("https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-{CLAUDE_CODE_VERSION}.tgz")
 }
 
-/// Build the test image with a pinned Claude CLI version and fake date.
+/// Write a devcontainer with a pinned Claude CLI and fake date.
 ///
-/// Downloads the pinned npm package directly inside the Docker build
-/// (which has network access for apt-get anyway) and extracts it
-/// without npm -- only the node runtime is needed.  Omitting npm also
-/// prevents Claude CLI's background `npm view` update check.
-/// Overrides JavaScript's Date via NODE_OPTIONS so the CLI always
-/// reports a fixed date in prompts (libfaketime breaks Node.js's
-/// event loop).
-pub fn build_claude_test_image(repo: &TestRepo) -> ImageId {
+/// Downloads the pinned npm package inside the Docker build and
+/// extracts it without npm -- only the node runtime is needed.
+/// Omitting npm also prevents Claude CLI's background `npm view`
+/// update check.  Overrides JavaScript's Date via NODE_OPTIONS so
+/// the CLI always reports a fixed date in prompts.
+fn write_claude_test_devcontainer(repo: &TestRepo) {
     let tarball_url = claude_code_tarball_url();
     let faketime_js = FAKETIME_JS.replace("FAKE_DATE_PLACEHOLDER", FAKE_DATE);
+
+    // Write the JS into the build context so the COPY picks it up.
+    std::fs::write(repo.path().join("faketime.js"), &faketime_js)
+        .expect("write faketime.js to build context");
 
     // nodejs without npm: the CLI only needs the node runtime, and
     // omitting npm prevents claude's background `npm view` update
     // check from running inside the container.
-    let extra = formatdoc! {r#"
+    let extra_dockerfile = formatdoc! {r#"
         USER root
         RUN apt-get update && apt-get install -y nodejs curl
         RUN curl -fsSL "{tarball_url}" \
@@ -78,37 +78,12 @@ pub fn build_claude_test_image(repo: &TestRepo) -> ImageId {
         USER testuser
     "#};
 
-    // Write the JS into the build context so the COPY picks it up.
-    std::fs::write(repo.path().join("faketime.js"), &faketime_js)
-        .expect("write faketime.js to build context");
+    let extra_json = r#",
+        "remoteEnv": {
+            "ANTHROPIC_BASE_URL": "${localEnv:ANTHROPIC_BASE_URL}"
+        }"#;
 
-    build_test_image(repo.path(), &extra).expect("build claude test image")
-}
-
-/// Write devcontainer config that points at the given image and injects
-/// the proxy's base URL into the container environment.
-///
-/// Only writes devcontainer.json; .rumpelpod.toml is handled by TestExecutor.
-fn write_claude_test_config(repo: &TestRepo, image_ref: &str) {
-    let devcontainer_dir = repo.path().join(".devcontainer");
-    std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer dir");
-
-    let devcontainer_json = formatdoc! {r#"
-        {{
-            "image": "{image_ref}",
-            "workspaceFolder": "{TEST_REPO_PATH}",
-            "runArgs": ["--runtime=runc"],
-            "remoteEnv": {{
-                "ANTHROPIC_BASE_URL": "${{localEnv:ANTHROPIC_BASE_URL}}"
-            }}
-        }}
-    "#};
-
-    std::fs::write(
-        devcontainer_dir.join("devcontainer.json"),
-        devcontainer_json,
-    )
-    .expect("write devcontainer.json");
+    write_test_devcontainer(repo, &extra_dockerfile, extra_json);
 }
 
 /// Create a temp directory that acts as HOME for the test process.
@@ -157,7 +132,7 @@ fn create_controlled_home() -> TempDir {
     home
 }
 
-/// Build the image, write config, and start a daemon -- everything needed
+/// Write the devcontainer, start a daemon -- everything needed
 /// before running a claude command.
 ///
 /// Returns the controlled HOME temp dir alongside the repo and pod so
@@ -168,27 +143,7 @@ pub fn setup_claude_test_repo(
 ) -> (TestRepo, TestExecutor, TempDir) {
     let _ = proxy; // used only to ensure the proxy is started first
     let repo = TestRepo::new();
-    let image_id = build_claude_test_image(&repo);
-
-    // On k8s the local Docker image must be pushed to the in-cluster
-    // registry; write devcontainer.json with the registry reference.
-    let image_ref = match executor_mode() {
-        ExecutorMode::K8s => {
-            let cluster = crate::k8s::k8s_cluster_config();
-            let push_ref = format!("{}/{test_name}", cluster.push_registry);
-            std::process::Command::new("docker")
-                .args(["tag", &image_id.to_string(), &push_ref])
-                .success()
-                .expect("Failed to tag docker image for push");
-            std::process::Command::new("docker")
-                .args(["push", &push_ref])
-                .success()
-                .expect("Failed to push image to registry");
-            format!("{}/{test_name}", cluster.pull_registry)
-        }
-        ExecutorMode::Docker | ExecutorMode::Ssh => image_id.to_string(),
-    };
-    write_claude_test_config(&repo, &image_ref);
+    write_claude_test_devcontainer(&repo);
 
     // Create the controlled home before starting the executor so
     // copy_claude_config (which runs in the daemon) reads our files.

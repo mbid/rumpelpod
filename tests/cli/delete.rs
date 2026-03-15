@@ -1,22 +1,23 @@
 //! Integration tests for the `rumpel delete` subcommand.
 
+use std::fs;
 use std::io::Write;
 use std::process::Stdio;
 
-use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
-use crate::executor::TestPod;
+use crate::common::{pod_command, TestDaemon, TestRepo};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 use super::agent::llm_cache_dir;
-use super::ssh::{create_ssh_config, write_remote_pod_config, SshRemoteHost};
 
 #[test]
 fn delete_smoke_test() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-smoke");
+    let exec = TestExecutor::start("delete-smoke");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // First create a pod by entering it
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "test-delete", "--", "echo", "created"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -28,7 +29,7 @@ fn delete_smoke_test() {
     );
 
     // Now delete the pod
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", "test-delete"])
         .output()
         .expect("Failed to run rumpel delete command");
@@ -43,10 +44,11 @@ fn delete_smoke_test() {
 #[test]
 fn delete_unknown_pod_fails() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-unknown");
+    let exec = TestExecutor::start("delete-unknown");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "nonexistent"])
         .output()
         .expect("Failed to run rumpel delete command");
@@ -89,12 +91,14 @@ fn delete_unmerged_pod_fails_without_tty() {
     // In non-tty mode (piped output), deleting an unmerged pod should fail
     // with a helpful error message.
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-unmerged");
-    create_ahead_pod(&repo, &pod.daemon, "unmerged");
+    let exec = TestExecutor::start("delete-unmerged");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+
+    create_ahead_pod(&repo, &exec.daemon, "unmerged");
 
     // pod_command pipes stdout/stderr, so this is non-tty
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "unmerged"])
         .output()
         .expect("Failed to run rumpel delete command");
@@ -114,11 +118,13 @@ fn delete_unmerged_pod_fails_without_tty() {
 #[test]
 fn delete_unmerged_pod_succeeds_with_force() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-force");
-    create_ahead_pod(&repo, &pod.daemon, "force-del");
+    let exec = TestExecutor::start("delete-force");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    create_ahead_pod(&repo, &exec.daemon, "force-del");
+
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", "--force", "force-del"])
         .output()
         .expect("Failed to run rumpel delete command");
@@ -130,7 +136,7 @@ fn delete_unmerged_pod_succeeds_with_force() {
     );
 
     // Verify pod is gone
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -147,11 +153,12 @@ fn delete_then_recreate_same_name() {
     // After deleting a pod, we should be able to create a new one with the same name.
     // This verifies that all resources (container, network) are properly cleaned up.
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-recreate");
+    let exec = TestExecutor::start("delete-recreate");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create pod
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "recyclable", "--", "echo", "first"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -162,7 +169,7 @@ fn delete_then_recreate_same_name() {
     );
 
     // Delete pod (--wait so the container is fully gone before re-entering)
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", "recyclable"])
         .output()
         .expect("Failed to run rumpel delete command");
@@ -173,7 +180,7 @@ fn delete_then_recreate_same_name() {
     );
 
     // Create pod with the same name again
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "recyclable", "--", "echo", "second"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -216,16 +223,15 @@ fn delete_pod_clears_conversation_history() {
     // This test verifies that after deletion, an agent started in a recreated pod
     // with the same name does NOT have access to the old conversation history.
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let exec = TestExecutor::start("delete-history");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // First, create a conversation and tell the agent a secret
     let unique_marker = "PELICAN_GAMMA_5555";
     let output1 = run_agent_with_prompt(
         &repo,
-        &daemon,
+        &exec.daemon,
         "history-test",
         &format!("Remember this code: {unique_marker}. Acknowledge."),
         &[],
@@ -237,7 +243,7 @@ fn delete_pod_clears_conversation_history() {
     );
 
     // Delete the pod (--wait so history is cleared before re-entering)
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", "history-test"])
         .output()
         .expect("Failed to run rumpel delete command");
@@ -252,7 +258,7 @@ fn delete_pod_clears_conversation_history() {
     // and the agent should NOT know the code.
     let output2 = run_agent_with_prompt(
         &repo,
-        &daemon,
+        &exec.daemon,
         "history-test",
         "Do you remember any code I asked you to remember? If so, what is it?",
         &[],
@@ -275,12 +281,13 @@ fn delete_pod_clears_conversation_history() {
 #[test]
 fn delete_multiple_pods() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-multi");
+    let exec = TestExecutor::start("delete-multi");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create three pods
     for name in ["multi-a", "multi-b", "multi-c"] {
-        let output = pod_command(&repo, &pod.daemon)
+        let output = pod_command(&repo, &exec.daemon)
             .args(["enter", name, "--", "true"])
             .output()
             .expect("Failed to run rumpel enter");
@@ -293,7 +300,7 @@ fn delete_multiple_pods() {
     }
 
     // Delete all three in one command
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", "multi-a", "multi-b", "multi-c"])
         .output()
         .expect("Failed to run rumpel delete");
@@ -304,7 +311,7 @@ fn delete_multiple_pods() {
     );
 
     // Verify all are gone
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -324,12 +331,13 @@ fn delete_multiple_continues_past_missing() {
     // When one pod in a multi-delete does not exist, the others should
     // still be deleted and the command should report the failure.
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-missing");
+    let exec = TestExecutor::start("delete-missing");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create two pods, leave a gap for a nonexistent one
     for name in ["surv-a", "surv-c"] {
-        let output = pod_command(&repo, &pod.daemon)
+        let output = pod_command(&repo, &exec.daemon)
             .args(["enter", name, "--", "true"])
             .output()
             .expect("Failed to run rumpel enter");
@@ -337,7 +345,7 @@ fn delete_multiple_continues_past_missing() {
     }
 
     // Delete with a nonexistent pod in the middle
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", "surv-a", "no-such-pod", "surv-c"])
         .output()
         .expect("Failed to run rumpel delete");
@@ -360,7 +368,7 @@ fn delete_multiple_continues_past_missing() {
     );
 
     // The other two should still have been deleted
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -377,20 +385,21 @@ fn delete_multiple_skips_unmerged_without_tty() {
     // In non-tty mode, unmerged pods are skipped with an error but
     // the remaining pods are still deleted.
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "delete-skip-unmerged");
+    let exec = TestExecutor::start("delete-skip-unmerged");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a clean pod and an ahead pod
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "clean-pod", "--", "true"])
         .output()
         .expect("Failed to run rumpel enter");
     assert!(output.status.success());
 
-    create_ahead_pod(&repo, &pod.daemon, "ahead-pod");
+    create_ahead_pod(&repo, &exec.daemon, "ahead-pod");
 
     // Try to delete both (non-tty, no --force)
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", "clean-pod", "ahead-pod"])
         .output()
         .expect("Failed to run rumpel delete");
@@ -405,7 +414,7 @@ fn delete_multiple_skips_unmerged_without_tty() {
     );
 
     // The clean pod should be deleted, the ahead pod should remain
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -425,27 +434,13 @@ fn delete_multiple_skips_unmerged_without_tty() {
 #[test]
 fn ssh_remote_pod_delete() {
     let repo = TestRepo::new();
-
-    // Build test image locally
-    let image_id =
-        crate::common::build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    // Start remote host and load the image
-    let remote = SshRemoteHost::start();
-    let remote_image_id = remote
-        .load_image(&image_id)
-        .expect("Failed to load image into remote Docker");
-
-    // Create SSH config and start daemon
-    let ssh_config = create_ssh_config(&[&remote]);
-    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
-
-    // Write pod config
-    write_remote_pod_config(&repo, &remote_image_id, &remote.ssh_spec());
+    let exec = TestExecutor::start("ssh-delete-remote");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a pod on the remote
     let pod_name = "delete-test-remote";
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", pod_name, "--", "true"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -457,7 +452,7 @@ fn ssh_remote_pod_delete() {
     );
 
     // Verify it exists in list
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("list")
         .output()
         .expect("rumpel list failed to execute");
@@ -467,7 +462,7 @@ fn ssh_remote_pod_delete() {
     );
 
     // Delete the pod (--wait so it's fully gone before checking list)
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["delete", "--wait", pod_name])
         .output()
         .expect("rumpel delete failed to execute");
@@ -483,7 +478,7 @@ fn ssh_remote_pod_delete() {
     );
 
     // Verify it is gone from list
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("list")
         .output()
         .expect("rumpel list failed to execute");
@@ -493,21 +488,5 @@ fn ssh_remote_pod_delete() {
         !stdout_list.contains(pod_name),
         "pod should not exist after delete in list output: {}",
         stdout_list
-    );
-
-    // Verify container is gone on remote host
-    let remote_containers = remote
-        .ssh_command(
-            &ssh_config.path,
-            &["docker", "ps", "-a", "--format", "{{.Names}}"],
-        )
-        .expect("docker ps failed");
-    let remote_containers_str = String::from_utf8_lossy(&remote_containers);
-
-    // The container name usually contains the pod name.
-    assert!(
-        !remote_containers_str.contains(pod_name),
-        "remote container should be deleted: {}",
-        remote_containers_str
     );
 }

@@ -1,27 +1,42 @@
-use crate::common::{
-    build_test_image, create_commit, pod_command, write_test_pod_config_with_network, TestDaemon,
-    TestRepo,
-};
-use rumpelpod::CommandExt;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
 
+use indoc::formatdoc;
+use rumpelpod::CommandExt;
+
+use crate::common::{create_commit, pod_command, TestRepo, TEST_REPO_PATH};
+use crate::executor::{write_test_devcontainer, TestExecutor};
+
 #[test]
 fn network_host_connectivity() {
-    let daemon = TestDaemon::start();
     let repo = TestRepo::new();
-
+    let exec = TestExecutor::start("network-host-conn");
     // Install netcat-openbsd for testing connectivity
     // Switch to root to install packages
-    let image_id = build_test_image(
-        repo.path(),
+    write_test_devcontainer(
+        &repo,
         "USER root\nRUN apt-get install -y netcat-openbsd\nUSER testuser",
+        "",
+    );
+    // Overwrite devcontainer.json with network=host
+    fs::write(
+        repo.path().join(".devcontainer/devcontainer.json"),
+        formatdoc! {r#"
+            {{
+                "build": {{
+                    "dockerfile": "Dockerfile",
+                    "context": ".."
+                }},
+                "workspaceFolder": "{TEST_REPO_PATH}",
+                "runArgs": ["--runtime=runc", "--network=host"]
+            }}
+        "#},
     )
-    .expect("Failed to build test image");
-
-    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
+    .unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // On macOS Docker Desktop, containers run in a VM so 127.0.0.1 inside the
     // container is the VM's loopback, not the Mac host. Bind to 0.0.0.0 and
@@ -54,7 +69,7 @@ fn network_host_connectivity() {
     });
 
     // Run nc inside pod to connect to host
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -75,14 +90,28 @@ fn network_host_connectivity() {
 /// namespace) or host.docker.internal on macOS Docker Desktop (VM-based).
 #[test]
 fn network_host_remotes_use_localhost() {
-    let daemon = TestDaemon::start();
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
+    let exec = TestExecutor::start("network-host-remotes");
+    write_test_devcontainer(&repo, "", "");
+    // Overwrite devcontainer.json with network=host
+    fs::write(
+        repo.path().join(".devcontainer/devcontainer.json"),
+        formatdoc! {r#"
+            {{
+                "build": {{
+                    "dockerfile": "Dockerfile",
+                    "context": ".."
+                }},
+                "workspaceFolder": "{TEST_REPO_PATH}",
+                "runArgs": ["--runtime=runc", "--network=host"]
+            }}
+        "#},
+    )
+    .unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Check 'host' remote inside pod
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -104,7 +133,7 @@ fn network_host_remotes_use_localhost() {
     );
 
     // Check 'rumpelpod' remote inside pod
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -130,14 +159,28 @@ fn network_host_remotes_use_localhost() {
 /// the pod when using --network=host.
 #[test]
 fn network_host_fetch_from_pod() {
-    let daemon = TestDaemon::start();
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
+    let exec = TestExecutor::start("network-host-fetch");
+    write_test_devcontainer(&repo, "", "");
+    // Overwrite devcontainer.json with network=host
+    fs::write(
+        repo.path().join(".devcontainer/devcontainer.json"),
+        formatdoc! {r#"
+            {{
+                "build": {{
+                    "dockerfile": "Dockerfile",
+                    "context": ".."
+                }},
+                "workspaceFolder": "{TEST_REPO_PATH}",
+                "runArgs": ["--runtime=runc", "--network=host"]
+            }}
+        "#},
+    )
+    .unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Launch pod first
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -156,7 +199,7 @@ fn network_host_fetch_from_pod() {
     let host_commit = String::from_utf8_lossy(&host_commit).trim().to_string();
 
     // Fetch from host remote inside the pod
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -167,7 +210,7 @@ fn network_host_fetch_from_pod() {
         .expect("Failed to fetch from host remote");
 
     // Verify the fetched commit matches
-    let fetched_commit = pod_command(&repo, &daemon)
+    let fetched_commit = pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -188,16 +231,30 @@ fn network_host_fetch_from_pod() {
 /// as remote-tracking refs when using --network=host.
 #[test]
 fn network_host_push_from_pod() {
-    let daemon = TestDaemon::start();
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    write_test_pod_config_with_network(&repo, &image_id, "unsafe-host");
+    let exec = TestExecutor::start("network-host-push");
+    write_test_devcontainer(&repo, "", "");
+    // Overwrite devcontainer.json with network=host
+    fs::write(
+        repo.path().join(".devcontainer/devcontainer.json"),
+        formatdoc! {r#"
+            {{
+                "build": {{
+                    "dockerfile": "Dockerfile",
+                    "context": ".."
+                }},
+                "workspaceFolder": "{TEST_REPO_PATH}",
+                "runArgs": ["--runtime=runc", "--network=host"]
+            }}
+        "#},
+    )
+    .unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let pod_name = "push-test";
 
     // Launch pod
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg(pod_name)
         .arg("--")
@@ -207,7 +264,7 @@ fn network_host_push_from_pod() {
         .expect("Failed to setup pod");
 
     // Create a commit inside the pod (reference-transaction hook pushes to gateway)
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg(pod_name)
         .arg("--")
@@ -220,7 +277,7 @@ fn network_host_push_from_pod() {
         .expect("Failed to create commit in pod");
 
     // Get the commit hash from the pod
-    let pod_commit = pod_command(&repo, &daemon)
+    let pod_commit = pod_command(&repo, &exec.daemon)
         .arg("enter")
         .arg(pod_name)
         .arg("--")

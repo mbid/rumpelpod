@@ -1,9 +1,10 @@
 //! Integration tests for the `rumpel merge` subcommand.
 
+use std::fs;
 use std::process::Command;
 
-use crate::common::{build_test_image, pod_command, TestDaemon, TestRepo};
-use crate::executor::{executor_supports_stop, TestPod};
+use crate::common::{pod_command, TestDaemon, TestRepo};
+use crate::executor::{executor_supports_stop, write_test_devcontainer, TestExecutor};
 
 /// Helper: create a pod and commit a new file inside it so its branch is ahead.
 fn create_ahead_pod(repo: &TestRepo, daemon: &TestDaemon, name: &str) {
@@ -32,13 +33,14 @@ fn merge_basic() {
         return;
     }
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "merge-basic");
+    let exec = TestExecutor::start("merge-basic");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    create_ahead_pod(&repo, &pod.daemon, "merge-basic");
+    create_ahead_pod(&repo, &exec.daemon, "merge-basic");
 
     // Merge
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["merge", "merge-basic"])
         .output()
         .expect("Failed to run rumpel merge");
@@ -61,7 +63,7 @@ fn merge_basic() {
     );
 
     // Verify pod is stopped
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -81,11 +83,12 @@ fn merge_conflict_warns() {
         return;
     }
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "merge-conflict");
+    let exec = TestExecutor::start("merge-conflict");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a pod and commit a file with specific content
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "merge-conflict",
@@ -117,7 +120,7 @@ fn merge_conflict_warns() {
         .expect("git commit failed");
 
     // Merge should fail with a conflict
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["merge", "merge-conflict"])
         .output()
         .expect("Failed to run rumpel merge");
@@ -131,7 +134,7 @@ fn merge_conflict_warns() {
     );
 
     // Pod should still be running after a failed merge
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "merge-conflict", "--", "true"])
         .output()
         .expect("Failed to enter pod");
@@ -155,12 +158,13 @@ fn merge_nothing_to_merge_warns() {
         return;
     }
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "merge-noop");
+    let exec = TestExecutor::start("merge-noop");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a pod without making any additional commits
     // The pod starts at the same commit as the host
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "merge-noop", "--", "true"])
         .output()
         .expect("Failed to create pod");
@@ -171,7 +175,7 @@ fn merge_nothing_to_merge_warns() {
     );
 
     // Need at least one commit for the ref to exist -- make a trivial one
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "merge-noop",
@@ -187,14 +191,14 @@ fn merge_nothing_to_merge_warns() {
     assert!(output.status.success(), "empty commit failed");
 
     // First merge to bring host up to date
-    let _output = pod_command(&repo, &pod.daemon)
+    let _output = pod_command(&repo, &exec.daemon)
         .args(["merge", "merge-noop"])
         .output()
         .expect("Failed to run first merge");
     // Ignore result -- pod is stopped now
 
     // Recreate pod at same point
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "merge-noop", "--", "true"])
         .output()
         .expect("Failed to re-create pod");
@@ -205,7 +209,7 @@ fn merge_nothing_to_merge_warns() {
     );
 
     // Second merge: nothing to merge
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["merge", "merge-noop"])
         .output()
         .expect("Failed to run rumpel merge");
@@ -229,11 +233,12 @@ fn merge_dirty_checkout_warns() {
         return;
     }
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "merge-dirty");
+    let exec = TestExecutor::start("merge-dirty");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a pod with committed and uncommitted changes
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "merge-dirty",
@@ -251,7 +256,7 @@ fn merge_dirty_checkout_warns() {
     );
 
     // Merge
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["merge", "merge-dirty"])
         .output()
         .expect("Failed to run rumpel merge");
@@ -276,13 +281,14 @@ fn merge_no_ff_flag() {
         return;
     }
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "merge-noff");
+    let exec = TestExecutor::start("merge-noff");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    create_ahead_pod(&repo, &pod.daemon, "merge-noff");
+    create_ahead_pod(&repo, &exec.daemon, "merge-noff");
 
     // Merge with --no-ff to force a merge commit
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["merge", "merge-noff", "--no-ff"])
         .output()
         .expect("Failed to run rumpel merge");
@@ -314,10 +320,11 @@ fn merge_squash_flag() {
         return;
     }
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "merge-squash");
+    let exec = TestExecutor::start("merge-squash");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    create_ahead_pod(&repo, &pod.daemon, "merge-squash");
+    create_ahead_pod(&repo, &exec.daemon, "merge-squash");
 
     // Record HEAD before merge
     let head_before = Command::new("git")
@@ -330,7 +337,7 @@ fn merge_squash_flag() {
         .to_string();
 
     // Merge with --squash (stages changes but does not commit)
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["merge", "merge-squash", "--squash"])
         .output()
         .expect("Failed to run rumpel merge");

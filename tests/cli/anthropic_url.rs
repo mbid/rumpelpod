@@ -1,31 +1,31 @@
-use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
-use indoc::formatdoc;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
 
+use indoc::formatdoc;
+
+use crate::common::{pod_command, TestRepo};
+use crate::executor::{write_test_devcontainer, TestExecutor};
+
 #[test]
 #[ignore] // flaky under heavy parallel test runs
 fn test_anthropic_base_url_garbage_errors() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    write_test_pod_config(&repo, &image_id);
+    let exec = TestExecutor::start("anthropic-url-garbage");
+    write_test_devcontainer(&repo, "", "");
 
     let config = formatdoc! {r#"
         [agent]
         model = "claude-sonnet-4-5"
         anthropic-base-url = "https://invalid.example.com/v1/messages"
     "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
+    fs::write(repo.path().join(".rumpelpod.toml"), format!("{}\n{config}", exec.toml))
         .expect("Failed to write .rumpelpod.toml");
-
-    let daemon = TestDaemon::start();
 
     // We need to provide an API key so it actually tries to make a request
     // instead of failing early due to missing key and no cache.
-    let mut cmd = pod_command(&repo, &daemon);
+    let mut cmd = pod_command(&repo, &exec.daemon);
     cmd.args(["agent", "test"]);
     cmd.env("ANTHROPIC_API_KEY", "dummy-key");
     // Ensure we attempt network request (disable offline mode)
@@ -67,9 +67,8 @@ fn test_anthropic_base_url_garbage_errors() {
 #[test]
 fn test_anthropic_base_url_default_works() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-
-    write_test_pod_config(&repo, &image_id);
+    let exec = TestExecutor::start("anthropic-url-default");
+    write_test_devcontainer(&repo, "", "");
 
     // Test with the default URL (explicitly set)
     let config = formatdoc! {r#"
@@ -77,14 +76,12 @@ fn test_anthropic_base_url_default_works() {
         model = "claude-sonnet-4-5"
         anthropic-base-url = "https://api.anthropic.com/v1/messages"
     "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
+    fs::write(repo.path().join(".rumpelpod.toml"), format!("{}\n{config}", exec.toml))
         .expect("Failed to write .rumpelpod.toml");
-
-    let daemon = TestDaemon::start();
 
     let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache");
 
-    let mut cmd = pod_command(&repo, &daemon);
+    let mut cmd = pod_command(&repo, &exec.daemon);
     cmd.args(["agent", "test", "--cache", cache_dir.to_str().unwrap()]);
     // No API key needed because we have cache
     cmd.stdin(Stdio::piped());

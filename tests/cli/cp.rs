@@ -4,17 +4,18 @@ use std::fs;
 
 use rumpelpod::CommandExt;
 
-use crate::common::{build_test_image, pod_command, TestRepo};
-use crate::executor::TestPod;
+use crate::common::{pod_command, TestRepo};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 #[test]
 fn cp_from_pod_to_host() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-from-pod");
+    let exec = TestExecutor::start("cp-from-pod");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a file inside the pod
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "cp-test",
@@ -27,8 +28,8 @@ fn cp_from_pod_to_host() {
         .expect("failed to create file in pod");
 
     // Copy it out
-    let host_dest = pod.daemon.temp_dir().join("copied.txt");
-    pod_command(&repo, &pod.daemon)
+    let host_dest = exec.daemon.temp_dir().join("copied.txt");
+    pod_command(&repo, &exec.daemon)
         .args([
             "cp",
             "cp-test:/tmp/testfile.txt",
@@ -44,21 +45,22 @@ fn cp_from_pod_to_host() {
 #[test]
 fn cp_from_host_to_pod() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-to-pod");
+    let exec = TestExecutor::start("cp-to-pod");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Ensure pod exists
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args(["enter", "cp-in-test", "--", "true"])
         .success()
         .expect("failed to start pod");
 
     // Write a local file
-    let local_file = pod.daemon.temp_dir().join("upload.txt");
+    let local_file = exec.daemon.temp_dir().join("upload.txt");
     fs::write(&local_file, "hello-from-host\n").expect("failed to write local file");
 
     // Copy it into the pod
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args([
             "cp",
             local_file.to_str().unwrap(),
@@ -68,7 +70,7 @@ fn cp_from_host_to_pod() {
         .expect("rumpel cp to pod failed");
 
     // Verify inside the pod
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "cp-in-test", "--", "cat", "/tmp/upload.txt"])
         .success()
         .expect("failed to read file in pod");
@@ -79,10 +81,11 @@ fn cp_from_host_to_pod() {
 #[test]
 fn cp_no_pod_syntax_fails() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-no-syntax");
+    let exec = TestExecutor::start("cp-no-syntax");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["cp", "/local/a", "/local/b"])
         .output()
         .expect("failed to run rumpel cp");
@@ -100,10 +103,11 @@ fn cp_no_pod_syntax_fails() {
 #[test]
 fn cp_both_pod_syntax_fails() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-both-syntax");
+    let exec = TestExecutor::start("cp-both-syntax");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["cp", "pod1:/a", "pod2:/b"])
         .output()
         .expect("failed to run rumpel cp");
@@ -121,11 +125,12 @@ fn cp_both_pod_syntax_fails() {
 #[test]
 fn cp_directory_from_pod() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-dir-from");
+    let exec = TestExecutor::start("cp-dir-from");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a directory with files inside the pod
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "cp-dir-test",
@@ -138,8 +143,8 @@ fn cp_directory_from_pod() {
         .expect("failed to create directory in pod");
 
     // Copy directory out
-    let host_dest = pod.daemon.temp_dir().join("testdir");
-    pod_command(&repo, &pod.daemon)
+    let host_dest = exec.daemon.temp_dir().join("testdir");
+    pod_command(&repo, &exec.daemon)
         .args([
             "cp",
             "cp-dir-test:/tmp/testdir",
@@ -214,11 +219,12 @@ fn cp_directory_to_pod() {
 #[test]
 fn cp_with_flags() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-flags");
+    let exec = TestExecutor::start("cp-flags");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a file inside the pod
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "cp-flags-test",
@@ -231,8 +237,8 @@ fn cp_with_flags() {
         .expect("failed to create file in pod");
 
     // Copy with -a -L flags
-    let host_dest = daemon.temp_dir().join("flagcopy.txt");
-    pod_command(&repo, &daemon)
+    let host_dest = exec.daemon.temp_dir().join("flagcopy.txt");
+    pod_command(&repo, &exec.daemon)
         .args([
             "cp",
             "-a",
@@ -250,11 +256,12 @@ fn cp_with_flags() {
 #[test]
 fn cp_relative_path_from_pod() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-rel-from");
+    let exec = TestExecutor::start("cp-rel-from");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a file at a path relative to the repo root inside the pod.
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "cp-rel-test",
@@ -267,8 +274,8 @@ fn cp_relative_path_from_pod() {
         .expect("failed to create file in pod");
 
     // Copy it out using a relative container path (no leading /).
-    let host_dest = pod.daemon.temp_dir().join("rel-copied.txt");
-    pod_command(&repo, &pod.daemon)
+    let host_dest = exec.daemon.temp_dir().join("rel-copied.txt");
+    pod_command(&repo, &exec.daemon)
         .args([
             "cp",
             "cp-rel-test:relative-file.txt",
@@ -284,21 +291,22 @@ fn cp_relative_path_from_pod() {
 #[test]
 fn cp_relative_path_to_pod() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-rel-to");
+    let exec = TestExecutor::start("cp-rel-to");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Ensure pod exists
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args(["enter", "cp-rel-in-test", "--", "true"])
         .success()
         .expect("failed to start pod");
 
     // Write a local file
-    let local_file = pod.daemon.temp_dir().join("rel-upload.txt");
+    let local_file = exec.daemon.temp_dir().join("rel-upload.txt");
     fs::write(&local_file, "relative-upload\n").expect("failed to write local file");
 
     // Copy it into the pod using a relative container path
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args([
             "cp",
             local_file.to_str().unwrap(),
@@ -308,7 +316,7 @@ fn cp_relative_path_to_pod() {
         .expect("rumpel cp to pod with relative path failed");
 
     // Verify by reading the file at the expected absolute location
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "cp-rel-in-test", "--", "cat", "rel-upload.txt"])
         .success()
         .expect("failed to read file in pod");
@@ -319,21 +327,22 @@ fn cp_relative_path_to_pod() {
 #[test]
 fn cp_to_pod_owns_files_as_container_user() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "cp-owns");
+    let exec = TestExecutor::start("cp-owns");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Ensure pod exists
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args(["enter", "cp-own-test", "--", "true"])
         .success()
         .expect("failed to start pod");
 
     // Write a local file
-    let local_file = pod.daemon.temp_dir().join("owned.txt");
+    let local_file = exec.daemon.temp_dir().join("owned.txt");
     fs::write(&local_file, "check-owner\n").expect("failed to write local file");
 
     // Copy into the pod (without -a, so chown should kick in)
-    pod_command(&repo, &pod.daemon)
+    pod_command(&repo, &exec.daemon)
         .args([
             "cp",
             local_file.to_str().unwrap(),
@@ -343,7 +352,7 @@ fn cp_to_pod_owns_files_as_container_user() {
         .expect("rumpel cp to pod failed");
 
     // Check the file owner matches the container user
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "cp-own-test",
