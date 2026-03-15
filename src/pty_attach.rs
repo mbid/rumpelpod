@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::trace;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{ClientRequestBuilder, Message, WebSocket};
 
@@ -118,6 +117,8 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
     // indefinitely on read().
     set_read_timeout(&ws, Some(Duration::from_millis(50)))?;
 
+    eprintln!("[Ctrl-a then d to detach]");
+
     // -- Initial resize -------------------------------------------------
 
     if let Ok((cols, rows)) = get_terminal_size() {
@@ -199,7 +200,6 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
             };
 
             let data = &buf[..n];
-            trace!("stdin: read {n} bytes: {data:02x?}");
 
             // Process input through the detach-key state machine.
             let mut to_send = Vec::with_capacity(n + 1);
@@ -207,7 +207,6 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
                 if saw_ctrl_a {
                     saw_ctrl_a = false;
                     if byte == DETACH_SUFFIX {
-                        trace!("detach sequence complete");
                         detached_flag.store(true, Ordering::Relaxed);
                         done_stdin.store(true, Ordering::Relaxed);
                         break;
@@ -221,7 +220,6 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
                         to_send.push(byte);
                     }
                 } else if byte == DETACH_PREFIX {
-                    trace!("detach prefix byte received");
                     saw_ctrl_a = true;
                 } else {
                     to_send.push(byte);
