@@ -33,9 +33,9 @@ fn claude_detach_reattach() {
 
     // -- Second session: reattach and verify Claude is still alive ----
     //
-    // The PTY master doesn't replay past output, so the screen starts
-    // blank. We verify the session is alive by typing new text and
-    // checking that Claude's TUI renders it.
+    // The server sends SIGWINCH on attach, which makes TUI apps
+    // re-render.  We verify the session is alive by typing new text
+    // and checking that Claude's TUI renders it.
 
     let mut session2 = ClaudeSession::spawn(
         &repo,
@@ -45,10 +45,6 @@ fn claude_detach_reattach() {
         "claude-haiku-4-5",
         &[],
     );
-
-    // Force Claude to re-render by sending Ctrl-l (form feed),
-    // which ink/blessed TUI frameworks treat as a redraw request.
-    session2.write_raw(&[0x0c]);
 
     // Verify the session is alive: type new text and check it appears.
     let marker = "reattach_test_42";

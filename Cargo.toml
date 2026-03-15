@@ -32,7 +32,7 @@ json5 = ">= 0"
 notify = ">= 0"
 tokio = { version = ">= 0", features = ["full"] }
 dirs = ">= 0"
-nix = { version = ">= 0", features = ["user", "fs", "process", "term", "ioctl"] }
+nix = { version = ">= 0", features = ["user", "fs", "process", "term", "ioctl", "signal"] }
 chrono = { version = ">= 0", features = ["serde"] }
 libc = ">= 0"
 reflink-copy = ">= 0"

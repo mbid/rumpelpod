@@ -177,16 +177,17 @@ impl PtySessions {
         }
     }
 
-    /// Return a dup'd fd for the master side, suitable for async I/O.
+    /// Return a dup'd fd for the master side, suitable for async I/O,
+    /// plus the child PID (for sending SIGWINCH on reattach).
     /// The original fd stays in the session so the PTY survives detach.
-    async fn attach(&self, name: &str) -> Result<OwnedFd> {
+    async fn attach(&self, name: &str) -> Result<(OwnedFd, Pid)> {
         let sessions = self.inner.lock().await;
         let session = sessions
             .get(name)
             .with_context(|| format!("no such pty session: {name}"))?;
 
         let duped = nix::unistd::dup(&session.master_fd).context("dup master fd")?;
-        Ok(duped)
+        Ok((duped, session.child_pid))
     }
 
     async fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
@@ -308,13 +309,18 @@ const MSG_DATA: u8 = 0x00;
 const MSG_RESIZE: u8 = 0x01;
 
 async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: String) {
-    let master_fd = match sessions.attach(&name).await {
-        Ok(fd) => fd,
+    let (master_fd, child_pid) = match sessions.attach(&name).await {
+        Ok(pair) => pair,
         Err(e) => {
             eprintln!("pty attach failed for '{name}': {e:#}");
             return;
         }
     };
+
+    // Nudge the child to re-render by sending SIGWINCH.  TUI apps
+    // redraw on window-size changes, so this makes the screen appear
+    // immediately after reattach instead of staying blank.
+    let _ = nix::sys::signal::kill(child_pid, nix::sys::signal::Signal::SIGWINCH);
 
     let raw_fd = master_fd.as_raw_fd();
     let async_fd = match AsyncFd::new(master_fd) {
