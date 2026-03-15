@@ -16,6 +16,8 @@ mod delete;
 mod devcontainer;
 #[path = "cli/enter.rs"]
 mod enter;
+#[path = "cli/executor.rs"]
+mod executor;
 #[path = "cli/gateway/mod.rs"]
 mod gateway;
 #[path = "cli/k8s/mod.rs"]

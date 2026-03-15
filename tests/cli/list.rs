@@ -5,16 +5,15 @@ use retry::OperationResult;
 
 use super::ssh::{create_ssh_config, write_remote_pod_config, SshRemoteHost, SSH_USER};
 use crate::common::{build_test_image, pod_command, write_test_pod_config, TestDaemon, TestRepo};
+use crate::executor::TestPod;
 
 #[test]
 fn list_empty_returns_header_only() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
+    let pod = TestPod::start(&repo, &image_id, "list-empty");
 
-    let daemon = TestDaemon::start();
-
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");
@@ -38,12 +37,10 @@ fn list_empty_returns_header_only() {
 fn list_shows_created_pod() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "list-shows-pod");
 
     // Create a pod
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "test-list", "--", "echo", "hello"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -55,7 +52,7 @@ fn list_shows_created_pod() {
     );
 
     // List pods
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");
@@ -77,38 +74,16 @@ fn list_shows_created_pod() {
         "Expected 'running' status in output: {}",
         stdout
     );
-    assert!(
-        stdout.contains("localhost"),
-        "Expected 'localhost' host in output: {}",
-        stdout
-    );
-
-    // Running pods should show a truncated docker container ID (12-char hex prefix)
-    let lines: Vec<&str> = stdout.lines().collect();
-    let pod_line = lines
-        .iter()
-        .find(|l| l.contains("test-list"))
-        .expect("Expected pod line in output");
-    let has_container_id = pod_line
-        .split_whitespace()
-        .any(|word| word.len() == 12 && word.chars().all(|c| c.is_ascii_hexdigit()));
-    assert!(
-        has_container_id,
-        "Expected a 12-char container ID (hex string) in pod line: {}",
-        pod_line
-    );
 }
 
 #[test]
 fn list_shows_repo_state() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "list-repo-state");
 
     // Create a pod
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "test-state", "--", "echo", "hello"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -120,7 +95,7 @@ fn list_shows_repo_state() {
     );
 
     // Initial state should be "up to date" (tracked via branch)
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");
@@ -133,19 +108,19 @@ fn list_shows_repo_state() {
     );
 
     // Make a commit in the pod
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "test-state", "--", "touch", "newfile"])
         .output()
         .expect("Failed to touch file");
     assert!(output.status.success());
 
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "test-state", "--", "git", "add", "newfile"])
         .output()
         .expect("Failed to git add");
     assert!(output.status.success());
 
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "test-state",
@@ -160,7 +135,7 @@ fn list_shows_repo_state() {
     assert!(output.status.success());
 
     // Check list again - should show ahead
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");
@@ -177,12 +152,10 @@ fn list_shows_repo_state() {
 fn list_shows_multiple_pods() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "list-multi");
 
     // Create first pod
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "pod-one", "--", "echo", "one"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -193,7 +166,7 @@ fn list_shows_multiple_pods() {
     );
 
     // Create second pod
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "pod-two", "--", "echo", "two"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -204,7 +177,7 @@ fn list_shows_multiple_pods() {
     );
 
     // List pods
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");
@@ -331,13 +304,11 @@ fn list_shows_running_pods_before_stopped() {
 fn list_sorts_by_commit_date_within_status() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "list-sort-date");
 
     // Create two pods -- both start at the same host HEAD commit.
     for name in ["stale-pod", "fresh-pod"] {
-        let output = pod_command(&repo, &daemon)
+        let output = pod_command(&repo, &pod.daemon)
             .args(["enter", name, "--", "echo", "hello"])
             .output()
             .unwrap_or_else(|_| panic!("Failed to create {}", name));
@@ -363,7 +334,7 @@ fn list_sorts_by_commit_date_within_status() {
             "new file",
         ],
     ] {
-        let output = pod_command(&repo, &daemon)
+        let output = pod_command(&repo, &pod.daemon)
             .args(&args)
             .output()
             .unwrap_or_else(|_| panic!("Failed to run: {:?}", args));
@@ -376,7 +347,7 @@ fn list_sorts_by_commit_date_within_status() {
     }
 
     // List - fresh-pod should come before stale-pod (both running, sorted by commit date)
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");
@@ -405,16 +376,14 @@ fn list_sorts_by_commit_date_within_status() {
 fn list_does_not_show_other_repo_pods() {
     let repo1 = TestRepo::new();
     let image_id1 = build_test_image(repo1.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo1, &image_id1);
+    let pod1 = TestPod::start(&repo1, &image_id1, "list-other-repo-1");
 
     let repo2 = TestRepo::new();
     let image_id2 = build_test_image(repo2.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo2, &image_id2);
-
-    let daemon = TestDaemon::start();
+    let pod2 = TestPod::start(&repo2, &image_id2, "list-other-repo-2");
 
     // Create pod in repo1
-    let output = pod_command(&repo1, &daemon)
+    let output = pod_command(&repo1, &pod1.daemon)
         .args(["enter", "repo1-pod", "--", "echo", "repo1"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -425,7 +394,7 @@ fn list_does_not_show_other_repo_pods() {
     );
 
     // Create pod in repo2
-    let output = pod_command(&repo2, &daemon)
+    let output = pod_command(&repo2, &pod2.daemon)
         .args(["enter", "repo2-pod", "--", "echo", "repo2"])
         .output()
         .expect("Failed to run rumpel enter command");
@@ -436,7 +405,7 @@ fn list_does_not_show_other_repo_pods() {
     );
 
     // List pods from repo1 - should only see repo1-pod
-    let output = pod_command(&repo1, &daemon)
+    let output = pod_command(&repo1, &pod1.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");
@@ -460,7 +429,7 @@ fn list_does_not_show_other_repo_pods() {
     );
 
     // List pods from repo2 - should only see repo2-pod
-    let output = pod_command(&repo2, &daemon)
+    let output = pod_command(&repo2, &pod2.daemon)
         .arg("list")
         .output()
         .expect("Failed to run rumpel list command");

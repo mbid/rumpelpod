@@ -12,16 +12,15 @@ use crate::common::{
     write_test_pod_config_with_user, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
     TEST_USER_UID,
 };
+use crate::executor::{executor_mode, ExecutorMode, TestPod};
 
 #[test]
 fn enter_smoke_test() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
+    let pod = TestPod::start(&repo, &image_id, "enter-smoke");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "test", "--", "echo", "123"])
         .success()
         .expect("rumpel enter failed");
@@ -34,19 +33,17 @@ fn enter_smoke_test() {
 fn enter_twice_sequentially() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "enter-twice");
 
     // First enter
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "test", "--", "echo", "first"])
         .success()
         .expect("first rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "first");
 
     // Second enter - should reuse the existing pod
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "test", "--", "echo", "second"])
         .success()
         .expect("second rumpel enter failed");
@@ -55,6 +52,10 @@ fn enter_twice_sequentially() {
 
 #[test]
 fn enter_from_subdir_uses_same_container() {
+    if matches!(executor_mode(), ExecutorMode::K8s) {
+        // k8s pods don't mirror the host directory structure
+        return;
+    }
     // Entering a pod from the repo root vs a subdirectory should result in
     // the same container (we detect the git repo root).
     let repo = TestRepo::new();
@@ -64,12 +65,10 @@ fn enter_from_subdir_uses_same_container() {
     fs::create_dir_all(&subdir).expect("Failed to create subdirectory");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "enter-subdir-same");
 
     // Enter from repo root and create a marker file
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "subdir-test",
@@ -82,7 +81,7 @@ fn enter_from_subdir_uses_same_container() {
         .expect("rumpel enter from repo root failed");
 
     // Enter from subdirectory and verify the marker file exists
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .current_dir(&subdir)
         .args([
             "enter",
@@ -151,12 +150,10 @@ fn enter_verifies_user_and_repo_path() {
     // Verify that the standard test image runs as the expected user and in the expected directory
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "enter-verify");
 
     // Verify running as the configured user
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "verify-test", "--", "whoami"])
         .success()
         .expect("rumpel enter failed");
@@ -171,7 +168,7 @@ fn enter_verifies_user_and_repo_path() {
     );
 
     // Verify working directory is repo-path
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "verify-test", "--", "pwd"])
         .success()
         .expect("rumpel enter failed");
@@ -188,6 +185,10 @@ fn enter_verifies_user_and_repo_path() {
 
 #[test]
 fn enter_subdir_workdir_is_relative() {
+    if matches!(executor_mode(), ExecutorMode::K8s) {
+        // k8s pods don't mirror the host directory structure
+        return;
+    }
     // Verify that entering from a subdirectory sets workdir relative to repo-path
     let repo = TestRepo::new();
 
@@ -196,12 +197,10 @@ fn enter_subdir_workdir_is_relative() {
     fs::create_dir_all(&subdir).expect("Failed to create subdirectory");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "enter-subdir-wd");
 
     // Enter from subdir - should use TEST_REPO_PATH/subdir as workdir
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .current_dir(&subdir)
         .args(["enter", "subdir-test", "--", "pwd"])
         .success()
@@ -224,12 +223,10 @@ fn enter_uses_image_user_when_not_specified_in_config() {
     // image's USER directive.
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "enter-image-user");
 
     // Verify running as the user from the image's USER directive
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "image-user-test", "--", "whoami"])
         .success()
         .expect("rumpel enter failed");
@@ -344,24 +341,33 @@ fn enter_allows_explicit_root_user_in_config() {
 #[test]
 fn enter_sets_hostname_to_pod_name() {
     // The container's hostname should be set to the pod name.
+    // On k8s the hostname is the k8s pod name, not the rumpelpod pod name.
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
+    let pod = TestPod::start(&repo, &image_id, "enter-hostname");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "my-pod", "--", "hostname"])
         .success()
         .expect("rumpel enter failed");
 
-    let stdout = String::from_utf8_lossy(&stdout);
-    assert_eq!(
-        stdout.trim(),
-        "my-pod",
-        "Hostname should be the pod name, got: {}",
-        stdout.trim()
-    );
+    let hostname = String::from_utf8_lossy(&stdout).trim().to_string();
+    if matches!(
+        crate::executor::executor_mode(),
+        crate::executor::ExecutorMode::K8s
+    ) {
+        assert!(
+            hostname.contains("my-pod"),
+            "K8s hostname should contain the pod name, got: {}",
+            hostname,
+        );
+    } else {
+        assert_eq!(
+            hostname, "my-pod",
+            "Hostname should be the pod name, got: {}",
+            hostname,
+        );
+    }
 }
 
 #[test]
@@ -408,11 +414,9 @@ fn enter_forwards_piped_stdin() {
     // Piped stdin must reach the command running inside the container.
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
+    let pod = TestPod::start(&repo, &image_id, "enter-stdin");
 
-    let daemon = TestDaemon::start();
-
-    let mut cmd = pod_command(&repo, &daemon);
+    let mut cmd = pod_command(&repo, &pod.daemon);
     cmd.args(["enter", "stdin-test", "--", "cat"]);
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -443,7 +447,6 @@ fn enter_forwards_piped_stdin() {
 fn enter_propagates_host_git_identity() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
 
     // Change host identity after building the image so the pod can only get
     // these values via propagation, not from the baked-in .git/config.
@@ -458,9 +461,9 @@ fn enter_propagates_host_git_identity() {
         .success()
         .expect("git config user.email failed");
 
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "enter-git-id");
 
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "git-id-test", "--", "git", "config", "user.name"])
         .success()
         .expect("rumpel enter failed");
@@ -472,7 +475,7 @@ fn enter_propagates_host_git_identity() {
         stdout.trim()
     );
 
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "git-id-test", "--", "git", "config", "user.email"])
         .success()
         .expect("rumpel enter failed");
@@ -489,12 +492,10 @@ fn enter_propagates_host_git_identity() {
 fn enter_updates_git_identity_on_reentry() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "enter-reentry-id");
 
     // First enter creates the container with the original identity.
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "reentry-id-test", "--", "echo", "setup"])
         .success()
         .expect("first enter failed");
@@ -512,7 +513,7 @@ fn enter_updates_git_identity_on_reentry() {
         .expect("git config user.email failed");
 
     // Re-entry should propagate the new identity.
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "reentry-id-test",
@@ -531,7 +532,7 @@ fn enter_updates_git_identity_on_reentry() {
         stdout.trim()
     );
 
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "reentry-id-test",

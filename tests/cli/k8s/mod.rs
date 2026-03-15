@@ -23,13 +23,13 @@ use crate::common::{
 };
 
 /// Cluster configuration read from environment variables.
-struct K8sClusterConfig {
-    context: String,
-    push_registry: String,
-    pull_registry: String,
+pub(super) struct K8sClusterConfig {
+    pub(super) context: String,
+    pub(super) push_registry: String,
+    pub(super) pull_registry: String,
 }
 
-fn k8s_cluster_config() -> K8sClusterConfig {
+pub(super) fn k8s_cluster_config() -> K8sClusterConfig {
     let context = std::env::var("RUMPELPOD_TEST_K8S_CONTEXT")
         .expect("RUMPELPOD_TEST_K8S_CONTEXT must be set to run k8s tests");
     let push_registry = std::env::var("RUMPELPOD_TEST_PUSH_REGISTRY")
@@ -45,7 +45,7 @@ fn k8s_cluster_config() -> K8sClusterConfig {
 
 /// Push a locally-built image to the test registry and return the
 /// pull reference (pull_registry/tag) for use in pod specs.
-fn push_image(cluster: &K8sClusterConfig, image_id: &ImageId, tag: &str) -> String {
+pub(super) fn push_image(cluster: &K8sClusterConfig, image_id: &ImageId, tag: &str) -> String {
     let push_ref = format!("{}/{}", cluster.push_registry, tag);
     Command::new("docker")
         .args(["tag", &image_id.to_string(), &push_ref])
@@ -59,13 +59,13 @@ fn push_image(cluster: &K8sClusterConfig, image_id: &ImageId, tag: &str) -> Stri
 }
 
 /// Per-test namespace that is automatically deleted on drop.
-struct K8sNamespace {
-    name: String,
+pub(super) struct K8sNamespace {
+    pub(super) name: String,
     context: String,
 }
 
 impl K8sNamespace {
-    fn new(cluster: &K8sClusterConfig, test_name: &str) -> Self {
+    pub(super) fn new(cluster: &K8sClusterConfig, test_name: &str) -> Self {
         let suffix = format!("{:06x}", rand::random::<u32>() & 0x00ff_ffff);
 
         let sanitized: String = test_name
@@ -120,7 +120,7 @@ impl Drop for K8sNamespace {
 ///
 /// `extra_json` is spliced into the devcontainer.json object, e.g.
 /// `r#""mounts": [{"type":"volume","source":"tv","target":"/data"}]"#`.
-fn write_k8s_pod_config_with_extras(
+pub(super) fn write_k8s_pod_config_with_extras(
     repo: &TestRepo,
     cluster: &K8sClusterConfig,
     pull_ref: &str,
@@ -164,7 +164,7 @@ fn write_k8s_pod_config_with_extras(
 }
 
 /// Write devcontainer.json and .rumpelpod.toml for a k8s test.
-fn write_k8s_pod_config(
+pub(super) fn write_k8s_pod_config(
     repo: &TestRepo,
     cluster: &K8sClusterConfig,
     pull_ref: &str,
