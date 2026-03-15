@@ -59,7 +59,8 @@ pub fn run_container_server(port: u16, token: String) -> ! {
 
     let app = Router::new()
         .route("/health", get(health_handler))
-        .merge(authenticated_routes);
+        .merge(authenticated_routes)
+        .layer(tower_http::compression::CompressionLayer::new());
 
     block_on(async {
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
@@ -864,49 +865,42 @@ async fn cp_download_handler(
         .await
         .expect("cp_download_impl panicked");
     match result {
-        Ok((data, is_dir)) => Ok(axum::response::Response::builder()
-            .header("X-Is-Dir", if is_dir { "true" } else { "false" })
-            .header("Content-Type", "application/gzip")
+        Ok(data) => Ok(axum::response::Response::builder()
+            .header("Content-Type", "application/x-tar")
             .body(axum::body::Body::from(data))
             .unwrap()),
         Err(e) => Err(err_json(e)),
     }
 }
 
-fn cp_download_impl(req: CpDownloadRequest) -> Result<(Vec<u8>, bool)> {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
-
+fn cp_download_impl(req: CpDownloadRequest) -> Result<Vec<u8>> {
     let path = &req.path;
     let path_display = path.display();
 
     let buf = Vec::new();
-    let encoder = GzEncoder::new(buf, Compression::fast());
-    let mut archive = tar::Builder::new(encoder);
+    let mut archive = tar::Builder::new(buf);
     archive.follow_symlinks(req.follow_symlinks);
 
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path_display}"))?;
-    let is_dir = meta.is_dir();
 
-    if is_dir {
+    let name = path
+        .file_name()
+        .with_context(|| format!("no file name in {path_display}"))?;
+    let wrapper_name = Path::new("_").join(name);
+
+    if meta.is_dir() {
         archive
-            .append_dir_all(".", path)
+            .append_dir_all(&wrapper_name, path)
             .with_context(|| format!("archiving directory {path_display}"))?;
     } else {
-        let name = path
-            .file_name()
-            .with_context(|| format!("no file name in {path_display}"))?;
         archive
-            .append_path_with_name(path, name)
+            .append_path_with_name(path, &wrapper_name)
             .with_context(|| format!("archiving file {path_display}"))?;
     }
 
-    let encoder = archive
+    archive
         .into_inner()
-        .with_context(|| format!("finalizing tar for {path_display}"))?;
-    let compressed = encoder.finish().context("finishing gzip")?;
-
-    Ok((compressed, is_dir))
+        .with_context(|| format!("finalizing tar for {path_display}"))
 }
 
 async fn cp_upload_handler(
@@ -922,44 +916,58 @@ async fn cp_upload_handler(
         .get("X-Owner")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    let is_dir = headers.get("X-Is-Dir").and_then(|v| v.to_str().ok()) == Some("true");
 
     let data = body.to_vec();
     let result =
-        tokio::task::spawn_blocking(move || cp_upload_impl(&path, &data, owner.as_deref(), is_dir))
+        tokio::task::spawn_blocking(move || cp_upload_impl(&path, &data, owner.as_deref()))
             .await
             .expect("cp_upload_impl panicked");
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn cp_upload_impl(path: &Path, data: &[u8], owner: Option<&str>, is_dir: bool) -> Result<()> {
-    use flate2::read::GzDecoder;
+fn cp_upload_impl(path: &Path, data: &[u8], owner: Option<&str>) -> Result<()> {
+    let path_display = path.display();
 
-    let decoder = GzDecoder::new(data);
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = tar::Archive::new(data);
+    for entry in archive
+        .entries()
+        .with_context(|| format!("reading tar entries for {path_display}"))?
+    {
+        let mut entry = entry.with_context(|| format!("reading tar entry for {path_display}"))?;
+        let entry_path = entry.path().context("reading entry path")?.into_owned();
 
-    // For directories the archive contents go directly into path.
-    // For files the archive contains a single named entry; extract
-    // into the parent so the entry name lands at path.
-    let extract_dir = if is_dir {
-        path.to_path_buf()
-    } else {
-        path.parent().unwrap_or(Path::new("/")).to_path_buf()
-    };
+        let relative = match entry_path.strip_prefix("_") {
+            Ok(r) if !r.as_os_str().is_empty() => r,
+            _ => continue,
+        };
 
-    let extract_dir_display = extract_dir.display();
-    std::fs::create_dir_all(&extract_dir)
-        .with_context(|| format!("creating destination {extract_dir_display}"))?;
+        let mut components = relative.components();
+        components.next();
+        let rest: PathBuf = components.collect();
 
-    archive
-        .unpack(&extract_dir)
-        .with_context(|| format!("extracting archive to {extract_dir_display}"))?;
+        let target = if rest.as_os_str().is_empty() {
+            path.to_path_buf()
+        } else {
+            path.join(&rest)
+        };
+
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&target).with_context(|| format!("creating {path_display}"))?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent for {path_display}"))?;
+            }
+            let target_display = target.display();
+            entry
+                .unpack(&target)
+                .with_context(|| format!("extracting to {target_display}"))?;
+        }
+    }
 
     if let Some(owner) = owner {
-        let target_display = path.display();
-        chown_recursive(path, owner)
-            .with_context(|| format!("chown {target_display} to {owner}"))?;
+        chown_recursive(path, owner).with_context(|| format!("chown {path_display} to {owner}"))?;
     }
 
     Ok(())

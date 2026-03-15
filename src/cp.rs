@@ -79,77 +79,88 @@ fn container_repo_path() -> Result<PathBuf> {
     Ok(devcontainer.container_repo_path(&repo_root))
 }
 
-/// Create a gzip-compressed tar archive of a local path.
-/// Returns `(archive_bytes, is_dir)`.
-fn tar_local_path(local_path: &str, follow_symlinks: bool) -> Result<(Vec<u8>, bool)> {
-    use flate2::write::GzEncoder;
-    use flate2::Compression;
-
+/// Create a tar archive of a local path.
+///
+/// The archive always has a single top-level entry under the wrapper
+/// directory `_/`: either `_/<filename>` for a file, or `_/<dirname>/...`
+/// for a directory. This lets the receiver distinguish files from
+/// directories by inspecting the tar structure without out-of-band metadata.
+/// Compression is handled at the HTTP layer via Content-Encoding.
+fn tar_local_path(local_path: &str, follow_symlinks: bool) -> Result<Vec<u8>> {
     let path = Path::new(local_path);
     let path_display = path.display();
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path_display}"))?;
-    let is_dir = meta.is_dir();
 
     let buf = Vec::new();
-    let encoder = GzEncoder::new(buf, Compression::fast());
-    let mut archive = tar::Builder::new(encoder);
+    let mut archive = tar::Builder::new(buf);
     archive.follow_symlinks(follow_symlinks);
 
-    if is_dir {
+    let name = path
+        .file_name()
+        .with_context(|| format!("no file name in {path_display}"))?;
+    let wrapper_name = Path::new("_").join(name);
+
+    if meta.is_dir() {
         archive
-            .append_dir_all(".", path)
+            .append_dir_all(&wrapper_name, path)
             .with_context(|| format!("archiving directory {path_display}"))?;
     } else {
-        let name = path
-            .file_name()
-            .with_context(|| format!("no file name in {path_display}"))?;
         archive
-            .append_path_with_name(path, name)
+            .append_path_with_name(path, &wrapper_name)
             .with_context(|| format!("archiving file {path_display}"))?;
     }
 
-    let encoder = archive
+    archive
         .into_inner()
-        .with_context(|| format!("finalizing tar for {path_display}"))?;
-    let compressed = encoder.finish().context("finishing gzip")?;
-    Ok((compressed, is_dir))
+        .with_context(|| format!("finalizing tar for {path_display}"))
 }
 
-/// Extract a gzip-compressed tar archive to a local path.
+/// Extract a tar archive to a local path.
 ///
-/// `is_dir`: whether the archive represents a directory. When true the
-/// archive contents are extracted directly into `local_path`. When false
-/// the archive contains a single file which is written to `local_path`
-/// regardless of what the entry inside the archive is named.
-fn untar_to_local(archive_data: &[u8], local_path: &str, is_dir: bool) -> Result<()> {
-    use flate2::read::GzDecoder;
-
+/// Expects the wrapper format produced by `tar_local_path` /
+/// `cp_download_impl`: every entry lives under `_/<name>/...` or is
+/// `_/<name>` for a single file. The first path component (`_`) and
+/// the second (`<name>`) are stripped, and remaining paths are placed
+/// under `local_path`.
+fn untar_to_local(archive_data: &[u8], local_path: &str) -> Result<()> {
     let dest = Path::new(local_path);
     let dest_display = dest.display();
 
-    if is_dir {
-        std::fs::create_dir_all(dest)
-            .with_context(|| format!("creating destination {dest_display}"))?;
-        let decoder = GzDecoder::new(archive_data);
-        let mut archive = tar::Archive::new(decoder);
-        archive
-            .unpack(dest)
-            .with_context(|| format!("extracting archive to {dest_display}"))?;
-    } else {
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating parent for {dest_display}"))?;
+    let mut archive = tar::Archive::new(archive_data);
+    for entry in archive.entries().context("reading tar entries")? {
+        let mut entry = entry.context("reading tar entry")?;
+        let path = entry.path().context("reading entry path")?.into_owned();
+
+        // Strip the `_/` wrapper prefix; skip the wrapper dir entry itself.
+        let relative = match path.strip_prefix("_") {
+            Ok(r) if !r.as_os_str().is_empty() => r,
+            _ => continue,
+        };
+
+        // Strip the content name (file name or directory name), leaving
+        // the path relative to the destination.
+        let mut components = relative.components();
+        components.next();
+        let rest: PathBuf = components.collect();
+
+        let target = if rest.as_os_str().is_empty() {
+            dest.to_path_buf()
+        } else {
+            dest.join(&rest)
+        };
+
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&target).with_context(|| format!("creating {dest_display}"))?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating parent for {dest_display}"))?;
+            }
+            let target_display = target.display();
+            entry
+                .unpack(&target)
+                .with_context(|| format!("extracting to {target_display}"))?;
         }
-        let decoder = GzDecoder::new(archive_data);
-        let mut archive = tar::Archive::new(decoder);
-        let mut entries = archive.entries().context("reading tar entries")?;
-        let mut entry = entries
-            .next()
-            .context("archive is empty")?
-            .context("reading tar entry")?;
-        entry
-            .unpack(dest)
-            .with_context(|| format!("extracting to {dest_display}"))?;
     }
 
     Ok(())
@@ -174,8 +185,8 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
             ..
         } => {
             let resolved = resolve_container_path(container_path, &repo_path);
-            let (archive, is_dir) = client.cp_download(Path::new(&resolved), cmd.follow_link)?;
-            untar_to_local(&archive, local_path, is_dir)?;
+            let archive = client.cp_download(Path::new(&resolved), cmd.follow_link)?;
+            untar_to_local(&archive, local_path)?;
         }
         CopyDirection::ToPod {
             local_path,
@@ -183,13 +194,13 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
             ..
         } => {
             let resolved = resolve_container_path(container_path, &repo_path);
-            let (archive, is_dir) = tar_local_path(local_path, cmd.follow_link)?;
+            let archive = tar_local_path(local_path, cmd.follow_link)?;
             let owner = if cmd.archive {
                 None
             } else {
                 Some(result.user.as_str())
             };
-            client.cp_upload(Path::new(&resolved), &archive, owner, is_dir)?;
+            client.cp_upload(Path::new(&resolved), &archive, owner)?;
         }
     }
 
@@ -280,11 +291,10 @@ mod tests {
         let src = dir.path().join("test.txt");
         std::fs::write(&src, "hello").unwrap();
 
-        let (archive, is_dir) = tar_local_path(src.to_str().unwrap(), false).unwrap();
-        assert!(!is_dir);
+        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
 
         let dest = dir.path().join("out.txt");
-        untar_to_local(&archive, dest.to_str().unwrap(), is_dir).unwrap();
+        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
 
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello");
     }
@@ -297,11 +307,10 @@ mod tests {
         std::fs::write(src.join("a.txt"), "aaa").unwrap();
         std::fs::write(src.join("b.txt"), "bbb").unwrap();
 
-        let (archive, is_dir) = tar_local_path(src.to_str().unwrap(), false).unwrap();
-        assert!(is_dir);
+        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
 
         let dest = dir.path().join("destdir");
-        untar_to_local(&archive, dest.to_str().unwrap(), is_dir).unwrap();
+        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
 
         assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "aaa");
         assert_eq!(std::fs::read_to_string(dest.join("b.txt")).unwrap(), "bbb");
@@ -314,11 +323,10 @@ mod tests {
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("only.txt"), "content").unwrap();
 
-        let (archive, is_dir) = tar_local_path(src.to_str().unwrap(), false).unwrap();
-        assert!(is_dir);
+        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
 
         let dest = dir.path().join("out");
-        untar_to_local(&archive, dest.to_str().unwrap(), is_dir).unwrap();
+        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dest.join("only.txt")).unwrap(),

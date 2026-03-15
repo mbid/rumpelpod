@@ -33,6 +33,7 @@ impl PodClient {
     pub fn new(url: &str, token: &str) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(None)
+            .gzip(true)
             .build()
             .expect("failed to build reqwest client");
         let pod = Self {
@@ -293,9 +294,12 @@ impl PodClient {
     // Copy (tar-based file transfer)
     // -------------------------------------------------------------------
 
-    /// Download a file or directory from the container as a gzip-compressed tar archive.
-    /// Returns `(archive_bytes, is_dir)`.
-    pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<(Vec<u8>, bool)> {
+    /// Download a file or directory from the container as a tar archive.
+    ///
+    /// The archive uses the wrapper format (`_/<name>/...`) so the caller
+    /// can distinguish files from directories by inspecting the tar entries.
+    /// Compression is handled transparently at the HTTP layer.
+    pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<Vec<u8>> {
         let base = &self.url;
         let token = &self.token;
         let url = format!("{base}/cp/download");
@@ -318,26 +322,17 @@ impl PodClient {
             return Err(anyhow::anyhow!("/cp/download: {err}"));
         }
 
-        let is_dir = response
-            .headers()
-            .get("X-Is-Dir")
-            .and_then(|v| v.to_str().ok())
-            == Some("true");
         let data = response
             .bytes()
             .context("reading download response body")?
             .to_vec();
-        Ok((data, is_dir))
+        Ok(data)
     }
 
-    /// Upload a gzip-compressed tar archive and extract it at `path` in the container.
-    pub fn cp_upload(
-        &self,
-        path: &Path,
-        archive: &[u8],
-        owner: Option<&str>,
-        is_dir: bool,
-    ) -> Result<()> {
+    /// Upload a tar archive and extract it at `path` in the container.
+    ///
+    /// The archive must use the wrapper format (`_/<name>/...`).
+    pub fn cp_upload(&self, path: &Path, archive: &[u8], owner: Option<&str>) -> Result<()> {
         let base = &self.url;
         let token = &self.token;
         let url = format!("{base}/cp/upload");
@@ -346,9 +341,8 @@ impl PodClient {
             .client
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .header("Content-Type", "application/gzip")
-            .header("X-Path", format!("{path_display}"))
-            .header("X-Is-Dir", if is_dir { "true" } else { "false" });
+            .header("Content-Type", "application/x-tar")
+            .header("X-Path", format!("{path_display}"));
         if let Some(owner) = owner {
             req = req.header("X-Owner", owner);
         }
