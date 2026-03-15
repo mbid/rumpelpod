@@ -2,7 +2,8 @@ use indoc::{formatdoc, indoc};
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::TestPod;
 
 fn write_devcontainer_with_env(repo: &TestRepo, env_config: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
@@ -37,25 +38,14 @@ fn write_devcontainer_with_env(repo: &TestRepo, env_config: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_pod_toml(repo: &TestRepo) {
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 #[test]
 fn container_env_simple() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "simple_value" }"#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "env-simple");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "env-simple", "--", "printenv", "MY_VAR"])
         .success()
         .expect("rumpel enter failed");
@@ -69,12 +59,10 @@ fn container_env_local_substitution() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_env(&repo, r#"{ "HOST_VAR": "${localEnv:TEST_HOST_VAR}" }"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "env-subst");
 
     // Set the environment variable in the command process
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .env("TEST_HOST_VAR", "secret_value")
         .args(["enter", "env-subst", "--", "printenv", "HOST_VAR"])
         .success()
@@ -92,11 +80,9 @@ fn container_env_local_substitution_missing() {
         &repo,
         r#"{ "MISSING_VAR": "${localEnv:NON_EXISTENT_VAR}" }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "env-missing");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "env-missing", "--", "printenv", "MISSING_VAR"])
         .success()
         .expect("rumpel enter failed");
@@ -111,16 +97,14 @@ fn container_env_mixed() {
 
     write_devcontainer_with_env(
         &repo,
-        r#"{ 
-        "STATIC": "static", 
+        r#"{
+        "STATIC": "static",
         "DYNAMIC": "${localEnv:TEST_DYNAMIC}"
     }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "env-mixed");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .env("TEST_DYNAMIC", "dynamic")
         .args([
             "enter",
@@ -143,12 +127,10 @@ fn container_env_recreate() {
 
     // Initial config
     write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "value1" }"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "recreate-env");
 
     // First enter
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "recreate-env", "--", "printenv", "MY_VAR"])
         .success()
         .expect("rumpel enter failed");
@@ -158,13 +140,13 @@ fn container_env_recreate() {
     write_devcontainer_with_env(&repo, r#"{ "MY_VAR": "value2" }"#);
 
     // Recreate
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["recreate", "recreate-env"])
         .success()
         .expect("pod recreate failed");
 
     // Verify new env var
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "recreate-env", "--", "printenv", "MY_VAR"])
         .success()
         .expect("rumpel enter failed");
@@ -223,11 +205,9 @@ fn env_file_basic() {
     .expect("Failed to write .env");
 
     write_devcontainer_with_env_file(&repo, r#""--env-file", ".env""#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "env-file-basic");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "env-file-basic",
@@ -263,11 +243,9 @@ fn env_file_comments_and_blanks() {
     .expect("Failed to write .env");
 
     write_devcontainer_with_env_file(&repo, r#""--env-file", ".env""#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "env-file-comments");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "env-file-comments",
@@ -290,11 +268,9 @@ fn env_file_equals_form() {
     fs::write(repo.path().join(".env"), "EQ_VAR=from_equals\n").expect("Failed to write .env");
 
     write_devcontainer_with_env_file(&repo, r#""--env-file=.env""#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "env-file-eq");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "env-file-eq", "--", "printenv", "EQ_VAR"])
         .success()
         .expect("rumpel enter failed");
@@ -352,11 +328,9 @@ fn env_file_merged_with_container_env() {
     )
     .expect("Failed to write devcontainer.json");
 
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "env-file-merge");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "env-file-merge",

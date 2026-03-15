@@ -7,7 +7,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
 use super::common::{llm_cache_dir, setup_test_repo, DEFAULT_MODEL};
-use crate::common::TestDaemon;
+use crate::executor::TestPod;
 
 /// Create a mock editor that just touches a marker file and exits.
 fn create_marker_mock_editor(script_dir: &Path, marker_file: &Path) -> PathBuf {
@@ -30,8 +30,8 @@ fn create_marker_mock_editor(script_dir: &Path, marker_file: &Path) -> PathBuf {
 
 #[test]
 fn test_editor_opens_immediately() {
-    let repo = setup_test_repo();
-    let daemon = TestDaemon::start();
+    let (repo, image_id) = setup_test_repo();
+    let pod = TestPod::start(&repo, &image_id, "agent-startup");
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let marker_file = temp_dir.path().join("editor-ran");
     let editor_path = create_marker_mock_editor(temp_dir.path(), &marker_file);
@@ -51,7 +51,7 @@ fn test_editor_opens_immediately() {
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",
-        daemon.socket_path.to_str().unwrap(),
+        pod.daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
 

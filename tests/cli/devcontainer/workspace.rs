@@ -7,7 +7,8 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::TestPod;
 
 /// Write a devcontainer.json with a Dockerfile that installs git and creates
 /// the test user.  `extra_config` is spliced into the JSON object so callers
@@ -43,15 +44,6 @@ fn write_devcontainer(repo: &TestRepo, extra_config: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_pod_toml(repo: &TestRepo) {
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 /// Without an explicit workspaceFolder the spec default is
 /// `/workspaces/<basename>`.  Verify the container's working directory
 /// matches that convention.
@@ -59,13 +51,12 @@ fn write_minimal_pod_toml(repo: &TestRepo) {
 fn workspace_folder_default() {
     let repo = TestRepo::new();
 
-    // No workspaceFolder in config — should fall back to /workspaces/<basename>
+    // No workspaceFolder in config -- should fall back to /workspaces/<basename>
     write_devcontainer(&repo, "");
-    write_minimal_pod_toml(&repo);
 
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "ws-default");
 
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "ws-default", "--", "pwd"])
         .success()
         .expect("rumpel enter should succeed with default workspaceFolder");
@@ -90,11 +81,10 @@ fn workspace_folder_custom() {
         r#",
             "workspaceFolder": "/custom/path""#,
     );
-    write_minimal_pod_toml(&repo);
 
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "ws-custom");
 
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "ws-custom", "--", "pwd"])
         .success()
         .expect("rumpel enter should succeed with custom workspaceFolder");
@@ -117,11 +107,10 @@ fn workspace_folder_repo_initialized() {
         &formatdoc! {r#",
         "workspaceFolder": "{TEST_REPO_PATH}""#},
     );
-    write_minimal_pod_toml(&repo);
 
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "ws-repo-init");
 
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "ws-repo-init",

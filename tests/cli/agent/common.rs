@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use crate::common::{build_test_image, write_test_pod_config, TestDaemon, TestRepo};
+use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo};
 
 /// Default model for tests that don't depend on provider-specific behavior.
 /// Using Haiku as it's the fastest and cheapest option.
@@ -58,12 +58,12 @@ pub fn run_agent_with_prompt_and_model(
     run_agent_interactive_model_and_args(repo, daemon, &[prompt], model, &[])
 }
 
-/// Set up a basic test repo with pod config.
-pub fn setup_test_repo() -> TestRepo {
+/// Set up a basic test repo and build its image.
+/// Returns both the repo and image_id so the caller can pass them to TestPod::start.
+pub fn setup_test_repo() -> (TestRepo, ImageId) {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-    repo
+    (repo, image_id)
 }
 
 /// Create a mock editor script that saves original content for verification

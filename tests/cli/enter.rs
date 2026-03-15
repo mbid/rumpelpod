@@ -12,7 +12,7 @@ use crate::common::{
     write_test_pod_config_with_user, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
     TEST_USER_UID,
 };
-use crate::executor::{executor_mode, ExecutorMode, TestPod};
+use crate::executor::TestPod;
 
 #[test]
 fn enter_smoke_test() {
@@ -52,10 +52,6 @@ fn enter_twice_sequentially() {
 
 #[test]
 fn enter_from_subdir_uses_same_container() {
-    if matches!(executor_mode(), ExecutorMode::K8s) {
-        // k8s pods don't mirror the host directory structure
-        return;
-    }
     // Entering a pod from the repo root vs a subdirectory should result in
     // the same container (we detect the git repo root).
     let repo = TestRepo::new();
@@ -185,10 +181,6 @@ fn enter_verifies_user_and_repo_path() {
 
 #[test]
 fn enter_subdir_workdir_is_relative() {
-    if matches!(executor_mode(), ExecutorMode::K8s) {
-        // k8s pods don't mirror the host directory structure
-        return;
-    }
     // Verify that entering from a subdirectory sets workdir relative to repo-path
     let repo = TestRepo::new();
 

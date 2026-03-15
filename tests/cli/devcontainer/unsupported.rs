@@ -4,7 +4,8 @@ use std::fs;
 
 use indoc::formatdoc;
 
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::TestPod;
 
 /// Write a Dockerfile and devcontainer.json where `extra_fields` is injected
 /// as additional top-level JSON properties (include leading comma).
@@ -40,15 +41,6 @@ fn write_devcontainer_with_unsupported(repo: &TestRepo, extra_fields: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_pod_toml(repo: &TestRepo) {
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 #[test]
 fn warns_on_workspace_mount() {
     let repo = TestRepo::new();
@@ -58,11 +50,9 @@ fn warns_on_workspace_mount() {
         r#",
             "workspaceMount": "source=/host/path,target=/workspace,type=bind""#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "unsup-wsmount");
 
-    let daemon = TestDaemon::start();
-
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "unsupported-wsmount", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -83,11 +73,9 @@ fn warns_on_app_port() {
         r#",
             "appPort": [3000, 8080]"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "unsup-appport");
 
-    let daemon = TestDaemon::start();
-
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "unsupported-appport", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -108,11 +96,9 @@ fn warns_on_docker_compose_file() {
         r#",
             "dockerComposeFile": "docker-compose.yml""#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "unsup-compose");
 
-    let daemon = TestDaemon::start();
-
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "unsupported-compose", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -136,11 +122,9 @@ fn warns_on_multiple_unsupported() {
             "service": "web",
             "runServices": ["web", "db"]"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "unsup-multi");
 
-    let daemon = TestDaemon::start();
-
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "unsupported-multi", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -173,11 +157,9 @@ fn warns_on_initialize_command() {
         r#",
             "initializeCommand": "echo hello""#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "unsup-initcmd");
 
-    let daemon = TestDaemon::start();
-
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "unsupported-initcmd", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -200,11 +182,9 @@ fn warns_on_features() {
                 "ghcr.io/devcontainers/features/node:1": { "version": "20" }
             }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "unsup-features");
 
-    let daemon = TestDaemon::start();
-
-    let output = pod_command(&repo, &daemon)
+    let output = pod_command(&repo, &pod.daemon)
         .args(["enter", "unsupported-features", "--", "true"])
         .output()
         .expect("Failed to run pod command");

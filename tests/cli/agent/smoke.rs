@@ -5,12 +5,13 @@ use std::process::Command;
 
 use rumpelpod::CommandExt;
 
-use crate::common::{build_test_image, create_commit, write_test_pod_config, TestDaemon, TestRepo};
+use crate::common::{build_test_image, create_commit, TestRepo};
+use crate::executor::TestPod;
 
 use super::common::run_agent_with_prompt_and_model;
 
 // This is used as smoke test and executed with every explicitly supported model.
-fn agent_reads_file(model: &str) {
+fn agent_reads_file(model: &str, test_name: &str) {
     let repo = TestRepo::new();
 
     let secret_content = "AGENT_SECRET_12345";
@@ -24,13 +25,11 @@ fn agent_reads_file(model: &str) {
     create_commit(repo.path(), "Add secret");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, test_name);
 
     let output = run_agent_with_prompt_and_model(
         &repo,
-        &daemon,
+        &pod.daemon,
         "Run `cat secret.txt` and tell me what it contains.",
         model,
     );
@@ -44,40 +43,40 @@ fn agent_reads_file(model: &str) {
 
 #[test]
 fn agent_reads_file_claude_haiku_4_5() {
-    agent_reads_file("claude-haiku-4-5");
+    agent_reads_file("claude-haiku-4-5", "agent-smoke-haiku");
 }
 
 #[test]
 fn agent_reads_file_claude_sonnet_4_5() {
-    agent_reads_file("claude-sonnet-4-5");
+    agent_reads_file("claude-sonnet-4-5", "agent-smoke-sonnet");
 }
 
 #[test]
 fn agent_reads_file_claude_opus_4_5() {
-    agent_reads_file("claude-opus-4-5");
+    agent_reads_file("claude-opus-4-5", "agent-smoke-opus45");
 }
 
 #[test]
 fn agent_reads_file_claude_opus_4_6() {
-    agent_reads_file("claude-opus-4-6");
+    agent_reads_file("claude-opus-4-6", "agent-smoke-opus46");
 }
 
 #[test]
 fn agent_reads_file_grok_4_1_fast_reasoning() {
-    agent_reads_file("grok-4-1-fast-reasoning");
+    agent_reads_file("grok-4-1-fast-reasoning", "agent-smoke-grok");
 }
 
 #[test]
 fn agent_reads_file_gemini_2_5_flash() {
-    agent_reads_file("gemini-2.5-flash");
+    agent_reads_file("gemini-2.5-flash", "agent-smoke-gemflash");
 }
 
 #[test]
 fn agent_reads_file_gemini_3_flash_preview() {
-    agent_reads_file("gemini-3-flash-preview");
+    agent_reads_file("gemini-3-flash-preview", "agent-smoke-gem3flash");
 }
 
 #[test]
 fn agent_reads_file_gemini_3_pro_preview() {
-    agent_reads_file("gemini-3-pro-preview");
+    agent_reads_file("gemini-3-pro-preview", "agent-smoke-gem3pro");
 }

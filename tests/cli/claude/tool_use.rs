@@ -18,7 +18,7 @@ use crate::common::{create_commit, pod_command};
 #[test]
 fn claude_read_file() {
     let proxy = claude_proxy();
-    let (repo, daemon, fake_home) = setup_claude_test_repo(proxy);
+    let (repo, pod, fake_home) = setup_claude_test_repo(proxy, "claude-read");
 
     // Commit a file so the gateway syncs it into the container.
     std::fs::write(repo.path().join("hello.txt"), "rumpelpod-test-content-42\n")
@@ -32,7 +32,7 @@ fn claude_read_file() {
 
     let mut session = ClaudeSession::spawn(
         &repo,
-        &daemon,
+        &pod.daemon,
         proxy,
         fake_home.path(),
         "claude-haiku-4-5",
@@ -50,11 +50,11 @@ fn claude_read_file() {
 #[test]
 fn claude_write_file() {
     let proxy = claude_proxy();
-    let (repo, daemon, fake_home) = setup_claude_test_repo(proxy);
+    let (repo, pod, fake_home) = setup_claude_test_repo(proxy, "claude-write");
 
     let mut session = ClaudeSession::spawn(
         &repo,
-        &daemon,
+        &pod.daemon,
         proxy,
         fake_home.path(),
         "claude-haiku-4-5",
@@ -69,7 +69,7 @@ fn claude_write_file() {
     // (the prompt text already contains the filename and content).
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        let result = pod_command(&repo, &daemon)
+        let result = pod_command(&repo, &pod.daemon)
             .args(["enter", "test", "--", "cat", "output.txt"])
             .output()
             .expect("rumpel enter failed to execute");
@@ -92,11 +92,11 @@ fn claude_write_file() {
 #[test]
 fn claude_run_command() {
     let proxy = claude_proxy();
-    let (repo, daemon, fake_home) = setup_claude_test_repo(proxy);
+    let (repo, pod, fake_home) = setup_claude_test_repo(proxy, "claude-run-cmd");
 
     let mut session = ClaudeSession::spawn(
         &repo,
-        &daemon,
+        &pod.daemon,
         proxy,
         fake_home.path(),
         "claude-haiku-4-5",

@@ -2,7 +2,8 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::TestPod;
 
 fn write_devcontainer_with_remote_env(repo: &TestRepo, remote_env_config: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
@@ -37,28 +38,17 @@ fn write_devcontainer_with_remote_env(repo: &TestRepo, remote_env_config: &str) 
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_pod_toml(repo: &TestRepo) {
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 /// remoteEnv with a simple static value should be visible in `rumpel enter` commands.
 #[test]
 fn remote_env_simple() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_remote_env(&repo, r#"{ "MY_VAR": "value" }"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "renv-simple");
 
     // printenv exits non-zero when the variable is not set, so .success() will
     // fail until remoteEnv injection is implemented.
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "renv-simple", "--", "printenv", "MY_VAR"])
         .success()
         .expect("rumpel enter failed");
@@ -73,13 +63,11 @@ fn remote_env_local_env_substitution() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_remote_env(&repo, r#"{ "VAR": "${localEnv:HOST_VAR}" }"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "renv-local");
 
     // printenv exits non-zero when the variable is not set, so .success() will
     // fail until remoteEnv with ${localEnv} substitution is implemented.
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .env("HOST_VAR", "from_host")
         .args(["enter", "renv-local", "--", "printenv", "VAR"])
         .success()
@@ -97,13 +85,11 @@ fn remote_env_container_env_substitution() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_remote_env(&repo, r#"{ "PATH": "${containerEnv:PATH}:/extra" }"#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "renv-cenv");
 
-    let daemon = TestDaemon::start();
-
-    // PATH always exists, so printenv will succeed — but without remoteEnv the
+    // PATH always exists, so printenv will succeed -- but without remoteEnv the
     // value won't contain :/extra, so the assertion below will fire.
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "renv-cenv", "--", "printenv", "PATH"])
         .success()
         .expect("rumpel enter failed");
@@ -132,21 +118,19 @@ fn remote_env_available_in_agent() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_remote_env(&repo, r#"{ "AGENT_TEST_VAR": "agent_value" }"#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "renv-agent");
 
-    let daemon = TestDaemon::start();
-
-    // First exec — creates the pod and runs a command
-    let stdout = pod_command(&repo, &daemon)
+    // First exec -- creates the pod and runs a command
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "renv-agent", "--", "printenv", "AGENT_TEST_VAR"])
         .success()
         .expect("rumpel enter failed");
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "agent_value");
 
-    // Second exec into the same pod — simulates what the agent's bash tool does
+    // Second exec into the same pod -- simulates what the agent's bash tool does
     // on subsequent tool calls. remoteEnv must be injected every time, not just once.
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "renv-agent", "--", "printenv", "AGENT_TEST_VAR"])
         .success()
         .expect("rumpel enter (second exec) failed");
@@ -198,12 +182,10 @@ fn remote_env_not_in_container_processes() {
     )
     .expect("Failed to write devcontainer.json");
 
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "renv-bg");
 
     // Verify remoteEnv IS visible in rumpel enter (this panics until implemented)
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "renv-bg", "--", "printenv", "REMOTE_ONLY"])
         .success()
         .expect("rumpel enter failed");
@@ -211,16 +193,16 @@ fn remote_env_not_in_container_processes() {
     assert_eq!(stdout.trim(), "secret");
 
     // Verify containerEnv is visible in rumpel enter (control)
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "renv-bg", "--", "printenv", "CONTAINER_MARKER"])
         .success()
         .expect("rumpel enter (container marker) failed");
     let stdout = String::from_utf8_lossy(&stdout);
     assert_eq!(stdout.trim(), "present");
 
-    // Read PID 1's environment — it should have CONTAINER_MARKER but NOT REMOTE_ONLY.
+    // Read PID 1's environment -- it should have CONTAINER_MARKER but NOT REMOTE_ONLY.
     // We use xargs with /proc/1/environ (null-delimited) to get a readable format.
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "renv-bg",
@@ -289,11 +271,9 @@ fn user_env_probe_login_shell() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_user_env_probe(&repo, Some("loginShell"));
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "probe-login");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "probe-login", "--", "printenv", "PATH"])
         .success()
         .expect("rumpel enter failed");
@@ -311,11 +291,9 @@ fn user_env_probe_none() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_user_env_probe(&repo, Some("none"));
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "probe-none");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "probe-none", "--", "printenv", "PATH"])
         .success()
         .expect("rumpel enter failed");

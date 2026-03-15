@@ -11,6 +11,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
 use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH};
+use crate::executor::TestPod;
 
 use super::proxy::ClaudeTestProxy;
 
@@ -84,6 +85,8 @@ pub fn build_claude_test_image(repo: &TestRepo) -> ImageId {
 
 /// Write devcontainer config that points at the given image and injects
 /// the proxy's base URL into the container environment.
+///
+/// Only writes devcontainer.json; .rumpelpod.toml is handled by TestPod.
 pub fn write_claude_test_config(repo: &TestRepo, image_id: &ImageId) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer dir");
@@ -104,8 +107,6 @@ pub fn write_claude_test_config(repo: &TestRepo, image_id: &ImageId) {
         devcontainer_json,
     )
     .expect("write devcontainer.json");
-
-    std::fs::write(repo.path().join(".rumpelpod.toml"), "").expect("write .rumpelpod.toml");
 }
 
 /// Create a temp directory that acts as HOME for the test process.
@@ -147,18 +148,21 @@ fn create_controlled_home() -> TempDir {
 /// Build the image, write config, and start a daemon -- everything needed
 /// before running a claude command.
 ///
-/// Returns the controlled HOME temp dir alongside the repo and daemon so
+/// Returns the controlled HOME temp dir alongside the repo and pod so
 /// it is not dropped (and cleaned up) before the test finishes.
-pub fn setup_claude_test_repo(proxy: &ClaudeTestProxy) -> (TestRepo, TestDaemon, TempDir) {
+pub fn setup_claude_test_repo(
+    proxy: &ClaudeTestProxy,
+    test_name: &str,
+) -> (TestRepo, TestPod, TempDir) {
     let _ = proxy; // used only to ensure the proxy is started first
     let repo = TestRepo::new();
     let image_id = build_claude_test_image(&repo);
     write_claude_test_config(&repo, &image_id);
-    // Create the controlled home before starting the daemon so
+    // Create the controlled home before starting the pod so
     // copy_claude_config (which runs in the daemon) reads our files.
     let fake_home = create_controlled_home();
-    let daemon = TestDaemon::start_with_home(fake_home.path());
-    (repo, daemon, fake_home)
+    let pod = TestPod::start_build_with_home(&repo, test_name, fake_home.path());
+    (repo, pod, fake_home)
 }
 
 // Tall enough to hold long responses without scrolling off, normal width.

@@ -72,6 +72,11 @@ impl TestDaemon {
         Self::start_internal(None, Some(home))
     }
 
+    /// Start a new test daemon with both a custom SSH config and HOME.
+    pub fn start_with_ssh_config_and_home(ssh_config: &Path, home: &Path) -> Self {
+        Self::start_internal(Some(ssh_config), Some(home))
+    }
+
     fn start_internal(ssh_config: Option<&Path>, home: Option<&Path>) -> Self {
         let temp_dir =
             TempDir::with_prefix("rumpelpod-test-").expect("Failed to create temp directory");

@@ -7,11 +7,11 @@ use super::proxy::claude_proxy;
 #[test]
 fn claude_smoke() {
     let proxy = claude_proxy();
-    let (repo, daemon, fake_home) = setup_claude_test_repo(proxy);
+    let (repo, pod, fake_home) = setup_claude_test_repo(proxy, "claude-smoke");
 
     let mut session = ClaudeSession::spawn(
         &repo,
-        &daemon,
+        &pod.daemon,
         proxy,
         fake_home.path(),
         "claude-haiku-4-5",

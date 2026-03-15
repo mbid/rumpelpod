@@ -9,7 +9,8 @@ use std::process::Command;
 
 use rumpelpod::CommandExt;
 
-use crate::common::{build_test_image, create_commit, write_test_pod_config, TestDaemon, TestRepo};
+use crate::common::{build_test_image, create_commit, TestRepo};
+use crate::executor::TestPod;
 
 use super::common::run_agent_with_prompt;
 
@@ -29,13 +30,11 @@ fn agent_edits_file() {
     create_commit(repo.path(), "Add greeting");
 
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "agent-file-edit");
 
     let output = run_agent_with_prompt(
         &repo,
-        &daemon,
+        &pod.daemon,
         "Use the edit tool to replace 'World' with 'Universe' in greeting.txt, then run `cat greeting.txt` and tell me the result.",
     );
 
@@ -50,15 +49,13 @@ fn agent_edits_file() {
 fn agent_writes_file() {
     let repo = TestRepo::new();
     let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    write_test_pod_config(&repo, &image_id);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start(&repo, &image_id, "agent-file-write");
 
     let expected_content = "WRITTEN_BY_AGENT_12345";
 
     let output = run_agent_with_prompt(
         &repo,
-        &daemon,
+        &pod.daemon,
         &format!(
             "Run `echo '{expected_content}' > newfile.txt` \
              then run `cat newfile.txt` and tell me the result."

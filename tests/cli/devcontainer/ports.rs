@@ -18,6 +18,7 @@ use crate::common::{
     build_docker_image, pod_command, DockerBuild, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
     TEST_USER_UID,
 };
+use crate::executor::TestPod;
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
 /// Write a devcontainer.json with port forwarding configuration.
@@ -55,15 +56,6 @@ fn write_devcontainer_with_ports(repo: &TestRepo, ports_config: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_pod_toml(repo: &TestRepo) {
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 /// Start a TCP echo server inside the container on the given port.
 /// Uses socat to listen and echo back whatever is sent.
 fn start_echo_server_in_container(repo: &TestRepo, daemon: &TestDaemon, pod_name: &str, port: u16) {
@@ -99,18 +91,16 @@ fn forward_single_port() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9100],"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "fwd-single");
 
     // Create pod (this should set up port forwarding)
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "fwd-single", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     // Start an echo server on port 9100 inside the container
-    start_echo_server_in_container(&repo, &daemon, "fwd-single", 9100);
+    start_echo_server_in_container(&repo, &pod.daemon, "fwd-single", 9100);
 
     // Verify we can reach it through the forwarded port
     let response = try_echo(9100, "hello port forwarding");
@@ -126,17 +116,15 @@ fn forward_multiple_ports() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9200, 9201],"#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "fwd-multi");
 
-    let daemon = TestDaemon::start();
-
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "fwd-multi", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    start_echo_server_in_container(&repo, &daemon, "fwd-multi", 9200);
-    start_echo_server_in_container(&repo, &daemon, "fwd-multi", 9201);
+    start_echo_server_in_container(&repo, &pod.daemon, "fwd-multi", 9200);
+    start_echo_server_in_container(&repo, &pod.daemon, "fwd-multi", 9201);
 
     let r1 = try_echo(9200, "port-9200");
     let r2 = try_echo(9201, "port-9201");
@@ -158,16 +146,14 @@ fn ports_command_shows_forwarded_ports() {
         },
         "#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "fwd-show");
 
-    let daemon = TestDaemon::start();
-
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "fwd-show", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["ports", "fwd-show"])
         .success()
         .expect("rumpel ports failed");
@@ -183,17 +169,15 @@ fn ports_command_empty_when_no_forwards() {
 
     // No forwardPorts at all
     write_devcontainer_with_ports(&repo, "");
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "fwd-empty-cfg");
 
-    let daemon = TestDaemon::start();
-
-    pod_command(&repo, &daemon)
-        .args(["enter", "fwd-empty", "--", "true"])
+    pod_command(&repo, &pod.daemon)
+        .args(["enter", "fwd-empty-cfg", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    let stdout = pod_command(&repo, &daemon)
-        .args(["ports", "fwd-empty"])
+    let stdout = pod_command(&repo, &pod.daemon)
+        .args(["ports", "fwd-empty-cfg"])
         .success()
         .expect("rumpel ports failed");
 
@@ -221,17 +205,15 @@ fn other_ports_attributes_label() {
         "otherPortsAttributes": { "label": "Fallback" },
         "#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "fwd-other-attr");
 
-    let daemon = TestDaemon::start();
-
-    pod_command(&repo, &daemon)
-        .args(["enter", "fwd-other", "--", "true"])
+    pod_command(&repo, &pod.daemon)
+        .args(["enter", "fwd-other-attr", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    let stdout = pod_command(&repo, &daemon)
-        .args(["ports", "fwd-other"])
+    let stdout = pod_command(&repo, &pod.daemon)
+        .args(["ports", "fwd-other-attr"])
         .success()
         .expect("rumpel ports failed");
 
@@ -253,30 +235,28 @@ fn multi_pod_port_remapping() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9400],"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "fwd-remap");
 
     // First pod gets port 9400
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "fwd-first", "--", "true"])
         .success()
         .expect("rumpel enter failed for first pod");
 
     // Second pod also wants port 9400 but should get remapped
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "fwd-second", "--", "true"])
         .success()
         .expect("rumpel enter failed for second pod");
 
     // Check the ports for both pods
-    let stdout1 = pod_command(&repo, &daemon)
+    let stdout1 = pod_command(&repo, &pod.daemon)
         .args(["ports", "fwd-first"])
         .success()
         .expect("rumpel ports failed for first");
     let output1 = String::from_utf8_lossy(&stdout1);
 
-    let stdout2 = pod_command(&repo, &daemon)
+    let stdout2 = pod_command(&repo, &pod.daemon)
         .args(["ports", "fwd-second"])
         .success()
         .expect("rumpel ports failed for second");

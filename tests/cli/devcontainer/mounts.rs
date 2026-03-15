@@ -8,6 +8,7 @@ use rumpelpod::CommandExt;
 use std::fs;
 
 use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::TestPod;
 use crate::ssh::{create_ssh_config, SshRemoteHost};
 
 /// Extract a short unique ID from a TestRepo's temp directory name.
@@ -53,15 +54,6 @@ fn write_devcontainer_with_mounts(repo: &TestRepo, mounts_config: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_pod_toml(repo: &TestRepo) {
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 /// Volume mount: the target directory should exist and be writable inside the container.
 ///
 /// Docker named volumes are created implicitly when first referenced in a
@@ -76,12 +68,10 @@ fn mount_volume() {
         &repo,
         &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "mnt-vol");
 
     // Write a file to /data and read it back to confirm the mount is writable
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "mnt-vol",
@@ -103,12 +93,10 @@ fn mount_tmpfs() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_mounts(&repo, r#"[{"type": "tmpfs", "target": "/tmp/mytmp"}]"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "mnt-tmpfs");
 
     // Verify the mount point exists and is a tmpfs via `mount` output
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "mnt-tmpfs",
@@ -138,12 +126,10 @@ fn mount_string_format() {
         &repo,
         &format!(r#"["type=volume,source={vol},target=/mnt"]"#),
     );
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "mnt-strfmt");
 
     // Write and read back to confirm the volume is mounted and writable
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "mnt-strfmt",
@@ -170,12 +156,10 @@ fn mount_persists_across_restarts() {
         &repo,
         &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "mnt-persist");
 
     // First run: write a sentinel file into the volume
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args([
             "enter",
             "mnt-persist",
@@ -188,13 +172,13 @@ fn mount_persists_across_restarts() {
         .expect("first rumpel enter failed");
 
     // Recreate the container (volume should survive)
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["recreate", "mnt-persist"])
         .success()
         .expect("pod recreate failed");
 
     // Second run: the sentinel should still be there
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "mnt-persist", "--", "cat", "/data/sentinel"])
         .success()
         .expect("second rumpel enter failed");

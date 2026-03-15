@@ -2,7 +2,8 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::TestPod;
 
 fn write_devcontainer_json(repo: &TestRepo, config_body: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
@@ -37,15 +38,6 @@ fn write_devcontainer_json(repo: &TestRepo, config_body: &str) {
     .expect("Failed to write devcontainer.json");
 }
 
-fn write_minimal_pod_toml(repo: &TestRepo) {
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-    "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
-}
-
 /// ${localEnv:MISSING:default_value} should fall back to the default when the
 /// environment variable is not set.
 #[test]
@@ -56,11 +48,9 @@ fn local_env_with_default() {
         &repo,
         r#""containerEnv": { "FALLBACK": "${localEnv:MISSING:default_value}" }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "var-env-default");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "env-default", "--", "printenv", "FALLBACK"])
         .success()
         .expect("rumpel enter failed");
@@ -83,11 +73,9 @@ fn local_workspace_folder() {
         &repo,
         r#""containerEnv": { "HOST_PATH": "${localWorkspaceFolder}" }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "var-lwf");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "lwf", "--", "printenv", "HOST_PATH"])
         .success()
         .expect("rumpel enter failed");
@@ -113,11 +101,9 @@ fn local_workspace_folder_basename() {
         &repo,
         r#""containerEnv": { "WS_NAME": "${localWorkspaceFolderBasename}" }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "var-lwfb");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "lwfb", "--", "printenv", "WS_NAME"])
         .success()
         .expect("rumpel enter failed");
@@ -145,11 +131,9 @@ fn container_workspace_folder() {
         &repo,
         r#""containerEnv": { "CWF": "${containerWorkspaceFolder}" }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "var-cwf");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "cwf", "--", "printenv", "CWF"])
         .success()
         .expect("rumpel enter failed");
@@ -172,11 +156,9 @@ fn container_workspace_folder_basename() {
         &repo,
         r#""containerEnv": { "CWF_BASE": "${containerWorkspaceFolderBasename}" }"#,
     );
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "var-cwfb");
 
-    let daemon = TestDaemon::start();
-
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "cwfb", "--", "printenv", "CWF_BASE"])
         .success()
         .expect("rumpel enter failed");
@@ -200,12 +182,10 @@ fn devcontainer_id_stable() {
     let repo = TestRepo::new();
 
     write_devcontainer_json(&repo, r#""containerEnv": { "DC_ID": "${devcontainerId}" }"#);
-    write_minimal_pod_toml(&repo);
+    let pod = TestPod::start_build(&repo, "var-id-stable");
 
-    let daemon = TestDaemon::start();
-
-    // First creation — capture the ID.
-    let stdout = pod_command(&repo, &daemon)
+    // First creation -- capture the ID.
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "id-stable", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
@@ -218,13 +198,13 @@ fn devcontainer_id_stable() {
     );
 
     // Recreate the pod (destroy + create).
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["recreate", "id-stable"])
         .success()
         .expect("pod recreate failed");
 
-    // Second creation — ID should be identical.
-    let stdout = pod_command(&repo, &daemon)
+    // Second creation -- ID should be identical.
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "id-stable", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
@@ -243,19 +223,17 @@ fn devcontainer_id_unique_per_pod() {
     let repo = TestRepo::new();
 
     write_devcontainer_json(&repo, r#""containerEnv": { "DC_ID": "${devcontainerId}" }"#);
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "var-id-unique");
 
     // Pod A
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "id-unique-a", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
     let id_a = String::from_utf8_lossy(&stdout).trim().to_string();
 
     // Pod B (same repo, different name)
-    let stdout = pod_command(&repo, &daemon)
+    let stdout = pod_command(&repo, &pod.daemon)
         .args(["enter", "id-unique-b", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
@@ -307,12 +285,10 @@ fn variables_in_run_args() {
         devcontainer_json,
     )
     .expect("Failed to write devcontainer.json");
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "var-run-args");
 
     // Enter the pod so the container is created with the label.
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "run-args-var", "--", "true"])
         .success()
         .expect("rumpel enter failed");
@@ -406,12 +382,10 @@ fn variables_in_mounts() {
         devcontainer_json,
     )
     .expect("Failed to write devcontainer.json");
-    write_minimal_pod_toml(&repo);
-
-    let daemon = TestDaemon::start();
+    let pod = TestPod::start_build(&repo, "var-mnt");
 
     // The mount should succeed now that ${devcontainerId} is resolved.
-    pod_command(&repo, &daemon)
+    pod_command(&repo, &pod.daemon)
         .args(["enter", "mnt-var", "--", "ls", "/data"])
         .success()
         .expect("rumpel enter with devcontainerId mount failed");
