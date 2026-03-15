@@ -20,8 +20,11 @@ fn test_anthropic_base_url_garbage_errors() {
         model = "claude-sonnet-4-5"
         anthropic-base-url = "https://invalid.example.com/v1/messages"
     "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), format!("{}\n{config}", exec.toml))
-        .expect("Failed to write .rumpelpod.toml");
+    fs::write(
+        repo.path().join(".rumpelpod.toml"),
+        format!("{}\n{config}", exec.toml),
+    )
+    .expect("Failed to write .rumpelpod.toml");
 
     // We need to provide an API key so it actually tries to make a request
     // instead of failing early due to missing key and no cache.
@@ -76,8 +79,11 @@ fn test_anthropic_base_url_default_works() {
         model = "claude-sonnet-4-5"
         anthropic-base-url = "https://api.anthropic.com/v1/messages"
     "#};
-    fs::write(repo.path().join(".rumpelpod.toml"), format!("{}\n{config}", exec.toml))
-        .expect("Failed to write .rumpelpod.toml");
+    fs::write(
+        repo.path().join(".rumpelpod.toml"),
+        format!("{}\n{config}", exec.toml),
+    )
+    .expect("Failed to write .rumpelpod.toml");
 
     let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache");
 

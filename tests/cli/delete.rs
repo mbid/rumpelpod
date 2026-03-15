@@ -433,6 +433,12 @@ fn delete_multiple_skips_unmerged_without_tty() {
 
 #[test]
 fn ssh_remote_pod_delete() {
+    if !matches!(
+        crate::executor::executor_mode(),
+        crate::executor::ExecutorMode::Ssh
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     let exec = TestExecutor::start("ssh-delete-remote");
     write_test_devcontainer(&repo, "", "");

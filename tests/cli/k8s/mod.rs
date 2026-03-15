@@ -245,8 +245,11 @@ fn k8s_image_build_no_registry() {
             "containerUser": "{TEST_USER}"
         }}
     "#};
-    fs::write(devcontainer_dir.join("devcontainer.json"), devcontainer_json)
-        .expect("Failed to write devcontainer.json");
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
 
     fs::write(devcontainer_dir.join("Dockerfile"), "FROM debian:13\n")
         .expect("Failed to write Dockerfile");

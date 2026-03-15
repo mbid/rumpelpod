@@ -286,7 +286,6 @@ impl SshRemoteHost {
             .success()
             .context("running SSH command")
     }
-
 }
 
 impl Drop for SshRemoteHost {
@@ -396,11 +395,7 @@ fn build_remote_docker_image() -> Result<String> {
         .context("writing Dockerfile")?;
 
     let output = Command::new("docker")
-        .args([
-            "build",
-            "-q",
-            temp_dir.path().to_str().unwrap(),
-        ])
+        .args(["build", "-q", temp_dir.path().to_str().unwrap()])
         .output()
         .context("executing docker build for SSH server image")?;
 
@@ -479,7 +474,6 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
         _temp_dir: temp_dir,
     }
 }
-
 
 // Tests
 // Note: These tests require privileged Docker containers, which may not be

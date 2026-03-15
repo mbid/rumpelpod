@@ -209,6 +209,9 @@ pub fn write_test_devcontainer(repo: &TestRepo, extra_dockerfile: &str, extra_js
             "runArgs": ["--runtime=runc"]{extra_json}
         }}
     "#};
-    std::fs::write(devcontainer_dir.join("devcontainer.json"), devcontainer_json)
-        .expect("Failed to write devcontainer.json");
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
 }

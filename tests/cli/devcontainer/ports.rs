@@ -299,6 +299,12 @@ fn extract_local_port(output: &str, container_port: u16) -> u16 {
 
 #[test]
 fn forward_port_remote_ssh() {
+    if !matches!(
+        crate::executor::executor_mode(),
+        crate::executor::ExecutorMode::Ssh
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
 
     // Install socat before switching to testuser so the install runs as root.

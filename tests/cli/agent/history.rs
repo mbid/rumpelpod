@@ -33,8 +33,12 @@ fn agent_new_flag_starts_fresh_conversation() {
     let output1 = run_agent_with_prompt(&repo, &exec.daemon, "Say 'first conversation'");
     assert!(output1.success, "First agent run should succeed");
 
-    let output2 =
-        run_agent_with_prompt_and_args(&repo, &exec.daemon, "Say 'second conversation'", &["--new"]);
+    let output2 = run_agent_with_prompt_and_args(
+        &repo,
+        &exec.daemon,
+        "Say 'second conversation'",
+        &["--new"],
+    );
     assert!(
         output2.success,
         "Second agent run with --new should succeed"

@@ -2594,7 +2594,6 @@ dependencies = [
  "tower-service",
  "url",
  "vt100",
- "walkdir",
 ]
 
 [[package]]

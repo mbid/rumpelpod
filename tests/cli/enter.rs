@@ -243,12 +243,18 @@ fn enter_falls_back_to_root_when_image_has_no_user() {
     let exec = TestExecutor::start("enter-no-user");
     let devcontainer_dir = repo.path().join(".devcontainer");
     fs::create_dir_all(&devcontainer_dir).unwrap();
-    fs::write(devcontainer_dir.join("Dockerfile"), formatdoc! {"
+    fs::write(
+        devcontainer_dir.join("Dockerfile"),
+        formatdoc! {"
         FROM debian:13
         RUN apt-get update && apt-get install -y git
         COPY . {TEST_REPO_PATH}
-    "}).unwrap();
-    fs::write(devcontainer_dir.join("devcontainer.json"), formatdoc! {r#"
+    "},
+    )
+    .unwrap();
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        formatdoc! {r#"
         {{
             "build": {{
                 "dockerfile": "Dockerfile",
@@ -257,7 +263,9 @@ fn enter_falls_back_to_root_when_image_has_no_user() {
             "workspaceFolder": "{TEST_REPO_PATH}",
             "runArgs": ["--runtime=runc"]
         }}
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let stdout = pod_command(&repo, &exec.daemon)
@@ -281,13 +289,19 @@ fn enter_falls_back_to_root_when_image_user_is_root() {
     let exec = TestExecutor::start("enter-root-user");
     let devcontainer_dir = repo.path().join(".devcontainer");
     fs::create_dir_all(&devcontainer_dir).unwrap();
-    fs::write(devcontainer_dir.join("Dockerfile"), formatdoc! {"
+    fs::write(
+        devcontainer_dir.join("Dockerfile"),
+        formatdoc! {"
         FROM debian:13
         RUN apt-get update && apt-get install -y git
         COPY . {TEST_REPO_PATH}
         USER root
-    "}).unwrap();
-    fs::write(devcontainer_dir.join("devcontainer.json"), formatdoc! {r#"
+    "},
+    )
+    .unwrap();
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        formatdoc! {r#"
         {{
             "build": {{
                 "dockerfile": "Dockerfile",
@@ -296,7 +310,9 @@ fn enter_falls_back_to_root_when_image_user_is_root() {
             "workspaceFolder": "{TEST_REPO_PATH}",
             "runArgs": ["--runtime=runc"]
         }}
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let stdout = pod_command(&repo, &exec.daemon)
@@ -321,12 +337,18 @@ fn enter_allows_explicit_root_user_in_config() {
     // Build an image where root owns the repo (COPY without --chown defaults to root)
     let devcontainer_dir = repo.path().join(".devcontainer");
     fs::create_dir_all(&devcontainer_dir).unwrap();
-    fs::write(devcontainer_dir.join("Dockerfile"), formatdoc! {"
+    fs::write(
+        devcontainer_dir.join("Dockerfile"),
+        formatdoc! {"
         FROM debian:13
         RUN apt-get update && apt-get install -y git
         COPY . {TEST_REPO_PATH}
-    "}).unwrap();
-    fs::write(devcontainer_dir.join("devcontainer.json"), formatdoc! {r#"
+    "},
+    )
+    .unwrap();
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        formatdoc! {r#"
         {{
             "build": {{
                 "dockerfile": "Dockerfile",
@@ -336,7 +358,9 @@ fn enter_allows_explicit_root_user_in_config() {
             "containerUser": "root",
             "runArgs": ["--runtime=runc"]
         }}
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let stdout = pod_command(&repo, &exec.daemon)
@@ -395,7 +419,9 @@ fn enter_uses_container_shell_not_host_shell() {
     let exec = TestExecutor::start("enter-shell");
     let devcontainer_dir = repo.path().join(".devcontainer");
     fs::create_dir_all(&devcontainer_dir).unwrap();
-    fs::write(devcontainer_dir.join("Dockerfile"), formatdoc! {"
+    fs::write(
+        devcontainer_dir.join("Dockerfile"),
+        formatdoc! {"
         FROM debian:13
         RUN apt-get update && apt-get install -y git
         RUN printf '#!/bin/sh\\necho CUSTOM_SHELL_OK\\n' > /usr/local/bin/myshell \
@@ -403,8 +429,12 @@ fn enter_uses_container_shell_not_host_shell() {
         RUN useradd -m -u {TEST_USER_UID} -s /usr/local/bin/myshell {TEST_USER}
         COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
         USER {TEST_USER}
-    "}).unwrap();
-    fs::write(devcontainer_dir.join("devcontainer.json"), formatdoc! {r#"
+    "},
+    )
+    .unwrap();
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        formatdoc! {r#"
         {{
             "build": {{
                 "dockerfile": "Dockerfile",
@@ -413,7 +443,9 @@ fn enter_uses_container_shell_not_host_shell() {
             "workspaceFolder": "{TEST_REPO_PATH}",
             "runArgs": ["--runtime=runc"]
         }}
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // The custom shell just prints and exits, so no PTY needed.

@@ -462,6 +462,12 @@ fn list_does_not_show_other_repo_pods() {
 
 #[test]
 fn ssh_remote_pod_list() {
+    if !matches!(
+        crate::executor::executor_mode(),
+        crate::executor::ExecutorMode::Ssh
+    ) {
+        return;
+    }
     let repo = TestRepo::new();
     let exec = TestExecutor::start("ssh-list-remote");
     write_test_devcontainer(&repo, "", "");

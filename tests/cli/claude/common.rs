@@ -149,8 +149,7 @@ pub fn setup_claude_test_repo(
     // copy_claude_config (which runs in the daemon) reads our files.
     let fake_home = create_controlled_home();
     let exec = TestExecutor::start_with_home(test_name, fake_home.path());
-    std::fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml)
-        .expect("write .rumpelpod.toml");
+    std::fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).expect("write .rumpelpod.toml");
     (repo, exec, fake_home)
 }
 
