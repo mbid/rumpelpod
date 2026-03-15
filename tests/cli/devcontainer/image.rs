@@ -7,7 +7,7 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestPod;
+use crate::executor::TestExecutor;
 
 /// Create a test devcontainer.json with a build configuration.
 fn write_devcontainer_with_build(repo: &TestRepo, dockerfile_name: &str) {
@@ -87,10 +87,11 @@ fn devcontainer_build_simple() {
 
     write_test_dockerfile(&repo, &dockerfile);
     write_devcontainer_with_build(&repo, "Dockerfile");
-    let pod = TestPod::start_build(&repo, "build-test");
+    let exec = TestExecutor::start("build-test");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Enter the pod - this should trigger an image build
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "build-test",
@@ -147,10 +148,11 @@ fn devcontainer_build_with_args() {
     )
     .expect("Failed to write devcontainer.json");
 
-    let pod = TestPod::start_build(&repo, "build-args");
+    let exec = TestExecutor::start("build-args");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Enter the pod and check that the build arg was used
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "args-test", "--", "cat", "/tmp/build-arg.txt"])
         .success()
         .expect("rumpel enter failed");
@@ -205,10 +207,11 @@ fn devcontainer_build_with_target() {
     )
     .expect("Failed to write devcontainer.json");
 
-    let pod = TestPod::start_build(&repo, "build-target");
+    let exec = TestExecutor::start("build-target");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Enter the pod and verify we're using the development stage
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "target-test", "--", "cat", "/tmp/stage.txt"])
         .success()
         .expect("rumpel enter failed");
@@ -231,10 +234,11 @@ fn devcontainer_build_reuses_cached_image() {
 
     write_test_dockerfile(&repo, &dockerfile);
     write_devcontainer_with_build(&repo, "Dockerfile");
-    let pod = TestPod::start_build(&repo, "build-cache");
+    let exec = TestExecutor::start("build-cache");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // First enter - should build the image
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "cache-test-1", "--", "echo", "first"])
         .success()
         .expect("first rumpel enter failed");
@@ -242,14 +246,14 @@ fn devcontainer_build_reuses_cached_image() {
 
     // Second enter with different pod name - should reuse the cached image
     // (same Dockerfile hash) without rebuilding
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "cache-test-2", "--", "echo", "second"])
         .success()
         .expect("second rumpel enter failed");
     assert_eq!(String::from_utf8_lossy(&stdout).trim(), "second");
 
     // Verify both pods can run commands (they're using the same image)
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "cache-test-1", "--", "echo", "still works"])
         .success()
         .expect("reentry to first pod failed");
@@ -273,9 +277,10 @@ fn devcontainer_build_with_context() {
 
     // First, use context ".." (repo root)
     write_devcontainer_with_build(&repo, "Dockerfile");
-    let pod = TestPod::start_build(&repo, "build-context");
+    let exec = TestExecutor::start("build-context");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let stdout = pod_command(&repo, &pod.daemon)
+    let stdout = pod_command(&repo, &exec.daemon)
         .args(["enter", "context-test", "--", "echo", "build works"])
         .success()
         .expect("rumpel enter failed");
@@ -298,10 +303,11 @@ fn devcontainer_build_skips_when_image_exists() {
 
     write_test_dockerfile(&repo, &dockerfile);
     write_devcontainer_with_build(&repo, "Dockerfile");
-    let pod = TestPod::start_build(&repo, "build-skip");
+    let exec = TestExecutor::start("build-skip");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // First enter should build the image and stream build output.
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "skip-test-1", "--", "echo", "built"])
         .output()
         .expect("first pod enter failed");
@@ -313,7 +319,7 @@ fn devcontainer_build_skips_when_image_exists() {
     );
 
     // Second enter with a different pod name should reuse the cached image.
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "skip-test-2", "--", "echo", "skipped"])
         .output()
         .expect("second pod enter failed");
@@ -460,9 +466,10 @@ fn image_fetch_errors_on_build_config() {
 fn no_devcontainer_enters_with_default_image() {
     let repo = TestRepo::new();
     // No devcontainer.json -- should build the default image and enter.
-    let pod = TestPod::start_build(&repo, "default-image");
+    let exec = TestExecutor::start("default-image");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args([
             "enter",
             "default-image-test",
@@ -503,9 +510,10 @@ fn devcontainer_build_streams_output() {
 
     write_test_dockerfile(&repo, &dockerfile);
     write_devcontainer_with_build(&repo, "Dockerfile");
-    let pod = TestPod::start_build(&repo, "build-stream");
+    let exec = TestExecutor::start("build-stream");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "stream-test", "--", "echo", "streamed"])
         .output()
         .expect("rumpel enter failed");

@@ -11,7 +11,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
 use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH};
-use crate::executor::{executor_mode, ExecutorMode, TestPod};
+use crate::executor::{executor_mode, ExecutorMode, TestExecutor};
 
 use super::proxy::ClaudeTestProxy;
 
@@ -86,7 +86,7 @@ pub fn build_claude_test_image(repo: &TestRepo) -> ImageId {
 /// Write devcontainer config that points at the given image and injects
 /// the proxy's base URL into the container environment.
 ///
-/// Only writes devcontainer.json; .rumpelpod.toml is handled by TestPod.
+/// Only writes devcontainer.json; .rumpelpod.toml is handled by TestExecutor.
 fn write_claude_test_config(repo: &TestRepo, image_ref: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer dir");
@@ -163,7 +163,7 @@ fn create_controlled_home() -> TempDir {
 pub fn setup_claude_test_repo(
     proxy: &ClaudeTestProxy,
     test_name: &str,
-) -> (TestRepo, TestPod, TempDir) {
+) -> (TestRepo, TestExecutor, TempDir) {
     let _ = proxy; // used only to ensure the proxy is started first
     let repo = TestRepo::new();
     let image_id = build_claude_test_image(&repo);
@@ -179,11 +179,13 @@ pub fn setup_claude_test_repo(
     };
     write_claude_test_config(&repo, &image_ref);
 
-    // Create the controlled home before starting the pod so
+    // Create the controlled home before starting the executor so
     // copy_claude_config (which runs in the daemon) reads our files.
     let fake_home = create_controlled_home();
-    let pod = TestPod::start_build_with_home(&repo, test_name, fake_home.path());
-    (repo, pod, fake_home)
+    let exec = TestExecutor::start_with_home(test_name, fake_home.path());
+    std::fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml)
+        .expect("write .rumpelpod.toml");
+    (repo, exec, fake_home)
 }
 
 // Tall enough to hold long responses without scrolling off, normal width.

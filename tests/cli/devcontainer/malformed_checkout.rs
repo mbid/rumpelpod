@@ -7,18 +7,20 @@
 
 use rumpelpod::CommandExt;
 
-use crate::common::{build_test_image, pod_command, TestRepo, TEST_REPO_PATH};
-use crate::executor::TestPod;
+use std::fs;
+
+use crate::common::{pod_command, TestRepo, TEST_REPO_PATH};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 /// Enter a pod and verify the repo has the host commit and a clean working tree.
-fn assert_repo_usable(repo: &TestRepo, pod: &TestPod, pod_name: &str) {
+fn assert_repo_usable(repo: &TestRepo, exec: &TestExecutor, pod_name: &str) {
     let script = format!(
         "git -C {TEST_REPO_PATH} log --oneline && \
          echo '---GIT_STATUS---' && \
          git -C {TEST_REPO_PATH} status --porcelain"
     );
 
-    let stdout = pod_command(repo, &pod.daemon)
+    let stdout = pod_command(repo, &exec.daemon)
         .args(["enter", pod_name, "--", "sh", "-c", &script])
         .success()
         .expect("rumpel enter should succeed");
@@ -43,38 +45,41 @@ fn assert_repo_usable(repo: &TestRepo, pod: &TestPod, pod_name: &str) {
 #[test]
 fn recover_from_detached_head() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(
-        repo.path(),
+    let exec = TestExecutor::start("recover-detached");
+    write_test_devcontainer(
+        &repo,
         "RUN git -C /home/testuser/workspace checkout --detach",
-    )
-    .expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "recover-detached");
-    assert_repo_usable(&repo, &pod, "recover-detached");
+        "",
+    );
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    assert_repo_usable(&repo, &exec, "recover-detached");
 }
 
 #[test]
 fn recover_from_unborn_branch() {
     let repo = TestRepo::new();
     // Replace the real repo with a bare git init (no commits at all)
-    let image_id = build_test_image(
-        repo.path(),
+    let exec = TestExecutor::start("recover-unborn");
+    write_test_devcontainer(
+        &repo,
         "RUN rm -rf /home/testuser/workspace/.git && git init /home/testuser/workspace",
-    )
-    .expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "recover-unborn");
-    assert_repo_usable(&repo, &pod, "recover-unborn");
+        "",
+    );
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    assert_repo_usable(&repo, &exec, "recover-unborn");
 }
 
 #[test]
 fn recover_from_dirty_index() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(
-        repo.path(),
+    let exec = TestExecutor::start("recover-dirty-idx");
+    write_test_devcontainer(
+        &repo,
         "RUN cd /home/testuser/workspace && echo staged > staged.txt && git add staged.txt",
-    )
-    .expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "recover-dirty-idx");
-    assert_repo_usable(&repo, &pod, "recover-dirty-idx");
+        "",
+    );
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    assert_repo_usable(&repo, &exec, "recover-dirty-idx");
 }
 
 #[test]
@@ -88,21 +93,23 @@ fn recover_from_dirty_working_tree() {
         "git -c user.email=t@t -c user.name=T commit -m 'add file' && ",
         "echo modified > tracked.txt",
     );
-    let image_id = build_test_image(repo.path(), extra).expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "recover-dirty-tree");
-    assert_repo_usable(&repo, &pod, "recover-dirty-tree");
+    let exec = TestExecutor::start("recover-dirty-tree");
+    write_test_devcontainer(&repo, extra, "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    assert_repo_usable(&repo, &exec, "recover-dirty-tree");
 }
 
 #[test]
 fn recover_from_untracked_files() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(
-        repo.path(),
+    let exec = TestExecutor::start("recover-untracked");
+    write_test_devcontainer(
+        &repo,
         "RUN echo untracked > /home/testuser/workspace/untracked.txt",
-    )
-    .expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "recover-untracked");
-    assert_repo_usable(&repo, &pod, "recover-untracked");
+        "",
+    );
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    assert_repo_usable(&repo, &exec, "recover-untracked");
 }
 
 #[test]
@@ -117,9 +124,10 @@ fn recover_from_in_progress_merge() {
         "git checkout master && echo main > file.txt && git commit -am main && ",
         "git merge other || true",
     );
-    let image_id = build_test_image(repo.path(), extra).expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "recover-merge");
-    assert_repo_usable(&repo, &pod, "recover-merge");
+    let exec = TestExecutor::start("recover-merge");
+    write_test_devcontainer(&repo, extra, "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    assert_repo_usable(&repo, &exec, "recover-merge");
 }
 
 #[test]
@@ -134,7 +142,8 @@ fn recover_from_in_progress_rebase() {
         "git checkout master && echo main > file.txt && git commit -am main && ",
         "git checkout feature && git rebase master || true",
     );
-    let image_id = build_test_image(repo.path(), extra).expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "recover-rebase");
-    assert_repo_usable(&repo, &pod, "recover-rebase");
+    let exec = TestExecutor::start("recover-rebase");
+    write_test_devcontainer(&repo, extra, "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    assert_repo_usable(&repo, &exec, "recover-rebase");
 }

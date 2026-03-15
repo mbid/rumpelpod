@@ -5,7 +5,7 @@ use std::fs;
 use indoc::formatdoc;
 
 use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestPod;
+use crate::executor::TestExecutor;
 
 /// Write a Dockerfile and devcontainer.json where `extra_fields` is injected
 /// as additional top-level JSON properties (include leading comma).
@@ -50,9 +50,10 @@ fn warns_on_workspace_mount() {
         r#",
             "workspaceMount": "source=/host/path,target=/workspace,type=bind""#,
     );
-    let pod = TestPod::start_build(&repo, "unsup-wsmount");
+    let exec = TestExecutor::start("unsup-wsmount");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "unsupported-wsmount", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -73,9 +74,10 @@ fn warns_on_app_port() {
         r#",
             "appPort": [3000, 8080]"#,
     );
-    let pod = TestPod::start_build(&repo, "unsup-appport");
+    let exec = TestExecutor::start("unsup-appport");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "unsupported-appport", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -96,9 +98,10 @@ fn warns_on_docker_compose_file() {
         r#",
             "dockerComposeFile": "docker-compose.yml""#,
     );
-    let pod = TestPod::start_build(&repo, "unsup-compose");
+    let exec = TestExecutor::start("unsup-compose");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "unsupported-compose", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -122,9 +125,10 @@ fn warns_on_multiple_unsupported() {
             "service": "web",
             "runServices": ["web", "db"]"#,
     );
-    let pod = TestPod::start_build(&repo, "unsup-multi");
+    let exec = TestExecutor::start("unsup-multi");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "unsupported-multi", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -157,9 +161,10 @@ fn warns_on_initialize_command() {
         r#",
             "initializeCommand": "echo hello""#,
     );
-    let pod = TestPod::start_build(&repo, "unsup-initcmd");
+    let exec = TestExecutor::start("unsup-initcmd");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "unsupported-initcmd", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -182,9 +187,10 @@ fn warns_on_features() {
                 "ghcr.io/devcontainers/features/node:1": { "version": "20" }
             }"#,
     );
-    let pod = TestPod::start_build(&repo, "unsup-features");
+    let exec = TestExecutor::start("unsup-features");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output = pod_command(&repo, &pod.daemon)
+    let output = pod_command(&repo, &exec.daemon)
         .args(["enter", "unsupported-features", "--", "true"])
         .output()
         .expect("Failed to run pod command");
