@@ -546,3 +546,58 @@ pub fn pty_routes(sessions: PtySessions) -> Router {
         .route("/pty/attach", any(pty_attach_handler))
         .with_state(sessions)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replay_roundtrip_through_vt100() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+
+        parser.process(b"\x1b[?1049h");
+        parser.process(b"\x1b[H\x1b[2J");
+        parser.process(b"~/workspace $ ");
+        parser.process(b"\x1b[2;1H");
+        parser.process(b"\x1b[1;32mgreen text\x1b[0m");
+        parser.process(b"\x1b[24;1H");
+        parser.process(b"status bar");
+
+        let screen = parser.screen();
+        assert!(screen.alternate_screen());
+
+        let replay = build_screen_replay(screen);
+
+        // Feed replay into a fresh parser (simulating a new client).
+        let mut replayed = vt100::Parser::new(24, 80, 0);
+        replayed.process(&replay);
+
+        let contents = replayed.screen().contents();
+        assert!(contents.contains("~/workspace"));
+        assert!(contents.contains("green text"));
+        assert!(contents.contains("status bar"));
+
+        // Old content on a dirty screen must be cleared by the replay.
+        let mut dirty = vt100::Parser::new(24, 80, 0);
+        dirty.process(b"THIS SHOULD BE OVERWRITTEN BY REPLAY");
+        dirty.process(&replay);
+        assert!(!dirty.screen().contents().contains("OVERWRITTEN"));
+    }
+
+    #[test]
+    fn resize_preserves_screen_content() {
+        let mut parser = vt100::Parser::new(24, 80, 0);
+        parser.process(b"\x1b[?1049h");
+        parser.process(b"\x1b[H\x1b[2J");
+        parser.process(b"~/workspace $ ");
+        assert!(parser.screen().contents().contains("~/workspace"));
+
+        // Same-size resize must not erase the buffer.
+        parser.screen_mut().set_size(24, 80);
+        assert!(parser.screen().contents().contains("~/workspace"));
+
+        // Different-size resize must preserve content too.
+        parser.screen_mut().set_size(30, 100);
+        assert!(parser.screen().contents().contains("~/workspace"));
+    }
+}
