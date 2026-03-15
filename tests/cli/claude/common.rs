@@ -10,6 +10,8 @@ use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
+use rumpelpod::CommandExt;
+
 use crate::common::{build_test_image, ImageId, TestDaemon, TestRepo, TEST_REPO_PATH};
 use crate::executor::{executor_mode, ExecutorMode, TestExecutor};
 
@@ -173,7 +175,16 @@ pub fn setup_claude_test_repo(
     let image_ref = match executor_mode() {
         ExecutorMode::K8s => {
             let cluster = crate::k8s::k8s_cluster_config();
-            crate::k8s::push_image(&cluster, &image_id, test_name)
+            let push_ref = format!("{}/{test_name}", cluster.push_registry);
+            std::process::Command::new("docker")
+                .args(["tag", &image_id.to_string(), &push_ref])
+                .success()
+                .expect("Failed to tag docker image for push");
+            std::process::Command::new("docker")
+                .args(["push", &push_ref])
+                .success()
+                .expect("Failed to push image to registry");
+            format!("{}/{test_name}", cluster.pull_registry)
         }
         ExecutorMode::Docker | ExecutorMode::Ssh => image_id.to_string(),
     };
