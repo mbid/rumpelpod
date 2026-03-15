@@ -7,5 +7,6 @@
 pub(super) mod common;
 pub(super) mod proxy;
 
+mod detach;
 mod smoke;
 mod tool_use;

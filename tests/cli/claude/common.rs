@@ -329,6 +329,32 @@ impl ClaudeSession {
         );
     }
 
+    /// Write raw bytes to the PTY without waiting for echo or pressing Enter.
+    pub fn write_raw(&mut self, bytes: &[u8]) {
+        self.writer.write_all(bytes).expect("write raw to PTY");
+        self.writer.flush().expect("flush PTY writer");
+    }
+
+    /// Wait for the child process to exit.  Returns once the PTY reader
+    /// disconnects (child exited) and the process has been reaped.
+    pub fn wait_for_exit(&mut self) {
+        // Drain the PTY reader until it disconnects.
+        loop {
+            match self.rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(bytes) => {
+                    self.raw_log.extend_from_slice(&bytes);
+                    self.parser.process(&bytes);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("timed out waiting for child to exit");
+                }
+            }
+        }
+        // Reap the child so the exit status is collected.
+        let _ = self.child.wait();
+    }
+
     /// Type text into the prompt and press Enter.
     ///
     /// Waits for the TUI to echo the text on screen before submitting,
