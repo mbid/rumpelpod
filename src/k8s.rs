@@ -53,6 +53,14 @@ impl ContainerArch {
             Self::Arm64 => "rumpel-linux-arm64",
         }
     }
+
+    /// Platform string for Claude Code downloads, e.g. "linux-x64".
+    pub fn claude_code_platform(&self) -> &'static str {
+        match self {
+            Self::Amd64 => "linux-x64",
+            Self::Arm64 => "linux-arm64",
+        }
+    }
 }
 
 /// Options for creating a Kubernetes pod beyond the basics (image, labels, etc.).

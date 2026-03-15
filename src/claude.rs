@@ -89,7 +89,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         }
     }
 
-    let mut claude_cmd = vec!["claude".to_string()];
+    let mut claude_cmd = vec![crate::daemon::CLAUDE_CONTAINER_BIN.to_string()];
     if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
         claude_cmd.push("--dangerously-skip-permissions".to_string());
     }

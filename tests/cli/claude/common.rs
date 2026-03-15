@@ -65,6 +65,8 @@ fn write_claude_test_devcontainer(repo: &TestRepo) {
     // nodejs without npm: the CLI only needs the node runtime, and
     // omitting npm prevents claude's background `npm view` update
     // check from running inside the container.
+    // The ensure_claude_cli endpoint finds this via PATH, so no
+    // download happens during tests.
     let extra_dockerfile = formatdoc! {r#"
         USER root
         RUN apt-get update && apt-get install -y nodejs curl
