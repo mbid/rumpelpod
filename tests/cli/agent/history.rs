@@ -12,26 +12,29 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use crate::executor::TestPod;
+use crate::common::TestRepo;
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 use rumpelpod::daemon::protocol::{Daemon, DaemonClient};
 
 use super::common::{
     create_mock_editor_exit, llm_cache_dir, run_agent_expecting_picker,
     run_agent_interactive_and_args, run_agent_with_prompt, run_agent_with_prompt_and_args,
-    setup_test_repo, PickerAction, DEFAULT_MODEL,
+    PickerAction, DEFAULT_MODEL,
 };
 
 #[test]
 fn agent_new_flag_starts_fresh_conversation() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-new");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-new");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output1 = run_agent_with_prompt(&repo, &pod.daemon, "Say 'first conversation'");
+    let output1 = run_agent_with_prompt(&repo, &exec.daemon, "Say 'first conversation'");
     assert!(output1.success, "First agent run should succeed");
 
     let output2 =
-        run_agent_with_prompt_and_args(&repo, &pod.daemon, "Say 'second conversation'", &["--new"]);
+        run_agent_with_prompt_and_args(&repo, &exec.daemon, "Say 'second conversation'", &["--new"]);
     assert!(
         output2.success,
         "Second agent run with --new should succeed"
@@ -45,19 +48,21 @@ fn agent_new_flag_starts_fresh_conversation() {
 
 #[test]
 fn agent_continue_flag_resumes_conversation() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-continue");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-continue");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output1 = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Remember this secret code: ZEBRA_DELTA_9876. Just acknowledge you've memorized it.",
     );
     assert!(output1.success, "First agent run should succeed");
 
     let output2 = run_agent_with_prompt_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "What was the secret code I asked you to remember?",
         &["--continue=0"],
     );
@@ -74,18 +79,20 @@ fn agent_continue_flag_resumes_conversation() {
 
 #[test]
 fn agent_auto_resumes_single_conversation() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-auto");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-auto");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output1 = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Remember: the secret code is FOXTROT_HOTEL_2468. Acknowledge.",
     );
     assert!(output1.success, "First agent run should succeed");
 
     let output2 =
-        run_agent_with_prompt(&repo, &pod.daemon, "What was the secret code I mentioned?");
+        run_agent_with_prompt(&repo, &exec.daemon, "What was the secret code I mentioned?");
     assert!(output2.success, "Second agent run should succeed");
 
     assert!(
@@ -99,20 +106,22 @@ fn agent_auto_resumes_single_conversation() {
 
 #[test]
 fn agent_errors_with_multiple_conversations_no_flag() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-multi");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-multi");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output1 = run_agent_with_prompt(&repo, &pod.daemon, "First conversation");
+    let output1 = run_agent_with_prompt(&repo, &exec.daemon, "First conversation");
     assert!(output1.success, "First agent run should succeed");
 
     let output2 =
-        run_agent_with_prompt_and_args(&repo, &pod.daemon, "Second conversation", &["--new"]);
+        run_agent_with_prompt_and_args(&repo, &exec.daemon, "Second conversation", &["--new"]);
     assert!(output2.success, "Second agent run should succeed");
 
     // In interactive mode, the picker is shown. Cancel it with Ctrl+C.
     let output3 = run_agent_expecting_picker(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["Which conversation am I in?"],
         PickerAction::Cancel,
     );
@@ -131,14 +140,16 @@ fn agent_errors_with_multiple_conversations_no_flag() {
 
 #[test]
 fn agent_continue_out_of_range_errors() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-oor");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-oor");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    let output1 = run_agent_with_prompt(&repo, &pod.daemon, "Single conversation");
+    let output1 = run_agent_with_prompt(&repo, &exec.daemon, "Single conversation");
     assert!(output1.success, "First agent run should succeed");
 
     let output2 =
-        run_agent_with_prompt_and_args(&repo, &pod.daemon, "This should fail", &["--continue=5"]);
+        run_agent_with_prompt_and_args(&repo, &exec.daemon, "This should fail", &["--continue=5"]);
     assert!(
         !output2.success,
         "Agent should fail with out-of-range conversation index"
@@ -154,11 +165,13 @@ fn agent_continue_out_of_range_errors() {
 
 #[test]
 fn agent_continue_no_conversations_errors() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-noconv");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-noconv");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output =
-        run_agent_with_prompt_and_args(&repo, &pod.daemon, "This should fail", &["--continue=0"]);
+        run_agent_with_prompt_and_args(&repo, &exec.daemon, "This should fail", &["--continue=0"]);
     assert!(
         !output.success,
         "Agent should fail with --continue when no conversations exist"
@@ -174,13 +187,15 @@ fn agent_continue_no_conversations_errors() {
 
 #[test]
 fn agent_interactive_resume_shows_history() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-resume");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-resume");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let unique_marker = "UNIQUE_HISTORY_MARKER_XYZ123";
     let output1 = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &format!("Remember this marker: {unique_marker}. Just acknowledge."),
     );
     assert!(output1.success, "First agent run should succeed");
@@ -206,7 +221,7 @@ fn agent_interactive_resume_shows_history() {
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",
-        pod.daemon.socket_path.to_str().unwrap(),
+        exec.daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
     cmd.args([
@@ -294,13 +309,15 @@ fn agent_interactive_resume_shows_history() {
 
 #[test]
 fn agent_picker_default_selection_on_enter() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-picker");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-picker");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // 1. Create first conversation
     run_agent_with_prompt_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Remember this color: BLUE_99. Just acknowledge.",
         &["--new"],
     );
@@ -308,7 +325,7 @@ fn agent_picker_default_selection_on_enter() {
     // 2. Create second conversation (will be most recent)
     run_agent_with_prompt_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Remember this color: RED_11. Just acknowledge.",
         &["--new"],
     );
@@ -316,7 +333,7 @@ fn agent_picker_default_selection_on_enter() {
     // 3. Run interactively, press Enter at picker to select default (most recent)
     let output = run_agent_expecting_picker(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["What color did I tell you?"],
         PickerAction::SelectDefault,
     );
@@ -335,13 +352,15 @@ fn agent_picker_default_selection_on_enter() {
 
 #[test]
 fn agent_resume_user_last_message_no_double_prefix() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-hist-nodouble");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-hist-nodouble");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
-    // 1. Run agent normally to create the pod and a conversation.
+    // 1. Run agent normally to create a conversation.
     let output1 = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Remember this secret code: ZEBRA_DELTA_9876. Just acknowledge you've memorized it.",
     );
     assert!(output1.success, "First agent run should succeed");
@@ -355,7 +374,7 @@ fn agent_resume_user_last_message_no_double_prefix() {
     // 2. Overwrite the conversation with one that ends in a user message.
     //    This simulates the agent being killed after saving the user message
     //    but before receiving the LLM response.
-    let client = DaemonClient::new_unix(&pod.daemon.socket_path);
+    let client = DaemonClient::new_unix(&exec.daemon.socket_path);
     // Resolve repo path the same way the agent does (via git)
     let repo_path = {
         let repo = git2::Repository::discover(repo.path()).expect("Failed to discover repo");
@@ -402,7 +421,7 @@ fn agent_resume_user_last_message_no_double_prefix() {
     //    an editable suffix. The mock editor has no new messages, so the suffix
     //    is submitted unchanged. The agent will fail (no cached LLM response),
     //    but user messages are printed before the LLM call.
-    let output = run_agent_interactive_and_args(&repo, &pod.daemon, &[], &["--continue=0"]);
+    let output = run_agent_interactive_and_args(&repo, &exec.daemon, &[], &["--continue=0"]);
 
     assert!(
         !output.stdout.contains("> >"),

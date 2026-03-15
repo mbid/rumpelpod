@@ -1,7 +1,9 @@
 //! Tests for web search and fetch functionality.
 
-use crate::common::{build_test_image, TestRepo};
-use crate::executor::TestPod;
+use std::fs;
+
+use crate::common::TestRepo;
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 use super::common::{
     run_agent_interactive_model_and_args, ANTHROPIC_MODEL, GEMINI_MODEL, XAI_MODEL,
@@ -9,12 +11,13 @@ use super::common::{
 
 fn agent_web_search(model: &str, extra_args: &[&str], test_name: &str) {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, test_name);
+    let exec = TestExecutor::start(test_name);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output = run_agent_interactive_model_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         model,
         extra_args,
@@ -55,12 +58,13 @@ fn agent_web_search_gemini() {
 #[test]
 fn agent_web_search_disabled_anthropic() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-web-disabled");
+    let exec = TestExecutor::start("agent-web-disabled");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output = run_agent_interactive_model_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &["--disable-anthropic-websearch"],
@@ -82,19 +86,18 @@ fn agent_web_search_disabled_anthropic() {
 #[test]
 fn agent_web_search_anthropic_config_disable_works() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-web-cfg-dis");
+    let exec = TestExecutor::start("agent-web-cfg-dis");
+    write_test_devcontainer(&repo, "", "");
 
     // Disable websearch in config
-    let config_path = repo.path().join(".rumpelpod.toml");
-    let mut config = std::fs::read_to_string(&config_path).expect("Failed to read config");
+    let mut config = exec.toml.clone();
     config.push_str("\n[agent]\nanthropic-websearch = false\n");
-    std::fs::write(&config_path, config).expect("Failed to update config");
+    fs::write(repo.path().join(".rumpelpod.toml"), config).unwrap();
 
     // Run without CLI flag - should be disabled by config
     let output = run_agent_interactive_model_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &[],
@@ -114,19 +117,18 @@ fn agent_web_search_anthropic_config_disable_works() {
 #[test]
 fn agent_web_search_anthropic_config_disable_cli_enable() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-web-cfg-en");
+    let exec = TestExecutor::start("agent-web-cfg-en");
+    write_test_devcontainer(&repo, "", "");
 
     // Disable websearch in config
-    let config_path = repo.path().join(".rumpelpod.toml");
-    let mut config = std::fs::read_to_string(&config_path).expect("Failed to read config");
+    let mut config = exec.toml.clone();
     config.push_str("\n[agent]\nanthropic-websearch = false\n");
-    std::fs::write(&config_path, config).expect("Failed to update config");
+    fs::write(repo.path().join(".rumpelpod.toml"), config).unwrap();
 
     // Run WITH enable CLI flag - should be enabled despite config
     let output = run_agent_interactive_model_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &["--enable-anthropic-websearch"],
@@ -142,13 +144,14 @@ fn agent_web_search_anthropic_config_disable_cli_enable() {
 #[test]
 fn agent_web_search_anthropic_flags_conflict() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-web-conflict");
+    let exec = TestExecutor::start("agent-web-conflict");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // --enable AND --disable -> should fail with conflict error
     let output = run_agent_interactive_model_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["Test"],
         ANTHROPIC_MODEL,
         &[
@@ -176,19 +179,18 @@ fn agent_web_search_anthropic_flags_conflict() {
 #[test]
 fn agent_web_search_anthropic_config_enable_cli_disable() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-web-en-dis");
+    let exec = TestExecutor::start("agent-web-en-dis");
+    write_test_devcontainer(&repo, "", "");
 
     // Enable websearch in config
-    let config_path = repo.path().join(".rumpelpod.toml");
-    let mut config = std::fs::read_to_string(&config_path).expect("Failed to read config");
+    let mut config = exec.toml.clone();
     config.push_str("\n[agent]\nanthropic-websearch = true\n");
-    std::fs::write(&config_path, config).expect("Failed to update config");
+    fs::write(repo.path().join(".rumpelpod.toml"), config).unwrap();
 
     // Run WITH disable CLI flag
     let output = run_agent_interactive_model_and_args(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &["Search the web: When was the last US penny minted? Answer with just the date in yyyy-mm-dd format."],
         ANTHROPIC_MODEL,
         &["--disable-anthropic-websearch"],

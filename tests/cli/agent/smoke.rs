@@ -5,8 +5,8 @@ use std::process::Command;
 
 use rumpelpod::CommandExt;
 
-use crate::common::{build_test_image, create_commit, TestRepo};
-use crate::executor::TestPod;
+use crate::common::{create_commit, TestRepo};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 use super::common::run_agent_with_prompt_and_model;
 
@@ -24,12 +24,13 @@ fn agent_reads_file(model: &str, test_name: &str) {
         .expect("git add failed");
     create_commit(repo.path(), "Add secret");
 
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, test_name);
+    let exec = TestExecutor::start(test_name);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output = run_agent_with_prompt_and_model(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Run `cat secret.txt` and tell me what it contains.",
         model,
     );

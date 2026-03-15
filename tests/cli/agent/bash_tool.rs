@@ -11,16 +11,17 @@ use std::process::Command;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{build_test_image, create_commit, TestRepo};
-use crate::executor::TestPod;
+use crate::common::{create_commit, TestRepo};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 use super::common::run_agent_with_prompt;
 
 #[test]
 fn agent_bash_timeout() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-bash-timeout");
+    let exec = TestExecutor::start("agent-bash-timeout");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     // Create a script that sleeps for 5 seconds and prints something
     let script_name = "sleepy.sh";
@@ -48,7 +49,7 @@ echo "Done sleeping"
     // Run agent with 2s timeout
     let output = super::common::run_agent_interactive_model_args_env(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &[formatdoc! {r#"
             Run `./{script_name}`.
             Tell me what happens.
@@ -79,12 +80,13 @@ echo "Done sleeping"
 #[test]
 fn agent_handles_command_with_empty_output_and_nonzero_exit() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-bash-empty-exit");
+    let exec = TestExecutor::start("agent-bash-empty-exit");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Run the command `false` and tell me what happened.",
     );
 
@@ -110,12 +112,13 @@ fn agent_large_file_output() {
         .expect("git add failed");
     create_commit(repo.path(), "Add large file");
 
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-bash-large-out");
+    let exec = TestExecutor::start("agent-bash-large-out");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Run exactly one tool: `cat large.txt`. After that single tool call, stop immediately and tell me what you observed. Do not run any other tools.",
     );
 
@@ -158,12 +161,13 @@ fn agent_can_read_large_output_from_one_time_command() {
         .expect("git add failed");
     create_commit(repo.path(), "Add one-time script");
 
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-bash-large-once");
+    let exec = TestExecutor::start("agent-bash-large-once");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &formatdoc! {r#"
             Run `./{script_name}`.
             It will print a lot of output and then delete itself.

@@ -9,8 +9,8 @@ use std::process::Command;
 
 use rumpelpod::CommandExt;
 
-use crate::common::{build_test_image, create_commit, TestRepo};
-use crate::executor::TestPod;
+use crate::common::{create_commit, TestRepo};
+use crate::executor::{write_test_devcontainer, TestExecutor};
 
 use super::common::run_agent_with_prompt;
 
@@ -29,12 +29,13 @@ fn agent_edits_file() {
         .expect("git add failed");
     create_commit(repo.path(), "Add greeting");
 
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-file-edit");
+    let exec = TestExecutor::start("agent-file-edit");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let output = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         "Use the edit tool to replace 'World' with 'Universe' in greeting.txt, then run `cat greeting.txt` and tell me the result.",
     );
 
@@ -48,14 +49,15 @@ fn agent_edits_file() {
 #[test]
 fn agent_writes_file() {
     let repo = TestRepo::new();
-    let image_id = build_test_image(repo.path(), "").expect("Failed to build test image");
-    let pod = TestPod::start(&repo, &image_id, "agent-file-write");
+    let exec = TestExecutor::start("agent-file-write");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
 
     let expected_content = "WRITTEN_BY_AGENT_12345";
 
     let output = run_agent_with_prompt(
         &repo,
-        &pod.daemon,
+        &exec.daemon,
         &format!(
             "Run `echo '{expected_content}' > newfile.txt` \
              then run `cat newfile.txt` and tell me the result."

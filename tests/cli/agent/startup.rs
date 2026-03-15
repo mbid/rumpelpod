@@ -6,8 +6,10 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use super::common::{llm_cache_dir, setup_test_repo, DEFAULT_MODEL};
-use crate::executor::TestPod;
+use crate::common::TestRepo;
+use crate::executor::{write_test_devcontainer, TestExecutor};
+
+use super::common::{llm_cache_dir, DEFAULT_MODEL};
 
 /// Create a mock editor that just touches a marker file and exits.
 fn create_marker_mock_editor(script_dir: &Path, marker_file: &Path) -> PathBuf {
@@ -30,8 +32,10 @@ fn create_marker_mock_editor(script_dir: &Path, marker_file: &Path) -> PathBuf {
 
 #[test]
 fn test_editor_opens_immediately() {
-    let (repo, image_id) = setup_test_repo();
-    let pod = TestPod::start(&repo, &image_id, "agent-startup");
+    let repo = TestRepo::new();
+    let exec = TestExecutor::start("agent-startup");
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let marker_file = temp_dir.path().join("editor-ran");
     let editor_path = create_marker_mock_editor(temp_dir.path(), &marker_file);
@@ -51,7 +55,7 @@ fn test_editor_opens_immediately() {
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",
-        pod.daemon.socket_path.to_str().unwrap(),
+        exec.daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
 
