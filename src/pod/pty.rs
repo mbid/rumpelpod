@@ -13,31 +13,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::State;
 use axum::response::Response;
-use axum::routing::{any, post};
-use axum::{Json, Router};
 use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{Pid, User};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
-
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-fn err_json(e: anyhow::Error) -> (StatusCode, Json<ErrorResponse>) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ErrorResponse {
-            error: format!("{e:#}"),
-        }),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Session types
@@ -76,8 +59,10 @@ impl PtySessions {
         Self::default()
     }
 
+    /// Spawn a new session or reuse an existing one.  Returns a dup'd
+    /// write fd, the screen buffer for replay, and a broadcast receiver.
     #[allow(clippy::too_many_arguments)]
-    async fn spawn(
+    async fn spawn_or_attach(
         &self,
         name: String,
         cmd: Vec<String>,
@@ -86,139 +71,26 @@ impl PtySessions {
         env: Vec<String>,
         cols: u16,
         rows: u16,
-    ) -> Result<bool> {
-        let mut sessions = self.inner.lock().await;
-
-        // Check for existing live session first
-        if sessions.contains_key(&name) {
-            if child_is_alive(sessions[&name].child_pid) {
-                return Ok(false);
-            }
-            // Child exited, remove stale session
-            sessions.remove(&name);
-        }
-
-        let winsize = Winsize {
-            ws_row: rows,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-
-        let user_info = match &user {
-            Some(u) => {
-                let info = User::from_name(u)?.with_context(|| format!("user '{u}' not found"))?;
-                Some(info)
-            }
-            None => None,
-        };
-
-        // Safety: we only call async-signal-safe functions (setuid, setgid,
-        // chdir, execvp) in the child before exec. The mutex is held in the
-        // parent, so the child (which has its own address space after fork)
-        // never touches it.
-        let result = unsafe { forkpty(&winsize, None) }.context("forkpty")?;
-
-        match result {
-            ForkptyResult::Child => {
-                // -- child process --
-                // These calls do not return on success (exec replaces the process).
-
-                if let Some(ref info) = user_info {
-                    // Set gid before uid to avoid permission errors
-                    let _ = nix::unistd::setgid(info.gid);
-                    let _ = nix::unistd::setuid(info.uid);
-
-                    // HOME must match the target user for shell init scripts
-                    let home = info.dir.to_string_lossy();
-                    std::env::set_var("HOME", &*home);
-                    std::env::set_var("USER", &info.name);
-                    std::env::set_var("LOGNAME", &info.name);
-                }
-
-                if let Some(ref dir) = workdir {
-                    let _ = std::env::set_current_dir(dir);
-                }
-
-                for entry in &env {
-                    if let Some((key, value)) = entry.split_once('=') {
-                        std::env::set_var(key, value);
-                    }
-                }
-
-                // Defaults so programs emit color/cursor codes.
-                // The caller's env list can override these.
-                if std::env::var_os("TERM").is_none() {
-                    std::env::set_var("TERM", "xterm-256color");
-                }
-                if std::env::var_os("COLORTERM").is_none() {
-                    std::env::set_var("COLORTERM", "truecolor");
-                }
-
-                if cmd.is_empty() {
-                    eprintln!("pty: empty command");
-                    std::process::exit(1);
-                }
-
-                let err = std::process::Command::new(&cmd[0]).args(&cmd[1..]).exec();
-                eprintln!("pty: exec failed: {err}");
-                std::process::exit(1);
-            }
-            ForkptyResult::Parent { child, master } => {
-                // Set master fd to non-blocking for async I/O
-                let flags = nix::fcntl::fcntl(&master, nix::fcntl::FcntlArg::F_GETFL)
-                    .context("fcntl F_GETFL")?;
-                let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
-                oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
-                nix::fcntl::fcntl(&master, nix::fcntl::FcntlArg::F_SETFL(oflags))
-                    .context("fcntl F_SETFL O_NONBLOCK")?;
-
-                let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
-                let (output_tx, _) = tokio::sync::broadcast::channel(256);
-
-                // Spawn persistent reader: continuously drains PTY output,
-                // updates the screen buffer, and broadcasts to clients.
-                // Runs even when no client is attached so the child never
-                // blocks on write() and the screen buffer stays current.
-                let reader_fd = nix::unistd::dup(&master).context("dup master for reader")?;
-                spawn_persistent_reader(
-                    reader_fd,
-                    Arc::clone(&screen),
-                    output_tx.clone(),
-                    self.clone(),
-                    name.clone(),
-                );
-
-                let session = PtySession {
-                    name: name.clone(),
-                    master_fd: master,
-                    child_pid: child,
-                    created_at: std::time::Instant::now(),
-                    screen,
-                    output_tx,
-                };
-                sessions.insert(name, session);
-                Ok(true)
-            }
-        }
-    }
-
-    /// Return a dup'd fd for writing input to the PTY, plus the screen
-    /// buffer for replay and a broadcast receiver for live output.
-    /// The original fd stays in the session so the PTY survives detach.
-    async fn attach(
-        &self,
-        name: &str,
     ) -> Result<(
         OwnedFd,
         Arc<Mutex<vt100::Parser>>,
         tokio::sync::broadcast::Receiver<Vec<u8>>,
     )> {
-        let sessions = self.inner.lock().await;
-        let session = sessions
-            .get(name)
-            .with_context(|| format!("no such pty session: {name}"))?;
+        let mut sessions = self.inner.lock().await;
 
+        // Reap dead sessions so we start fresh if the child exited.
+        if let Some(s) = sessions.get(&name) {
+            if !child_is_alive(s.child_pid) {
+                sessions.remove(&name);
+            }
+        }
+
+        if !sessions.contains_key(&name) {
+            let session = spawn_session(&name, &cmd, user, workdir, &env, cols, rows, self)?;
+            sessions.insert(name.clone(), session);
+        }
+
+        let session = sessions.get(&name).unwrap();
         let duped = nix::unistd::dup(&session.master_fd).context("dup master fd")?;
         let rx = session.output_tx.subscribe();
         Ok((duped, Arc::clone(&session.screen), rx))
@@ -246,6 +118,123 @@ impl PtySessions {
             if !child_is_alive(s.child_pid) {
                 sessions.remove(name);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session spawning
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_session(
+    name: &str,
+    cmd: &[String],
+    user: Option<String>,
+    workdir: Option<PathBuf>,
+    env: &[String],
+    cols: u16,
+    rows: u16,
+    sessions: &PtySessions,
+) -> Result<PtySession> {
+    let winsize = Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    let user_info = match &user {
+        Some(u) => {
+            let info = User::from_name(u)?.with_context(|| format!("user '{u}' not found"))?;
+            Some(info)
+        }
+        None => None,
+    };
+
+    if cmd.is_empty() {
+        return Err(anyhow::anyhow!("empty command"));
+    }
+
+    // Safety: we only call async-signal-safe functions (setuid, setgid,
+    // chdir, execvp) in the child before exec. The mutex is held in the
+    // parent, so the child (which has its own address space after fork)
+    // never touches it.
+    let result = unsafe { forkpty(&winsize, None) }.context("forkpty")?;
+
+    match result {
+        ForkptyResult::Child => {
+            // -- child process --
+            // These calls do not return on success (exec replaces the process).
+
+            if let Some(ref info) = user_info {
+                // Set gid before uid to avoid permission errors
+                let _ = nix::unistd::setgid(info.gid);
+                let _ = nix::unistd::setuid(info.uid);
+
+                // HOME must match the target user for shell init scripts
+                let home = info.dir.to_string_lossy();
+                std::env::set_var("HOME", &*home);
+                std::env::set_var("USER", &info.name);
+                std::env::set_var("LOGNAME", &info.name);
+            }
+
+            if let Some(ref dir) = workdir {
+                let _ = std::env::set_current_dir(dir);
+            }
+
+            for entry in env {
+                if let Some((key, value)) = entry.split_once('=') {
+                    std::env::set_var(key, value);
+                }
+            }
+
+            // Defaults so programs emit color/cursor codes.
+            // The caller's env list can override these.
+            if std::env::var_os("TERM").is_none() {
+                std::env::set_var("TERM", "xterm-256color");
+            }
+            if std::env::var_os("COLORTERM").is_none() {
+                std::env::set_var("COLORTERM", "truecolor");
+            }
+
+            let err = std::process::Command::new(&cmd[0]).args(&cmd[1..]).exec();
+            eprintln!("pty: exec failed: {err}");
+            std::process::exit(1);
+        }
+        ForkptyResult::Parent { child, master } => {
+            // Set master fd to non-blocking for async I/O
+            let flags = nix::fcntl::fcntl(&master, nix::fcntl::FcntlArg::F_GETFL)
+                .context("fcntl F_GETFL")?;
+            let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
+            oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
+            nix::fcntl::fcntl(&master, nix::fcntl::FcntlArg::F_SETFL(oflags))
+                .context("fcntl F_SETFL O_NONBLOCK")?;
+
+            let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+            let (output_tx, _) = tokio::sync::broadcast::channel(256);
+
+            // Spawn persistent reader: continuously drains PTY output,
+            // updates the screen buffer, and broadcasts to clients.
+            // Runs even when no client is attached so the child never
+            // blocks on write() and the screen buffer stays current.
+            let reader_fd = nix::unistd::dup(&master).context("dup master for reader")?;
+            spawn_persistent_reader(
+                reader_fd,
+                Arc::clone(&screen),
+                output_tx.clone(),
+                sessions.clone(),
+                name.to_string(),
+            );
+
+            Ok(PtySession {
+                name: name.to_string(),
+                master_fd: master,
+                child_pid: child,
+                created_at: std::time::Instant::now(),
+                screen,
+                output_tx,
+            })
         }
     }
 }
@@ -367,11 +356,14 @@ fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Request / response types
+// Request types
 // ---------------------------------------------------------------------------
 
+/// Sent by the client as the first WebSocket text message to identify
+/// the session and provide spawn parameters (used only if the session
+/// does not already exist).
 #[derive(Debug, Deserialize)]
-pub struct PtySpawnRequest {
+pub struct PtySessionRequest {
     pub name: String,
     pub cmd: Vec<String>,
     pub user: Option<String>,
@@ -382,45 +374,15 @@ pub struct PtySpawnRequest {
     pub rows: u16,
 }
 
-#[derive(Debug, Serialize)]
-struct PtySpawnResponse {
-    created: bool,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PtyAttachQuery {
-    pub name: String,
-}
-
 // ---------------------------------------------------------------------------
-// HTTP handlers
+// HTTP handler
 // ---------------------------------------------------------------------------
 
-async fn pty_spawn_handler(
-    State(sessions): State<PtySessions>,
-    Json(req): Json<PtySpawnRequest>,
-) -> Result<Json<PtySpawnResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let created = sessions
-        .spawn(
-            req.name,
-            req.cmd,
-            req.user,
-            req.workdir,
-            req.env,
-            req.cols,
-            req.rows,
-        )
-        .await
-        .map_err(err_json)?;
-    Ok(Json(PtySpawnResponse { created }))
-}
-
-async fn pty_attach_handler(
+pub async fn claude_session_handler(
     ws: WebSocketUpgrade,
     State(sessions): State<PtySessions>,
-    Query(query): Query<PtyAttachQuery>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_pty_socket(socket, sessions, query.name))
+    ws.on_upgrade(move |socket| handle_pty_socket(socket, sessions))
 }
 
 // ---------------------------------------------------------------------------
@@ -433,11 +395,44 @@ async fn pty_attach_handler(
 const MSG_DATA: u8 = 0x00;
 const MSG_RESIZE: u8 = 0x01;
 
-async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: String) {
-    let (write_fd, screen, mut output_rx) = match sessions.attach(&name).await {
+async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
+    // First message must be a text message with the session request JSON.
+    let req: PtySessionRequest = match socket.recv().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
+            Ok(req) => req,
+            Err(e) => {
+                eprintln!("pty: invalid session request: {e}");
+                return;
+            }
+        },
+        Some(Ok(_)) => {
+            eprintln!("pty: expected text message with session params, got binary");
+            return;
+        }
+        Some(Err(e)) => {
+            eprintln!("pty: WebSocket error reading session request: {e}");
+            return;
+        }
+        None => return,
+    };
+
+    let name = req.name.clone();
+
+    let (write_fd, screen, mut output_rx) = match sessions
+        .spawn_or_attach(
+            req.name,
+            req.cmd,
+            req.user,
+            req.workdir,
+            req.env,
+            req.cols,
+            req.rows,
+        )
+        .await
+    {
         Ok(tuple) => tuple,
         Err(e) => {
-            eprintln!("pty attach failed for '{name}': {e:#}");
+            eprintln!("pty session failed for '{name}': {e:#}");
             return;
         }
     };
@@ -460,8 +455,6 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: S
     let raw_fd = write_fd.as_raw_fd();
 
     // Main loop: multiplex between broadcast output and WebSocket input.
-    let ws_sessions = sessions.clone();
-    let ws_name = name.clone();
     loop {
         tokio::select! {
             // Persistent reader produced output -> forward to WebSocket
@@ -512,7 +505,7 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: S
                                 if data.len() >= 5 {
                                     let cols = u16::from_le_bytes([data[1], data[2]]);
                                     let rows = u16::from_le_bytes([data[3], data[4]]);
-                                    let _ = ws_sessions.resize(&ws_name, cols, rows).await;
+                                    let _ = sessions.resize(&name, cols, rows).await;
                                 }
                             }
                             _ => {
@@ -534,15 +527,4 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions, name: S
 
     // The dup'd write_fd is dropped here; the session's master_fd and
     // the persistent reader's fd keep the PTY alive for future reattach.
-}
-
-// ---------------------------------------------------------------------------
-// Router
-// ---------------------------------------------------------------------------
-
-pub fn pty_routes(sessions: PtySessions) -> Router {
-    Router::new()
-        .route("/pty/spawn", post(pty_spawn_handler))
-        .route("/pty/attach", any(pty_attach_handler))
-        .with_state(sessions)
 }

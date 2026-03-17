@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use nix::unistd::{Uid, User};
 use serde::{Deserialize, Serialize};
@@ -53,7 +53,8 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/env/probe", post(env_probe_handler))
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
-        .merge(super::pty::pty_routes(pty_sessions))
+        .route("/claude", any(super::pty::claude_session_handler))
+        .with_state(pty_sessions)
         .layer(axum::middleware::from_fn_with_state(
             token.clone(),
             require_bearer_token,

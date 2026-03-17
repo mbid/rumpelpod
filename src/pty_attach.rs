@@ -80,13 +80,23 @@ enum Outbound {
     Resize(u16, u16),
 }
 
-/// Attach to a remote PTY session over WebSocket.
+/// Session parameters sent as the first WebSocket message.
+/// The server spawns the session if it doesn't exist, otherwise
+/// reuses the existing one and replays the screen state.
+pub struct SessionParams {
+    pub name: String,
+    pub cmd: Vec<String>,
+    pub user: Option<String>,
+    pub workdir: Option<String>,
+    pub env: Vec<String>,
+}
+
+/// Connect to or launch a Claude session over WebSocket.
 ///
-/// Puts the terminal into raw mode, connects to
-/// `ws://HOST:PORT/pty/attach?name=SESSION`, and bridges local
-/// stdin/stdout to the WebSocket until the user detaches (Ctrl-a d)
-/// or the remote session ends.
-pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcome> {
+/// Puts the terminal into raw mode, connects to `ws://HOST:PORT/claude`,
+/// sends the session parameters as the first message, and bridges local
+/// stdin/stdout until the user detaches (Ctrl-a d) or the session ends.
+pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
     eprintln!("[Ctrl-a d to detach]");
 
     // -- Terminal setup -------------------------------------------------
@@ -105,7 +115,7 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
     // -- WebSocket connection -------------------------------------------
 
     let ws_url = format!(
-        "{}/pty/attach?name={session_name}",
+        "{}/claude",
         url.replacen("http://", "ws://", 1)
             .replacen("https://", "wss://", 1),
     );
@@ -121,13 +131,20 @@ pub fn attach(url: &str, token: &str, session_name: &str) -> Result<AttachOutcom
     // indefinitely on read().
     set_read_timeout(&ws, Some(Duration::from_millis(50)))?;
 
-    // -- Initial resize -------------------------------------------------
+    // -- Send session parameters ----------------------------------------
 
-    if let Ok((cols, rows)) = get_terminal_size() {
-        let msg = resize_message(cols, rows);
-        ws.send(Message::Binary(msg.into()))
-            .context("sending initial resize")?;
-    }
+    let (cols, rows) = get_terminal_size().unwrap_or((80, 24));
+    let session_json = serde_json::json!({
+        "name": params.name,
+        "cmd": params.cmd,
+        "user": params.user,
+        "workdir": params.workdir,
+        "env": params.env,
+        "cols": cols,
+        "rows": rows,
+    });
+    ws.send(Message::Text(session_json.to_string().into()))
+        .context("sending session parameters")?;
 
     // -- Shared state ---------------------------------------------------
 

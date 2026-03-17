@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::trace;
 
 use crate::cli::ClaudeCommand;
@@ -89,37 +89,13 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         }
     }
 
-    // Spawn is idempotent: returns created=false if the session is
-    // already running, so the client doesn't need a separate status check.
-    let container_url = &result.container_url;
-    let container_token = &result.container_token;
-    let (cols, rows) = pty_attach::get_terminal_size().unwrap_or((80, 24));
-
     let mut claude_cmd = vec!["claude".to_string()];
     if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
         claude_cmd.push("--dangerously-skip-permissions".to_string());
     }
     claude_cmd.extend(cmd.args.clone());
 
-    let spawn_resp = reqwest::blocking::Client::new()
-        .post(format!("{container_url}/pty/spawn"))
-        .header("Authorization", format!("Bearer {container_token}"))
-        .json(&serde_json::json!({
-            "name": PTY_SESSION_NAME,
-            "cmd": claude_cmd,
-            "user": result.user,
-            "workdir": workdir,
-            "env": env_strings,
-            "cols": cols,
-            "rows": rows,
-        }))
-        .send()
-        .context("spawning pty session")?;
-
-    if !spawn_resp.status().is_success() {
-        let body = spawn_resp.text().unwrap_or_default();
-        return Err(anyhow::anyhow!("failed to spawn pty session: {body}"));
-    }
+    let workdir_str = workdir.to_string_lossy().to_string();
 
     let elapsed = t_total.elapsed();
     trace!("total claude startup: {elapsed:?}");
@@ -127,7 +103,13 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let outcome = pty_attach::attach(
         &result.container_url,
         &result.container_token,
-        PTY_SESSION_NAME,
+        pty_attach::SessionParams {
+            name: PTY_SESSION_NAME.to_string(),
+            cmd: claude_cmd,
+            user: Some(result.user.clone()),
+            workdir: Some(workdir_str),
+            env: env_strings,
+        },
     )?;
 
     match outcome {
