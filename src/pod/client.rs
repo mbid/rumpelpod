@@ -332,7 +332,17 @@ impl PodClient {
     /// Upload a tar archive and extract it at `path` in the container.
     ///
     /// The archive must use the wrapper format (`_/<name>/...`).
+    /// The body is gzip-compressed for transfer; the server decompresses
+    /// via Content-Encoding negotiation.
     pub fn cp_upload(&self, path: &Path, archive: &[u8], owner: Option<&str>) -> Result<()> {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(archive).context("gzip compressing tar")?;
+        let compressed = encoder.finish().context("finishing gzip")?;
+
         let base = &self.url;
         let token = &self.token;
         let url = format!("{base}/cp/upload");
@@ -342,12 +352,13 @@ impl PodClient {
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
             .header("Content-Type", "application/x-tar")
+            .header("Content-Encoding", "gzip")
             .header("X-Path", format!("{path_display}"));
         if let Some(owner) = owner {
             req = req.header("X-Owner", owner);
         }
         let response = req
-            .body(archive.to_vec())
+            .body(compressed)
             .send()
             .with_context(|| format!("sending request to {url}"))?;
 

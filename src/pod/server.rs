@@ -60,7 +60,8 @@ pub fn run_container_server(port: u16, token: String) -> ! {
     let app = Router::new()
         .route("/health", get(health_handler))
         .merge(authenticated_routes)
-        .layer(tower_http::compression::CompressionLayer::new());
+        .layer(tower_http::compression::CompressionLayer::new())
+        .layer(tower_http::decompression::RequestDecompressionLayer::new());
 
     block_on(async {
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))

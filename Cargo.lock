@@ -2550,6 +2550,7 @@ dependencies = [
  "comfy-table",
  "dirs",
  "env_logger",
+ "flate2",
  "futures-core",
  "git2",
  "hex",
