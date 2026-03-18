@@ -400,18 +400,6 @@ impl PodClient {
     }
 
     // -------------------------------------------------------------------
-    // Claude CLI
-    // -------------------------------------------------------------------
-
-    /// Ensure the Claude Code binary is available, downloading it if
-    /// needed.  Returns the path to use.
-    pub fn ensure_claude_cli(&self) -> Result<String> {
-        let resp: EnsureClaudeCliResponse =
-            self.post("/ensure-claude-cli", &serde_json::json!({}))?;
-        Ok(resp.path)
-    }
-
-    // -------------------------------------------------------------------
     // Internal helpers
     // -------------------------------------------------------------------
 

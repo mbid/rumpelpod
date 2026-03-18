@@ -63,7 +63,6 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/env/probe", post(env_probe_handler))
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
-        .route("/ensure-claude-cli", post(ensure_claude_cli_handler))
         .route("/claude", any(super::pty::claude_session_handler))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
@@ -1194,89 +1193,6 @@ fn resolve_user_opt(name: &Option<String>) -> Result<Option<User>> {
         Some(n) => Ok(Some(resolve_user(n)?)),
         None => Ok(None),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Claude CLI installation
-// ---------------------------------------------------------------------------
-
-const CLAUDE_CODE_DIST_BUCKET: &str =
-    "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases";
-
-async fn ensure_claude_cli_handler(
-) -> Result<Json<EnsureClaudeCliResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = tokio::task::spawn_blocking(ensure_claude_cli_impl)
-        .await
-        .expect("ensure_claude_cli_impl panicked");
-    match result {
-        Ok(path) => ok_json(EnsureClaudeCliResponse { path }),
-        Err(e) => Err(err_json(e)),
-    }
-}
-
-/// Return the path to the Claude CLI binary, downloading it if
-/// necessary.  Prefers an existing binary in PATH or at our install
-/// location to avoid re-downloading.
-fn ensure_claude_cli_impl() -> Result<String> {
-    // Already installed by us on a previous call.
-    let bin_path = Path::new(crate::daemon::CLAUDE_CONTAINER_BIN);
-    if bin_path.exists() {
-        return Ok(crate::daemon::CLAUDE_CONTAINER_BIN.to_string());
-    }
-
-    // The user's image ships its own claude binary.
-    if let Ok(found) = which("claude") {
-        return Ok(found);
-    }
-
-    let platform = match std::env::consts::ARCH {
-        "x86_64" => "linux-x64",
-        "aarch64" => "linux-arm64",
-        other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
-    };
-
-    let client = reqwest::blocking::Client::new();
-
-    let version = client
-        .get(format!("{CLAUDE_CODE_DIST_BUCKET}/latest"))
-        .send()
-        .context("fetching latest Claude Code version")?
-        .error_for_status()
-        .context("fetching latest Claude Code version")?
-        .text()
-        .context("reading latest Claude Code version")?;
-    let version = version.trim();
-
-    let url = format!("{CLAUDE_CODE_DIST_BUCKET}/{version}/{platform}/claude");
-    let data = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("downloading Claude Code from {url}"))?
-        .error_for_status()
-        .with_context(|| format!("downloading Claude Code from {url}"))?
-        .bytes()
-        .with_context(|| format!("reading Claude Code binary from {url}"))?;
-
-    if let Some(parent) = bin_path.parent() {
-        std::fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
-    }
-    std::fs::write(bin_path, &data).context("writing Claude Code binary")?;
-    std::fs::set_permissions(bin_path, std::fs::Permissions::from_mode(0o755))
-        .context("making Claude Code binary executable")?;
-
-    Ok(crate::daemon::CLAUDE_CONTAINER_BIN.to_string())
-}
-
-/// Resolve a binary name via PATH, like `which(1)`.
-fn which(name: &str) -> Result<String> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    for dir in path_var.split(':') {
-        let candidate = Path::new(dir).join(name);
-        if candidate.is_file() {
-            return Ok(candidate.to_string_lossy().into_owned());
-        }
-    }
-    Err(anyhow::anyhow!("'{name}' not found in PATH"))
 }
 
 // ---------------------------------------------------------------------------

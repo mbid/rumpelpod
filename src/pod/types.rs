@@ -236,15 +236,6 @@ pub fn base64_encode(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-// ---------------------------------------------------------------------------
-// Claude CLI
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct EnsureClaudeCliResponse {
-    pub path: String,
-}
-
 pub fn base64_decode(s: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
