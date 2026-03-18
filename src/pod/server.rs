@@ -976,6 +976,7 @@ async fn cp_upload_handler(
 
 fn cp_upload_impl(path: &Path, reader: impl std::io::Read, owner: Option<&str>) -> Result<()> {
     let path_display = path.display();
+    let user = owner.map(resolve_user).transpose()?;
 
     let mut archive = tar::Archive::new(reader);
     for entry in archive
@@ -1006,27 +1007,38 @@ fn cp_upload_impl(path: &Path, reader: impl std::io::Read, owner: Option<&str>) 
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating parent for {path_display}"))?;
+                // Chown any implicitly created parent directories
+                if let Some(ref user) = user {
+                    chown_up_to(parent, path, user)?;
+                }
             }
             let target_display = target.display();
             entry
                 .unpack(&target)
                 .with_context(|| format!("extracting to {target_display}"))?;
         }
-    }
 
-    if let Some(owner) = owner {
-        chown_recursive(path, owner).with_context(|| format!("chown {path_display} to {owner}"))?;
+        if let Some(ref user) = user {
+            nix::unistd::chown(&target, Some(user.uid), Some(user.gid))
+                .with_context(|| format!("chown {path_display}"))?;
+        }
     }
 
     Ok(())
 }
 
-/// Recursively chown a path and all its descendants.
-fn chown_recursive(path: &Path, owner: &str) -> Result<()> {
-    let user = resolve_user(owner)?;
-    for entry in walkdir::WalkDir::new(path) {
-        let entry = entry?;
-        nix::unistd::chown(entry.path(), Some(user.uid), Some(user.gid))?;
+/// Chown `from` and its ancestors up to and including `root`.
+fn chown_up_to(from: &Path, root: &Path, user: &User) -> Result<()> {
+    let mut current = from;
+    loop {
+        nix::unistd::chown(current, Some(user.uid), Some(user.gid))?;
+        if current == root {
+            break;
+        }
+        match current.parent() {
+            Some(p) if p.starts_with(root) || p == root => current = p,
+            _ => break,
+        }
     }
     Ok(())
 }
