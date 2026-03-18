@@ -1,3 +1,5 @@
+use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -79,40 +81,68 @@ fn container_repo_path() -> Result<PathBuf> {
     Ok(devcontainer.container_repo_path(&repo_root))
 }
 
-/// Create a tar archive of a local path.
+/// Create a pipe for OS-level streaming.
+fn pipe() -> Result<(std::fs::File, std::fs::File)> {
+    let mut fds = [0i32; 2];
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("creating pipe");
+    }
+    unsafe {
+        Ok((
+            std::fs::File::from(std::os::fd::OwnedFd::from_raw_fd(fds[0])),
+            std::fs::File::from(std::os::fd::OwnedFd::from_raw_fd(fds[1])),
+        ))
+    }
+}
+
+/// Stream a tar archive of a local path through a pipe.
 ///
 /// The archive always has a single top-level entry under the wrapper
 /// directory `_/`: either `_/<filename>` for a file, or `_/<dirname>/...`
 /// for a directory. This lets the receiver distinguish files from
 /// directories by inspecting the tar structure without out-of-band metadata.
-/// Compression is handled at the HTTP layer via Content-Encoding.
-fn tar_local_path(local_path: &str, follow_symlinks: bool) -> Result<Vec<u8>> {
-    let path = Path::new(local_path);
-    let path_display = path.display();
-    let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path_display}"))?;
+///
+/// Returns a readable end of the pipe and a handle to the writer thread.
+/// The caller must read from the pipe before joining the handle to avoid
+/// deadlock (pipes have a finite buffer).
+fn tar_local_path(
+    local_path: &str,
+    follow_symlinks: bool,
+) -> Result<(std::fs::File, std::thread::JoinHandle<Result<()>>)> {
+    let path = PathBuf::from(local_path);
+    let path_display = path.display().to_string();
+    let meta = std::fs::symlink_metadata(&path).with_context(|| format!("stat {path_display}"))?;
 
-    let buf = Vec::new();
-    let mut archive = tar::Builder::new(buf);
-    archive.follow_symlinks(follow_symlinks);
+    let (read_end, write_end) = pipe()?;
 
-    let name = path
-        .file_name()
-        .with_context(|| format!("no file name in {path_display}"))?;
-    let wrapper_name = Path::new("_").join(name);
+    let handle = std::thread::spawn(move || {
+        let path_display = path.display();
+        let mut archive = tar::Builder::new(write_end);
+        archive.follow_symlinks(follow_symlinks);
 
-    if meta.is_dir() {
+        let name = path
+            .file_name()
+            .with_context(|| format!("no file name in {path_display}"))?;
+        let wrapper_name = Path::new("_").join(name);
+
+        if meta.is_dir() {
+            archive
+                .append_dir_all(&wrapper_name, &path)
+                .with_context(|| format!("archiving directory {path_display}"))?;
+        } else {
+            archive
+                .append_path_with_name(&path, &wrapper_name)
+                .with_context(|| format!("archiving file {path_display}"))?;
+        }
+
         archive
-            .append_dir_all(&wrapper_name, path)
-            .with_context(|| format!("archiving directory {path_display}"))?;
-    } else {
-        archive
-            .append_path_with_name(path, &wrapper_name)
-            .with_context(|| format!("archiving file {path_display}"))?;
-    }
+            .into_inner()
+            .with_context(|| format!("finalizing tar for {path_display}"))?;
+        Ok(())
+    });
 
-    archive
-        .into_inner()
-        .with_context(|| format!("finalizing tar for {path_display}"))
+    Ok((read_end, handle))
 }
 
 /// Extract a tar archive to a local path.
@@ -122,11 +152,11 @@ fn tar_local_path(local_path: &str, follow_symlinks: bool) -> Result<Vec<u8>> {
 /// `_/<name>` for a single file. The first path component (`_`) and
 /// the second (`<name>`) are stripped, and remaining paths are placed
 /// under `local_path`.
-fn untar_to_local(archive_data: &[u8], local_path: &str) -> Result<()> {
+fn untar_to_local(reader: impl Read, local_path: &str) -> Result<()> {
     let dest = Path::new(local_path);
     let dest_display = dest.display();
 
-    let mut archive = tar::Archive::new(archive_data);
+    let mut archive = tar::Archive::new(reader);
     for entry in archive.entries().context("reading tar entries")? {
         let mut entry = entry.context("reading tar entry")?;
         let path = entry.path().context("reading entry path")?.into_owned();
@@ -185,8 +215,8 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
             ..
         } => {
             let resolved = resolve_container_path(container_path, &repo_path);
-            let archive = client.cp_download(Path::new(&resolved), cmd.follow_link)?;
-            untar_to_local(&archive, local_path)?;
+            let response = client.cp_download(Path::new(&resolved), cmd.follow_link)?;
+            untar_to_local(response, local_path)?;
         }
         CopyDirection::ToPod {
             local_path,
@@ -194,13 +224,17 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
             ..
         } => {
             let resolved = resolve_container_path(container_path, &repo_path);
-            let archive = tar_local_path(local_path, cmd.follow_link)?;
+            let (reader, handle) = tar_local_path(local_path, cmd.follow_link)?;
             let owner = if cmd.archive {
                 None
             } else {
                 Some(result.user.as_str())
             };
-            client.cp_upload(Path::new(&resolved), &archive, owner)?;
+            client.cp_upload(Path::new(&resolved), reader, owner)?;
+            handle
+                .join()
+                .expect("tar writer panicked")
+                .context("archiving local path")?;
         }
     }
 
@@ -291,10 +325,11 @@ mod tests {
         let src = dir.path().join("test.txt");
         std::fs::write(&src, "hello").unwrap();
 
-        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
+        let (reader, handle) = tar_local_path(src.to_str().unwrap(), false).unwrap();
 
         let dest = dir.path().join("out.txt");
-        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
+        untar_to_local(reader, dest.to_str().unwrap()).unwrap();
+        handle.join().unwrap().unwrap();
 
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello");
     }
@@ -307,10 +342,11 @@ mod tests {
         std::fs::write(src.join("a.txt"), "aaa").unwrap();
         std::fs::write(src.join("b.txt"), "bbb").unwrap();
 
-        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
+        let (reader, handle) = tar_local_path(src.to_str().unwrap(), false).unwrap();
 
         let dest = dir.path().join("destdir");
-        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
+        untar_to_local(reader, dest.to_str().unwrap()).unwrap();
+        handle.join().unwrap().unwrap();
 
         assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "aaa");
         assert_eq!(std::fs::read_to_string(dest.join("b.txt")).unwrap(), "bbb");
@@ -323,10 +359,11 @@ mod tests {
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("only.txt"), "content").unwrap();
 
-        let archive = tar_local_path(src.to_str().unwrap(), false).unwrap();
+        let (reader, handle) = tar_local_path(src.to_str().unwrap(), false).unwrap();
 
         let dest = dir.path().join("out");
-        untar_to_local(&archive, dest.to_str().unwrap()).unwrap();
+        untar_to_local(reader, dest.to_str().unwrap()).unwrap();
+        handle.join().unwrap().unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dest.join("only.txt")).unwrap(),

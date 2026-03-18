@@ -294,12 +294,13 @@ impl PodClient {
     // Copy (tar-based file transfer)
     // -------------------------------------------------------------------
 
-    /// Download a file or directory from the container as a tar archive.
+    /// Download a file or directory from the container as a tar stream.
     ///
     /// The archive uses the wrapper format (`_/<name>/...`) so the caller
     /// can distinguish files from directories by inspecting the tar entries.
-    /// Compression is handled transparently at the HTTP layer.
-    pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<Vec<u8>> {
+    /// Returns a reader over the response body; data is streamed without
+    /// buffering the entire archive in memory.
+    pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<impl std::io::Read> {
         let base = &self.url;
         let token = &self.token;
         let url = format!("{base}/cp/download");
@@ -322,26 +323,25 @@ impl PodClient {
             return Err(anyhow::anyhow!("/cp/download: {err}"));
         }
 
-        let data = response
-            .bytes()
-            .context("reading download response body")?
-            .to_vec();
-        Ok(data)
+        Ok(response)
     }
 
     /// Upload a tar archive and extract it at `path` in the container.
     ///
     /// The archive must use the wrapper format (`_/<name>/...`).
-    /// The body is gzip-compressed for transfer; the server decompresses
-    /// via Content-Encoding negotiation.
-    pub fn cp_upload(&self, path: &Path, archive: &[u8], owner: Option<&str>) -> Result<()> {
-        use flate2::write::GzEncoder;
+    /// The reader is gzip-compressed on-the-fly and streamed as the
+    /// request body; neither the tar nor the compressed data is buffered.
+    pub fn cp_upload(
+        &self,
+        path: &Path,
+        reader: impl std::io::Read + Send + 'static,
+        owner: Option<&str>,
+    ) -> Result<()> {
+        use flate2::read::GzEncoder;
         use flate2::Compression;
-        use std::io::Write;
 
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-        encoder.write_all(archive).context("gzip compressing tar")?;
-        let compressed = encoder.finish().context("finishing gzip")?;
+        let gz_reader = GzEncoder::new(reader, Compression::fast());
+        let body = reqwest::blocking::Body::new(gz_reader);
 
         let base = &self.url;
         let token = &self.token;
@@ -358,7 +358,7 @@ impl PodClient {
             req = req.header("X-Owner", owner);
         }
         let response = req
-            .body(compressed)
+            .body(body)
             .send()
             .with_context(|| format!("sending request to {url}"))?;
 
