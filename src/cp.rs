@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::os::fd::FromRawFd;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -81,21 +80,6 @@ fn container_repo_path() -> Result<PathBuf> {
     Ok(devcontainer.container_repo_path(&repo_root))
 }
 
-/// Create a pipe for OS-level streaming.
-fn pipe() -> Result<(std::fs::File, std::fs::File)> {
-    let mut fds = [0i32; 2];
-    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error()).context("creating pipe");
-    }
-    unsafe {
-        Ok((
-            std::fs::File::from(std::os::fd::OwnedFd::from_raw_fd(fds[0])),
-            std::fs::File::from(std::os::fd::OwnedFd::from_raw_fd(fds[1])),
-        ))
-    }
-}
-
 /// Stream a tar archive of a local path through a pipe.
 ///
 /// The archive always has a single top-level entry under the wrapper
@@ -109,12 +93,12 @@ fn pipe() -> Result<(std::fs::File, std::fs::File)> {
 fn tar_local_path(
     local_path: &str,
     follow_symlinks: bool,
-) -> Result<(std::fs::File, std::thread::JoinHandle<Result<()>>)> {
+) -> Result<(std::io::PipeReader, std::thread::JoinHandle<Result<()>>)> {
     let path = PathBuf::from(local_path);
     let path_display = path.display().to_string();
     let meta = std::fs::symlink_metadata(&path).with_context(|| format!("stat {path_display}"))?;
 
-    let (read_end, write_end) = pipe()?;
+    let (read_end, write_end) = std::io::pipe().context("creating pipe")?;
 
     let handle = std::thread::spawn(move || {
         let path_display = path.display();
