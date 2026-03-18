@@ -11,7 +11,26 @@ pub fn stop(cmd: &StopCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    client.stop_pod(PodName(cmd.name.clone()), repo_path, cmd.wait)?;
+    let pods = client.list_pods(repo_path.clone())?;
+
+    let mut failed = 0u32;
+
+    for name in &cmd.names {
+        if !pods.iter().any(|p| p.name == *name) {
+            eprintln!("pod '{name}' not found");
+            failed += 1;
+            continue;
+        }
+
+        if let Err(e) = client.stop_pod(PodName(name.clone()), repo_path.clone(), cmd.wait) {
+            eprintln!("failed to stop pod '{name}': {e}");
+            failed += 1;
+        }
+    }
+
+    if failed > 0 {
+        return Err(anyhow::anyhow!("{failed} pod(s) could not be stopped"));
+    }
 
     Ok(())
 }

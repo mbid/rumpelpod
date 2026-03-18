@@ -139,10 +139,10 @@ Shows pod name, status (running/stopped), and creation time.
 ")]
     List,
 
-    /// Stop a running pod
-    #[command(long_about = "Stop a pod container without removing it.
+    /// Stop running pods
+    #[command(long_about = "Stop one or more pod containers without removing them.
 
-The container is stopped but preserved. Use 'rumpel enter' to restart it.
+The containers are stopped but preserved. Use 'rumpel enter' to restart them.
 ")]
     Stop(StopCommand),
 
@@ -304,9 +304,9 @@ pub struct EnterCommand {
 
 #[derive(Args)]
 pub struct StopCommand {
-    /// Name of the pod to stop
-    #[arg(help = "Name of the pod to stop", value_parser = validate_pod_name)]
-    pub name: String,
+    /// Names of pods to stop
+    #[arg(required = true, num_args = 1.., value_parser = validate_pod_name)]
+    pub names: Vec<String>,
 
     /// Block until the container is fully stopped
     #[arg(long)]
