@@ -15,8 +15,7 @@ use tungstenite::{ClientRequestBuilder, Message};
 use crate::pod::pty::PtyControl;
 
 /// Ctrl-a (0x01) is the first byte of the detach sequence (same as
-/// GNU screen). Ctrl+letter works on all keyboard layouts, unlike
-/// Ctrl+punctuation which breaks on non-US layouts in gnome-terminal.
+/// GNU screen).
 const DETACH_PREFIX: u8 = 0x01;
 /// 'd' (0x64) or Ctrl-d (0x04) completes the detach sequence after
 /// Ctrl-a, so it works whether the user releases Ctrl or not.
