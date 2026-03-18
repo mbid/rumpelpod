@@ -165,8 +165,14 @@ fn spawn_session(
 
             if let Some(ref info) = user_info {
                 // Set gid before uid to avoid permission errors
-                let _ = nix::unistd::setgid(info.gid);
-                let _ = nix::unistd::setuid(info.uid);
+                if let Err(e) = nix::unistd::setgid(info.gid) {
+                    eprintln!("pty: setgid failed: {e}");
+                    std::process::exit(1);
+                }
+                if let Err(e) = nix::unistd::setuid(info.uid) {
+                    eprintln!("pty: setuid failed: {e}");
+                    std::process::exit(1);
+                }
 
                 // HOME must match the target user for shell init scripts
                 let home = info.dir.to_string_lossy();
@@ -176,7 +182,11 @@ fn spawn_session(
             }
 
             if let Some(ref dir) = workdir {
-                let _ = std::env::set_current_dir(dir);
+                if let Err(e) = std::env::set_current_dir(dir) {
+                    let dir = dir.display();
+                    eprintln!("pty: chdir to {dir} failed: {e}");
+                    std::process::exit(1);
+                }
             }
 
             for entry in env {
