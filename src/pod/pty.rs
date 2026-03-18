@@ -388,9 +388,9 @@ pub enum PtyControl {
 
 pub async fn claude_session_handler(
     ws: WebSocketUpgrade,
-    State(sessions): State<PtySessions>,
+    State(state): State<super::server::PodServerState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_pty_socket(socket, sessions))
+    ws.on_upgrade(move |socket| handle_pty_socket(socket, state.pty_sessions))
 }
 
 // ---------------------------------------------------------------------------

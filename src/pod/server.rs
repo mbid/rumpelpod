@@ -23,6 +23,13 @@ use crate::async_runtime::block_on;
 pub const DEFAULT_PORT: u16 = 7890;
 pub const TOKEN_FILE: &str = "/tmp/rumpelpod-server-token";
 
+/// Shared state for the in-container HTTP server.
+#[derive(Clone)]
+pub struct PodServerState {
+    pub pty_sessions: super::pty::PtySessions,
+    pub token: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
     error: String,
@@ -33,7 +40,10 @@ struct ErrorResponse {
 // ---------------------------------------------------------------------------
 
 pub fn run_container_server(port: u16, token: String) -> ! {
-    let pty_sessions = super::pty::PtySessions::new();
+    let state = PodServerState {
+        pty_sessions: super::pty::PtySessions::new(),
+        token: token.clone(),
+    };
 
     // POST routes require bearer token authentication
     let authenticated_routes = Router::new()
@@ -54,7 +64,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
         .route("/claude", any(super::pty::claude_session_handler))
-        .with_state(pty_sessions)
+        .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
             token.clone(),
             require_bearer_token,
