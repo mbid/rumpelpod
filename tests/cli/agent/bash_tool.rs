@@ -11,8 +11,8 @@ use std::process::Command;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{create_commit, TestRepo};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{create_commit, write_test_devcontainer, TestRepo};
+use crate::executor::TestExecutor;
 
 use super::common::run_agent_with_prompt;
 

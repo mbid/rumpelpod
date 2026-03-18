@@ -4,8 +4,8 @@ use std::fs;
 
 use rumpelpod::CommandExt;
 
-use crate::common::{pod_command, TestRepo};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestRepo};
+use crate::executor::TestExecutor;
 
 #[test]
 fn cp_from_pod_to_host() {

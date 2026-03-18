@@ -18,8 +18,8 @@ use std::time::Duration;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::TestExecutor;
 
 /// Cluster configuration read from environment variables.
 pub(super) struct K8sClusterConfig {

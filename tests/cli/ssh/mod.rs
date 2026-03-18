@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use indoc::formatdoc;
 use tempfile::TempDir;
 
-use crate::common::{pod_command, TestRepo, TEST_USER_UID};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestRepo, TEST_USER_UID};
+use crate::executor::TestExecutor;
 use rumpelpod::CommandExt;
 
 /// Test user for SSH connections.

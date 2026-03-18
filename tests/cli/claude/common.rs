@@ -10,8 +10,8 @@ use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use crate::common::{TestDaemon, TestRepo};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{write_test_devcontainer, TestDaemon, TestRepo};
+use crate::executor::TestExecutor;
 
 use super::proxy::ClaudeTestProxy;
 

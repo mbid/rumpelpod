@@ -5,8 +5,8 @@ use std::fs;
 use retry::delay::Exponential;
 use retry::OperationResult;
 
-use crate::common::{pod_command, TestRepo};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestRepo};
+use crate::executor::TestExecutor;
 
 #[test]
 fn list_empty_returns_header_only() {

@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use tempfile::TempDir;
 
@@ -290,4 +291,45 @@ pub fn pod_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
     }
 
     cmd
+}
+
+/// Write a standard test devcontainer.json with a Dockerfile build section.
+///
+/// Creates a Dockerfile that installs git, creates the test user, and
+/// COPYs the repo.  The devcontainer.json uses a build section so the
+/// image is built on first `rumpel enter` (with buildkit layer caching).
+///
+/// `extra_dockerfile` is appended after the USER directive.
+/// `extra_json` is spliced into the devcontainer.json object (include
+/// a leading comma if non-empty).
+pub fn write_test_devcontainer(repo: &TestRepo, extra_dockerfile: &str, extra_json: &str) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
+
+    let dockerfile = formatdoc! {r#"
+        FROM debian:13
+        RUN apt-get update && apt-get install -y git
+        RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        USER {TEST_USER}
+        {extra_dockerfile}
+    "#};
+    std::fs::write(devcontainer_dir.join("Dockerfile"), dockerfile)
+        .expect("Failed to write Dockerfile");
+
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "build": {{
+                "dockerfile": "Dockerfile",
+                "context": ".."
+            }},
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "runArgs": ["--runtime=runc"]{extra_json}
+        }}
+    "#};
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
 }

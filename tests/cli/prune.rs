@@ -2,8 +2,8 @@
 
 use std::fs;
 
-use crate::common::{pod_command, TestDaemon, TestRepo};
-use crate::executor::{executor_supports_stop, write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestRepo};
+use crate::executor::{executor_supports_stop, TestExecutor};
 
 /// Poll `rumpel list` until `name` shows with the given status word.
 fn wait_for_pod_status(repo: &TestRepo, daemon: &TestDaemon, name: &str, status: &str) {

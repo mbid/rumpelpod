@@ -9,8 +9,8 @@ use rumpelpod::CommandExt;
 
 use std::fs;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestRepo, TEST_REPO_PATH};
+use crate::executor::TestExecutor;
 
 /// Enter a pod and verify the repo has the host commit and a clean working tree.
 fn assert_repo_usable(repo: &TestRepo, exec: &TestExecutor, pod_name: &str) {

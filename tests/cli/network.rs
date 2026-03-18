@@ -7,8 +7,10 @@ use std::thread;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{create_commit, pod_command, TestRepo, TEST_REPO_PATH};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{
+    create_commit, pod_command, write_test_devcontainer, TestRepo, TEST_REPO_PATH,
+};
+use crate::executor::TestExecutor;
 
 #[test]
 fn network_host_connectivity() {

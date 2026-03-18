@@ -7,8 +7,10 @@ use std::process::{Command, Stdio};
 use indoc::{formatdoc, indoc};
 use rumpelpod::CommandExt;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER, TEST_USER_UID};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{
+    pod_command, write_test_devcontainer, TestRepo, TEST_REPO_PATH, TEST_USER, TEST_USER_UID,
+};
+use crate::executor::TestExecutor;
 
 #[test]
 fn enter_smoke_test() {

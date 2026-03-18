@@ -15,7 +15,7 @@ use std::path::Path;
 
 use indoc::formatdoc;
 
-use super::common::{TestDaemon, TestRepo};
+use super::common::TestDaemon;
 
 // ---------------------------------------------------------------------------
 // Executor mode
@@ -62,17 +62,19 @@ pub struct TestExecutor {
     pub daemon: TestDaemon,
     /// Executor-specific `.rumpelpod.toml` content.
     pub toml: String,
-    /// Prevent the compiler from dropping resources too early.
-    _resources: Box<dyn std::any::Any>,
+    /// Resources that must outlive the daemon.
+    _resources: ExecutorResources,
 }
 
-struct SshResources {
-    _remote: super::ssh::SshRemoteHost,
-    _ssh_config: super::ssh::SshConfig,
-}
-
-struct K8sResources {
-    _namespace: super::k8s::K8sNamespace,
+enum ExecutorResources {
+    Docker,
+    Ssh {
+        _remote: super::ssh::SshRemoteHost,
+        _ssh_config: super::ssh::SshConfig,
+    },
+    K8s {
+        _namespace: super::k8s::K8sNamespace,
+    },
 }
 
 impl TestExecutor {
@@ -106,7 +108,7 @@ impl TestExecutor {
         TestExecutor {
             daemon,
             toml: String::new(),
-            _resources: Box::new(()),
+            _resources: ExecutorResources::Docker,
         }
     }
 
@@ -126,10 +128,10 @@ impl TestExecutor {
         TestExecutor {
             daemon,
             toml,
-            _resources: Box::new(SshResources {
+            _resources: ExecutorResources::Ssh {
                 _remote: remote,
                 _ssh_config: ssh_config,
-            }),
+            },
         }
     }
 
@@ -164,54 +166,7 @@ impl TestExecutor {
         TestExecutor {
             daemon,
             toml,
-            _resources: Box::new(K8sResources { _namespace: ns }),
+            _resources: ExecutorResources::K8s { _namespace: ns },
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Standard test devcontainer
-// ---------------------------------------------------------------------------
-
-use super::common::{TEST_REPO_PATH, TEST_USER, TEST_USER_UID};
-
-/// Write a standard test devcontainer.json with a Dockerfile build section.
-///
-/// Creates a Dockerfile that installs git, creates the test user, and
-/// COPYs the repo.  The devcontainer.json uses a build section so the
-/// image is built on first `rumpel enter` (with buildkit layer caching).
-///
-/// `extra_dockerfile` is appended after the USER directive.
-/// `extra_json` is spliced into the devcontainer.json object (include
-/// a leading comma if non-empty).
-pub fn write_test_devcontainer(repo: &TestRepo, extra_dockerfile: &str, extra_json: &str) {
-    let devcontainer_dir = repo.path().join(".devcontainer");
-    std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
-
-    let dockerfile = formatdoc! {r#"
-        FROM debian:13
-        RUN apt-get update && apt-get install -y git
-        RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
-        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
-        USER {TEST_USER}
-        {extra_dockerfile}
-    "#};
-    std::fs::write(devcontainer_dir.join("Dockerfile"), dockerfile)
-        .expect("Failed to write Dockerfile");
-
-    let devcontainer_json = formatdoc! {r#"
-        {{
-            "build": {{
-                "dockerfile": "Dockerfile",
-                "context": ".."
-            }},
-            "workspaceFolder": "{TEST_REPO_PATH}",
-            "runArgs": ["--runtime=runc"]{extra_json}
-        }}
-    "#};
-    std::fs::write(
-        devcontainer_dir.join("devcontainer.json"),
-        devcontainer_json,
-    )
-    .expect("Failed to write devcontainer.json");
 }

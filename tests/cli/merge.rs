@@ -3,8 +3,8 @@
 use std::fs;
 use std::process::Command;
 
-use crate::common::{pod_command, TestDaemon, TestRepo};
-use crate::executor::{executor_supports_stop, write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestRepo};
+use crate::executor::{executor_supports_stop, TestExecutor};
 
 /// Helper: create a pod and commit a new file inside it so its branch is ahead.
 fn create_ahead_pod(repo: &TestRepo, daemon: &TestDaemon, name: &str) {

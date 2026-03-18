@@ -4,8 +4,8 @@ use std::process::Command;
 use rumpelpod::CommandExt;
 
 use super::{get_branch_commit, get_gateway_path, get_remote_ref_commit};
-use crate::common::{create_commit, pod_command, TestRepo};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{create_commit, pod_command, write_test_devcontainer, TestRepo};
+use crate::executor::TestExecutor;
 
 /// Create a parent TestRepo that contains a git submodule pointing to
 /// a second TestRepo.  Returns (parent, child_name) where child_name

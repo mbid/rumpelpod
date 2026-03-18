@@ -14,8 +14,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{
+    pod_command, write_test_devcontainer, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+};
+use crate::executor::TestExecutor;
 
 /// Write a devcontainer.json with port forwarding configuration.
 fn write_devcontainer_with_ports(repo: &TestRepo, ports_config: &str) {

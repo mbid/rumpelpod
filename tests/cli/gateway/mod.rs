@@ -13,8 +13,10 @@ use std::process::Command;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{create_commit, pod_command, TestDaemon, TestRepo, TEST_REPO_PATH};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{
+    create_commit, pod_command, write_test_devcontainer, TestDaemon, TestRepo, TEST_REPO_PATH,
+};
+use crate::executor::TestExecutor;
 
 /// Get the list of branches in a repository.
 fn get_branches(repo_path: &Path) -> Vec<String> {

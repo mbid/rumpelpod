@@ -7,8 +7,8 @@
 
 use std::fs;
 
-use crate::common::{pod_command, TestRepo};
-use crate::executor::{write_test_devcontainer, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestRepo};
+use crate::executor::TestExecutor;
 
 #[test]
 fn unicode_pod_name_is_rejected() {
