@@ -4,16 +4,23 @@
 //! Replaces `docker exec -it ... screen ...` with a direct WebSocket
 //! connection to the in-container PTY server.
 
-use std::io::{self, Write};
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::io;
+use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result};
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use tungstenite::stream::MaybeTlsStream;
-use tungstenite::{ClientRequestBuilder, Message};
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 use crate::pod::pty::PtyControl;
+
+type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type WsWriter = SplitSink<WsStream, Message>;
+type WsReader = SplitStream<WsStream>;
 
 /// Ctrl-a (0x01) is the first byte of the detach sequence (same as
 /// GNU screen).
@@ -91,6 +98,14 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
     nix::sys::termios::tcsetattr(io::stdin(), nix::sys::termios::SetArg::TCSANOW, &raw)
         .context("setting terminal to raw mode")?;
 
+    // -- Run async bridge -----------------------------------------------
+
+    let url = url.to_string();
+    let token = token.to_string();
+    crate::async_runtime::block_on(attach_async(&url, &token, params))
+}
+
+async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
     // -- WebSocket connection -------------------------------------------
 
     let mut ws_url = Url::parse(url).context("parsing container URL")?;
@@ -103,12 +118,30 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
         .set_scheme(scheme)
         .expect("ws/wss are always valid schemes");
     ws_url.set_path("/claude");
-    let uri: tungstenite::http::Uri = ws_url.as_str().parse().context("parsing WebSocket URI")?;
-    let request =
-        ClientRequestBuilder::new(uri).with_header("Authorization", format!("Bearer {token}"));
 
-    let (mut ws, _response) =
-        tungstenite::connect(request).context("WebSocket handshake failed")?;
+    let host = match ws_url.port() {
+        Some(port) => format!("{}:{port}", ws_url.host_str().unwrap_or("localhost")),
+        None => ws_url.host_str().unwrap_or("localhost").to_string(),
+    };
+    let request = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(ws_url.as_str())
+        .header("Host", &host)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .context("building WebSocket request")?;
+
+    let (ws, _response) = tokio_tungstenite::connect_async(request)
+        .await
+        .context("WebSocket handshake failed")?;
+
+    let (mut ws_write, mut ws_read): (WsWriter, WsReader) = ws.split();
 
     // -- Send session parameters ----------------------------------------
 
@@ -123,167 +156,126 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
         rows,
     };
     let json = serde_json::to_string(&session_msg).context("serializing session params")?;
-    ws.send(Message::Text(json.into()))
+    ws_write
+        .send(Message::Text(json.into()))
+        .await
         .context("sending session parameters")?;
 
-    // -- Set up non-blocking I/O ----------------------------------------
+    // -- Bridge loop ----------------------------------------------------
 
-    let tcp_raw_fd = match ws.get_ref() {
-        MaybeTlsStream::Plain(tcp) => tcp.as_raw_fd(),
-        _ => return Err(anyhow::anyhow!("unexpected TLS stream for local WebSocket")),
-    };
-
-    // SAFETY: the TCP stream is owned by the WebSocket and stays open
-    // for the duration of this function.
-    let tcp_fd = unsafe { BorrowedFd::borrow_raw(tcp_raw_fd) };
-
-    // Set the TCP stream to non-blocking so ws.read() returns WouldBlock
-    // instead of blocking when no data is available.
-    let flags =
-        nix::fcntl::fcntl(tcp_fd, nix::fcntl::FcntlArg::F_GETFL).context("fcntl F_GETFL")?;
-    let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
-    oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
-    nix::fcntl::fcntl(tcp_fd, nix::fcntl::FcntlArg::F_SETFL(oflags))
-        .context("fcntl F_SETFL O_NONBLOCK")?;
-
-    // -- Single-threaded poll loop --------------------------------------
-
-    let stdin_raw_fd = io::stdin().as_raw_fd();
-    // SAFETY: stdin is open for the duration of this function.
-    let stdin_fd = unsafe { BorrowedFd::borrow_raw(stdin_raw_fd) };
-    let mut stdout = io::stdout().lock();
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
     let mut stdin_buf = [0u8; 4096];
     let mut saw_ctrl_a = false;
     let mut last_size = get_terminal_size().ok();
-    let mut detached = false;
+    let mut resize_interval = tokio::time::interval(std::time::Duration::from_millis(100));
 
     loop {
-        // SAFETY: BorrowedFd requires the fd to be valid for the
-        // lifetime of the borrow. Both stdin and the TCP socket are
-        // open for the duration of this loop.
-        let poll_fds = &mut [
-            PollFd::new(stdin_fd, PollFlags::POLLIN),
-            PollFd::new(tcp_fd, PollFlags::POLLIN),
-        ];
+        tokio::select! {
+            // stdin -> WebSocket
+            n = stdin.read(&mut stdin_buf) => {
+                let n = match n {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(_) => break,
+                };
 
-        match poll(poll_fds, PollTimeout::from(100u16)) {
-            Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(e) => return Err(e).context("poll"),
-        }
+                match process_stdin(&stdin_buf[..n], &mut saw_ctrl_a) {
+                    StdinAction::Detach => return Ok(AttachOutcome::Detached),
+                    StdinAction::Send(data) => {
+                        if ws_write.send(Message::Binary(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    StdinAction::Nothing => {}
+                }
+            }
 
-        // Check for terminal resize each iteration.
-        let current_size = get_terminal_size().ok();
-        if current_size != last_size {
-            if let Some((cols, rows)) = current_size {
-                let msg = PtyControl::Resize { cols, rows };
-                let json = serde_json::to_string(&msg).expect("Resize is always serializable");
-                if ws.send(Message::Text(json.into())).is_err() {
+            // WebSocket -> stdout
+            msg = ws_read.next() => {
+                if handle_ws_message(msg, &mut stdout, &mut ws_write).await.is_err() {
                     break;
                 }
             }
-            last_size = current_size;
-        }
 
-        // stdin ready -> read, process detach keys, send to WebSocket
-        if poll_fds[0]
-            .revents()
-            .is_some_and(|r| r.contains(PollFlags::POLLIN))
-        {
-            let n = nix::unistd::read(stdin_fd, &mut stdin_buf);
-            match n {
-                Ok(0) => break,
-                Ok(n) => {
-                    let mut to_send = Vec::with_capacity(n + 1);
-                    for &byte in &stdin_buf[..n] {
-                        if saw_ctrl_a {
-                            saw_ctrl_a = false;
-                            if byte == DETACH_SUFFIX || byte == DETACH_SUFFIX_CTRL {
-                                detached = true;
-                                break;
-                            } else if byte == DETACH_PREFIX {
-                                // Ctrl-a Ctrl-a -> send one literal Ctrl-a, stay alert
-                                to_send.push(DETACH_PREFIX);
-                                saw_ctrl_a = true;
-                            } else {
-                                // Not a detach sequence -- flush the buffered Ctrl-a
-                                to_send.push(DETACH_PREFIX);
-                                to_send.push(byte);
-                            }
-                        } else if byte == DETACH_PREFIX {
-                            saw_ctrl_a = true;
-                        } else {
-                            to_send.push(byte);
-                        }
+            // Resize check
+            _ = resize_interval.tick() => {
+                let current_size = get_terminal_size().ok();
+                if current_size != last_size {
+                    if let Some((cols, rows)) = current_size {
+                        let _ = send_resize(&mut ws_write, cols, rows).await;
                     }
-
-                    if detached {
-                        break;
-                    }
-
-                    if !to_send.is_empty() && ws.send(Message::Binary(to_send.into())).is_err() {
-                        break;
-                    }
-                }
-                Err(nix::errno::Errno::EINTR) => continue,
-                Err(_) => break,
-            }
-        }
-
-        // WebSocket ready -> read messages, write to stdout
-        if poll_fds[1]
-            .revents()
-            .is_some_and(|r| r.contains(PollFlags::POLLIN))
-        {
-            // Drain all available messages before going back to poll,
-            // since tungstenite may buffer multiple frames from one read.
-            loop {
-                match ws.read() {
-                    Ok(Message::Binary(data)) => {
-                        let _ = stdout.write_all(&data);
-                        let _ = stdout.flush();
-                    }
-                    Ok(Message::Close(_)) => {
-                        return Ok(AttachOutcome::SessionEnded);
-                    }
-                    Ok(_) => {}
-                    Err(tungstenite::Error::Io(ref e)) if e.kind() == io::ErrorKind::WouldBlock => {
-                        break;
-                    }
-                    Err(tungstenite::Error::ConnectionClosed)
-                    | Err(tungstenite::Error::AlreadyClosed) => {
-                        return Ok(AttachOutcome::SessionEnded);
-                    }
-                    Err(_) => return Ok(AttachOutcome::SessionEnded),
+                    last_size = current_size;
                 }
             }
-        }
-
-        // stdin hangup or error
-        if poll_fds[0]
-            .revents()
-            .is_some_and(|r| r.intersects(PollFlags::POLLHUP | PollFlags::POLLERR))
-        {
-            break;
-        }
-
-        // WebSocket hangup or error
-        if poll_fds[1]
-            .revents()
-            .is_some_and(|r| r.intersects(PollFlags::POLLHUP | PollFlags::POLLERR))
-        {
-            break;
         }
     }
 
-    // Best-effort close handshake.
-    let _ = ws.close(None);
+    Ok(AttachOutcome::SessionEnded)
+}
 
-    // Terminal is restored by _guard's Drop.
+enum StdinAction {
+    Detach,
+    Send(Vec<u8>),
+    Nothing,
+}
 
-    if detached {
-        Ok(AttachOutcome::Detached)
+fn process_stdin(data: &[u8], saw_ctrl_a: &mut bool) -> StdinAction {
+    let mut to_send = Vec::with_capacity(data.len() + 1);
+    for &byte in data {
+        if *saw_ctrl_a {
+            *saw_ctrl_a = false;
+            if byte == DETACH_SUFFIX || byte == DETACH_SUFFIX_CTRL {
+                return StdinAction::Detach;
+            } else if byte == DETACH_PREFIX {
+                // Ctrl-a Ctrl-a -> send one literal Ctrl-a, stay alert
+                to_send.push(DETACH_PREFIX);
+                *saw_ctrl_a = true;
+            } else {
+                // Not a detach sequence -- flush the buffered Ctrl-a
+                to_send.push(DETACH_PREFIX);
+                to_send.push(byte);
+            }
+        } else if byte == DETACH_PREFIX {
+            *saw_ctrl_a = true;
+        } else {
+            to_send.push(byte);
+        }
+    }
+    if to_send.is_empty() {
+        StdinAction::Nothing
     } else {
-        Ok(AttachOutcome::SessionEnded)
+        StdinAction::Send(to_send)
     }
+}
+
+async fn handle_ws_message(
+    msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
+    stdout: &mut tokio::io::Stdout,
+    ws_write: &mut WsWriter,
+) -> Result<(), ()> {
+    match msg {
+        Some(Ok(Message::Binary(data))) => {
+            let _ = stdout.write_all(&data).await;
+            let _ = stdout.flush().await;
+            Ok(())
+        }
+        Some(Ok(Message::Ping(data))) => {
+            let _ = ws_write.send(Message::Pong(data)).await;
+            Ok(())
+        }
+        Some(Ok(Message::Close(_))) => Err(()),
+        Some(Ok(_)) => Ok(()),
+        Some(Err(_)) => Err(()),
+        None => Err(()),
+    }
+}
+
+async fn send_resize(ws_write: &mut WsWriter, cols: u16, rows: u16) -> Result<()> {
+    let msg = PtyControl::Resize { cols, rows };
+    let json = serde_json::to_string(&msg).expect("Resize is always serializable");
+    ws_write
+        .send(Message::Text(json.into()))
+        .await
+        .context("sending resize")
 }
