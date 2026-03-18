@@ -365,8 +365,6 @@ fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> Result<()> {
 
 /// Text messages carry JSON control messages. Binary messages carry
 /// raw PTY data (no prefix, no framing beyond WebSocket itself).
-/// This mirrors how SSH separates channel data from window-change
-/// requests at the protocol level.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PtyControl {
