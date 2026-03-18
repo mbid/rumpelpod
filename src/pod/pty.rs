@@ -27,12 +27,8 @@ use tokio::sync::Mutex;
 // ---------------------------------------------------------------------------
 
 struct PtySession {
-    #[allow(dead_code)]
-    name: String,
     master_fd: OwnedFd,
     child_pid: Pid,
-    #[allow(dead_code)]
-    created_at: std::time::Instant,
     /// Virtual terminal buffer tracking the screen state for replay
     /// on reattach, like screen/tmux.
     screen: Arc<Mutex<vt100::Parser>>,
@@ -228,10 +224,8 @@ fn spawn_session(
             );
 
             Ok(PtySession {
-                name: name.to_string(),
                 master_fd: master,
                 child_pid: child,
-                created_at: std::time::Instant::now(),
                 screen,
                 output_tx,
             })
