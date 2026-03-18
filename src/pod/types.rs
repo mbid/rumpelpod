@@ -214,9 +214,9 @@ pub struct CpDownloadRequest {
     pub follow_symlinks: bool,
 }
 
-// CpDownloadResponse and CpUploadRequest are not needed: download returns
-// raw gzip bytes with X-Is-Dir header, upload sends raw gzip bytes with
-// metadata in request headers (X-Path, X-Owner, X-Is-Dir).
+// Download is GET /cp with query parameters from CpDownloadRequest,
+// returning a streamed tar body. Upload is POST /cp with a tar body
+// and metadata in request headers (X-Path, X-Owner).
 
 // ---------------------------------------------------------------------------
 // Health

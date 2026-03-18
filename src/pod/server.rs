@@ -49,8 +49,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/git/apply-patch", post(git_apply_patch_handler))
         .route("/env/user-info", post(env_user_info_handler))
         .route("/env/probe", post(env_probe_handler))
-        .route("/cp/download", post(cp_download_handler))
-        .route("/cp/upload", post(cp_upload_handler))
+        .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
         .layer(axum::middleware::from_fn_with_state(
             token.clone(),
@@ -916,7 +915,7 @@ impl std::io::Read for ChannelReader {
 // ---------------------------------------------------------------------------
 
 async fn cp_download_handler(
-    Json(req): Json<CpDownloadRequest>,
+    axum::extract::Query(req): axum::extract::Query<CpDownloadRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     // Validate the path before starting the stream, so we can return
     // a proper error response for the most common failure (not found).

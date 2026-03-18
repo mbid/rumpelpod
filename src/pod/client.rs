@@ -303,12 +303,12 @@ impl PodClient {
     pub fn cp_download(&self, path: &Path, follow_symlinks: bool) -> Result<impl std::io::Read> {
         let base = &self.url;
         let token = &self.token;
-        let url = format!("{base}/cp/download");
+        let url = format!("{base}/cp");
         let response = self
             .client
-            .post(&url)
+            .get(&url)
             .header("Authorization", format!("Bearer {token}"))
-            .json(&CpDownloadRequest {
+            .query(&CpDownloadRequest {
                 path: path.to_path_buf(),
                 follow_symlinks,
             })
@@ -320,7 +320,7 @@ impl PodClient {
                 error: "unknown error".to_string(),
             });
             let err = &error.error;
-            return Err(anyhow::anyhow!("/cp/download: {err}"));
+            return Err(anyhow::anyhow!("GET /cp: {err}"));
         }
 
         Ok(response)
@@ -345,7 +345,7 @@ impl PodClient {
 
         let base = &self.url;
         let token = &self.token;
-        let url = format!("{base}/cp/upload");
+        let url = format!("{base}/cp");
         let path_display = path.display();
         let mut req = self
             .client
@@ -369,7 +369,7 @@ impl PodClient {
                 error: "unknown error".to_string(),
             });
             let err = &error.error;
-            Err(anyhow::anyhow!("/cp/upload: {err}"))
+            Err(anyhow::anyhow!("POST /cp: {err}"))
         }
     }
 
