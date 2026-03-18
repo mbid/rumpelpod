@@ -882,34 +882,6 @@ impl std::io::Write for ChannelWriter {
     }
 }
 
-/// Adapter: reads bytes received through a tokio mpsc channel.
-/// Used to stream an HTTP request body into a tar extractor.
-struct ChannelReader {
-    rx: tokio::sync::mpsc::Receiver<axum::body::Bytes>,
-    cursor: std::io::Cursor<axum::body::Bytes>,
-}
-
-impl ChannelReader {
-    fn new(rx: tokio::sync::mpsc::Receiver<axum::body::Bytes>) -> Self {
-        Self {
-            rx,
-            cursor: std::io::Cursor::new(axum::body::Bytes::new()),
-        }
-    }
-}
-
-impl std::io::Read for ChannelReader {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.cursor.position() as usize >= self.cursor.get_ref().len() {
-            match self.rx.blocking_recv() {
-                Some(bytes) => self.cursor = std::io::Cursor::new(bytes),
-                None => return Ok(0),
-            }
-        }
-        std::io::Read::read(&mut self.cursor, buf)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Copy handlers
 // ---------------------------------------------------------------------------
@@ -987,29 +959,15 @@ async fn cp_upload_handler(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    // Stream body chunks into a channel that the blocking extractor reads from.
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    tokio::spawn(async move {
-        use tokio_stream::StreamExt;
-        let mut stream = body.into_data_stream();
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    if tx.send(bytes).await.is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    eprintln!("cp_upload body read error: {e}");
-                    break;
-                }
-            }
-        }
-    });
+    use tokio_stream::StreamExt;
+    let stream = body
+        .into_data_stream()
+        .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+    let async_reader = tokio_util::io::StreamReader::new(stream);
+    let sync_reader = tokio_util::io::SyncIoBridge::new(async_reader);
 
-    let reader = ChannelReader::new(rx);
     let result =
-        tokio::task::spawn_blocking(move || cp_upload_impl(&path, reader, owner.as_deref()))
+        tokio::task::spawn_blocking(move || cp_upload_impl(&path, sync_reader, owner.as_deref()))
             .await
             .expect("cp_upload_impl panicked");
     result.map_err(err_json)?;
