@@ -372,11 +372,8 @@ pub enum PtyControl {
     Session {
         name: String,
         cmd: Vec<String>,
-        #[serde(default)]
         user: Option<String>,
-        #[serde(default)]
         workdir: Option<PathBuf>,
-        #[serde(default)]
         env: Vec<String>,
         cols: u16,
         rows: u16,
