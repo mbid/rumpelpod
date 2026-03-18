@@ -11,6 +11,8 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
   Only if needed to test unicode support etc.
 - Most features should have tests.
   Prefer integration tests/ over unit tests.
+- Readers should not require a lot of context to understand tests.
+  Some fixtures are OK, but bias towards some duplication across test cases over introducing new helpers.
 - Use `cargo xtest` instead of `cargo test`.
   It builds cross-architecture binaries and sets up the test environment.
 - Never fall through to a "default" when matching known variants.
