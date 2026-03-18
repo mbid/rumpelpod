@@ -962,7 +962,7 @@ async fn cp_upload_handler(
     use tokio_stream::StreamExt;
     let stream = body
         .into_data_stream()
-        .map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)));
+        .map(|result| result.map_err(std::io::Error::other));
     let async_reader = tokio_util::io::StreamReader::new(stream);
     let sync_reader = tokio_util::io::SyncIoBridge::new(async_reader);
 
