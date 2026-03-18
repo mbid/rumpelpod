@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use crate::common::{write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
 
 use super::common::{llm_cache_dir, ANTHROPIC_MODEL};
 
@@ -19,9 +19,11 @@ use super::common::{llm_cache_dir, ANTHROPIC_MODEL};
 #[test]
 fn temp_file_path_contains_pod_name() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("agent-temp-path");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "agent-temp-path");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create a temp directory for the mock editor script
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -72,7 +74,7 @@ fi
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",
-        exec.daemon.socket_path.to_str().unwrap(),
+        daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_script_path.to_str().unwrap());
     if crate::executor::executor_supports_deterministic_ids() {

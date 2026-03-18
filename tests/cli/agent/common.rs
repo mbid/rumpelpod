@@ -31,9 +31,10 @@ pub fn llm_cache_dir() -> PathBuf {
 pub fn run_agent_with_prompt(
     repo: &TestRepo,
     daemon: &TestDaemon,
+    home: &Path,
     prompt: &str,
 ) -> InteractiveOutput {
-    run_agent_interactive_model_and_args(repo, daemon, &[prompt], DEFAULT_MODEL, &[])
+    run_agent_interactive_model_and_args(repo, daemon, &[prompt], DEFAULT_MODEL, &[], home)
 }
 
 /// Run agent with a prompt and extra CLI arguments using the default model (interactive mode).
@@ -41,10 +42,11 @@ pub fn run_agent_with_prompt(
 pub fn run_agent_with_prompt_and_args(
     repo: &TestRepo,
     daemon: &TestDaemon,
+    home: &Path,
     prompt: &str,
     extra_args: &[&str],
 ) -> InteractiveOutput {
-    run_agent_interactive_model_and_args(repo, daemon, &[prompt], DEFAULT_MODEL, extra_args)
+    run_agent_interactive_model_and_args(repo, daemon, &[prompt], DEFAULT_MODEL, extra_args, home)
 }
 
 /// Run agent with a prompt using a specific model (interactive mode via PTY).
@@ -52,10 +54,11 @@ pub fn run_agent_with_prompt_and_args(
 pub fn run_agent_with_prompt_and_model(
     repo: &TestRepo,
     daemon: &TestDaemon,
+    home: &Path,
     prompt: &str,
     model: &str,
 ) -> InteractiveOutput {
-    run_agent_interactive_model_and_args(repo, daemon, &[prompt], model, &[])
+    run_agent_interactive_model_and_args(repo, daemon, &[prompt], model, &[], home)
 }
 
 /// Create a mock editor script that saves original content for verification
@@ -162,9 +165,10 @@ pub enum PickerAction {
 pub fn run_agent_interactive(
     repo: &TestRepo,
     daemon: &TestDaemon,
+    home: &Path,
     messages: &[&str],
 ) -> InteractiveOutput {
-    run_agent_interactive_model_and_args(repo, daemon, messages, DEFAULT_MODEL, &[])
+    run_agent_interactive_model_and_args(repo, daemon, messages, DEFAULT_MODEL, &[], home)
 }
 
 /// Run agent interactively with a specific model.
@@ -172,10 +176,11 @@ pub fn run_agent_interactive(
 pub fn run_agent_interactive_and_model(
     repo: &TestRepo,
     daemon: &TestDaemon,
+    home: &Path,
     messages: &[&str],
     model: &str,
 ) -> InteractiveOutput {
-    run_agent_interactive_model_and_args(repo, daemon, messages, model, &[])
+    run_agent_interactive_model_and_args(repo, daemon, messages, model, &[], home)
 }
 
 /// Run agent interactively with extra CLI arguments.
@@ -183,10 +188,11 @@ pub fn run_agent_interactive_and_model(
 pub fn run_agent_interactive_and_args(
     repo: &TestRepo,
     daemon: &TestDaemon,
+    home: &Path,
     messages: &[&str],
     extra_args: &[&str],
 ) -> InteractiveOutput {
-    run_agent_interactive_model_and_args(repo, daemon, messages, DEFAULT_MODEL, extra_args)
+    run_agent_interactive_model_and_args(repo, daemon, messages, DEFAULT_MODEL, extra_args, home)
 }
 
 /// Run agent interactively with a list of messages, model, and extra CLI arguments using PTY.
@@ -196,8 +202,9 @@ pub fn run_agent_interactive_model_and_args(
     messages: &[&str],
     model: &str,
     extra_args: &[&str],
+    home: &Path,
 ) -> InteractiveOutput {
-    run_agent_interactive_model_args_env(repo, daemon, messages, model, extra_args, &[])
+    run_agent_interactive_model_args_env(repo, daemon, messages, model, extra_args, &[], home)
 }
 
 /// Run agent interactively with full configuration including environment variables.
@@ -208,6 +215,7 @@ pub fn run_agent_interactive_model_args_env(
     model: &str,
     extra_args: &[&str],
     env_vars: &[(&str, &str)],
+    home: &Path,
 ) -> InteractiveOutput {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let editor_path = create_mock_editor_with_messages(temp_dir.path(), messages);
@@ -235,7 +243,7 @@ pub fn run_agent_interactive_model_args_env(
     // K8s pods run unprivileged so we skip deterministic mode there.
     if crate::executor::executor_supports_deterministic_ids() {
         cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
-        let pid_dir = daemon.temp_dir().join("deterministic-pids");
+        let pid_dir = home.join("deterministic-pids");
         cmd.env("DETERMINISTIC_PID_DIR", pid_dir.to_str().unwrap());
     }
 
@@ -356,6 +364,7 @@ pub fn run_agent_interactive_model_args_env(
 pub fn run_agent_expecting_picker(
     repo: &TestRepo,
     daemon: &TestDaemon,
+    home: &Path,
     messages: &[&str],
     picker_action: PickerAction,
 ) -> InteractiveOutput {
@@ -383,7 +392,7 @@ pub fn run_agent_expecting_picker(
     cmd.env("EDITOR", editor_path.to_str().unwrap());
     if crate::executor::executor_supports_deterministic_ids() {
         cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
-        let pid_dir = daemon.temp_dir().join("deterministic-pids");
+        let pid_dir = home.join("deterministic-pids");
         cmd.env("DETERMINISTIC_PID_DIR", pid_dir.to_str().unwrap());
     }
 

@@ -2,8 +2,8 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::ExecutorResources;
 
 fn write_devcontainer_json(repo: &TestRepo, config_body: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
@@ -48,10 +48,12 @@ fn local_env_with_default() {
         &repo,
         r#""containerEnv": { "FALLBACK": "${localEnv:MISSING:default_value}" }"#,
     );
-    let exec = TestExecutor::start("var-env-default");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-env-default");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "env-default", "--", "printenv", "FALLBACK"])
         .success()
         .expect("rumpel enter failed");
@@ -74,10 +76,12 @@ fn local_workspace_folder() {
         &repo,
         r#""containerEnv": { "HOST_PATH": "${localWorkspaceFolder}" }"#,
     );
-    let exec = TestExecutor::start("var-lwf");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-lwf");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lwf", "--", "printenv", "HOST_PATH"])
         .success()
         .expect("rumpel enter failed");
@@ -103,10 +107,12 @@ fn local_workspace_folder_basename() {
         &repo,
         r#""containerEnv": { "WS_NAME": "${localWorkspaceFolderBasename}" }"#,
     );
-    let exec = TestExecutor::start("var-lwfb");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-lwfb");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lwfb", "--", "printenv", "WS_NAME"])
         .success()
         .expect("rumpel enter failed");
@@ -134,10 +140,12 @@ fn container_workspace_folder() {
         &repo,
         r#""containerEnv": { "CWF": "${containerWorkspaceFolder}" }"#,
     );
-    let exec = TestExecutor::start("var-cwf");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-cwf");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "cwf", "--", "printenv", "CWF"])
         .success()
         .expect("rumpel enter failed");
@@ -160,10 +168,12 @@ fn container_workspace_folder_basename() {
         &repo,
         r#""containerEnv": { "CWF_BASE": "${containerWorkspaceFolderBasename}" }"#,
     );
-    let exec = TestExecutor::start("var-cwfb");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-cwfb");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "cwfb", "--", "printenv", "CWF_BASE"])
         .success()
         .expect("rumpel enter failed");
@@ -187,11 +197,13 @@ fn devcontainer_id_stable() {
     let repo = TestRepo::new();
 
     write_devcontainer_json(&repo, r#""containerEnv": { "DC_ID": "${devcontainerId}" }"#);
-    let exec = TestExecutor::start("var-id-stable");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-id-stable");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First creation -- capture the ID.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-stable", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
@@ -204,13 +216,13 @@ fn devcontainer_id_stable() {
     );
 
     // Recreate the pod (destroy + create).
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "id-stable"])
         .success()
         .expect("pod recreate failed");
 
     // Second creation -- ID should be identical.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-stable", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
@@ -229,18 +241,20 @@ fn devcontainer_id_unique_per_pod() {
     let repo = TestRepo::new();
 
     write_devcontainer_json(&repo, r#""containerEnv": { "DC_ID": "${devcontainerId}" }"#);
-    let exec = TestExecutor::start("var-id-unique");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-id-unique");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Pod A
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-unique-a", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
     let id_a = String::from_utf8_lossy(&stdout).trim().to_string();
 
     // Pod B (same repo, different name)
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "id-unique-b", "--", "printenv", "DC_ID"])
         .success()
         .expect("rumpel enter failed");
@@ -292,11 +306,13 @@ fn variables_in_run_args() {
         devcontainer_json,
     )
     .expect("Failed to write devcontainer.json");
-    let exec = TestExecutor::start("var-run-args");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-run-args");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Enter the pod so the container is created with the label.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "run-args-var", "--", "true"])
         .success()
         .expect("rumpel enter failed");
@@ -390,11 +406,13 @@ fn variables_in_mounts() {
         devcontainer_json,
     )
     .expect("Failed to write devcontainer.json");
-    let exec = TestExecutor::start("var-mnt");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-mnt");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // The mount should succeed now that ${devcontainerId} is resolved.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "mnt-var", "--", "ls", "/data"])
         .success()
         .expect("rumpel enter with devcontainerId mount failed");

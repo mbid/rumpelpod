@@ -10,7 +10,7 @@ const CTRL_A: u8 = 0x01;
 #[test]
 fn claude_detach_reattach() {
     let proxy = claude_proxy();
-    let (repo, daemon, fake_home) = setup_claude_test_repo(proxy);
+    let (fake_home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-detach");
 
     // -- First session: start Claude, then detach ---------------------
 

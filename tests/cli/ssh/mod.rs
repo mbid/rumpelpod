@@ -13,8 +13,10 @@ use anyhow::{Context, Result};
 use indoc::formatdoc;
 use tempfile::TempDir;
 
-use crate::common::{pod_command, write_test_devcontainer, TestRepo, TEST_USER_UID};
-use crate::executor::TestExecutor;
+use crate::common::{
+    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_USER_UID,
+};
+use crate::executor::ExecutorResources;
 use rumpelpod::CommandExt;
 
 /// Test user for SSH connections.
@@ -132,10 +134,10 @@ impl SshRemoteHost {
 
     /// Restart the remote host container.
     ///
-    /// If `ssh_config` is provided, also verifies that SSH is connectable from
-    /// outside (not just that sshd is listening internally). This catches cases
-    /// where sshd is up but not yet accepting connections.
-    pub fn restart(&mut self, ssh_config: Option<&Path>) {
+    /// If `home` is provided, also verifies that SSH is connectable using
+    /// the config in `home/.ssh/config`.  This catches cases where sshd is
+    /// up but not yet accepting connections.
+    pub fn restart(&mut self, home: Option<&Path>) {
         Command::new("docker")
             .args(["restart", &self.container_id])
             .success()
@@ -154,8 +156,8 @@ impl SshRemoteHost {
         }
 
         // Verify SSH is actually connectable from outside, not just listening
-        if let Some(config) = ssh_config {
-            self.wait_for_ssh_connectivity(config);
+        if let Some(home) = home {
+            self.wait_for_ssh_connectivity(&home.join(".ssh").join("config"));
         }
     }
 
@@ -412,34 +414,20 @@ fn build_remote_docker_image() -> Result<String> {
     Ok(image_id)
 }
 
-/// SSH configuration for test daemons.
+/// Write an SSH config into `home/.ssh/` for the given remote hosts.
 ///
-/// This holds the path to an SSH config file and keeps the underlying
-/// temp directory alive.
-pub struct SshConfig {
-    /// Path to the SSH config file.
-    pub path: PathBuf,
-    /// Temp directory containing the config and known_hosts file.
-    _temp_dir: TempDir,
-}
-
-/// Create an SSH config file for the given remote hosts.
-///
-/// The config file provides isolation from the user's SSH configuration:
-/// - Uses a separate known_hosts file
+/// The config provides isolation from the user's SSH configuration:
+/// - Uses a separate known_hosts file inside the test home
 /// - Configures each host with its specific identity file
 /// - Sets IdentitiesOnly to prevent using ssh-agent keys
-pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
-    let temp_dir = TempDir::with_prefix("rumpelpod-ssh-config-")
-        .expect("Failed to create temp dir for SSH config");
-    let config_path = temp_dir.path().join("config");
-    let known_hosts_path = temp_dir.path().join("known_hosts");
+pub fn write_ssh_config(home: &TestHome, hosts: &[&SshRemoteHost]) {
+    let ssh_dir = home.path().join(".ssh");
+    std::fs::create_dir_all(&ssh_dir).expect("Failed to create .ssh directory");
+
+    let config_path = ssh_dir.join("config");
+    let known_hosts_path = ssh_dir.join("known_hosts");
 
     let mut config = formatdoc! {r#"
-        # SSH config for rumpelpod integration tests
-        # Auto-generated - provides isolation from user's SSH configuration
-
-        # Global settings
         Host *
             UserKnownHostsFile {known_hosts}
             StrictHostKeyChecking accept-new
@@ -450,7 +438,6 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
         known_hosts = known_hosts_path.display(),
     };
 
-    // Add host-specific settings
     for host in hosts {
         let mut host_config = formatdoc! {r#"
             Host {ssh_host}
@@ -468,11 +455,6 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
     }
 
     std::fs::write(&config_path, config).expect("Failed to write SSH config");
-
-    SshConfig {
-        path: config_path,
-        _temp_dir: temp_dir,
-    }
 }
 
 // Tests
@@ -481,14 +463,16 @@ pub fn create_ssh_config(hosts: &[&SshRemoteHost]) -> SshConfig {
 
 #[test]
 fn ssh_smoke_test() {
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "ssh-smoke");
+    let daemon = TestDaemon::start(&home);
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("ssh-smoke");
     write_test_devcontainer(&repo, "", "");
-    std::fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    std::fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Enter the pod on the remote Docker host
     let pod_name = "remote-test";
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "hello from remote"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -509,12 +493,13 @@ fn ssh_smoke_test() {
 #[test]
 fn ssh_reconnect_test() {
     // This test needs direct access to the SshRemoteHost to restart it,
-    // so it sets up SSH infrastructure manually rather than via TestExecutor.
-    let repo = TestRepo::new();
+    // so it sets up SSH infrastructure manually rather than via ExecutorResources.
+    let home = TestHome::new();
     let mut remote = SshRemoteHost::start();
-    let ssh_config = create_ssh_config(&[&remote]);
-    let daemon = crate::common::TestDaemon::start_with_ssh_config(&ssh_config.path);
+    write_ssh_config(&home, &[&remote]);
+    let daemon = TestDaemon::start(&home);
 
+    let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
     let remote_spec = remote.ssh_spec();
     let toml = formatdoc! {r#"
@@ -544,7 +529,7 @@ fn ssh_reconnect_test() {
     // This ensures the daemon can reconnect immediately rather than racing
     // against sshd startup.
     let old_ip = remote.ip_address().to_string();
-    remote.restart(Some(&ssh_config.path));
+    remote.restart(Some(home.path()));
     assert_eq!(
         remote.ip_address(),
         old_ip,

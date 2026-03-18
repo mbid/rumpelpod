@@ -7,9 +7,9 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestExecutor;
-use crate::ssh::{create_ssh_config, SshRemoteHost};
+use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::ExecutorResources;
+use crate::ssh::{write_ssh_config, SshRemoteHost};
 
 /// Extract a short unique ID from a TestRepo's temp directory name.
 /// The TempDir suffix is random, so this is safe for concurrent use.
@@ -68,11 +68,13 @@ fn mount_volume() {
         &repo,
         &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
-    let exec = TestExecutor::start("mnt-vol");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "mnt-vol");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Write a file to /data and read it back to confirm the mount is writable
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-vol",
@@ -94,11 +96,13 @@ fn mount_tmpfs() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_mounts(&repo, r#"[{"type": "tmpfs", "target": "/tmp/mytmp"}]"#);
-    let exec = TestExecutor::start("mnt-tmpfs");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "mnt-tmpfs");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Verify the mount point exists and is a tmpfs via `mount` output
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-tmpfs",
@@ -128,11 +132,13 @@ fn mount_string_format() {
         &repo,
         &format!(r#"["type=volume,source={vol},target=/mnt"]"#),
     );
-    let exec = TestExecutor::start("mnt-strfmt");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "mnt-strfmt");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Write and read back to confirm the volume is mounted and writable
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-strfmt",
@@ -159,11 +165,13 @@ fn mount_persists_across_restarts() {
         &repo,
         &format!(r#"[{{"type": "volume", "source": "{vol}", "target": "/data"}}]"#),
     );
-    let exec = TestExecutor::start("mnt-persist");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "mnt-persist");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First run: write a sentinel file into the volume
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "mnt-persist",
@@ -176,13 +184,13 @@ fn mount_persists_across_restarts() {
         .expect("first rumpel enter failed");
 
     // Recreate the container (volume should survive)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "mnt-persist"])
         .success()
         .expect("pod recreate failed");
 
     // Second run: the sentinel should still be there
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "mnt-persist", "--", "cat", "/data/sentinel"])
         .success()
         .expect("second rumpel enter failed");
@@ -206,9 +214,10 @@ fn mount_bind_blocked_remote() {
     // Point .rumpelpod.toml at a remote Docker host so the daemon tunnels
     // over SSH.  The devcontainer.json is still used for image build and
     // mounts config.
+    let home = TestHome::new();
     let remote = SshRemoteHost::start();
-    let ssh_config = create_ssh_config(&[&remote]);
-    let daemon = TestDaemon::start_with_ssh_config(&ssh_config.path);
+    write_ssh_config(&home, &[&remote]);
+    let daemon = TestDaemon::start(&home);
 
     let config = formatdoc! {r#"
         host = "{remote_spec}"

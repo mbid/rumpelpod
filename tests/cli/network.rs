@@ -8,14 +8,17 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{
-    create_commit, pod_command, write_test_devcontainer, TestRepo, TEST_REPO_PATH,
+    create_commit, pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo,
+    TEST_REPO_PATH,
 };
-use crate::executor::TestExecutor;
+use crate::executor::ExecutorResources;
 
 #[test]
 fn network_host_connectivity() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("network-host-conn");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "network-host-conn");
+    let daemon = TestDaemon::start(&home);
     // Install netcat-openbsd for testing connectivity
     // Switch to root to install packages
     write_test_devcontainer(
@@ -38,7 +41,7 @@ fn network_host_connectivity() {
         "#},
     )
     .unwrap();
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // On macOS Docker Desktop, containers run in a VM so 127.0.0.1 inside the
     // container is the VM's loopback, not the Mac host. Bind to 0.0.0.0 and
@@ -71,7 +74,7 @@ fn network_host_connectivity() {
     });
 
     // Run nc inside pod to connect to host
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -93,7 +96,9 @@ fn network_host_connectivity() {
 #[test]
 fn network_host_remotes_use_localhost() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("network-host-remotes");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "network-host-remotes");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     // Overwrite devcontainer.json with network=host
     fs::write(
@@ -110,10 +115,10 @@ fn network_host_remotes_use_localhost() {
         "#},
     )
     .unwrap();
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Check 'host' remote inside pod
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -135,7 +140,7 @@ fn network_host_remotes_use_localhost() {
     );
 
     // Check 'rumpelpod' remote inside pod
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -162,7 +167,9 @@ fn network_host_remotes_use_localhost() {
 #[test]
 fn network_host_fetch_from_pod() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("network-host-fetch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "network-host-fetch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     // Overwrite devcontainer.json with network=host
     fs::write(
@@ -179,10 +186,10 @@ fn network_host_fetch_from_pod() {
         "#},
     )
     .unwrap();
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod first
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -201,7 +208,7 @@ fn network_host_fetch_from_pod() {
     let host_commit = String::from_utf8_lossy(&host_commit).trim().to_string();
 
     // Fetch from host remote inside the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -212,7 +219,7 @@ fn network_host_fetch_from_pod() {
         .expect("Failed to fetch from host remote");
 
     // Verify the fetched commit matches
-    let fetched_commit = pod_command(&repo, &exec.daemon)
+    let fetched_commit = pod_command(&repo, &daemon)
         .arg("enter")
         .arg("test")
         .arg("--")
@@ -234,7 +241,9 @@ fn network_host_fetch_from_pod() {
 #[test]
 fn network_host_push_from_pod() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("network-host-push");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "network-host-push");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     // Overwrite devcontainer.json with network=host
     fs::write(
@@ -251,12 +260,12 @@ fn network_host_push_from_pod() {
         "#},
     )
     .unwrap();
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     let pod_name = "push-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .arg("enter")
         .arg(pod_name)
         .arg("--")
@@ -266,7 +275,7 @@ fn network_host_push_from_pod() {
         .expect("Failed to setup pod");
 
     // Create a commit inside the pod (reference-transaction hook pushes to gateway)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .arg("enter")
         .arg(pod_name)
         .arg("--")
@@ -279,7 +288,7 @@ fn network_host_push_from_pod() {
         .expect("Failed to create commit in pod");
 
     // Get the commit hash from the pod
-    let pod_commit = pod_command(&repo, &exec.daemon)
+    let pod_commit = pod_command(&repo, &daemon)
         .arg("enter")
         .arg(pod_name)
         .arg("--")

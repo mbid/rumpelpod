@@ -18,8 +18,10 @@ use std::time::Duration;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{pod_command, write_test_devcontainer, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestExecutor;
+use crate::common::{
+    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER,
+};
+use crate::executor::ExecutorResources;
 
 /// Cluster configuration read from environment variables.
 pub(super) struct K8sClusterConfig {
@@ -122,11 +124,13 @@ fn toml_value(toml: &str, key: &str) -> String {
 #[ignore]
 fn k8s_enter_smoke() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("enter-smoke");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "enter-smoke");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "k8s-test", "--", "echo", "hello from k8s"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -147,18 +151,20 @@ fn k8s_enter_smoke() {
 #[ignore]
 fn k8s_list_shows_pod() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("list-shows-pod");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "list-shows-pod");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create a pod first
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "k8s-list-test", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     // Check it shows up in list
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["list"])
         .success()
         .expect("rumpel list failed");
@@ -175,27 +181,29 @@ fn k8s_list_shows_pod() {
 #[ignore]
 fn k8s_delete_removes_pod() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("delete-removes-pod");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "delete-removes-pod");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let context = toml_value(&exec.toml, "context");
-    let namespace = toml_value(&exec.toml, "namespace");
+    let context = toml_value(&executor.toml, "context");
+    let namespace = toml_value(&executor.toml, "namespace");
 
     // Create a pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "k8s-del-test", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     // Delete it
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["delete", "--force", "k8s-del-test"])
         .success()
         .expect("rumpel delete failed");
 
     // Verify it's gone from list
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["list"])
         .success()
         .expect("rumpel list failed");
@@ -264,9 +272,11 @@ fn k8s_image_build_no_registry() {
     fs::write(repo.path().join(".rumpelpod.toml"), config)
         .expect("Failed to write .rumpelpod.toml");
 
-    let exec = TestExecutor::start("build-no-registry-daemon");
+    let home = TestHome::new();
+    let _executor = ExecutorResources::setup(&home, "build-no-registry-daemon");
+    let daemon = TestDaemon::start(&home);
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "build-test", "--", "true"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -288,11 +298,13 @@ fn k8s_image_build_no_registry() {
 #[ignore]
 fn k8s_image_build() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("image-build");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "image-build");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "k8s-build-test",
@@ -324,12 +336,14 @@ fn k8s_image_build() {
 #[ignore]
 fn k8s_cp_to_and_from_pod() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("cp-to-and-from-pod");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cp-to-and-from-pod");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create a pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "k8s-cp-test", "--", "true"])
         .success()
         .expect("rumpel enter failed");
@@ -339,7 +353,7 @@ fn k8s_cp_to_and_from_pod() {
     fs::write(&local_file, "hello from host").expect("Failed to write local file");
 
     // Copy to pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "cp",
             &local_file.to_string_lossy(),
@@ -349,7 +363,7 @@ fn k8s_cp_to_and_from_pod() {
         .expect("rumpel cp to pod failed");
 
     // Verify file exists in pod
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "k8s-cp-test", "--", "cat", "/tmp/test-upload.txt"])
         .success()
         .expect("reading file in pod failed");
@@ -357,7 +371,7 @@ fn k8s_cp_to_and_from_pod() {
 
     // Copy back from pod
     let local_download = repo.path().join("test-download.txt");
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "cp",
             "k8s-cp-test:/tmp/test-upload.txt",
@@ -374,16 +388,18 @@ fn k8s_cp_to_and_from_pod() {
 #[ignore]
 fn k8s_mount_volume() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("mount-volume");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "mount-volume");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "",
         r#","mounts": [{"type":"volume","source":"tv","target":"/data"}]"#,
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Write a file to the volume mount
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "k8s-vol-test",
@@ -396,7 +412,7 @@ fn k8s_mount_volume() {
         .expect("writing to volume failed");
 
     // Read it back
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "k8s-vol-test", "--", "cat", "/data/test.txt"])
         .success()
         .expect("reading from volume failed");
@@ -408,16 +424,18 @@ fn k8s_mount_volume() {
 #[ignore]
 fn k8s_mount_tmpfs() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("mount-tmpfs");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "mount-tmpfs");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "",
         r#","mounts": [{"type":"tmpfs","target":"/tmp/mytmp"}]"#,
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Check that the tmpfs mount is present
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "k8s-tmpfs-test", "--", "mount"])
         .success()
         .expect("mount command failed");
@@ -435,15 +453,17 @@ fn k8s_mount_tmpfs() {
 #[ignore]
 fn k8s_bind_mount_rejected() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("bind-mount-rejected");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "bind-mount-rejected");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "",
         r#","mounts": [{"type":"bind","source":"/tmp/x","target":"/mnt/x"}]"#,
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "k8s-bind-test", "--", "true"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -465,11 +485,13 @@ fn k8s_bind_mount_rejected() {
 #[ignore]
 fn k8s_privileged() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("privileged");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "privileged");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", r#","privileged": true"#);
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "k8s-priv-test", "--", "echo", "privileged-ok"])
         .success()
         .expect("rumpel enter with privileged failed");
@@ -481,11 +503,13 @@ fn k8s_privileged() {
 #[ignore]
 fn k8s_cap_add() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("cap-add");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cap-add");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", r#","capAdd": ["SYS_PTRACE"]"#);
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "k8s-cap-test", "--", "echo", "caps-ok"])
         .success()
         .expect("rumpel enter with capAdd failed");
@@ -497,16 +521,18 @@ fn k8s_cap_add() {
 #[ignore]
 fn k8s_override_command_false() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("override-command-false");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "override-command-false");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         r#"CMD ["tail", "-f", "/dev/null"]"#,
         r#","overrideCommand": false"#,
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Check PID 1 is tail, not sleep
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "k8s-nocmd-test", "--", "cat", "/proc/1/cmdline"])
         .success()
         .expect("checking PID 1 failed");
@@ -523,18 +549,20 @@ fn k8s_override_command_false() {
 #[ignore]
 fn k8s_host_requirements() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("host-requirements");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "host-requirements");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "",
         r#","hostRequirements": {"cpus": 1, "memory": "256mb"}"#,
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let context = toml_value(&exec.toml, "context");
-    let namespace = toml_value(&exec.toml, "namespace");
+    let context = toml_value(&executor.toml, "context");
+    let namespace = toml_value(&executor.toml, "namespace");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "k8s-reqs-test", "--", "true"])
         .success()
         .expect("rumpel enter with hostRequirements failed");
@@ -571,13 +599,15 @@ fn k8s_host_requirements() {
 #[ignore]
 fn k8s_init_succeeds_despite_unsupported() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("init-unsupported");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "init-unsupported");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", r#","init": true"#);
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // init: true is unsupported on k8s but should not prevent pod creation
     // (the daemon logs a warning instead of failing)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "k8s-init-test", "--", "echo", "init-ok"])
         .success()
         .expect("init: true should not prevent pod creation on k8s");
@@ -587,23 +617,25 @@ fn k8s_init_succeeds_despite_unsupported() {
 #[ignore]
 fn k8s_forward_port() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("forward-port");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "forward-port");
+    let daemon = TestDaemon::start(&home);
     // Install socat alongside git for the echo server
     write_test_devcontainer(
         &repo,
         "RUN apt-get install -y socat",
         r#","forwardPorts": [9600]"#,
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create the pod (this should set up the port forward)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "k8s-fwd-test", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     // Start a socat listener on port 9600 inside the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "k8s-fwd-test",
@@ -618,7 +650,7 @@ fn k8s_forward_port() {
     std::thread::sleep(Duration::from_millis(500));
 
     // Check rumpel ports shows the forwarded port
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "k8s-fwd-test"])
         .success()
         .expect("rumpel ports failed");
@@ -649,12 +681,14 @@ fn k8s_forward_port() {
 #[ignore]
 fn k8s_recreate() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("recreate");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recreate");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create a pod and write a dirty (uncommitted) file
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "k8s-recreate-test",
@@ -667,13 +701,13 @@ fn k8s_recreate() {
         .expect("writing dirty file failed");
 
     // Recreate the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "k8s-recreate-test"])
         .success()
         .expect("rumpel recreate failed");
 
     // Verify the dirty file survived the recreate
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "k8s-recreate-test",
@@ -695,11 +729,13 @@ fn k8s_recreate() {
 #[ignore]
 fn k8s_node_selector_and_tolerations() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("node-selector");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "node-selector");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    let context = toml_value(&exec.toml, "context");
-    let namespace = toml_value(&exec.toml, "namespace");
+    let context = toml_value(&executor.toml, "context");
+    let namespace = toml_value(&executor.toml, "namespace");
 
     // Append extra node-selector and toleration to the executor's toml
     // to verify both appear in the pod spec.
@@ -713,10 +749,10 @@ fn k8s_node_selector_and_tolerations() {
         value = "yes"
         effect = "NoSchedule"
     "#};
-    let toml = format!("{}{extra_toml}", exec.toml);
+    let toml = format!("{}{extra_toml}", executor.toml);
     fs::write(repo.path().join(".rumpelpod.toml"), toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "k8s-ns-test", "--", "true"])
         .success()
         .expect("rumpel enter with node-selector failed");

@@ -9,18 +9,20 @@ use rumpelpod::CommandExt;
 
 use std::fs;
 
-use crate::common::{pod_command, write_test_devcontainer, TestRepo, TEST_REPO_PATH};
-use crate::executor::TestExecutor;
+use crate::common::{
+    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH,
+};
+use crate::executor::ExecutorResources;
 
 /// Enter a pod and verify the repo has the host commit and a clean working tree.
-fn assert_repo_usable(repo: &TestRepo, exec: &TestExecutor, pod_name: &str) {
+fn assert_repo_usable(repo: &TestRepo, daemon: &TestDaemon, pod_name: &str) {
     let script = format!(
         "git -C {TEST_REPO_PATH} log --oneline && \
          echo '---GIT_STATUS---' && \
          git -C {TEST_REPO_PATH} status --porcelain"
     );
 
-    let stdout = pod_command(repo, &exec.daemon)
+    let stdout = pod_command(repo, daemon)
         .args(["enter", pod_name, "--", "sh", "-c", &script])
         .success()
         .expect("rumpel enter should succeed");
@@ -45,41 +47,47 @@ fn assert_repo_usable(repo: &TestRepo, exec: &TestExecutor, pod_name: &str) {
 #[test]
 fn recover_from_detached_head() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("recover-detached");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recover-detached");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "RUN git -C /home/testuser/workspace checkout --detach",
         "",
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
-    assert_repo_usable(&repo, &exec, "recover-detached");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    assert_repo_usable(&repo, &daemon, "recover-detached");
 }
 
 #[test]
 fn recover_from_unborn_branch() {
     let repo = TestRepo::new();
     // Replace the real repo with a bare git init (no commits at all)
-    let exec = TestExecutor::start("recover-unborn");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recover-unborn");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "RUN rm -rf /home/testuser/workspace/.git && git init /home/testuser/workspace",
         "",
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
-    assert_repo_usable(&repo, &exec, "recover-unborn");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    assert_repo_usable(&repo, &daemon, "recover-unborn");
 }
 
 #[test]
 fn recover_from_dirty_index() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("recover-dirty-idx");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recover-dirty-idx");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "RUN cd /home/testuser/workspace && echo staged > staged.txt && git add staged.txt",
         "",
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
-    assert_repo_usable(&repo, &exec, "recover-dirty-idx");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    assert_repo_usable(&repo, &daemon, "recover-dirty-idx");
 }
 
 #[test]
@@ -93,23 +101,27 @@ fn recover_from_dirty_working_tree() {
         "git -c user.email=t@t -c user.name=T commit -m 'add file' && ",
         "echo modified > tracked.txt",
     );
-    let exec = TestExecutor::start("recover-dirty-tree");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recover-dirty-tree");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, extra, "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
-    assert_repo_usable(&repo, &exec, "recover-dirty-tree");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    assert_repo_usable(&repo, &daemon, "recover-dirty-tree");
 }
 
 #[test]
 fn recover_from_untracked_files() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("recover-untracked");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recover-untracked");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
         "RUN echo untracked > /home/testuser/workspace/untracked.txt",
         "",
     );
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
-    assert_repo_usable(&repo, &exec, "recover-untracked");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    assert_repo_usable(&repo, &daemon, "recover-untracked");
 }
 
 #[test]
@@ -124,10 +136,12 @@ fn recover_from_in_progress_merge() {
         "git checkout master && echo main > file.txt && git commit -am main && ",
         "git merge other || true",
     );
-    let exec = TestExecutor::start("recover-merge");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recover-merge");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, extra, "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
-    assert_repo_usable(&repo, &exec, "recover-merge");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    assert_repo_usable(&repo, &daemon, "recover-merge");
 }
 
 #[test]
@@ -142,8 +156,10 @@ fn recover_from_in_progress_rebase() {
         "git checkout master && echo main > file.txt && git commit -am main && ",
         "git checkout feature && git rebase master || true",
     );
-    let exec = TestExecutor::start("recover-rebase");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recover-rebase");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, extra, "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
-    assert_repo_usable(&repo, &exec, "recover-rebase");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    assert_repo_usable(&repo, &daemon, "recover-rebase");
 }

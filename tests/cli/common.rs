@@ -25,57 +25,45 @@ pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";
 /// Environment variable for XDG state directory (where rumpelpod data is stored).
 const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
 
+/// Isolated HOME directory for a test.
+///
+/// Created before the executor setup and daemon so that both can write
+/// into it (e.g. SSH config, Claude config) and the daemon inherits it
+/// as `$HOME`.
+pub struct TestHome {
+    dir: TempDir,
+}
+
+impl TestHome {
+    pub fn new() -> Self {
+        let dir =
+            TempDir::with_prefix("rumpelpod-test-home-").expect("Failed to create test home dir");
+        TestHome { dir }
+    }
+
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
 /// A test daemon that manages pods for integration tests.
-/// Each test gets its own daemon with an isolated socket and state directory
-/// to enable parallel execution without interference.
-/// On drop, the daemon process is terminated.
+///
+/// Uses the [`TestHome`] as `$HOME` and stores its socket, state, and
+/// runtime directories under it.  On drop the daemon process is killed.
 pub struct TestDaemon {
     pub socket_path: PathBuf,
     process: Child,
-    #[allow(dead_code)]
-    temp_dir: TempDir,
     /// Separate short-path temp dir for the runtime directory on macOS,
     /// where Unix socket paths must be under 104 bytes.
     #[allow(dead_code)]
     runtime_temp_dir: Option<TempDir>,
 }
 
-/// Environment variable for custom SSH config file (must match ssh_forward.rs).
-const SSH_CONFIG_FILE_ENV: &str = "SSH_CONFIG_FILE";
-
 impl TestDaemon {
-    /// Start a new test daemon with an isolated socket and state directory.
-    pub fn start() -> Self {
-        Self::start_internal(None, None)
-    }
-
-    /// Start a new test daemon with a custom SSH config file.
-    ///
-    /// This is used for testing SSH remote Docker functionality. The daemon
-    /// will use the specified SSH config file for all SSH connections.
-    pub fn start_with_ssh_config(ssh_config: &Path) -> Self {
-        Self::start_internal(Some(ssh_config), None)
-    }
-
-    /// Start a new test daemon with a custom HOME directory.
-    ///
-    /// This isolates the daemon from the host user's config files
-    /// (e.g. Claude's ~/.claude.json).
-    pub fn start_with_home(home: &Path) -> Self {
-        Self::start_internal(None, Some(home))
-    }
-
-    /// Start a new test daemon with both a custom SSH config and HOME.
-    pub fn start_with_ssh_config_and_home(ssh_config: &Path, home: &Path) -> Self {
-        Self::start_internal(Some(ssh_config), Some(home))
-    }
-
-    fn start_internal(ssh_config: Option<&Path>, home: Option<&Path>) -> Self {
-        let temp_dir =
-            TempDir::with_prefix("rumpelpod-test-").expect("Failed to create temp directory");
-
-        let socket_path = temp_dir.path().join("rumpelpod.sock");
-        let state_dir = temp_dir.path().join("state");
+    pub fn start(home: &TestHome) -> Self {
+        let home_path = home.path();
+        let socket_path = home_path.join("rumpelpod.sock");
+        let state_dir = home_path.join("state");
 
         // macOS limits Unix socket paths to 104 bytes. The default TMPDIR
         // on macOS is ~51 chars, making our socket paths too long. Use a
@@ -86,7 +74,7 @@ impl TestDaemon {
             let path = rt.path().to_path_buf();
             (path, Some(rt))
         } else {
-            (temp_dir.path().join("runtime"), None)
+            (home_path.join("runtime"), None)
         };
 
         // Ensure runtime directory exists, including the 'rumpelpod' subdirectory that
@@ -95,7 +83,8 @@ impl TestDaemon {
             .expect("Failed to create runtime dir");
 
         let mut cmd = Command::new("rumpel");
-        cmd.env(SOCKET_PATH_ENV, &socket_path)
+        cmd.env("HOME", home_path)
+            .env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
             .env("XDG_RUNTIME_DIR", &runtime_dir);
 
@@ -103,14 +92,6 @@ impl TestDaemon {
         // K8s pods run unprivileged and cannot write ns_last_pid.
         if super::executor::executor_supports_deterministic_ids() {
             cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
-        }
-
-        if let Some(config_path) = ssh_config {
-            cmd.env(SSH_CONFIG_FILE_ENV, config_path);
-        }
-
-        if let Some(home_path) = home {
-            cmd.env("HOME", home_path);
         }
 
         let process = cmd
@@ -136,17 +117,8 @@ impl TestDaemon {
         TestDaemon {
             socket_path,
             process,
-            temp_dir,
             runtime_temp_dir,
         }
-    }
-
-    /// Get the path to the daemon's temporary directory.
-    ///
-    /// Useful for creating isolated test resources that need to live alongside
-    /// the daemon (e.g., deterministic PID files).
-    pub fn temp_dir(&self) -> &Path {
-        self.temp_dir.path()
     }
 }
 

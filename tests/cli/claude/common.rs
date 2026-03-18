@@ -8,10 +8,9 @@ use std::time::{Duration, Instant};
 
 use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use tempfile::TempDir;
 
-use crate::common::{write_test_devcontainer, TestDaemon, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
 
 use super::proxy::ClaudeTestProxy;
 
@@ -86,16 +85,14 @@ fn write_claude_test_devcontainer(repo: &TestRepo) {
     write_test_devcontainer(repo, &extra_dockerfile, extra_json);
 }
 
-/// Create a temp directory that acts as HOME for the test process.
+/// Write the minimal config files needed for Claude tests into the
+/// test home directory.
 ///
-/// Contains only the minimal config files needed for `copy_claude_config`
-/// in the daemon, so tests don't depend on the real user's Claude config.
-/// Includes fake OAuth credentials so the CLI considers the user "logged
-/// in" without needing the host's real tokens.
-fn create_controlled_home() -> TempDir {
-    let home =
-        TempDir::with_prefix("rumpelpod-claude-home-").expect("create controlled HOME temp dir");
-
+/// Contains only the config files needed for `copy_claude_config` in
+/// the daemon, so tests don't depend on the real user's Claude config.
+/// Includes fake OAuth credentials so the CLI considers the user
+/// "logged in" without needing the host's real tokens.
+fn setup_controlled_home(home: &TestHome) {
     // Minimal .claude.json: skip onboarding and accept bypass mode.
     // strip_claude_json in the daemon will add per-project trust entries.
     std::fs::write(
@@ -128,29 +125,34 @@ fn create_controlled_home() -> TempDir {
         std::fs::create_dir_all(&kube_dir).expect("create .kube dir");
         std::fs::write(kube_dir.join("config"), kubeconfig).expect("write kubeconfig");
     }
-
-    home
 }
 
 /// Write the devcontainer, start a daemon -- everything needed
 /// before running a claude command.
 ///
-/// Returns the controlled HOME temp dir alongside the repo and pod so
-/// it is not dropped (and cleaned up) before the test finishes.
+/// Returns the home, executor, daemon, and repo so nothing is dropped
+/// (and cleaned up) before the test finishes.
+///
+/// Drop order: `home` must outlive `executor` and `daemon`, so callers
+/// must destructure in the right order (Rust drops in reverse
+/// declaration order).
 pub fn setup_claude_test_repo(
     proxy: &ClaudeTestProxy,
     test_name: &str,
-) -> (TestRepo, TestExecutor, TempDir) {
+) -> (TestHome, TestRepo, ExecutorResources, TestDaemon) {
     let _ = proxy; // used only to ensure the proxy is started first
     let repo = TestRepo::new();
     write_claude_test_devcontainer(&repo);
 
-    // Create the controlled home before starting the executor so
+    // Set up the controlled home before starting the executor so
     // copy_claude_config (which runs in the daemon) reads our files.
-    let fake_home = create_controlled_home();
-    let exec = TestExecutor::start_with_home(test_name, fake_home.path());
-    std::fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).expect("write .rumpelpod.toml");
-    (repo, exec, fake_home)
+    let home = TestHome::new();
+    setup_controlled_home(&home);
+    let executor = ExecutorResources::setup(&home, test_name);
+    let daemon = TestDaemon::start(&home);
+    std::fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml)
+        .expect("write .rumpelpod.toml");
+    (home, repo, executor, daemon)
 }
 
 // Tall enough to hold long responses without scrolling off, normal width.

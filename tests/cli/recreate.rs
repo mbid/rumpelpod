@@ -2,19 +2,21 @@
 
 use std::fs;
 
-use crate::common::{pod_command, write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
 use rumpelpod::CommandExt;
 
 #[test]
 fn recreate_preserves_dirty_files_but_resets_container() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("recreate-dirty");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recreate-dirty");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // 1. Enter pod and create a dirty file in the repo, and a file in /tmp
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
@@ -27,13 +29,13 @@ fn recreate_preserves_dirty_files_but_resets_container() {
         .expect("rumpel enter failed");
 
     // 2. Recreate the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "test"])
         .success()
         .expect("pod recreate failed");
 
     // 3. Verify dirty file exists and has correct content (repo is preserved)
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "cat", "dirty_file.txt"])
         .success()
         .expect("pod check failed");
@@ -42,7 +44,7 @@ fn recreate_preserves_dirty_files_but_resets_container() {
     assert_eq!(content.trim(), "dirty content");
 
     // 4. Verify /tmp/temp_file.txt is gone (container was reset)
-    let status = pod_command(&repo, &exec.daemon)
+    let status = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "test", "-f", "/tmp/temp_file.txt"])
         .status()
         .expect("pod check failed");
@@ -56,24 +58,26 @@ fn recreate_preserves_dirty_files_but_resets_container() {
 #[test]
 fn recreate_preserves_untracked_files() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("recreate-untracked");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recreate-untracked");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // 1. Create untracked file
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "touch", "untracked.txt"])
         .success()
         .expect("rumpel enter failed");
 
     // 2. Recreate
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "test"])
         .success()
         .expect("pod recreate failed");
 
     // 3. Verify file exists
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "ls", "untracked.txt"])
         .success()
         .expect("untracked file should exist");
@@ -82,9 +86,11 @@ fn recreate_preserves_untracked_files() {
 #[test]
 fn recreate_preserves_modified_tracked_files() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("recreate-tracked");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "recreate-tracked");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // 1. Modify a tracked file (README.md exists in the test repo)
     // Actually TestRepo doesn't create README.md. It creates an empty commit.
@@ -110,7 +116,7 @@ fn recreate_preserves_modified_tracked_files() {
         .expect("git commit failed");
 
     // 2. Modify it in pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
@@ -123,13 +129,13 @@ fn recreate_preserves_modified_tracked_files() {
         .expect("rumpel enter failed");
 
     // 3. Recreate
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["recreate", "test"])
         .success()
         .expect("pod recreate failed");
 
     // 4. Verify modification exists
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "cat", "tracked.txt"])
         .success()
         .expect("check failed");

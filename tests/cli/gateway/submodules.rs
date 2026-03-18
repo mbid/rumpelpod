@@ -4,8 +4,10 @@ use std::process::Command;
 use rumpelpod::CommandExt;
 
 use super::{get_branch_commit, get_gateway_path, get_remote_ref_commit};
-use crate::common::{create_commit, pod_command, write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{
+    create_commit, pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo,
+};
+use crate::executor::ExecutorResources;
 
 /// Create a parent TestRepo that contains a git submodule pointing to
 /// a second TestRepo.  Returns (parent, child_name) where child_name
@@ -49,13 +51,15 @@ fn create_test_repo_with_submodule() -> (TestRepo, TestRepo, String) {
 fn submodule_pod_commit_syncs_to_host() {
     let (parent, _child, sub_name) = create_test_repo_with_submodule();
 
-    let exec = TestExecutor::start("gw-sub-commit");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-sub-commit");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&parent, "", "");
-    fs::write(parent.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(parent.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "sub-commit-test";
 
     // Launch pod -- sets up parent and submodule gateways
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -67,13 +71,13 @@ fn submodule_pod_commit_syncs_to_host() {
          git config user.name TestUser && \
          git commit --allow-empty -m 'Pod submodule commit'"
     );
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args(["enter", pod_name, "--", "sh", "-c", &commit_script])
         .success()
         .expect("Failed to create commit in pod submodule");
 
     // Get the commit hash from the pod's submodule
-    let pod_sub_commit = pod_command(&parent, &exec.daemon)
+    let pod_sub_commit = pod_command(&parent, &daemon)
         .args([
             "enter",
             pod_name,
@@ -117,13 +121,15 @@ fn submodule_pod_commit_syncs_to_host() {
 fn submodule_host_update_visible_in_pod() {
     let (parent, _child, sub_name) = create_test_repo_with_submodule();
 
-    let exec = TestExecutor::start("gw-sub-fetch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-sub-fetch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&parent, "", "");
-    fs::write(parent.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(parent.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "sub-fetch-test";
 
     // Launch pod
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -148,7 +154,7 @@ fn submodule_host_update_visible_in_pod() {
     let host_sub_commit = host_sub_commit.trim().to_string();
 
     // Fetch host refs inside the pod's submodule
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args([
             "enter", pod_name, "--", "git", "-C", &sub_name, "fetch", "host",
         ])
@@ -156,7 +162,7 @@ fn submodule_host_update_visible_in_pod() {
         .expect("Failed to fetch host in pod submodule");
 
     // The pod should see the new commit via host/HEAD
-    let fetched_commit = pod_command(&parent, &exec.daemon)
+    let fetched_commit = pod_command(&parent, &daemon)
         .args([
             "enter",
             pod_name,
@@ -181,13 +187,15 @@ fn submodule_host_update_visible_in_pod() {
 fn submodule_pod_commit_mirrored_to_host() {
     let (parent, _child, sub_name) = create_test_repo_with_submodule();
 
-    let exec = TestExecutor::start("gw-sub-mirror");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-sub-mirror");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&parent, "", "");
-    fs::write(parent.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(parent.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "sub-mirror-test";
 
     // Launch pod
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -199,12 +207,12 @@ fn submodule_pod_commit_mirrored_to_host() {
          git config user.name TestUser && \
          git commit --allow-empty -m 'Mirror test commit'"
     );
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args(["enter", pod_name, "--", "sh", "-c", &commit_script])
         .success()
         .expect("Failed to create commit in pod submodule");
 
-    let pod_sub_commit = pod_command(&parent, &exec.daemon)
+    let pod_sub_commit = pod_command(&parent, &daemon)
         .args([
             "enter",
             pod_name,
@@ -274,13 +282,15 @@ fn create_test_repo_with_subdir_submodule() -> (TestRepo, TestRepo, String) {
 fn subdir_submodule_pod_commit_syncs_to_host() {
     let (parent, _child, sub_name) = create_test_repo_with_subdir_submodule();
 
-    let exec = TestExecutor::start("gw-subdir-commit");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-subdir-commit");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&parent, "", "");
-    fs::write(parent.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(parent.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "subdir-commit-test";
 
     // Launch pod -- sets up parent and submodule gateways
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -292,13 +302,13 @@ fn subdir_submodule_pod_commit_syncs_to_host() {
          git config user.name TestUser && \
          git commit --allow-empty -m 'Pod subdir submodule commit'"
     );
-    pod_command(&parent, &exec.daemon)
+    pod_command(&parent, &daemon)
         .args(["enter", pod_name, "--", "sh", "-c", &commit_script])
         .success()
         .expect("Failed to create commit in pod subdir submodule");
 
     // Get the commit hash from the pod's submodule
-    let pod_sub_commit = pod_command(&parent, &exec.daemon)
+    let pod_sub_commit = pod_command(&parent, &daemon)
         .args([
             "enter",
             pod_name,
@@ -405,13 +415,15 @@ fn nested_submodule_pod_commit_syncs_to_host() {
     let (grandparent, _outer, _inner, _outer_name, inner_displaypath) =
         create_test_repo_with_nested_submodules();
 
-    let exec = TestExecutor::start("gw-nested-commit");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-nested-commit");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&grandparent, "", "");
-    fs::write(grandparent.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(grandparent.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "nested-commit-test";
 
     // Launch pod -- sets up parent, outer, and inner submodule gateways
-    pod_command(&grandparent, &exec.daemon)
+    pod_command(&grandparent, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -423,13 +435,13 @@ fn nested_submodule_pod_commit_syncs_to_host() {
          git config user.name TestUser && \
          git commit --allow-empty -m 'Pod nested submodule commit'"
     );
-    pod_command(&grandparent, &exec.daemon)
+    pod_command(&grandparent, &daemon)
         .args(["enter", pod_name, "--", "sh", "-c", &commit_script])
         .success()
         .expect("Failed to create commit in pod nested submodule");
 
     // Get the commit hash from the pod's nested submodule
-    let pod_commit = pod_command(&grandparent, &exec.daemon)
+    let pod_commit = pod_command(&grandparent, &daemon)
         .args([
             "enter",
             pod_name,
@@ -473,13 +485,15 @@ fn nested_submodule_host_update_visible_in_pod() {
     let (grandparent, _outer, _inner, _outer_name, inner_displaypath) =
         create_test_repo_with_nested_submodules();
 
-    let exec = TestExecutor::start("gw-nested-fetch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-nested-fetch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&grandparent, "", "");
-    fs::write(grandparent.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(grandparent.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "nested-fetch-test";
 
     // Launch pod
-    pod_command(&grandparent, &exec.daemon)
+    pod_command(&grandparent, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -509,7 +523,7 @@ fn nested_submodule_host_update_visible_in_pod() {
     let host_inner_commit = host_inner_commit.trim().to_string();
 
     // Fetch host refs inside the pod's nested submodule
-    pod_command(&grandparent, &exec.daemon)
+    pod_command(&grandparent, &daemon)
         .args([
             "enter",
             pod_name,
@@ -524,7 +538,7 @@ fn nested_submodule_host_update_visible_in_pod() {
         .expect("Failed to fetch host in pod nested submodule");
 
     // The pod should see the new commit via host/HEAD
-    let fetched_commit = pod_command(&grandparent, &exec.daemon)
+    let fetched_commit = pod_command(&grandparent, &daemon)
         .args([
             "enter",
             pod_name,

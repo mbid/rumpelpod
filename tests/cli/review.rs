@@ -12,8 +12,10 @@ use std::process::Command;
 
 use rumpelpod::CommandExt;
 
-use crate::common::{create_commit, pod_command, write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{
+    create_commit, pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo,
+};
+use crate::executor::ExecutorResources;
 
 /// Create a mock difftool script that logs the files it sees.
 /// Returns the path to the log file.
@@ -96,19 +98,21 @@ fn review_shows_pod_changes() {
         .expect("git add failed");
     create_commit(repo.path(), "Add file.txt");
 
-    let exec = TestExecutor::start("review-changes");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "review-changes");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "review-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Make a change in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -121,12 +125,12 @@ fn review_shows_pod_changes() {
         .expect("Failed to modify file in pod");
 
     // Commit the change in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "add", "file.txt"])
         .success()
         .expect("Failed to stage file in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -143,7 +147,7 @@ fn review_shows_pod_changes() {
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["review", pod_name, "--yes"])
         .success()
         .expect("rumpel review failed");
@@ -171,19 +175,21 @@ fn review_shows_pod_changes() {
 #[test]
 fn review_shows_new_files() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("review-new-file");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "review-new-file");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "review-new-file";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Create a new file in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -196,12 +202,12 @@ fn review_shows_new_files() {
         .expect("Failed to create file in pod");
 
     // Commit the new file
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "add", "newfile.txt"])
         .success()
         .expect("Failed to stage new file in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -218,7 +224,7 @@ fn review_shows_new_files() {
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["review", pod_name, "--yes"])
         .success()
         .expect("rumpel review failed");
@@ -247,19 +253,21 @@ fn review_multiple_files() {
         .expect("git add failed");
     create_commit(repo.path(), "Add files");
 
-    let exec = TestExecutor::start("review-multi");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "review-multi");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "review-multi";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Modify both files in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -271,7 +279,7 @@ fn review_multiple_files() {
         .success()
         .expect("Failed to modify files in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -284,7 +292,7 @@ fn review_multiple_files() {
         .success()
         .expect("Failed to stage files in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -301,7 +309,7 @@ fn review_multiple_files() {
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["review", pod_name, "--yes"])
         .success()
         .expect("rumpel review failed");
@@ -342,19 +350,21 @@ fn review_path_filter() {
         .expect("git add failed");
     create_commit(repo.path(), "Add files");
 
-    let exec = TestExecutor::start("review-pathfilt");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "review-pathfilt");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "review-path-filter";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Modify all three files in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -366,7 +376,7 @@ fn review_path_filter() {
         .success()
         .expect("Failed to modify files in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -380,7 +390,7 @@ fn review_path_filter() {
         .success()
         .expect("Failed to stage files in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -397,7 +407,7 @@ fn review_path_filter() {
     let log_file = setup_mock_difftool(repo.path());
 
     // Review with path filter -- only file1.txt and file3.txt
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["review", pod_name, "--yes", "--", "file1.txt", "file3.txt"])
         .success()
         .expect("rumpel review with path filter failed");
@@ -455,19 +465,21 @@ fn review_works_in_detached_head() {
         .success()
         .expect("git checkout --detach failed");
 
-    let exec = TestExecutor::start("review-detached");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "review-detached");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "review-detached-head";
 
     // Launch pod (created while host is in detached HEAD)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Make a change in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -480,12 +492,12 @@ fn review_works_in_detached_head() {
         .expect("Failed to modify file in pod");
 
     // Commit the change
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "add", "file.txt"])
         .success()
         .expect("Failed to stage file in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -502,7 +514,7 @@ fn review_works_in_detached_head() {
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command - should succeed even in detached HEAD
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["review", pod_name, "--yes"])
         .success()
         .expect("rumpel review should work in detached HEAD state");
@@ -520,19 +532,21 @@ fn review_works_in_detached_head() {
 fn review_no_changes() {
     // Test that review works even when there are no changes (empty diff)
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("review-no-chg");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "review-no-chg");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "review-no-changes";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Make an empty commit so the pod ref exists
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -550,7 +564,7 @@ fn review_no_changes() {
     let log_file = setup_mock_difftool(repo.path());
 
     // Run review command - should succeed
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["review", pod_name, "--yes"])
         .success()
         .expect("rumpel review should succeed with no changes");
@@ -567,11 +581,13 @@ fn review_no_changes() {
 #[test]
 fn review_nonexistent_pod_fails() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("review-nonexistent");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "review-nonexistent");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["review", "does-not-exist", "--yes"])
         .output()
         .expect("Failed to run rumpel review command");

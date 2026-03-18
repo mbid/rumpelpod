@@ -5,17 +5,15 @@
 //!   - `ssh`              -- remote Docker via SSH tunnel
 //!   - `k8s`              -- Kubernetes cluster
 //!
-//! [`TestExecutor`] starts a daemon and returns the `.rumpelpod.toml`
-//! section for the active executor.  Tests splice this into their own
-//! `.rumpelpod.toml`, keeping the config fully visible in the test body.
+//! [`ExecutorResources`] sets up the active executor's resources and
+//! returns the `.rumpelpod.toml` section.  The daemon is started
+//! separately by the test.
 
 #![allow(dead_code)]
 
-use std::path::Path;
-
 use indoc::formatdoc;
 
-use super::common::TestDaemon;
+use super::common::TestHome;
 
 // ---------------------------------------------------------------------------
 // Executor mode
@@ -50,92 +48,68 @@ pub fn executor_supports_deterministic_ids() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// TestExecutor -- daemon + executor-specific .rumpelpod.toml
+// ExecutorResources -- executor-specific setup and .rumpelpod.toml
 // ---------------------------------------------------------------------------
 
-/// Running daemon plus executor resources (SSH remote, K8s namespace)
-/// that must stay alive for the duration of the test.
+/// Executor resources (SSH remote host, K8s namespace) that must stay
+/// alive for the duration of the test.
 ///
 /// The `.rumpelpod.toml` content is in [`toml`]; tests write it to disk
 /// themselves so the config is visible in the test body.
-pub struct TestExecutor {
-    pub daemon: TestDaemon,
+pub struct ExecutorResources {
     /// Executor-specific `.rumpelpod.toml` content.
     pub toml: String,
-    /// Resources that must outlive the daemon.
-    _resources: ExecutorResources,
+    /// Keep resources alive until the test ends.
+    _resources: Resources,
 }
 
-enum ExecutorResources {
+enum Resources {
     Docker,
     Ssh {
         _remote: super::ssh::SshRemoteHost,
-        _ssh_config: super::ssh::SshConfig,
     },
     K8s {
         _namespace: super::k8s::K8sNamespace,
     },
 }
 
-impl TestExecutor {
-    /// Start a test executor for the given test name.
+impl ExecutorResources {
+    /// Set up the executor for the given test.
     ///
-    /// `test_name` must be unique per test; it is used as the K8s
-    /// namespace suffix.
-    pub fn start(test_name: &str) -> Self {
-        Self::start_inner(test_name, None)
-    }
-
-    /// Like [`start`](Self::start) but with a custom HOME directory,
-    /// isolating the daemon from the host user's config files.
-    pub fn start_with_home(test_name: &str, home: &Path) -> Self {
-        Self::start_inner(test_name, Some(home))
-    }
-
-    fn start_inner(test_name: &str, home: Option<&Path>) -> Self {
+    /// For SSH mode, writes the SSH config into `home/.ssh/`.
+    /// Must be called before [`TestDaemon::start`] so the daemon
+    /// inherits the config via `$HOME`.
+    pub fn setup(home: &TestHome, test_name: &str) -> Self {
         match executor_mode() {
-            ExecutorMode::Docker => Self::docker(home),
+            ExecutorMode::Docker => Self::docker(),
             ExecutorMode::Ssh => Self::ssh(home),
-            ExecutorMode::K8s => Self::k8s(test_name, home),
+            ExecutorMode::K8s => Self::k8s(test_name),
         }
     }
 
-    fn docker(home: Option<&Path>) -> Self {
-        let daemon = match home {
-            Some(h) => TestDaemon::start_with_home(h),
-            None => TestDaemon::start(),
-        };
-        TestExecutor {
-            daemon,
+    fn docker() -> Self {
+        ExecutorResources {
             toml: String::new(),
-            _resources: ExecutorResources::Docker,
+            _resources: Resources::Docker,
         }
     }
 
-    fn ssh(home: Option<&Path>) -> Self {
+    fn ssh(home: &TestHome) -> Self {
         let remote = super::ssh::SshRemoteHost::start();
-        let ssh_config = super::ssh::create_ssh_config(&[&remote]);
-        let daemon = match home {
-            Some(h) => TestDaemon::start_with_ssh_config_and_home(&ssh_config.path, h),
-            None => TestDaemon::start_with_ssh_config(&ssh_config.path),
-        };
+        super::ssh::write_ssh_config(home, &[&remote]);
 
         let remote_spec = remote.ssh_spec();
         let toml = formatdoc! {r#"
             host = "{remote_spec}"
         "#};
 
-        TestExecutor {
-            daemon,
+        ExecutorResources {
             toml,
-            _resources: ExecutorResources::Ssh {
-                _remote: remote,
-                _ssh_config: ssh_config,
-            },
+            _resources: Resources::Ssh { _remote: remote },
         }
     }
 
-    fn k8s(test_name: &str, home: Option<&Path>) -> Self {
+    fn k8s(test_name: &str) -> Self {
         let cluster = super::k8s::k8s_cluster_config();
         let ns = super::k8s::K8sNamespace::new(&cluster, test_name);
 
@@ -159,14 +133,9 @@ impl TestExecutor {
             effect = "NoSchedule"
         "#};
 
-        let daemon = match home {
-            Some(h) => TestDaemon::start_with_home(h),
-            None => TestDaemon::start(),
-        };
-        TestExecutor {
-            daemon,
+        ExecutorResources {
             toml,
-            _resources: ExecutorResources::K8s { _namespace: ns },
+            _resources: Resources::K8s { _namespace: ns },
         }
     }
 }

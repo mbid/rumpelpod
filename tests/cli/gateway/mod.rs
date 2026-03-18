@@ -14,9 +14,10 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{
-    create_commit, pod_command, write_test_devcontainer, TestDaemon, TestRepo, TEST_REPO_PATH,
+    create_commit, pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo,
+    TEST_REPO_PATH,
 };
-use crate::executor::TestExecutor;
+use crate::executor::ExecutorResources;
 
 /// Get the list of branches in a repository.
 fn get_branches(repo_path: &Path) -> Vec<String> {
@@ -147,12 +148,14 @@ fn gateway_initial_branches_pushed() {
 
     checkout_branch(repo.path(), "master");
 
-    let exec = TestExecutor::start("gw-init-branches");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-init-branches");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod - this should set up gateway and push all branches
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "hello"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -182,12 +185,14 @@ fn gateway_initial_branches_pushed() {
 #[test]
 fn gateway_commit_updates_branch() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-commit-update");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-commit-update");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -215,12 +220,14 @@ fn gateway_commit_updates_branch() {
 #[test]
 fn gateway_force_push_updates_branch() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-force-push");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-force-push");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -253,12 +260,14 @@ fn gateway_force_push_updates_branch() {
 fn gateway_new_branch_creation_pushed() {
     // Test that creating a new branch (without making a commit) is immediately pushed
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-new-branch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-new-branch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -302,12 +311,14 @@ fn gateway_branch_deletion_propagates() {
     create_commit(repo.path(), "Branch commit");
     checkout_branch(repo.path(), "master");
 
-    let exec = TestExecutor::start("gw-branch-delete");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-branch-delete");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway with the branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -337,12 +348,14 @@ fn gateway_branch_deletion_propagates() {
 fn gateway_host_reset_propagates() {
     // Test that resetting a branch (without making a new commit) updates the gateway
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-host-reset");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-host-reset");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -380,18 +393,20 @@ fn gateway_host_reset_propagates() {
 fn gateway_http_remotes_configured_in_container() {
     // Test that the container gets "host" and "rumpelpod" remotes pointing to the gateway
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-http-remotes");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-http-remotes");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "http-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Check that remotes are configured
-    let remotes_output = pod_command(&repo, &exec.daemon)
+    let remotes_output = pod_command(&repo, &daemon)
         .args(["enter", "http-test", "--", "git", "remote"])
         .success()
         .expect("Failed to get git remotes");
@@ -421,24 +436,26 @@ fn gateway_http_fetch_works_from_container() {
     let test_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
     checkout_branch(repo.path(), "master");
 
-    let exec = TestExecutor::start("gw-http-fetch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-http-fetch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod (this sets up gateway and pushes branches)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fetch-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Fetch from host remote inside the container
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fetch-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch from host remote");
 
     // Verify the fetched commit matches
-    let fetched_commit_output = pod_command(&repo, &exec.daemon)
+    let fetched_commit_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "fetch-test",
@@ -464,18 +481,20 @@ fn gateway_http_fetch_works_from_container() {
 fn gateway_http_fetch_new_commits_after_create() {
     // Test that new commits made on host after container creation can be fetched
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-fetch-new");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-fetch-new");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod first
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "new-commits-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Initial fetch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "new-commits-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to initial fetch");
@@ -485,13 +504,13 @@ fn gateway_http_fetch_new_commits_after_create() {
     let new_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
     // Fetch again - should get the new commit
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "new-commits-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch new commits");
 
     // Verify we got the new commit
-    let fetched_commit_output = pod_command(&repo, &exec.daemon)
+    let fetched_commit_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "new-commits-test",
@@ -517,18 +536,20 @@ fn gateway_http_fetch_new_commits_after_create() {
 fn gateway_http_works_with_non_root_user() {
     // Test that git remotes work when running as a non-root user
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-non-root");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-non-root");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "user-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Check that remotes are configured
-    let remotes_output = pod_command(&repo, &exec.daemon)
+    let remotes_output = pod_command(&repo, &daemon)
         .args(["enter", "user-test", "--", "git", "remote", "-v"])
         .success()
         .expect("Failed to get git remotes");
@@ -542,7 +563,7 @@ fn gateway_http_works_with_non_root_user() {
     );
 
     // Fetch should work
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "user-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch from host remote");
@@ -552,19 +573,21 @@ fn gateway_http_works_with_non_root_user() {
 fn gateway_pod_commit_triggers_push() {
     // Test that creating a commit in the pod triggers a push to the gateway
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-pod-commit");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-commit");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "commit-push-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Create a commit in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -579,7 +602,7 @@ fn gateway_pod_commit_triggers_push() {
         .expect("Failed to create commit in pod");
 
     // Get the commit hash from the pod
-    let pod_commit_output = pod_command(&repo, &exec.daemon)
+    let pod_commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get pod commit");
@@ -606,20 +629,22 @@ fn gateway_pod_commit_triggers_push() {
 fn gateway_pod_push_works_from_new_branch() {
     // Test that pushing from a new branch in pod works
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-new-branch-push");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-new-branch-push");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "new-branch-push";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Create a new branch and commit in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -632,7 +657,7 @@ fn gateway_pod_push_works_from_new_branch() {
         .success()
         .expect("Failed to create branch in pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -647,7 +672,7 @@ fn gateway_pod_push_works_from_new_branch() {
         .expect("Failed to create commit in pod");
 
     // Get the commit hash from the pod
-    let pod_commit_output = pod_command(&repo, &exec.daemon)
+    let pod_commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get pod commit");
@@ -673,24 +698,26 @@ fn gateway_pod_push_works_from_new_branch() {
 fn gateway_multiple_pods_push_independently() {
     // Test that multiple pods can push to the gateway without conflicts
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-multi-pods");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-multi-pods");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch two pods
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "pod-a", "--", "echo", "setup"])
         .success()
         .expect("Failed to run pod-a enter");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "pod-b", "--", "echo", "setup"])
         .success()
         .expect("Failed to run pod-b enter");
 
     // Create commits in both pods on the same branch name
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "pod-a",
@@ -704,7 +731,7 @@ fn gateway_multiple_pods_push_independently() {
         .success()
         .expect("Failed to create commit in pod-a");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "pod-b",
@@ -719,13 +746,13 @@ fn gateway_multiple_pods_push_independently() {
         .expect("Failed to create commit in pod-b");
 
     // Get commit hashes
-    let commit_a_output = pod_command(&repo, &exec.daemon)
+    let commit_a_output = pod_command(&repo, &daemon)
         .args(["enter", "pod-a", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get pod-a commit");
     let commit_a = String::from_utf8_lossy(&commit_a_output).trim().to_string();
 
-    let commit_b_output = pod_command(&repo, &exec.daemon)
+    let commit_b_output = pod_command(&repo, &daemon)
         .args(["enter", "pod-b", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get pod-b commit");
@@ -759,20 +786,22 @@ fn gateway_multiple_pods_push_independently() {
 fn gateway_pod_amend_triggers_push() {
     // Test that amending a commit in the pod triggers a push to the gateway
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-pod-amend");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-amend");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "amend-push-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Create a commit in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -786,7 +815,7 @@ fn gateway_pod_amend_triggers_push() {
         .success()
         .expect("Failed to create commit in pod");
 
-    let original_commit_output = pod_command(&repo, &exec.daemon)
+    let original_commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get original commit");
@@ -795,7 +824,7 @@ fn gateway_pod_amend_triggers_push() {
         .to_string();
 
     // Amend the commit
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -810,7 +839,7 @@ fn gateway_pod_amend_triggers_push() {
         .success()
         .expect("Failed to amend commit in pod");
 
-    let amended_commit_output = pod_command(&repo, &exec.daemon)
+    let amended_commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get amended commit");
@@ -840,13 +869,15 @@ fn gateway_pod_amend_triggers_push() {
 fn gateway_host_amend_updates_branch() {
     // Test that amending a commit on the host updates the gateway
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-host-amend");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-host-amend");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -879,24 +910,26 @@ fn gateway_host_amend_updates_branch() {
 fn gateway_pod_cannot_push_to_other_pod_namespace() {
     // Test that pod-a cannot push to pod-b's namespace
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-no-cross-push");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-no-cross-push");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod-a
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "pod-a", "--", "echo", "setup"])
         .success()
         .expect("Failed to run pod-a enter");
 
     // Launch pod-b and create a commit so it has a branch in the gateway
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "pod-b", "--", "echo", "setup"])
         .success()
         .expect("Failed to run pod-b enter");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "pod-b",
@@ -911,7 +944,7 @@ fn gateway_pod_cannot_push_to_other_pod_namespace() {
         .expect("Failed to create commit in pod-b");
 
     // Get pod-b's commit
-    let commit_b_output = pod_command(&repo, &exec.daemon)
+    let commit_b_output = pod_command(&repo, &daemon)
         .args(["enter", "pod-b", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get pod-b commit");
@@ -928,7 +961,7 @@ fn gateway_pod_cannot_push_to_other_pod_namespace() {
 
     // Now try to have pod-a push directly to pod-b's namespace
     // This should fail because of access control
-    let result = pod_command(&repo, &exec.daemon)
+    let result = pod_command(&repo, &daemon)
         .args([
             "enter",
             "pod-a",
@@ -968,13 +1001,15 @@ fn gateway_pod_cannot_push_to_other_pod_namespace() {
 fn gateway_pod_cannot_push_to_host_namespace() {
     // Test that a pod cannot push to the host/* namespace
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-no-host-push");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-no-host-push");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -984,7 +1019,7 @@ fn gateway_pod_cannot_push_to_host_namespace() {
     let host_commit_before = get_branch_commit(&gateway, "host/master");
 
     // Create a commit in pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
@@ -999,7 +1034,7 @@ fn gateway_pod_cannot_push_to_host_namespace() {
         .expect("Failed to create commit in pod");
 
     // Try to push to host/master - should be rejected
-    let result = pod_command(&repo, &exec.daemon)
+    let result = pod_command(&repo, &daemon)
         .args([
             "enter",
             "test",
@@ -1038,25 +1073,27 @@ fn gateway_pod_cannot_push_to_host_namespace() {
 fn gateway_pod_can_push_to_own_namespace() {
     // Test that a pod can push to its own namespace (positive test)
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-own-ns-push");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-own-ns-push");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "my-pod";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Create a new branch and commit
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "checkout", "-b", "feature"])
         .success()
         .expect("Failed to create branch");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1071,14 +1108,14 @@ fn gateway_pod_can_push_to_own_namespace() {
         .expect("Failed to create commit");
 
     // Get the commit hash
-    let commit_output = pod_command(&repo, &exec.daemon)
+    let commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit");
     let commit = String::from_utf8_lossy(&commit_output).trim().to_string();
 
     // Manually push to our own namespace with explicit refspec
-    let explicit_push = pod_command(&repo, &exec.daemon)
+    let explicit_push = pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1115,20 +1152,22 @@ fn gateway_pod_can_push_to_own_namespace() {
 fn gateway_pod_reset_triggers_push() {
     // Test that resetting in the pod (without making a new commit) triggers a push to the gateway
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-pod-reset");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-reset");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "reset-push-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Create two commits in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1142,13 +1181,13 @@ fn gateway_pod_reset_triggers_push() {
         .success()
         .expect("Failed to create commit 1");
 
-    let commit1_output = pod_command(&repo, &exec.daemon)
+    let commit1_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit1");
     let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1167,7 +1206,7 @@ fn gateway_pod_reset_triggers_push() {
     let expected_branch = format!("rumpelpod/{}@{}", pod_name, pod_name);
 
     // Reset back to commit1 (no new commit created)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "reset", "--hard", &commit1])
         .success()
         .expect("Failed to reset in pod");
@@ -1185,14 +1224,16 @@ fn gateway_pod_reset_triggers_push() {
 fn gateway_pod_branch_creation_triggers_push() {
     // Test that creating a new branch (without making a commit) in the pod triggers a push
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-pod-branch-create");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-branch-create");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "branch-create-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -1208,7 +1249,7 @@ fn gateway_pod_branch_creation_triggers_push() {
     );
 
     // Get the current commit
-    let current_commit_output = pod_command(&repo, &exec.daemon)
+    let current_commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get current commit");
@@ -1217,7 +1258,7 @@ fn gateway_pod_branch_creation_triggers_push() {
         .to_string();
 
     // Create a new branch WITHOUT making a commit
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1252,14 +1293,16 @@ fn gateway_pod_branch_creation_triggers_push() {
 fn gateway_pod_push_syncs_to_host_remote_ref() {
     // Test that when a pod pushes to gateway, it appears as a remote-tracking ref in host
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-push-sync-ref");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-push-sync-ref");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "sync-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -1270,7 +1313,7 @@ fn gateway_pod_push_syncs_to_host_remote_ref() {
     let expected_ref = format!("rumpelpod/{}@{}", pod_name, pod_name);
 
     // Create a commit in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1285,7 +1328,7 @@ fn gateway_pod_push_syncs_to_host_remote_ref() {
         .expect("Failed to create commit in pod");
 
     // Get the commit hash
-    let commit_output = pod_command(&repo, &exec.daemon)
+    let commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit");
@@ -1313,20 +1356,22 @@ fn gateway_pod_push_syncs_to_host_remote_ref() {
 fn gateway_pod_branch_sync_to_host() {
     // Test that creating a new branch in pod syncs to host remote refs
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-branch-sync");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-branch-sync");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "branch-sync-test";
 
     // Launch pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
 
     // Create a new branch in pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1354,14 +1399,16 @@ fn gateway_pod_branch_sync_to_host() {
 fn gateway_multiple_pods_sync_to_host() {
     // Test that multiple pods can sync independently to host remote refs
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-multi-sync");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-multi-sync");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create first pod and commit
     let pod1 = "multi-sync-1";
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod1,
@@ -1375,7 +1422,7 @@ fn gateway_multiple_pods_sync_to_host() {
         .success()
         .expect("Failed to create commit in pod 1");
 
-    let commit1_output = pod_command(&repo, &exec.daemon)
+    let commit1_output = pod_command(&repo, &daemon)
         .args(["enter", pod1, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit 1");
@@ -1383,7 +1430,7 @@ fn gateway_multiple_pods_sync_to_host() {
 
     // Create second pod and commit
     let pod2 = "multi-sync-2";
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod2,
@@ -1397,7 +1444,7 @@ fn gateway_multiple_pods_sync_to_host() {
         .success()
         .expect("Failed to create commit in pod 2");
 
-    let commit2_output = pod_command(&repo, &exec.daemon)
+    let commit2_output = pod_command(&repo, &daemon)
         .args(["enter", pod2, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit 2");
@@ -1438,14 +1485,16 @@ fn gateway_multiple_pods_sync_to_host() {
 fn gateway_pod_reset_syncs_to_host_via_force_push() {
     // Test that resetting in pod (requiring force push) syncs to host remote refs
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-reset-force");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-reset-force");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "force-push-test";
 
     // Launch pod and create two commits
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1459,13 +1508,13 @@ fn gateway_pod_reset_syncs_to_host_via_force_push() {
         .success()
         .expect("Failed to create first commit");
 
-    let commit1_output = pod_command(&repo, &exec.daemon)
+    let commit1_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit1");
     let commit1 = String::from_utf8_lossy(&commit1_output).trim().to_string();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1479,7 +1528,7 @@ fn gateway_pod_reset_syncs_to_host_via_force_push() {
         .success()
         .expect("Failed to create second commit");
 
-    let commit2_output = pod_command(&repo, &exec.daemon)
+    let commit2_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get commit2");
@@ -1494,7 +1543,7 @@ fn gateway_pod_reset_syncs_to_host_via_force_push() {
     );
 
     // Reset back to commit1 (requires force push to update host remote ref)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "reset", "--hard", &commit1])
         .success()
         .expect("Failed to reset in pod");
@@ -1511,16 +1560,18 @@ fn gateway_pod_reset_syncs_to_host_via_force_push() {
 fn gateway_host_head_synced_on_setup() {
     // Test that host/HEAD is synced to the gateway when the gateway is set up
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-head-setup");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-head-setup");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Get the current HEAD commit before launching pod
     let head_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
     // Launch pod - this triggers gateway setup
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "head-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -1547,22 +1598,24 @@ fn gateway_host_head_synced_on_setup() {
 fn gateway_host_head_available_in_pod() {
     // Test that pod can access host/HEAD as a remote-tracking ref
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-head-in-pod");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-head-in-pod");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Get the current HEAD commit
     let head_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
     // Launch pod and fetch host refs
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "pod-head-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch host refs");
 
     // Verify pod can resolve host/HEAD
-    let pod_head_output = pod_command(&repo, &exec.daemon)
+    let pod_head_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "pod-head-test",
@@ -1586,13 +1639,15 @@ fn gateway_host_head_available_in_pod() {
 fn gateway_host_head_updates_on_commit() {
     // Test that host/HEAD is updated when a new commit is made
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-head-on-commit");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-head-on-commit");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "head-commit-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -1635,13 +1690,15 @@ fn gateway_host_head_updates_on_branch_switch() {
     // Sanity check: different commits
     assert_ne!(master_commit, feature_commit);
 
-    let exec = TestExecutor::start("gw-head-branch-switch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-head-branch-switch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway (currently on master)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "branch-switch-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -1666,12 +1723,12 @@ fn gateway_host_head_updates_on_branch_switch() {
     );
 
     // Pod should see the updated HEAD after fetch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "branch-switch-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch after branch switch");
 
-    let pod_head_output = pod_command(&repo, &exec.daemon)
+    let pod_head_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "branch-switch-test",
@@ -1703,13 +1760,15 @@ fn gateway_host_head_works_in_detached_state() {
     create_commit(repo.path(), "Second commit");
     let second_commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
-    let exec = TestExecutor::start("gw-head-detached");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-head-detached");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod to set up gateway (on master at second_commit)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "detached-head-test", "--", "echo", "setup"])
         .success()
         .expect("Failed to run rumpel enter");
@@ -1738,12 +1797,12 @@ fn gateway_host_head_works_in_detached_state() {
     );
 
     // Pod should be able to fetch and resolve the detached HEAD commit
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "detached-head-test", "--", "git", "fetch", "host"])
         .success()
         .expect("Failed to fetch in detached HEAD state");
 
-    let pod_head_output = pod_command(&repo, &exec.daemon)
+    let pod_head_output = pod_command(&repo, &daemon)
         .args([
             "enter",
             "detached-head-test",
@@ -1785,12 +1844,14 @@ fn gateway_setup_works_with_detached_head() {
         .success()
         .expect("git branch -D master failed");
 
-    let exec = TestExecutor::start("gw-setup-detached");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-setup-detached");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "detached-setup", "--", "echo", "ok"])
         .success()
         .expect("Failed to run rumpel enter on detached HEAD repo");
@@ -1811,21 +1872,23 @@ fn gateway_primary_branch_alias_works_on_host() {
     // For the alias to be created, the pod must be on a branch with the same name
     // as the pod (the "primary branch").
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-alias-host");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-alias-host");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "alias-test";
 
     // Launch pod - it automatically creates and checks out a branch named after
     // the pod (the "primary branch")
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to launch pod");
 
     // Create a commit on the primary branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1840,7 +1903,7 @@ fn gateway_primary_branch_alias_works_on_host() {
         .expect("Failed to create commit in pod");
 
     // Get commit from pod
-    let commit_output = pod_command(&repo, &exec.daemon)
+    let commit_output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get pod HEAD");
@@ -1872,20 +1935,22 @@ fn gateway_primary_branch_alias_works_on_host() {
 fn gateway_alias_deleted_with_pod() {
     // Test that alias ref is removed when pod is deleted
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-alias-delete");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-alias-delete");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "delete-alias-test";
 
     // Launch pod - it automatically creates and checks out the primary branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to launch pod");
 
     // Create a commit on the primary branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -1913,7 +1978,7 @@ fn gateway_alias_deleted_with_pod() {
     );
 
     // Delete the pod (--wait so refs are cleaned up before checking)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["delete", "--wait", "--force", pod_name])
         .success()
         .expect("Failed to delete pod");
@@ -1933,18 +1998,20 @@ fn gateway_alias_deleted_with_pod() {
 fn gateway_alias_does_not_conflict_with_branches() {
     // Test that pod `alice` creating branch `bob` does not affect pod `bob`'s alias
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-alias-no-conflict");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-alias-no-conflict");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Launch pod `bob` - it automatically creates and checks out its primary branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "bob", "--", "echo", "setup"])
         .success()
         .expect("Failed to launch bob pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "bob",
@@ -1958,7 +2025,7 @@ fn gateway_alias_does_not_conflict_with_branches() {
         .success()
         .expect("Failed to create commit in bob pod");
 
-    let bob_commit_output = pod_command(&repo, &exec.daemon)
+    let bob_commit_output = pod_command(&repo, &daemon)
         .args(["enter", "bob", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get bob HEAD");
@@ -1967,7 +2034,7 @@ fn gateway_alias_does_not_conflict_with_branches() {
         .to_string();
 
     // Create pod `alice` and create a branch named `bob` with different commit
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "alice",
@@ -1981,12 +2048,12 @@ fn gateway_alias_does_not_conflict_with_branches() {
         .success()
         .expect("Failed to create commit in alice pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "alice", "--", "git", "checkout", "-b", "bob"])
         .success()
         .expect("Failed to create bob branch in alice pod");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "alice",
@@ -2000,7 +2067,7 @@ fn gateway_alias_does_not_conflict_with_branches() {
         .success()
         .expect("Failed to create commit on bob branch in alice pod");
 
-    let alice_bob_commit_output = pod_command(&repo, &exec.daemon)
+    let alice_bob_commit_output = pod_command(&repo, &daemon)
         .args(["enter", "alice", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("Failed to get alice bob-branch HEAD");
@@ -2038,20 +2105,22 @@ fn gateway_alias_does_not_conflict_with_branches() {
 fn gateway_non_primary_branches_have_no_alias() {
     // Test that non-primary branches (feature@pod) don't get an alias
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-no-alias");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-no-alias");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "no-alias-test";
 
     // Launch pod - it automatically creates and checks out its primary branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("Failed to launch pod");
 
     // Create initial commit on primary branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -2066,12 +2135,12 @@ fn gateway_non_primary_branches_have_no_alias() {
         .expect("Failed to create commit on primary branch");
 
     // Create a feature branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "checkout", "-b", "feature"])
         .success()
         .expect("Failed to create feature branch");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -2115,13 +2184,15 @@ fn gateway_non_primary_branches_have_no_alias() {
 #[test]
 fn pod_has_branch_named_after_pod() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-pod-branch-name");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-branch-name");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Enter pod and check the current branch name
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "my-pod",
@@ -2145,10 +2216,12 @@ fn pod_has_branch_named_after_pod() {
 #[test]
 fn pod_branch_points_to_host_head() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-pod-branch-head");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-branch-head");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Get the host's HEAD commit
     let host_head = Command::new("git")
@@ -2159,7 +2232,7 @@ fn pod_branch_points_to_host_head() {
     let host_head = String::from_utf8_lossy(&host_head).trim().to_string();
 
     // Enter pod and get its HEAD commit
-    let pod_head = pod_command(&repo, &exec.daemon)
+    let pod_head = pod_command(&repo, &daemon)
         .args(["enter", "test-branch", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("rumpel enter failed");
@@ -2196,13 +2269,15 @@ fn pod_has_host_remote_refs() {
         .success()
         .expect("Failed to switch back");
 
-    let exec = TestExecutor::start("gw-pod-host-refs");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-host-refs");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Enter pod and list remote refs
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "test-refs", "--", "git", "branch", "-r"])
         .success()
         .expect("rumpel enter failed");
@@ -2240,14 +2315,16 @@ fn pod_branch_is_different_from_host_branches() {
         .success()
         .expect("Failed to switch back");
 
-    let exec = TestExecutor::start("gw-pod-diff-branch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-pod-diff-branch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // The pod named "existing" should still have its own branch, separate
     // from the host's "existing" branch (which becomes host/existing)
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "existing",
@@ -2268,7 +2345,7 @@ fn pod_branch_is_different_from_host_branches() {
     );
 
     // Check that both the local branch and remote ref exist
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "existing", "--", "git", "branch", "-a"])
         .success()
         .expect("rumpel enter failed");
@@ -2290,19 +2367,21 @@ fn pod_branch_is_different_from_host_branches() {
 fn re_entering_pod_preserves_branch() {
     // Re-entering a pod should not reset the branch or checkout
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-reenter-branch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-reenter-branch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First enter - creates the pod and branch
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "persist-test", "--", "echo", "first"])
         .success()
         .expect("first rumpel enter failed");
 
     // Make a commit in the pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             "persist-test",
@@ -2317,7 +2396,7 @@ fn re_entering_pod_preserves_branch() {
         .expect("pod commit failed");
 
     // Get the pod HEAD after the commit
-    let head_after_commit = pod_command(&repo, &exec.daemon)
+    let head_after_commit = pod_command(&repo, &daemon)
         .args(["enter", "persist-test", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("git rev-parse failed");
@@ -2326,7 +2405,7 @@ fn re_entering_pod_preserves_branch() {
         .to_string();
 
     // Re-enter the pod and check HEAD is still at the same commit
-    let head_after_reenter = pod_command(&repo, &exec.daemon)
+    let head_after_reenter = pod_command(&repo, &daemon)
         .args(["enter", "persist-test", "--", "git", "rev-parse", "HEAD"])
         .success()
         .expect("git rev-parse failed after re-enter");
@@ -2340,7 +2419,7 @@ fn re_entering_pod_preserves_branch() {
     );
 
     // Check we're still on the same branch
-    let branch = pod_command(&repo, &exec.daemon)
+    let branch = pod_command(&repo, &daemon)
         .args([
             "enter",
             "persist-test",
@@ -2387,22 +2466,24 @@ fn get_pod_upstream(
 fn pod_primary_branch_has_upstream_when_host_on_branch() {
     // When the host is on a branch, the pod's primary branch should track it
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-upstream-branch");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-upstream-branch");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Host is on "master" branch by default (from TestRepo::new)
     let pod_name = "upstream-test";
 
     // Enter pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("rumpel enter failed");
 
     // Check that the primary branch tracks host/master
-    let upstream = get_pod_upstream(&repo, &exec.daemon, pod_name, pod_name);
+    let upstream = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream,
         Some("host/master".to_string()),
@@ -2419,20 +2500,22 @@ fn pod_primary_branch_tracks_host_feature_branch() {
     create_branch(repo.path(), "feature-xyz");
     create_commit(repo.path(), "Feature commit");
 
-    let exec = TestExecutor::start("gw-upstream-feature");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-upstream-feature");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "feature-upstream-test";
 
     // Enter pod while host is on feature-xyz
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("rumpel enter failed");
 
     // Check that the primary branch tracks host/feature-xyz
-    let upstream = get_pod_upstream(&repo, &exec.daemon, pod_name, pod_name);
+    let upstream = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream,
         Some("host/feature-xyz".to_string()),
@@ -2449,9 +2532,11 @@ fn pod_primary_branch_has_no_upstream_when_host_detached() {
     create_commit(repo.path(), "Test commit");
     let commit = get_branch_commit(repo.path(), "HEAD").unwrap();
 
-    let exec = TestExecutor::start("gw-upstream-detached");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-upstream-detached");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Now detach HEAD by checking out the commit directly
     Command::new("git")
@@ -2463,13 +2548,13 @@ fn pod_primary_branch_has_no_upstream_when_host_detached() {
     let pod_name = "detached-upstream-test";
 
     // Enter pod while host is detached
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "setup"])
         .success()
         .expect("rumpel enter failed");
 
     // Check that the primary branch has no upstream
-    let upstream = get_pod_upstream(&repo, &exec.daemon, pod_name, pod_name);
+    let upstream = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert!(
         upstream.is_none(),
         "Primary branch should have no upstream when host is detached, got: {:?}",
@@ -2481,20 +2566,22 @@ fn pod_primary_branch_has_no_upstream_when_host_detached() {
 fn pod_re_entry_does_not_change_upstream() {
     // Re-entering a pod should not change the upstream, even if host branch changed
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-upstream-preserve");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-upstream-preserve");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "upstream-preserve-test";
 
     // First entry while on master
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "first entry"])
         .success()
         .expect("first rumpel enter failed");
 
     // Verify upstream is host/master
-    let upstream_before = get_pod_upstream(&repo, &exec.daemon, pod_name, pod_name);
+    let upstream_before = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream_before,
         Some("host/master".to_string()),
@@ -2505,13 +2592,13 @@ fn pod_re_entry_does_not_change_upstream() {
     create_branch(repo.path(), "other-branch");
 
     // Re-enter pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "second entry"])
         .success()
         .expect("second rumpel enter failed");
 
     // Verify upstream is still host/master (not changed to host/other-branch)
-    let upstream_after = get_pod_upstream(&repo, &exec.daemon, pod_name, pod_name);
+    let upstream_after = get_pod_upstream(&repo, &daemon, pod_name, pod_name);
     assert_eq!(
         upstream_after,
         Some("host/master".to_string()),
@@ -2522,7 +2609,9 @@ fn pod_re_entry_does_not_change_upstream() {
 #[test]
 fn pod_unsafe_host_network_mode() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("gw-unsafe-host");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-unsafe-host");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     // Overwrite devcontainer.json with network=host version
     fs::write(
@@ -2539,22 +2628,22 @@ fn pod_unsafe_host_network_mode() {
         "#},
     )
     .unwrap();
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "unsafe-host-test";
 
     // Enter pod and verify it works
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "echo", "hello"])
         .success()
         .expect("rumpel enter failed");
 
     // Verify git sync works by pushing a branch from pod
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "git", "checkout", "-b", "feature"])
         .success()
         .expect("git checkout failed");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -2648,12 +2737,14 @@ fn gateway_lfs_download_from_host() {
     let repo = TestRepo::new();
     let content = setup_lfs_repo(repo.path());
 
-    let exec = TestExecutor::start("gw-lfs-download");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-lfs-download");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, LFS_DOCKERFILE, "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "lfs-download";
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", pod_name, "--", "cat", "large.bin"])
         .success()
         .expect("pod enter failed");
@@ -2697,13 +2788,15 @@ fn gateway_lfs_upload_from_pod() {
         .success()
         .expect("git commit failed");
 
-    let exec = TestExecutor::start("gw-lfs-upload");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-lfs-upload");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, LFS_DOCKERFILE, "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let pod_name = "lfs-upload";
 
     // Create an LFS file inside the pod, commit, and push
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args([
             "enter",
             pod_name,
@@ -2757,11 +2850,13 @@ fn gateway_lfs_not_used() {
         .expect("git add failed");
     create_commit(repo.path(), "add plain file");
 
-    let exec = TestExecutor::start("gw-lfs-not-used");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-lfs-not-used");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, LFS_DOCKERFILE, "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "no-lfs", "--", "cat", "plain.txt"])
         .success()
         .expect("pod enter failed for non-LFS repo with git-lfs installed");

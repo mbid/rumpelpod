@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tempfile::TempDir;
 
-use crate::common::{write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
 
 use super::common::{llm_cache_dir, DEFAULT_MODEL};
 
@@ -33,9 +33,11 @@ fn create_marker_mock_editor(script_dir: &Path, marker_file: &Path) -> PathBuf {
 #[test]
 fn test_editor_opens_immediately() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("agent-startup");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "agent-startup");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let marker_file = temp_dir.path().join("editor-ran");
     let editor_path = create_marker_mock_editor(temp_dir.path(), &marker_file);
@@ -55,7 +57,7 @@ fn test_editor_opens_immediately() {
     cmd.cwd(repo.path());
     cmd.env(
         "RUMPELPOD_DAEMON_SOCKET",
-        exec.daemon.socket_path.to_str().unwrap(),
+        daemon.socket_path.to_str().unwrap(),
     );
     cmd.env("EDITOR", editor_path.to_str().unwrap());
 

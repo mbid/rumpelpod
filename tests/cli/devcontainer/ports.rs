@@ -15,9 +15,9 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::common::{
-    pod_command, write_test_devcontainer, TestDaemon, TestRepo, TEST_REPO_PATH, TEST_USER,
+    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER,
 };
-use crate::executor::TestExecutor;
+use crate::executor::ExecutorResources;
 
 /// Write a devcontainer.json with port forwarding configuration.
 fn write_devcontainer_with_ports(repo: &TestRepo, ports_config: &str) {
@@ -89,17 +89,19 @@ fn forward_single_port() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9100],"#);
-    let exec = TestExecutor::start("fwd-single");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "fwd-single");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create pod (this should set up port forwarding)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-single", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     // Start an echo server on port 9100 inside the container
-    start_echo_server_in_container(&repo, &exec.daemon, "fwd-single", 9100);
+    start_echo_server_in_container(&repo, &daemon, "fwd-single", 9100);
 
     // Verify we can reach it through the forwarded port
     let response = try_echo(9100, "hello port forwarding");
@@ -115,16 +117,18 @@ fn forward_multiple_ports() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9200, 9201],"#);
-    let exec = TestExecutor::start("fwd-multi");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "fwd-multi");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-multi", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    start_echo_server_in_container(&repo, &exec.daemon, "fwd-multi", 9200);
-    start_echo_server_in_container(&repo, &exec.daemon, "fwd-multi", 9201);
+    start_echo_server_in_container(&repo, &daemon, "fwd-multi", 9200);
+    start_echo_server_in_container(&repo, &daemon, "fwd-multi", 9201);
 
     let r1 = try_echo(9200, "port-9200");
     let r2 = try_echo(9201, "port-9201");
@@ -146,15 +150,17 @@ fn ports_command_shows_forwarded_ports() {
         },
         "#,
     );
-    let exec = TestExecutor::start("fwd-show");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "fwd-show");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-show", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "fwd-show"])
         .success()
         .expect("rumpel ports failed");
@@ -170,15 +176,17 @@ fn ports_command_empty_when_no_forwards() {
 
     // No forwardPorts at all
     write_devcontainer_with_ports(&repo, "");
-    let exec = TestExecutor::start("fwd-empty-cfg");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "fwd-empty-cfg");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-empty-cfg", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "fwd-empty-cfg"])
         .success()
         .expect("rumpel ports failed");
@@ -207,15 +215,17 @@ fn other_ports_attributes_label() {
         "otherPortsAttributes": { "label": "Fallback" },
         "#,
     );
-    let exec = TestExecutor::start("fwd-other-attr");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "fwd-other-attr");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-other-attr", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "fwd-other-attr"])
         .success()
         .expect("rumpel ports failed");
@@ -238,29 +248,31 @@ fn multi_pod_port_remapping() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, r#""forwardPorts": [9400],"#);
-    let exec = TestExecutor::start("fwd-remap");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "fwd-remap");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First pod gets port 9400
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-first", "--", "true"])
         .success()
         .expect("rumpel enter failed for first pod");
 
     // Second pod also wants port 9400 but should get remapped
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-second", "--", "true"])
         .success()
         .expect("rumpel enter failed for second pod");
 
     // Check the ports for both pods
-    let stdout1 = pod_command(&repo, &exec.daemon)
+    let stdout1 = pod_command(&repo, &daemon)
         .args(["ports", "fwd-first"])
         .success()
         .expect("rumpel ports failed for first");
     let output1 = String::from_utf8_lossy(&stdout1);
 
-    let stdout2 = pod_command(&repo, &exec.daemon)
+    let stdout2 = pod_command(&repo, &daemon)
         .args(["ports", "fwd-second"])
         .success()
         .expect("rumpel ports failed for second");
@@ -316,20 +328,22 @@ fn forward_port_remote_ssh() {
         r#","forwardPorts": [9500]"#,
     );
 
-    let exec = TestExecutor::start("fwd-remote-ssh");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "fwd-remote-ssh");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "fwd-remote", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     // Start an echo server on port 9500 inside the remote container
-    start_echo_server_in_container(&repo, &exec.daemon, "fwd-remote", 9500);
+    start_echo_server_in_container(&repo, &daemon, "fwd-remote", 9500);
 
     // The port should be forwarded via SSH tunnel from localhost to the
     // container's port 9500 on the remote host's Docker network.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["ports", "fwd-remote"])
         .success()
         .expect("rumpel ports failed");

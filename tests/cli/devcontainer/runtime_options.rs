@@ -14,8 +14,8 @@ use std::fs;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::ExecutorResources;
 
 /// Write a devcontainer.json with the given runtime options block merged in.
 fn write_devcontainer_with_runtime_opts(repo: &TestRepo, runtime_opts: &str) {
@@ -96,12 +96,16 @@ fn override_command_false() {
     )
     .expect("Failed to write devcontainer.json");
 
-    let exec = TestExecutor::start("rt-override-false");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+
+    let executor = ExecutorResources::setup(&home, "rt-override-false");
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // PID 1 should be `tail` from the image's CMD, not rumpelpod's
     // `sleep infinity` override.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "override-false", "--", "cat", "/proc/1/comm"])
         .success()
         .expect("rumpel enter failed with overrideCommand=false");
@@ -120,10 +124,12 @@ fn override_command_default_true() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""remoteUser": "testuser""#);
-    let exec = TestExecutor::start("rt-override-default");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "rt-override-default");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "override-default", "--", "cat", "/proc/1/comm"])
         .success()
         .expect("rumpel enter failed");
@@ -150,11 +156,13 @@ fn privileged_mode_enabled() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""privileged": true"#);
-    let exec = TestExecutor::start("rt-privileged");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "rt-privileged");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Verify the config parses and the pod starts with privileged mode.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "privileged-test", "--", "true"])
         .success()
         .expect("rumpel enter failed");
@@ -173,10 +181,12 @@ fn init_process_enabled() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""init": true"#);
-    let exec = TestExecutor::start("rt-init");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "rt-init");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "init-test", "--", "cat", "/proc/1/comm"])
         .success()
         .expect("rumpel enter failed");
@@ -202,11 +212,13 @@ fn cap_add_sys_ptrace() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""capAdd": ["SYS_PTRACE"]"#);
-    let exec = TestExecutor::start("rt-cap-add");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "rt-cap-add");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Verify the config parses and the pod starts with capAdd.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "cap-add-test", "--", "true"])
         .success()
         .expect("rumpel enter failed");
@@ -226,11 +238,13 @@ fn security_opt_seccomp_unconfined() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(&repo, r#""securityOpt": ["seccomp=unconfined"]"#);
-    let exec = TestExecutor::start("rt-seccomp");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "rt-seccomp");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Verify the config parses and the pod starts with securityOpt.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "seccomp-test", "--", "true"])
         .success()
         .expect("rumpel enter failed");
@@ -279,11 +293,15 @@ fn run_args_device() {
     )
     .expect("Failed to write devcontainer.json");
 
-    let exec = TestExecutor::start("rt-device");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+
+    let executor = ExecutorResources::setup(&home, "rt-device");
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Verify device is accessible and is a character device
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "device-test", "--", "test", "-c", "/dev/null"])
         .success()
         .expect("/dev/null should be a character device in container");
@@ -303,10 +321,12 @@ fn host_requirements_logged() {
         &repo,
         r#""hostRequirements": { "cpus": 2, "memory": "4gb" }"#,
     );
-    let exec = TestExecutor::start("rt-hostreq-log");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "rt-hostreq-log");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .env("RUST_LOG", "info")
         .args(["enter", "hostreq-logged", "--", "true"])
         .output()
@@ -339,10 +359,12 @@ fn host_requirements_ignored_on_local() {
         &repo,
         r#""hostRequirements": { "cpus": 9999, "memory": "999tb", "storage": "999tb" }"#,
     );
-    let exec = TestExecutor::start("rt-hostreq-absurd");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "rt-hostreq-absurd");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "hostreq-absurd", "--", "true"])
         .success()
         .expect("pod should start even with absurd hostRequirements on local Docker");

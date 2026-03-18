@@ -7,16 +7,10 @@ use super::proxy::claude_proxy;
 #[test]
 fn claude_smoke() {
     let proxy = claude_proxy();
-    let (repo, exec, fake_home) = setup_claude_test_repo(proxy, "claude-smoke");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-smoke");
 
-    let mut session = ClaudeSession::spawn(
-        &repo,
-        &exec.daemon,
-        proxy,
-        fake_home.path(),
-        "claude-haiku-4-5",
-        &[],
-    );
+    let mut session =
+        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
 
     // Wait for the TUI to finish loading.  "~/workspace" appears in the
     // status line once the CLI is ready for input.

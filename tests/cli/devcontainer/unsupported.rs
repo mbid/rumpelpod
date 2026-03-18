@@ -4,8 +4,8 @@ use std::fs;
 
 use indoc::formatdoc;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::ExecutorResources;
 
 /// Write a Dockerfile and devcontainer.json where `extra_fields` is injected
 /// as additional top-level JSON properties (include leading comma).
@@ -50,10 +50,12 @@ fn warns_on_workspace_mount() {
         r#",
             "workspaceMount": "source=/host/path,target=/workspace,type=bind""#,
     );
-    let exec = TestExecutor::start("unsup-wsmount");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "unsup-wsmount");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "unsupported-wsmount", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -74,10 +76,12 @@ fn warns_on_app_port() {
         r#",
             "appPort": [3000, 8080]"#,
     );
-    let exec = TestExecutor::start("unsup-appport");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "unsup-appport");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "unsupported-appport", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -98,10 +102,12 @@ fn warns_on_docker_compose_file() {
         r#",
             "dockerComposeFile": "docker-compose.yml""#,
     );
-    let exec = TestExecutor::start("unsup-compose");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "unsup-compose");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "unsupported-compose", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -125,10 +131,12 @@ fn warns_on_multiple_unsupported() {
             "service": "web",
             "runServices": ["web", "db"]"#,
     );
-    let exec = TestExecutor::start("unsup-multi");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "unsup-multi");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "unsupported-multi", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -161,10 +169,12 @@ fn warns_on_initialize_command() {
         r#",
             "initializeCommand": "echo hello""#,
     );
-    let exec = TestExecutor::start("unsup-initcmd");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "unsup-initcmd");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "unsupported-initcmd", "--", "true"])
         .output()
         .expect("Failed to run pod command");
@@ -187,10 +197,12 @@ fn warns_on_features() {
                 "ghcr.io/devcontainers/features/node:1": { "version": "20" }
             }"#,
     );
-    let exec = TestExecutor::start("unsup-features");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "unsup-features");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "unsupported-features", "--", "true"])
         .output()
         .expect("Failed to run pod command");

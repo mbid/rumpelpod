@@ -5,14 +5,16 @@ use std::process::Stdio;
 
 use indoc::formatdoc;
 
-use crate::common::{pod_command, write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
 
 #[test]
 #[ignore] // flaky under heavy parallel test runs
 fn test_anthropic_base_url_garbage_errors() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("anthropic-url-garbage");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "anthropic-url-garbage");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
     let config = formatdoc! {r#"
@@ -22,13 +24,13 @@ fn test_anthropic_base_url_garbage_errors() {
     "#};
     fs::write(
         repo.path().join(".rumpelpod.toml"),
-        format!("{}\n{config}", exec.toml),
+        format!("{}\n{config}", executor.toml),
     )
     .expect("Failed to write .rumpelpod.toml");
 
     // We need to provide an API key so it actually tries to make a request
     // instead of failing early due to missing key and no cache.
-    let mut cmd = pod_command(&repo, &exec.daemon);
+    let mut cmd = pod_command(&repo, &daemon);
     cmd.args(["agent", "test"]);
     cmd.env("ANTHROPIC_API_KEY", "dummy-key");
     // Ensure we attempt network request (disable offline mode)
@@ -70,7 +72,9 @@ fn test_anthropic_base_url_garbage_errors() {
 #[test]
 fn test_anthropic_base_url_default_works() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("anthropic-url-default");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "anthropic-url-default");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
     // Test with the default URL (explicitly set)
@@ -81,13 +85,13 @@ fn test_anthropic_base_url_default_works() {
     "#};
     fs::write(
         repo.path().join(".rumpelpod.toml"),
-        format!("{}\n{config}", exec.toml),
+        format!("{}\n{config}", executor.toml),
     )
     .expect("Failed to write .rumpelpod.toml");
 
     let cache_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache");
 
-    let mut cmd = pod_command(&repo, &exec.daemon);
+    let mut cmd = pod_command(&repo, &daemon);
     cmd.args(["agent", "test", "--cache", cache_dir.to_str().unwrap()]);
     // No API key needed because we have cache
     cmd.stdin(Stdio::piped());

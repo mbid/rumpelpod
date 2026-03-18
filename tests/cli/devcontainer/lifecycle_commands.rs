@@ -8,8 +8,8 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::ExecutorResources;
 
 /// Write a devcontainer.json with the given lifecycle command properties spliced
 /// in alongside a standard build section.
@@ -53,11 +53,13 @@ fn on_create_command_runs_once() {
     let repo = TestRepo::new();
 
     write_devcontainer_with_lifecycle(&repo, r#""onCreateCommand": "touch /tmp/on_create_marker""#);
-    let exec = TestExecutor::start("lc-once");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-once");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First enter -- onCreateCommand should have created the marker file.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-once", "--", "cat", "/tmp/on_create_marker"])
         .success()
         .expect("first rumpel enter failed");
@@ -65,13 +67,13 @@ fn on_create_command_runs_once() {
     let _ = String::from_utf8_lossy(&stdout);
 
     // Remove the marker so we can detect if the command runs again.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-once", "--", "rm", "/tmp/on_create_marker"])
         .success()
         .expect("marker removal failed");
 
     // Second enter -- onCreateCommand must NOT run again.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-once",
@@ -104,10 +106,12 @@ fn post_create_command_runs_after_on_create() {
         r#""onCreateCommand": "echo 1 >> /tmp/lifecycle_order",
             "postCreateCommand": "echo 2 >> /tmp/lifecycle_order""#,
     );
-    let exec = TestExecutor::start("lc-order");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-order");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-order", "--", "cat", "/tmp/lifecycle_order"])
         .success()
         .expect("rumpel enter failed");
@@ -131,28 +135,30 @@ fn post_start_command_runs_each_start() {
         &repo,
         r#""postStartCommand": "echo start >> /tmp/start_count""#,
     );
-    let exec = TestExecutor::start("lc-start");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-start");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First enter -- triggers a start.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-start", "--", "echo", "ok"])
         .success()
         .expect("first enter failed");
 
     // Stop the pod, then start it again.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["stop", "lc-start"])
         .success()
         .expect("rumpel stop failed");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-start", "--", "echo", "ok"])
         .success()
         .expect("second enter failed");
 
     // Verify the command ran twice.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-start",
@@ -183,22 +189,24 @@ fn post_attach_command_runs_each_enter() {
         &repo,
         r#""postAttachCommand": "echo attach >> /tmp/attach_count""#,
     );
-    let exec = TestExecutor::start("lc-attach");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-attach");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Enter twice without stopping.
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-attach", "--", "echo", "ok"])
         .success()
         .expect("first enter failed");
 
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-attach", "--", "echo", "ok"])
         .success()
         .expect("second enter failed");
 
     // Verify the command ran twice.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-attach",
@@ -230,10 +238,12 @@ fn lifecycle_command_string_format() {
         &repo,
         r#""onCreateCommand": "echo hello > /tmp/string_fmt""#,
     );
-    let exec = TestExecutor::start("lc-str");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-str");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-str", "--", "cat", "/tmp/string_fmt"])
         .success()
         .expect("rumpel enter failed");
@@ -251,10 +261,12 @@ fn lifecycle_command_array_format() {
         &repo,
         r#""onCreateCommand": ["sh", "-c", "echo hello > /tmp/array_fmt"]"#,
     );
-    let exec = TestExecutor::start("lc-arr");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-arr");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-arr", "--", "cat", "/tmp/array_fmt"])
         .success()
         .expect("rumpel enter failed");
@@ -276,10 +288,12 @@ fn lifecycle_command_object_parallel() {
                 "b": "echo bravo > /tmp/parallel_b"
             }"#,
     );
-    let exec = TestExecutor::start("lc-obj");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-obj");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-obj",
@@ -310,17 +324,19 @@ fn lifecycle_command_failure_stops_chain() {
         r#""onCreateCommand": "exit 1",
             "postCreateCommand": "touch /tmp/should_not_exist""#,
     );
-    let exec = TestExecutor::start("lc-fail");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-fail");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // The first enter should fail because onCreateCommand exits 1.
-    let _ = pod_command(&repo, &exec.daemon)
+    let _ = pod_command(&repo, &daemon)
         .args(["enter", "lc-fail", "--", "echo", "ok"])
         .output();
 
     // Second enter should succeed (failed lifecycle commands are marked as
     // "ran" and not retried), and postCreateCommand should never have executed.
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-fail",
@@ -353,10 +369,12 @@ fn wait_for_setting() {
         r#""postCreateCommand": "sleep 1 && echo done > /tmp/wait_marker",
             "waitFor": "postCreateCommand""#,
     );
-    let exec = TestExecutor::start("lc-wait");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-wait");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-wait", "--", "cat", "/tmp/wait_marker"])
         .success()
         .expect("rumpel enter failed");
@@ -381,10 +399,12 @@ fn update_content_command_runs_after_on_create() {
             "updateContentCommand": "echo 2 >> /tmp/uc_order",
             "postCreateCommand": "echo 3 >> /tmp/uc_order""#,
     );
-    let exec = TestExecutor::start("lc-uc-order");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-uc-order");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-uc-order", "--", "cat", "/tmp/uc_order"])
         .success()
         .expect("rumpel enter failed");
@@ -408,22 +428,24 @@ fn update_content_command_runs_on_reentry() {
         &repo,
         r#""updateContentCommand": "echo update >> /tmp/uc_count""#,
     );
-    let exec = TestExecutor::start("lc-uc-reentry");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-uc-reentry");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First enter (creation)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-uc-reentry", "--", "echo", "ok"])
         .success()
         .expect("first enter failed");
 
     // Second enter (re-entry)
-    pod_command(&repo, &exec.daemon)
+    pod_command(&repo, &daemon)
         .args(["enter", "lc-uc-reentry", "--", "echo", "ok"])
         .success()
         .expect("second enter failed");
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-uc-reentry",
@@ -456,17 +478,19 @@ fn update_content_command_failure_stops_chain() {
         r#""updateContentCommand": "if [ ! -f /tmp/uc_fail_done ]; then touch /tmp/uc_fail_done && exit 1; fi",
             "postCreateCommand": "touch /tmp/uc_should_not_exist""#,
     );
-    let exec = TestExecutor::start("lc-uc-fail");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-uc-fail");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First enter fails because updateContentCommand exits 1 on first run.
-    let _ = pod_command(&repo, &exec.daemon)
+    let _ = pod_command(&repo, &daemon)
         .args(["enter", "lc-uc-fail", "--", "echo", "ok"])
         .output();
 
     // Second enter succeeds (updateContentCommand passes on re-run,
     // postCreateCommand was marked as ran after the failure).
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-uc-fail",
@@ -505,11 +529,13 @@ fn wait_for_on_create_attaches_early() {
             "postCreateCommand": "sleep 30 && echo done > /tmp/marker",
             "waitFor": "onCreateCommand""#,
     );
-    let exec = TestExecutor::start("lc-wait-early");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-wait-early");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     let start = std::time::Instant::now();
-    let _stdout = pod_command(&repo, &exec.daemon)
+    let _stdout = pod_command(&repo, &daemon)
         .args(["enter", "lc-wait-early", "--", "echo", "attached"])
         .success()
         .expect("rumpel enter failed");
@@ -524,7 +550,7 @@ fn wait_for_on_create_attaches_early() {
     // Poll until the background command finishes and writes the marker.
     for _ in 0..45 {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let result = pod_command(&repo, &exec.daemon)
+        let result = pod_command(&repo, &daemon)
             .args(["enter", "lc-wait-early", "--", "cat", "/tmp/marker"])
             .output()
             .expect("failed to run enter");
@@ -549,10 +575,12 @@ fn wait_for_default_waits_for_all() {
         &repo,
         r#""onCreateCommand": "echo done > /tmp/default_marker""#,
     );
-    let exec = TestExecutor::start("lc-wait-default");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "lc-wait-default");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "lc-wait-default",

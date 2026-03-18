@@ -7,17 +7,19 @@
 
 use std::fs;
 
-use crate::common::{pod_command, write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
 
 #[test]
 fn unicode_pod_name_is_rejected() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("container-name-unicode");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "container-name-unicode");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "caf\u{00e9}-\u{1f680}", "--", "echo", "hello"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -40,11 +42,13 @@ fn unicode_repo_path() {
     // The temp dir name contains unicode, which ends up in the container name.
     // docker_name() sanitizes this so it still works.
     let repo = TestRepo::new_with_prefix("rumpelpod-\u{00fc}bung-");
-    let exec = TestExecutor::start("container-name-repo-path");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "container-name-repo-path");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "test", "--", "echo", "hello"])
         .output()
         .expect("rumpel enter failed to execute");
@@ -63,11 +67,13 @@ fn unicode_repo_path() {
 #[test]
 fn spaces_in_pod_name_rejected() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("container-name-spaces");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "container-name-spaces");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["enter", "my pod", "--", "echo", "hello"])
         .output()
         .expect("rumpel enter failed to execute");

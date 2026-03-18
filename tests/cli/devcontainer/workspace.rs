@@ -7,8 +7,8 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use std::fs;
 
-use crate::common::{pod_command, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::TestExecutor;
+use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::ExecutorResources;
 
 /// Write a devcontainer.json with a Dockerfile that installs git and creates
 /// the test user.  `extra_config` is spliced into the JSON object so callers
@@ -54,10 +54,14 @@ fn workspace_folder_default() {
     // No workspaceFolder in config -- should fall back to /workspaces/<basename>
     write_devcontainer(&repo, "");
 
-    let exec = TestExecutor::start("ws-default");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let executor = ExecutorResources::setup(&home, "ws-default");
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "ws-default", "--", "pwd"])
         .success()
         .expect("rumpel enter should succeed with default workspaceFolder");
@@ -83,10 +87,14 @@ fn workspace_folder_custom() {
             "workspaceFolder": "/custom/path""#,
     );
 
-    let exec = TestExecutor::start("ws-custom");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let executor = ExecutorResources::setup(&home, "ws-custom");
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
         .args(["enter", "ws-custom", "--", "pwd"])
         .success()
         .expect("rumpel enter should succeed with custom workspaceFolder");
@@ -110,10 +118,14 @@ fn workspace_folder_repo_initialized() {
         "workspaceFolder": "{TEST_REPO_PATH}""#},
     );
 
-    let exec = TestExecutor::start("ws-repo-init");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    let home = TestHome::new();
 
-    let stdout = pod_command(&repo, &exec.daemon)
+    let executor = ExecutorResources::setup(&home, "ws-repo-init");
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
         .args([
             "enter",
             "ws-repo-init",

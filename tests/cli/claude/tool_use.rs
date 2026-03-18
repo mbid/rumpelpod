@@ -18,7 +18,7 @@ use crate::common::{create_commit, pod_command};
 #[test]
 fn claude_read_file() {
     let proxy = claude_proxy();
-    let (repo, exec, fake_home) = setup_claude_test_repo(proxy, "claude-read");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-read");
 
     // Commit a file so the gateway syncs it into the container.
     std::fs::write(repo.path().join("hello.txt"), "rumpelpod-test-content-42\n")
@@ -30,14 +30,8 @@ fn claude_read_file() {
         .expect("git add hello.txt");
     create_commit(repo.path(), "Add hello.txt");
 
-    let mut session = ClaudeSession::spawn(
-        &repo,
-        &exec.daemon,
-        proxy,
-        fake_home.path(),
-        "claude-haiku-4-5",
-        &[],
-    );
+    let mut session =
+        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
     session.send("Read hello.txt. Reply with only the file contents.");
@@ -50,16 +44,10 @@ fn claude_read_file() {
 #[test]
 fn claude_write_file() {
     let proxy = claude_proxy();
-    let (repo, exec, fake_home) = setup_claude_test_repo(proxy, "claude-write");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-write");
 
-    let mut session = ClaudeSession::spawn(
-        &repo,
-        &exec.daemon,
-        proxy,
-        fake_home.path(),
-        "claude-haiku-4-5",
-        &[],
-    );
+    let mut session =
+        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
     session.send("Write 'rumpelpod-write-ok' to output.txt");
@@ -69,7 +57,7 @@ fn claude_write_file() {
     // (the prompt text already contains the filename and content).
     let deadline = Instant::now() + Duration::from_secs(120);
     loop {
-        let result = pod_command(&repo, &exec.daemon)
+        let result = pod_command(&repo, &daemon)
             .args(["enter", "test", "--", "cat", "output.txt"])
             .output()
             .expect("rumpel enter failed to execute");
@@ -92,16 +80,10 @@ fn claude_write_file() {
 #[test]
 fn claude_run_command() {
     let proxy = claude_proxy();
-    let (repo, exec, fake_home) = setup_claude_test_repo(proxy, "claude-run-cmd");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-run-cmd");
 
-    let mut session = ClaudeSession::spawn(
-        &repo,
-        &exec.daemon,
-        proxy,
-        fake_home.path(),
-        "claude-haiku-4-5",
-        &[],
-    );
+    let mut session =
+        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
 

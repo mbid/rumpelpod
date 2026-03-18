@@ -2,8 +2,8 @@
 
 use std::fs;
 
-use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestRepo};
-use crate::executor::{executor_supports_stop, TestExecutor};
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::{executor_supports_stop, ExecutorResources};
 
 /// Poll `rumpel list` until `name` shows with the given status word.
 fn wait_for_pod_status(repo: &TestRepo, daemon: &TestDaemon, name: &str, status: &str) {
@@ -98,11 +98,13 @@ fn prune_no_stopped_pods() {
         return;
     }
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("prune-no-stopped");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "prune-no-stopped");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("prune")
         .output()
         .expect("Failed to run rumpel prune");
@@ -126,14 +128,16 @@ fn prune_deletes_stopped_pods() {
         return;
     }
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("prune-deletes");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "prune-deletes");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    create_stopped_pod(&repo, &exec.daemon, "prune-a");
-    create_stopped_pod(&repo, &exec.daemon, "prune-b");
+    create_stopped_pod(&repo, &daemon, "prune-a");
+    create_stopped_pod(&repo, &daemon, "prune-b");
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["prune", "--force"])
         .output()
         .expect("Failed to run rumpel prune");
@@ -145,7 +149,7 @@ fn prune_deletes_stopped_pods() {
     );
 
     // Verify pods are gone
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -163,12 +167,14 @@ fn prune_leaves_running_pods() {
         return;
     }
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("prune-leaves-run");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "prune-leaves-run");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create a running pod (enter with sleep to keep it alive)
-    let mut running = pod_command(&repo, &exec.daemon)
+    let mut running = pod_command(&repo, &daemon)
         .args(["enter", "keep-running", "--", "sleep", "120"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -177,12 +183,12 @@ fn prune_leaves_running_pods() {
         .expect("Failed to spawn running pod");
 
     // Wait for the running pod to appear
-    wait_for_pod_status(&repo, &exec.daemon, "keep-running", "running");
+    wait_for_pod_status(&repo, &daemon, "keep-running", "running");
 
     // Create a stopped pod
-    create_stopped_pod(&repo, &exec.daemon, "to-prune");
+    create_stopped_pod(&repo, &daemon, "to-prune");
 
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .args(["prune", "--force"])
         .output()
         .expect("Failed to run rumpel prune");
@@ -194,7 +200,7 @@ fn prune_leaves_running_pods() {
     );
 
     // Verify the running pod is still there
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -220,14 +226,16 @@ fn prune_skips_unmerged_without_tty() {
         return;
     }
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("prune-unmerged");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "prune-unmerged");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    create_ahead_stopped_pod(&repo, &exec.daemon, "unmerged-prune");
+    create_ahead_stopped_pod(&repo, &daemon, "unmerged-prune");
 
     // Verify the pod shows as ahead before pruning
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("list")
         .output()
         .expect("Failed to list");
@@ -239,7 +247,7 @@ fn prune_skips_unmerged_without_tty() {
     );
 
     // pod_command pipes stdout/stderr, so this is non-tty
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("prune")
         .output()
         .expect("Failed to run rumpel prune");
@@ -256,7 +264,7 @@ fn prune_skips_unmerged_without_tty() {
     );
 
     // Pod should still exist
-    let output = pod_command(&repo, &exec.daemon)
+    let output = pod_command(&repo, &daemon)
         .arg("list")
         .output()
         .expect("Failed to list");

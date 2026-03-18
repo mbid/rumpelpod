@@ -11,17 +11,19 @@ use std::process::Command;
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
-use crate::common::{create_commit, write_test_devcontainer, TestRepo};
-use crate::executor::TestExecutor;
+use crate::common::{create_commit, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
 
 use super::common::run_agent_with_prompt;
 
 #[test]
 fn agent_bash_timeout() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("agent-bash-timeout");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "agent-bash-timeout");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // Create a script that sleeps for 5 seconds and prints something
     let script_name = "sleepy.sh";
@@ -49,7 +51,7 @@ echo "Done sleeping"
     // Run agent with 2s timeout
     let output = super::common::run_agent_interactive_model_args_env(
         &repo,
-        &exec.daemon,
+        &daemon,
         &[formatdoc! {r#"
             Run `./{script_name}`.
             Tell me what happens.
@@ -58,6 +60,7 @@ echo "Done sleeping"
         super::common::DEFAULT_MODEL,
         &[],
         &[("AGENT_BASH_TIMEOUT", "2")],
+        home.path(),
     );
 
     assert!(
@@ -80,13 +83,16 @@ echo "Done sleeping"
 #[test]
 fn agent_handles_command_with_empty_output_and_nonzero_exit() {
     let repo = TestRepo::new();
-    let exec = TestExecutor::start("agent-bash-empty-exit");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "agent-bash-empty-exit");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     let output = run_agent_with_prompt(
         &repo,
-        &exec.daemon,
+        &daemon,
+        home.path(),
         "Run the command `false` and tell me what happened.",
     );
 
@@ -112,13 +118,16 @@ fn agent_large_file_output() {
         .expect("git add failed");
     create_commit(repo.path(), "Add large file");
 
-    let exec = TestExecutor::start("agent-bash-large-out");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "agent-bash-large-out");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     let output = run_agent_with_prompt(
         &repo,
-        &exec.daemon,
+        &daemon,
+        home.path(),
         "Run exactly one tool: `cat large.txt`. After that single tool call, stop immediately and tell me what you observed. Do not run any other tools.",
     );
 
@@ -161,13 +170,16 @@ fn agent_can_read_large_output_from_one_time_command() {
         .expect("git add failed");
     create_commit(repo.path(), "Add one-time script");
 
-    let exec = TestExecutor::start("agent-bash-large-once");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "agent-bash-large-once");
+    let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &exec.toml).unwrap();
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     let output = run_agent_with_prompt(
         &repo,
-        &exec.daemon,
+        &daemon,
+        home.path(),
         &formatdoc! {r#"
             Run `./{script_name}`.
             It will print a lot of output and then delete itself.
