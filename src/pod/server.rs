@@ -859,27 +859,96 @@ fn parse_null_delimited_env(data: &[u8]) -> HashMap<String, String> {
     map
 }
 
-async fn cp_download_handler(
-    Json(req): Json<CpDownloadRequest>,
-) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
-    let result = tokio::task::spawn_blocking(|| cp_download_impl(req))
-        .await
-        .expect("cp_download_impl panicked");
-    match result {
-        Ok(data) => Ok(axum::response::Response::builder()
-            .header("Content-Type", "application/x-tar")
-            .body(axum::body::Body::from(data))
-            .unwrap()),
-        Err(e) => Err(err_json(e)),
+// ---------------------------------------------------------------------------
+// Streaming helpers for tar transfer
+// ---------------------------------------------------------------------------
+
+/// Adapter: sends written bytes as chunks through a tokio mpsc channel.
+/// Used to stream tar output into an HTTP response body.
+struct ChannelWriter {
+    tx: tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+}
+
+impl std::io::Write for ChannelWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let bytes = axum::body::Bytes::copy_from_slice(buf);
+        self.tx
+            .blocking_send(Ok(bytes))
+            .map_err(|_| std::io::Error::other("receiver dropped"))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
-fn cp_download_impl(req: CpDownloadRequest) -> Result<Vec<u8>> {
+/// Adapter: reads bytes received through a tokio mpsc channel.
+/// Used to stream an HTTP request body into a tar extractor.
+struct ChannelReader {
+    rx: tokio::sync::mpsc::Receiver<axum::body::Bytes>,
+    cursor: std::io::Cursor<axum::body::Bytes>,
+}
+
+impl ChannelReader {
+    fn new(rx: tokio::sync::mpsc::Receiver<axum::body::Bytes>) -> Self {
+        Self {
+            rx,
+            cursor: std::io::Cursor::new(axum::body::Bytes::new()),
+        }
+    }
+}
+
+impl std::io::Read for ChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.cursor.position() as usize >= self.cursor.get_ref().len() {
+            match self.rx.blocking_recv() {
+                Some(bytes) => self.cursor = std::io::Cursor::new(bytes),
+                None => return Ok(0),
+            }
+        }
+        std::io::Read::read(&mut self.cursor, buf)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Copy handlers
+// ---------------------------------------------------------------------------
+
+async fn cp_download_handler(
+    Json(req): Json<CpDownloadRequest>,
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
+    // Validate the path before starting the stream, so we can return
+    // a proper error response for the most common failure (not found).
+    let check_path = req.path.clone();
+    let meta = tokio::task::spawn_blocking(move || std::fs::symlink_metadata(&check_path))
+        .await
+        .expect("stat panicked");
+    if let Err(e) = meta {
+        let path_display = req.path.display();
+        return Err(err_json(anyhow::anyhow!("stat {path_display}: {e}")));
+    }
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::task::spawn_blocking(move || {
+        let writer = ChannelWriter { tx };
+        if let Err(e) = cp_download_impl(req, writer) {
+            eprintln!("cp_download error: {e:#}");
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    Ok(axum::response::Response::builder()
+        .header("Content-Type", "application/x-tar")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap())
+}
+
+fn cp_download_impl(req: CpDownloadRequest, writer: impl std::io::Write) -> Result<()> {
     let path = &req.path;
     let path_display = path.display();
 
-    let buf = Vec::new();
-    let mut archive = tar::Builder::new(buf);
+    let mut archive = tar::Builder::new(writer);
     archive.follow_symlinks(req.follow_symlinks);
 
     let meta = std::fs::symlink_metadata(path).with_context(|| format!("stat {path_display}"))?;
@@ -901,12 +970,13 @@ fn cp_download_impl(req: CpDownloadRequest) -> Result<Vec<u8>> {
 
     archive
         .into_inner()
-        .with_context(|| format!("finalizing tar for {path_display}"))
+        .with_context(|| format!("finalizing tar for {path_display}"))?;
+    Ok(())
 }
 
 async fn cp_upload_handler(
     headers: axum::http::HeaderMap,
-    body: axum::body::Bytes,
+    body: axum::body::Body,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let path = headers
         .get("X-Path")
@@ -918,19 +988,39 @@ async fn cp_upload_handler(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
-    let data = body.to_vec();
+    // Stream body chunks into a channel that the blocking extractor reads from.
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        use tokio_stream::StreamExt;
+        let mut stream = body.into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if tx.send(bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    eprintln!("cp_upload body read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
+
+    let reader = ChannelReader::new(rx);
     let result =
-        tokio::task::spawn_blocking(move || cp_upload_impl(&path, &data, owner.as_deref()))
+        tokio::task::spawn_blocking(move || cp_upload_impl(&path, reader, owner.as_deref()))
             .await
             .expect("cp_upload_impl panicked");
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn cp_upload_impl(path: &Path, data: &[u8], owner: Option<&str>) -> Result<()> {
+fn cp_upload_impl(path: &Path, reader: impl std::io::Read, owner: Option<&str>) -> Result<()> {
     let path_display = path.display();
 
-    let mut archive = tar::Archive::new(data);
+    let mut archive = tar::Archive::new(reader);
     for entry in archive
         .entries()
         .with_context(|| format!("reading tar entries for {path_display}"))?
