@@ -1195,10 +1195,6 @@ fn resolve_user_opt(name: &Option<String>) -> Result<Option<User>> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Git helpers
-// ---------------------------------------------------------------------------
-
 fn run_git_command(args: &[&str], workdir: Option<&Path>, user: Option<&User>) -> Result<Vec<u8>> {
     let mut cmd = git_command(user);
     cmd.args(args);

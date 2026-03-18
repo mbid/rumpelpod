@@ -87,7 +87,7 @@ impl PtySessions {
             let claude_bin = tokio::task::spawn_blocking(ensure_claude_cli)
                 .await
                 .expect("ensure_claude_cli panicked")?;
-            cmd[0] = claude_bin;
+            cmd[0] = claude_bin.to_string_lossy().into_owned();
             let session = spawn_session(&name, &cmd, user, workdir, &env, cols, rows, self)?;
             sessions.insert(name.clone(), session);
         }
@@ -375,11 +375,11 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 /// Return the path to the Claude CLI binary, downloading it if
 /// necessary.  Prefers an existing binary in PATH or at our install
 /// location to avoid re-downloading.
-fn ensure_claude_cli() -> Result<String> {
+fn ensure_claude_cli() -> Result<PathBuf> {
     // Already installed by us on a previous call.
     let bin_path = Path::new(crate::daemon::CLAUDE_CONTAINER_BIN);
     if bin_path.exists() {
-        return Ok(crate::daemon::CLAUDE_CONTAINER_BIN.to_string());
+        return Ok(bin_path.to_path_buf());
     }
 
     // The user's image ships its own claude binary.
@@ -422,16 +422,16 @@ fn ensure_claude_cli() -> Result<String> {
     std::fs::set_permissions(bin_path, std::fs::Permissions::from_mode(0o755))
         .context("making Claude Code binary executable")?;
 
-    Ok(crate::daemon::CLAUDE_CONTAINER_BIN.to_string())
+    Ok(bin_path.to_path_buf())
 }
 
 /// Resolve a binary name via PATH, like `which(1)`.
-fn which(name: &str) -> Result<String> {
+fn which(name: &str) -> Result<PathBuf> {
     let path_var = std::env::var("PATH").unwrap_or_default();
     for dir in path_var.split(':') {
         let candidate = Path::new(dir).join(name);
         if candidate.is_file() {
-            return Ok(candidate.to_string_lossy().into_owned());
+            return Ok(candidate);
         }
     }
     Err(anyhow::anyhow!("'{name}' not found in PATH"))
