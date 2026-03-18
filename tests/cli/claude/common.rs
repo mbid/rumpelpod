@@ -352,7 +352,9 @@ impl ClaudeSession {
             }
         }
         // Reap the child so the exit status is collected.
-        let _ = self.child.wait();
+        if let Err(e) = self.child.wait() {
+            eprintln!("warning: failed to wait for child: {e}");
+        }
     }
 
     /// Type text into the prompt and press Enter.

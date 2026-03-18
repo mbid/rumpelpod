@@ -12,6 +12,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::signal::unix::{signal, SignalKind};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
@@ -137,11 +138,9 @@ async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<A
         .body(())
         .context("building WebSocket request")?;
 
-    let (ws, _response) = tokio_tungstenite::connect_async(request)
+    let (mut ws, _response) = tokio_tungstenite::connect_async(request)
         .await
         .context("WebSocket handshake failed")?;
-
-    let (mut ws_write, mut ws_read): (WsWriter, WsReader) = ws.split();
 
     // -- Send session parameters ----------------------------------------
 
@@ -156,62 +155,81 @@ async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<A
         rows,
     };
     let json = serde_json::to_string(&session_msg).context("serializing session params")?;
-    ws_write
-        .send(Message::Text(json.into()))
+    ws.send(Message::Text(json.into()))
         .await
         .context("sending session parameters")?;
 
-    // -- Bridge loop ----------------------------------------------------
+    // -- Bridge ---------------------------------------------------------
+    // Two independent directions: the writer task owns ws_write and
+    // forwards stdin + SIGWINCH; the reader task pipes ws_read to stdout.
+    // tungstenite handles WebSocket pings internally (auto-pongs before
+    // returning a message), so the reader never needs write access.
 
+    let (ws_write, ws_read) = ws.split();
+
+    tokio::select! {
+        outcome = write_loop(ws_write) => outcome,
+        _ = read_loop(ws_read) => Ok(AttachOutcome::SessionEnded),
+    }
+}
+
+/// Forward stdin and window-resize signals to the WebSocket.
+async fn write_loop(mut ws_write: WsWriter) -> Result<AttachOutcome> {
     let mut stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
     let mut stdin_buf = [0u8; 4096];
     let mut saw_ctrl_a = false;
-    let mut last_size = get_terminal_size().ok();
-    let mut resize_interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut sigwinch =
+        signal(SignalKind::window_change()).context("registering SIGWINCH handler")?;
 
     loop {
         tokio::select! {
-            // stdin -> WebSocket
             n = stdin.read(&mut stdin_buf) => {
                 let n = match n {
-                    Ok(0) => break,
+                    Ok(0) | Err(_) => return Ok(AttachOutcome::SessionEnded),
                     Ok(n) => n,
-                    Err(_) => break,
                 };
 
                 match process_stdin(&stdin_buf[..n], &mut saw_ctrl_a) {
                     StdinAction::Detach => return Ok(AttachOutcome::Detached),
                     StdinAction::Send(data) => {
-                        if ws_write.send(Message::Binary(data.into())).await.is_err() {
-                            break;
-                        }
+                        ws_write.send(Message::Binary(data.into())).await
+                            .context("sending to WebSocket")?;
                     }
                     StdinAction::Nothing => {}
                 }
             }
-
-            // WebSocket -> stdout
-            msg = ws_read.next() => {
-                if handle_ws_message(msg, &mut stdout, &mut ws_write).await.is_err() {
-                    break;
-                }
-            }
-
-            // Resize check
-            _ = resize_interval.tick() => {
-                let current_size = get_terminal_size().ok();
-                if current_size != last_size {
-                    if let Some((cols, rows)) = current_size {
-                        let _ = send_resize(&mut ws_write, cols, rows).await;
-                    }
-                    last_size = current_size;
+            _ = sigwinch.recv() => {
+                if let Ok((cols, rows)) = get_terminal_size() {
+                    let msg = PtyControl::Resize { cols, rows };
+                    let json = serde_json::to_string(&msg)
+                        .expect("Resize is always serializable");
+                    ws_write
+                        .send(Message::Text(json.into()))
+                        .await
+                        .context("sending resize")?;
                 }
             }
         }
     }
+}
 
-    Ok(AttachOutcome::SessionEnded)
+/// Forward WebSocket output to stdout.
+async fn read_loop(mut ws_read: WsReader) {
+    let mut stdout = tokio::io::stdout();
+    while let Some(Ok(msg)) = ws_read.next().await {
+        match msg {
+            Message::Binary(data) => {
+                if stdout.write_all(&data).await.is_err() || stdout.flush().await.is_err() {
+                    break;
+                }
+            }
+            Message::Close(_) => break,
+            // tungstenite handles Ping internally (auto-pongs before
+            // returning a message to the caller).
+            // Text/Pong/Frame are not expected from the server.
+            Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+        }
+    }
 }
 
 enum StdinAction {
@@ -247,35 +265,4 @@ fn process_stdin(data: &[u8], saw_ctrl_a: &mut bool) -> StdinAction {
     } else {
         StdinAction::Send(to_send)
     }
-}
-
-async fn handle_ws_message(
-    msg: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
-    stdout: &mut tokio::io::Stdout,
-    ws_write: &mut WsWriter,
-) -> Result<(), ()> {
-    match msg {
-        Some(Ok(Message::Binary(data))) => {
-            let _ = stdout.write_all(&data).await;
-            let _ = stdout.flush().await;
-            Ok(())
-        }
-        Some(Ok(Message::Ping(data))) => {
-            let _ = ws_write.send(Message::Pong(data)).await;
-            Ok(())
-        }
-        Some(Ok(Message::Close(_))) => Err(()),
-        Some(Ok(_)) => Ok(()),
-        Some(Err(_)) => Err(()),
-        None => Err(()),
-    }
-}
-
-async fn send_resize(ws_write: &mut WsWriter, cols: u16, rows: u16) -> Result<()> {
-    let msg = PtyControl::Resize { cols, rows };
-    let json = serde_json::to_string(&msg).expect("Resize is always serializable");
-    ws_write
-        .send(Message::Text(json.into()))
-        .await
-        .context("sending resize")
 }

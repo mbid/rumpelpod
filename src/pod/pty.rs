@@ -273,18 +273,18 @@ fn spawn_persistent_reader(
             };
 
             match ready.try_io(|inner| {
-                let fd = inner.as_raw_fd();
-                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-                if n > 0 {
-                    Ok(n as usize)
-                } else if n == 0 {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "pty eof",
-                    ))
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
+                nix::unistd::read(inner, &mut buf)
+                    .map_err(std::io::Error::from)
+                    .and_then(|n| {
+                        if n == 0 {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "pty eof",
+                            ))
+                        } else {
+                            Ok(n)
+                        }
+                    })
             }) {
                 Ok(Ok(n)) => {
                     let data = &buf[..n];
@@ -451,8 +451,6 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
         }
     }
 
-    let raw_fd = write_fd.as_raw_fd();
-
     // Main loop: multiplex between broadcast output and WebSocket input.
     loop {
         tokio::select! {
@@ -476,17 +474,10 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
                 match ws_msg {
                     // Binary = raw PTY input from client
                     Some(Ok(Message::Binary(data))) => {
-                        if !data.is_empty() {
-                            let written = unsafe {
-                                libc::write(
-                                    raw_fd,
-                                    data.as_ptr() as *const libc::c_void,
-                                    data.len(),
-                                )
-                            };
-                            if written < 0 {
-                                break;
-                            }
+                        if !data.is_empty()
+                            && nix::unistd::write(&write_fd, &data).is_err()
+                        {
+                            break;
                         }
                     }
                     // Text = JSON control message
