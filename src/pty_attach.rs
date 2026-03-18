@@ -14,10 +14,7 @@ use anyhow::{Context, Result};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{ClientRequestBuilder, Message, WebSocket};
 
-/// Message type prefix for terminal I/O data.
-const MSG_DATA: u8 = 0x00;
-/// Message type prefix for resize notifications.
-const MSG_RESIZE: u8 = 0x01;
+use crate::pod::pty::PtyControl;
 
 /// Ctrl-a (0x01) is the first byte of the detach sequence (same as
 /// GNU screen). Ctrl+letter works on all keyboard layouts, unlike
@@ -62,15 +59,6 @@ pub fn get_terminal_size() -> Result<(u16, u16)> {
         tiocgwinsz(io::stdout().as_raw_fd(), &mut ws).context("TIOCGWINSZ ioctl failed")?;
     }
     Ok((ws.ws_col, ws.ws_row))
-}
-
-/// Build a resize message: 0x01 prefix + cols (u16 LE) + rows (u16 LE).
-fn resize_message(cols: u16, rows: u16) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(5);
-    buf.push(MSG_RESIZE);
-    buf.extend_from_slice(&cols.to_le_bytes());
-    buf.extend_from_slice(&rows.to_le_bytes());
-    buf
 }
 
 /// Outbound messages queued by the stdin reader thread for the
@@ -134,16 +122,17 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
     // -- Send session parameters ----------------------------------------
 
     let (cols, rows) = get_terminal_size().unwrap_or((80, 24));
-    let session_json = serde_json::json!({
-        "name": params.name,
-        "cmd": params.cmd,
-        "user": params.user,
-        "workdir": params.workdir,
-        "env": params.env,
-        "cols": cols,
-        "rows": rows,
-    });
-    ws.send(Message::Text(session_json.to_string().into()))
+    let session_msg = PtyControl::Session {
+        name: params.name,
+        cmd: params.cmd,
+        user: params.user,
+        workdir: params.workdir.map(Into::into),
+        env: params.env,
+        cols,
+        rows,
+    };
+    let json = serde_json::to_string(&session_msg).context("serializing session params")?;
+    ws.send(Message::Text(json.into()))
         .context("sending session parameters")?;
 
     // -- Shared state ---------------------------------------------------
@@ -272,11 +261,8 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
         // this returns WouldBlock after ~50ms if no data arrives.
         match ws.read() {
             Ok(Message::Binary(data)) => {
-                if !data.is_empty() && data[0] == MSG_DATA {
-                    // Ignore write errors to stdout -- terminal may be gone.
-                    let _ = stdout.write_all(&data[1..]);
-                    let _ = stdout.flush();
-                }
+                let _ = stdout.write_all(&data);
+                let _ = stdout.flush();
             }
             Ok(Message::Close(_)) => {
                 break;
@@ -300,17 +286,15 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
         loop {
             match outbound_rx.try_recv() {
                 Ok(Outbound::Data(data)) => {
-                    let mut msg_buf = Vec::with_capacity(1 + data.len());
-                    msg_buf.push(MSG_DATA);
-                    msg_buf.extend_from_slice(&data);
-                    if ws.send(Message::Binary(msg_buf.into())).is_err() {
+                    if ws.send(Message::Binary(data.into())).is_err() {
                         done.store(true, Ordering::Relaxed);
                         break;
                     }
                 }
                 Ok(Outbound::Resize(cols, rows)) => {
-                    let msg = resize_message(cols, rows);
-                    if ws.send(Message::Binary(msg.into())).is_err() {
+                    let msg = PtyControl::Resize { cols, rows };
+                    let json = serde_json::to_string(&msg).expect("Resize is always serializable");
+                    if ws.send(Message::Text(json.into())).is_err() {
                         done.store(true, Ordering::Relaxed);
                         break;
                     }

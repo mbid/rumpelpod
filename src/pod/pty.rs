@@ -18,7 +18,7 @@ use axum::response::Response;
 use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{Pid, User};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
 
@@ -356,22 +356,31 @@ fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Request types
+// Wire protocol
 // ---------------------------------------------------------------------------
 
-/// Sent by the client as the first WebSocket text message to identify
-/// the session and provide spawn parameters (used only if the session
-/// does not already exist).
-#[derive(Debug, Deserialize)]
-pub struct PtySessionRequest {
-    pub name: String,
-    pub cmd: Vec<String>,
-    pub user: Option<String>,
-    pub workdir: Option<PathBuf>,
-    #[serde(default)]
-    pub env: Vec<String>,
-    pub cols: u16,
-    pub rows: u16,
+/// Text messages carry JSON control messages. Binary messages carry
+/// raw PTY data (no prefix, no framing beyond WebSocket itself).
+/// This mirrors how SSH separates channel data from window-change
+/// requests at the protocol level.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PtyControl {
+    /// Sent as the first message to identify/create a session.
+    Session {
+        name: String,
+        cmd: Vec<String>,
+        #[serde(default)]
+        user: Option<String>,
+        #[serde(default)]
+        workdir: Option<PathBuf>,
+        #[serde(default)]
+        env: Vec<String>,
+        cols: u16,
+        rows: u16,
+    },
+    /// Terminal resize (client -> server).
+    Resize { cols: u16, rows: u16 },
 }
 
 // ---------------------------------------------------------------------------
@@ -389,17 +398,23 @@ pub async fn claude_session_handler(
 // WebSocket <-> PTY bridge
 // ---------------------------------------------------------------------------
 
-/// Wire protocol over WebSocket binary messages:
-///   0x00 + data        -- terminal I/O (bidirectional)
-///   0x01 + u16le cols + u16le rows -- resize (client -> server only)
-const MSG_DATA: u8 = 0x00;
-const MSG_RESIZE: u8 = 0x01;
-
 async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
-    // First message must be a text message with the session request JSON.
-    let req: PtySessionRequest = match socket.recv().await {
-        Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
-            Ok(req) => req,
+    // First message must be a Session control message.
+    let (name, cmd, user, workdir, env, cols, rows) = match socket.recv().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
+            Ok(PtyControl::Session {
+                name,
+                cmd,
+                user,
+                workdir,
+                env,
+                cols,
+                rows,
+            }) => (name, cmd, user, workdir, env, cols, rows),
+            Ok(other) => {
+                eprintln!("pty: expected session message, got {other:?}");
+                return;
+            }
             Err(e) => {
                 eprintln!("pty: invalid session request: {e}");
                 return;
@@ -416,18 +431,8 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
         None => return,
     };
 
-    let name = req.name.clone();
-
     let (write_fd, screen, mut output_rx) = match sessions
-        .spawn_or_attach(
-            req.name,
-            req.cmd,
-            req.user,
-            req.workdir,
-            req.env,
-            req.cols,
-            req.rows,
-        )
+        .spawn_or_attach(name.clone(), cmd, user, workdir, env, cols, rows)
         .await
     {
         Ok(tuple) => tuple,
@@ -442,13 +447,8 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
     {
         let parser = screen.lock().await;
         let replay = build_screen_replay(parser.screen());
-        if !replay.is_empty() {
-            let mut msg = Vec::with_capacity(1 + replay.len());
-            msg.push(MSG_DATA);
-            msg.extend_from_slice(&replay);
-            if socket.send(Message::Binary(msg.into())).await.is_err() {
-                return;
-            }
+        if !replay.is_empty() && socket.send(Message::Binary(replay.into())).await.is_err() {
+            return;
         }
     }
 
@@ -457,14 +457,11 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
     // Main loop: multiplex between broadcast output and WebSocket input.
     loop {
         tokio::select! {
-            // Persistent reader produced output -> forward to WebSocket
+            // Persistent reader produced output -> forward as binary
             output = output_rx.recv() => {
                 match output {
                     Ok(data) => {
-                        let mut msg = Vec::with_capacity(1 + data.len());
-                        msg.push(MSG_DATA);
-                        msg.extend_from_slice(&data);
-                        if socket.send(Message::Binary(msg.into())).await.is_err() {
+                        if socket.send(Message::Binary(data.into())).await.is_err() {
                             break;
                         }
                     }
@@ -478,47 +475,38 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
             // WebSocket received a message -> handle it
             ws_msg = socket.recv() => {
                 match ws_msg {
+                    // Binary = raw PTY input from client
                     Some(Ok(Message::Binary(data))) => {
-                        if data.is_empty() {
-                            continue;
+                        if !data.is_empty() {
+                            let written = unsafe {
+                                libc::write(
+                                    raw_fd,
+                                    data.as_ptr() as *const libc::c_void,
+                                    data.len(),
+                                )
+                            };
+                            if written < 0 {
+                                break;
+                            }
                         }
-                        match data[0] {
-                            MSG_DATA => {
-                                let payload = &data[1..];
-                                if !payload.is_empty() {
-                                    // Blocking write is acceptable for small terminal
-                                    // input chunks; the kernel PTY buffer is large
-                                    // enough that this won't block in practice.
-                                    let written = unsafe {
-                                        libc::write(
-                                            raw_fd,
-                                            payload.as_ptr() as *const libc::c_void,
-                                            payload.len(),
-                                        )
-                                    };
-                                    if written < 0 {
-                                        break;
-                                    }
-                                }
+                    }
+                    // Text = JSON control message
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<PtyControl>(&text) {
+                            Ok(PtyControl::Resize { cols, rows }) => {
+                                let _ = sessions.resize(&name, cols, rows).await;
                             }
-                            MSG_RESIZE => {
-                                if data.len() >= 5 {
-                                    let cols = u16::from_le_bytes([data[1], data[2]]);
-                                    let rows = u16::from_le_bytes([data[3], data[4]]);
-                                    let _ = sessions.resize(&name, cols, rows).await;
-                                }
+                            Ok(PtyControl::Session { .. }) => {
+                                // Session message after handshake is nonsensical
                             }
-                            _ => {
-                                // Unknown message type -- ignore rather than crash,
-                                // since future protocol extensions may add new types.
+                            Err(e) => {
+                                eprintln!("pty: invalid control message: {e}");
                             }
                         }
                     }
                     Some(Ok(Message::Close(_))) => break,
-                    // Ignore text, ping, pong
                     Some(Ok(_)) => continue,
                     Some(Err(_)) => break,
-                    // WebSocket closed
                     None => break,
                 }
             }
