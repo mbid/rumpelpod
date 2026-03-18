@@ -342,14 +342,6 @@ impl ContainerArch {
             Self::Arm64 => "rumpel-linux-arm64",
         }
     }
-
-    /// Platform string for Claude Code downloads, e.g. "linux-x64".
-    fn claude_code_platform(self) -> &'static str {
-        match self {
-            Self::Amd64 => "linux-x64",
-            Self::Arm64 => "linux-arm64",
-        }
-    }
 }
 
 fn get_image_architecture(docker: &Docker, image: &str) -> Result<Option<ContainerArch>> {
@@ -774,13 +766,11 @@ fn is_overlay2_setup_error(err: &anyhow::Error) -> bool {
     {
         return true;
     }
-    // copy_rumpel_binary / install_claude_code run before git ops and
-    // hit the same overlay2 issue -- the container filesystem is not yet
-    // writeable/visible.
+    // copy_rumpel_binary runs before git ops and hits the same overlay2
+    // issue -- the container filesystem is not yet writeable/visible.
     if msg.contains("creating /opt/rumpelpod/bin")
         || msg.contains("writing rumpel binary")
         || msg.contains("making rumpel binary executable")
-        || msg.contains("installing Claude Code binary")
     {
         return true;
     }
@@ -1740,86 +1730,6 @@ fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Resul
     Ok(())
 }
 
-const CLAUDE_CODE_DIST_BUCKET: &str =
-    "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases";
-
-/// Resolve the Claude Code platform string for the given container
-/// architecture, falling back to the host architecture.
-fn claude_code_platform(container_arch: Option<ContainerArch>) -> Result<&'static str> {
-    if let Some(arch) = container_arch {
-        return Ok(arch.claude_code_platform());
-    }
-    match std::env::consts::ARCH {
-        "x86_64" => Ok("linux-x64"),
-        "aarch64" => Ok("linux-arm64"),
-        other => Err(anyhow::anyhow!("unsupported host architecture '{other}'")),
-    }
-}
-
-/// Download the Claude Code binary for the given platform.
-fn download_claude_code(platform: &str) -> Result<Vec<u8>> {
-    let client = reqwest::blocking::Client::new();
-
-    let version = client
-        .get(format!("{CLAUDE_CODE_DIST_BUCKET}/latest"))
-        .send()
-        .context("fetching latest Claude Code version")?
-        .error_for_status()
-        .context("fetching latest Claude Code version")?
-        .text()
-        .context("reading latest Claude Code version")?;
-    let version = version.trim();
-
-    let url = format!("{CLAUDE_CODE_DIST_BUCKET}/{version}/{platform}/claude");
-    let data = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("downloading Claude Code from {url}"))?
-        .error_for_status()
-        .with_context(|| format!("downloading Claude Code from {url}"))?
-        .bytes()
-        .with_context(|| format!("reading Claude Code binary from {url}"))?;
-
-    Ok(data.to_vec())
-}
-
-/// Download Claude Code and install it into the container.
-///
-/// Skips the download if the binary already exists (e.g. the image
-/// pre-installs a specific version for testing).
-fn install_claude_code(docker: &Docker, container_id: &str, image: &str) -> Result<()> {
-    let check = exec_command(
-        docker,
-        container_id,
-        Some("root"),
-        None,
-        None,
-        vec!["test", "-x", CLAUDE_CONTAINER_BIN],
-    );
-    if check.is_ok() {
-        return Ok(());
-    }
-
-    let container_arch = get_image_architecture(docker, image)?;
-    let platform = claude_code_platform(container_arch)?;
-    let data = download_claude_code(platform)?;
-
-    let escaped_path = shell_escape(CLAUDE_CONTAINER_BIN);
-    let cmd = format!("cat > {escaped_path} && chmod +x {escaped_path}");
-    exec_with_stdin(
-        docker,
-        container_id,
-        Some("root"),
-        None,
-        None,
-        vec!["sh", "-c", &cmd],
-        Some(&data),
-    )
-    .context("installing Claude Code binary")?;
-
-    Ok(())
-}
-
 /// Determine the port container-serve should bind inside the container.
 ///
 /// In host network mode the container shares the host's loopback, so we
@@ -2668,20 +2578,6 @@ impl DaemonServer {
             )
             .map_err(|e| mark_error(e.context("copying rumpel binary to k8s pod")))?;
 
-        let has_claude = client
-            .exec_output(&k8s_name, &["test", "-x", CLAUDE_CONTAINER_BIN])
-            .is_ok();
-        if !has_claude {
-            let claude_platform = arch.claude_code_platform();
-            let claude_data = download_claude_code(claude_platform)
-                .map_err(|e| mark_error(e.context("downloading Claude Code for k8s pod")))?;
-            let install_cmd =
-                format!("cat > {CLAUDE_CONTAINER_BIN} && chmod +x {CLAUDE_CONTAINER_BIN}");
-            client
-                .exec_with_stdin(&k8s_name, &["sh", "-c", &install_cmd], &claude_data)
-                .map_err(|e| mark_error(e.context("installing Claude Code in k8s pod")))?;
-        }
-
         let container_serve_cmd = format!(
             "/opt/rumpelpod/bin/rumpel container-serve --port {} --token {}",
             crate::pod::DEFAULT_PORT,
@@ -3344,7 +3240,6 @@ impl DaemonServer {
             // The rumpel binary must be present before git operations
             // that trigger the reference-transaction hook shim.
             copy_rumpel_binary(&docker, &container_id.0, &image.0)?;
-            install_claude_code(&docker, &container_id.0, &image.0)?;
 
             // Route container-serve access through an exec proxy so we
             // don't need bridge IPs or SSH port forwards.

@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::trace;
 
 use crate::cli::ClaudeCommand;
@@ -73,6 +73,14 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 
     // Resolve ${containerEnv:VAR} via the in-container HTTP server.
     let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+
+    let t = Instant::now();
+    let claude_bin = pod
+        .ensure_claude_cli()
+        .context("ensuring Claude Code CLI is available")?;
+    let elapsed = t.elapsed();
+    trace!("ensure_claude_cli: {elapsed:?}");
+
     let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
     let merged_env = merge_env(result.probed_env, remote_env);
 
@@ -89,7 +97,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         }
     }
 
-    let mut claude_cmd = vec![crate::daemon::CLAUDE_CONTAINER_BIN.to_string()];
+    let mut claude_cmd = vec![claude_bin];
     if !skip_permissions_hook && !cmd.no_dangerously_skip_permissions {
         claude_cmd.push("--dangerously-skip-permissions".to_string());
     }
