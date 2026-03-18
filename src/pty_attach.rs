@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{ClientRequestBuilder, Message};
+use url::Url;
 
 use crate::pod::pty::PtyControl;
 
@@ -92,12 +93,17 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
 
     // -- WebSocket connection -------------------------------------------
 
-    let ws_url = format!(
-        "{}/claude",
-        url.replacen("http://", "ws://", 1)
-            .replacen("https://", "wss://", 1),
-    );
-    let uri: tungstenite::http::Uri = ws_url.parse().context("parsing WebSocket URI")?;
+    let mut ws_url = Url::parse(url).context("parsing container URL")?;
+    let scheme = match ws_url.scheme() {
+        "http" => "ws",
+        "https" => "wss",
+        other => return Err(anyhow::anyhow!("unexpected scheme: {other}")),
+    };
+    ws_url
+        .set_scheme(scheme)
+        .expect("ws/wss are always valid schemes");
+    ws_url.set_path("/claude");
+    let uri: tungstenite::http::Uri = ws_url.as_str().parse().context("parsing WebSocket URI")?;
     let request =
         ClientRequestBuilder::new(uri).with_header("Authorization", format!("Bearer {token}"));
 
