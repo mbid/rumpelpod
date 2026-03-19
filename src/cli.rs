@@ -271,6 +271,10 @@ Examples:
         token: String,
     },
 
+    /// Set up repo clone and Claude CLI during image build (internal)
+    #[command(hide = true)]
+    PrepareImage(PrepareImageCommand),
+
     /// Install the rumpelpod daemon as a system service
     #[command(long_about = "Install the rumpelpod daemon as a system service.
 
@@ -482,6 +486,25 @@ pub struct CpCommand {
     /// Destination: either POD:PATH or a local path
     #[arg(value_name = "DEST")]
     pub dest: String,
+}
+
+#[derive(Args)]
+pub struct PrepareImageCommand {
+    /// Path to the gateway bare repo (bind-mounted at build time)
+    #[arg(long)]
+    pub gateway: PathBuf,
+
+    /// Where to clone the repo inside the container
+    #[arg(long)]
+    pub repo_path: PathBuf,
+
+    /// User to chown the repo to
+    #[arg(long)]
+    pub user: String,
+
+    /// Claude CLI version to install (skip if not provided)
+    #[arg(long)]
+    pub claude_version: Option<String>,
 }
 
 #[derive(Subcommand)]

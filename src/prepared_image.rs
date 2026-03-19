@@ -3,15 +3,17 @@
 //! devcontainer image.  This avoids repeating expensive setup steps every
 //! time a container is created.
 
-use std::fmt::Write;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use indoc::formatdoc;
 use sha2::{Digest, Sha256};
 
+use crate::cli::PrepareImageCommand;
 use crate::config::Host;
 use crate::image::{BuildOutputFn, BuildResult, Image, OutputLine};
 
@@ -21,7 +23,7 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 
 /// Bump this when the Dockerfile template changes in a way that
 /// invalidates previously built prepared images.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 /// Information about the Claude CLI on the host, used to pin the
 /// exact version inside the prepared image.
@@ -115,6 +117,10 @@ fn compute_prepared_tag(
 /// The gateway bare repo is passed as a named build context (`gateway`)
 /// and bind-mounted at build time so its contents never end up in an
 /// image layer.
+///
+/// After the rumpel binary is installed, remaining setup (repo clone,
+/// Claude CLI) is delegated to `rumpel prepare-image` so the logic
+/// lives in Rust instead of shell.
 fn generate_dockerfile(
     base_image: &str,
     container_repo_path: &Path,
@@ -122,92 +128,36 @@ fn generate_dockerfile(
     claude_info: Option<&HostClaudeInfo>,
 ) -> String {
     let repo_path = container_repo_path.display();
+    let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
 
-    // Build the Dockerfile line-by-line to avoid rustfmt mangling
-    // indentation inside formatdoc! string literals.
-    let mut df = String::new();
-    writeln!(df, "FROM {base_image}").unwrap();
-    writeln!(df, "USER root").unwrap();
-    writeln!(df).unwrap();
-    writeln!(df, "# Install rumpel binary -- pick arch at build time").unwrap();
-    writeln!(df, "COPY rumpel-linux-* /tmp/").unwrap();
-    // Single RUN to keep image layers minimal.
-    writeln!(df, "RUN set -e; \\").unwrap();
-    writeln!(df, "    mkdir -p /opt/rumpelpod/bin; \\").unwrap();
-    writeln!(df, "    case \"$(uname -m)\" in \\").unwrap();
-    writeln!(
-        df,
-        "      x86_64)  cp /tmp/rumpel-linux-amd64 /opt/rumpelpod/bin/rumpel ;; \\"
-    )
-    .unwrap();
-    writeln!(
-        df,
-        "      aarch64) cp /tmp/rumpel-linux-arm64 /opt/rumpelpod/bin/rumpel ;; \\"
-    )
-    .unwrap();
-    writeln!(df, "      *) echo \"unsupported arch\" >&2; exit 1 ;; \\").unwrap();
-    writeln!(df, "    esac; \\").unwrap();
-    writeln!(df, "    chmod +x /opt/rumpelpod/bin/rumpel; \\").unwrap();
-    writeln!(df, "    rm -f /tmp/rumpel-linux-*").unwrap();
-    writeln!(df).unwrap();
-    writeln!(
-        df,
-        "# Clone repo from gateway bare repo (bind-mounted, not copied into layer)"
-    )
-    .unwrap();
-    writeln!(
-        df,
-        "RUN --mount=type=bind,from=gateway,target=/tmp/gateway \\"
-    )
-    .unwrap();
-    writeln!(df, "    if [ ! -d '{repo_path}/.git' ]; then \\").unwrap();
-    writeln!(
-        df,
-        "      git clone file:///tmp/gateway '{repo_path}' && \\"
-    )
-    .unwrap();
-    writeln!(df, "      chown -R {user} '{repo_path}'; \\").unwrap();
-    writeln!(df, "    fi").unwrap();
+    let claude_flag = match claude_info {
+        Some(info) => format!(" \\\n      --claude-version '{}'", info.version),
+        None => String::new(),
+    };
 
-    if let Some(info) = claude_info {
-        let version = &info.version;
-        writeln!(df).unwrap();
-        writeln!(
-            df,
-            "# Install Claude CLI at the version pinned from the host"
-        )
-        .unwrap();
-        writeln!(df, "RUN set -e; \\").unwrap();
-        writeln!(
-            df,
-            "    if command -v claude >/dev/null 2>&1 || [ -x /opt/rumpelpod/bin/claude ]; then \\"
-        )
-        .unwrap();
-        writeln!(df, "      exit 0; \\").unwrap();
-        writeln!(df, "    fi; \\").unwrap();
-        writeln!(df, "    BUCKET='{CLAUDE_CODE_DIST_BUCKET}'; \\").unwrap();
-        writeln!(df, "    VERSION='{version}'; \\").unwrap();
-        writeln!(df, "    PLATFORM=$(case \"$(uname -m)\" in x86_64) echo linux-x64;; aarch64) echo linux-arm64;; *) echo unsupported; exit 1;; esac); \\").unwrap();
-        writeln!(df, "    if command -v curl >/dev/null 2>&1; then \\").unwrap();
-        writeln!(df, "      curl -fsSL -o /opt/rumpelpod/bin/claude \"$BUCKET/$VERSION/$PLATFORM/claude\"; \\").unwrap();
-        writeln!(df, "    elif command -v wget >/dev/null 2>&1; then \\").unwrap();
-        writeln!(
-            df,
-            "      wget -qO /opt/rumpelpod/bin/claude \"$BUCKET/$VERSION/$PLATFORM/claude\"; \\"
-        )
-        .unwrap();
-        writeln!(df, "    else \\").unwrap();
-        writeln!(df, "      exit 0; \\").unwrap();
-        writeln!(df, "    fi; \\").unwrap();
-        writeln!(df, "    chmod +x /opt/rumpelpod/bin/claude").unwrap();
-    }
+    formatdoc! {r#"
+        FROM {base_image}
+        USER root
 
-    // Restore the original user so the container starts with the same
-    // default USER as the base image.
-    writeln!(df).unwrap();
-    writeln!(df, "USER {user}").unwrap();
+        COPY rumpel-linux-* /tmp/
+        RUN set -e; \
+            mkdir -p /opt/rumpelpod/bin; \
+            case "$(uname -m)" in \
+              x86_64)  cp /tmp/rumpel-linux-amd64 {rumpel} ;; \
+              aarch64) cp /tmp/rumpel-linux-arm64 {rumpel} ;; \
+              *) echo "unsupported arch" >&2; exit 1 ;; \
+            esac; \
+            chmod +x {rumpel}; \
+            rm -f /tmp/rumpel-linux-*
 
-    df
+        RUN --mount=type=bind,from=gateway,target=/tmp/gateway \
+            {rumpel} prepare-image \
+              --gateway /tmp/gateway \
+              --repo-path '{repo_path}' \
+              --user '{user}'{claude_flag}
+
+        USER {user}
+    "#}
 }
 
 /// Assemble the build context directory with the Dockerfile and binaries.
@@ -445,4 +395,86 @@ pub fn build_prepared_image(
         image: final_image,
         built: true,
     })
+}
+
+// ---------------------------------------------------------------------------
+// `rumpel prepare-image` subcommand -- runs inside the container at build time
+// ---------------------------------------------------------------------------
+
+/// Clone the repo and optionally install the Claude CLI.
+///
+/// Invoked as a Dockerfile RUN step after the rumpel binary itself has
+/// been copied in.  Replaces what used to be shell scripting.
+pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
+    if !cmd.repo_path.join(".git").exists() {
+        let gateway = cmd.gateway.display();
+        let status = Command::new("git")
+            .args(["clone", &format!("file://{gateway}")])
+            .arg(&cmd.repo_path)
+            .status()
+            .context("cloning repository from gateway")?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("git clone failed"));
+        }
+
+        let status = Command::new("chown")
+            .args(["-R", &cmd.user])
+            .arg(&cmd.repo_path)
+            .status()
+            .context("setting repository ownership")?;
+        if !status.success() {
+            return Err(anyhow::anyhow!("chown failed"));
+        }
+    }
+
+    if let Some(ref version) = cmd.claude_version {
+        install_claude_cli(version)?;
+    }
+
+    Ok(())
+}
+
+/// Download and install the Claude CLI at a specific version.
+///
+/// Skips if a `claude` binary is already present.
+fn install_claude_cli(version: &str) -> Result<()> {
+    let bin_path = Path::new(crate::daemon::CLAUDE_CONTAINER_BIN);
+    if bin_path.exists() {
+        return Ok(());
+    }
+    if Command::new("claude")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return Ok(());
+    }
+
+    let platform = match std::env::consts::ARCH {
+        "x86_64" => "linux-x64",
+        "aarch64" => "linux-arm64",
+        other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
+    };
+
+    let url = format!("{CLAUDE_CODE_DIST_BUCKET}/{version}/{platform}/claude");
+    let client = reqwest::blocking::Client::new();
+    let data = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("downloading Claude CLI from {url}"))?
+        .error_for_status()
+        .with_context(|| format!("downloading Claude CLI from {url}"))?
+        .bytes()
+        .with_context(|| format!("reading Claude CLI binary from {url}"))?;
+
+    if let Some(parent) = bin_path.parent() {
+        fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
+    }
+    fs::write(bin_path, &data).context("writing Claude CLI binary")?;
+    fs::set_permissions(bin_path, fs::Permissions::from_mode(0o755))
+        .context("making Claude CLI binary executable")?;
+
+    Ok(())
 }

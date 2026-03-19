@@ -104,6 +104,9 @@ pub fn run() -> Result<()> {
         Command::Claude(ref cmd) => {
             claude::claude(cmd)?;
         }
+        Command::PrepareImage(ref cmd) => {
+            prepared_image::run_prepare_image(cmd)?;
+        }
         Command::GitHook(ref sub) => match sub {
             GitHookSubcommand::ReferenceTransaction(ref cmd) => {
                 hook::reference_transaction(cmd)?;
