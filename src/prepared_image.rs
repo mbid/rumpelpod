@@ -139,16 +139,8 @@ fn generate_dockerfile(
         FROM {base_image}
         USER root
 
-        COPY rumpel-linux-* /tmp/
-        RUN set -e; \
-            mkdir -p /opt/rumpelpod/bin; \
-            case "$(uname -m)" in \
-              x86_64)  cp /tmp/rumpel-linux-amd64 {rumpel} ;; \
-              aarch64) cp /tmp/rumpel-linux-arm64 {rumpel} ;; \
-              *) echo "unsupported arch" >&2; exit 1 ;; \
-            esac; \
-            chmod +x {rumpel}; \
-            rm -f /tmp/rumpel-linux-*
+        ARG TARGETARCH
+        COPY --chmod=755 rumpel-linux-${{TARGETARCH}} {rumpel}
 
         RUN --mount=type=bind,from=gateway,target=/tmp/gateway \
             {rumpel} prepare-image \
