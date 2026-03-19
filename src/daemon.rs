@@ -26,10 +26,10 @@ use tokio::net::UnixListener;
 use crate::async_runtime::block_on;
 use crate::config::{is_deterministic_test_mode, Host};
 use crate::devcontainer::{
-    self, compute_devcontainer_id, shell_escape, substitute_vars, DevContainer, LifecycleCommand,
-    Port, PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
+    self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
+    PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
 };
-use crate::docker_exec::{exec_command, exec_with_stdin};
+use crate::docker_exec::exec_command;
 use crate::gateway;
 use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use protocol::{
@@ -315,42 +315,6 @@ fn get_image_user(docker: &Docker, image: &str) -> Result<Option<String>> {
     } else {
         Ok(Some(user))
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContainerArch {
-    Amd64,
-    Arm64,
-}
-
-impl ContainerArch {
-    fn from_docker(s: &str) -> Result<Self> {
-        match s {
-            "amd64" => Ok(Self::Amd64),
-            "arm64" => Ok(Self::Arm64),
-            other => Err(anyhow::anyhow!(
-                "unsupported container architecture '{}'",
-                other
-            )),
-        }
-    }
-
-    /// Filename for the cross-arch binary, e.g. "rumpel-linux-amd64".
-    fn binary_name(self) -> &'static str {
-        match self {
-            Self::Amd64 => "rumpel-linux-amd64",
-            Self::Arm64 => "rumpel-linux-arm64",
-        }
-    }
-}
-
-fn get_image_architecture(docker: &Docker, image: &str) -> Result<Option<ContainerArch>> {
-    let inspect = block_on(docker.inspect_image(image))
-        .with_context(|| format!("Failed to inspect image '{image}'"))?;
-    inspect
-        .architecture
-        .map(|s| ContainerArch::from_docker(&s))
-        .transpose()
 }
 
 /// Resolve the user for a pod.
@@ -1664,72 +1628,6 @@ fn inject_hooks(data: &[u8]) -> Vec<u8> {
 /// When the container arch is unknown, returns the running binary.
 /// Otherwise looks for `rumpel-linux-{arch}` next to the running
 /// executable.
-fn resolve_rumpel_binary(container_arch: Option<ContainerArch>) -> Result<PathBuf> {
-    let exe = std::env::current_exe().context("resolving own binary path")?;
-
-    let arch = match container_arch {
-        None => return Ok(exe),
-        Some(a) => a,
-    };
-
-    let exe_dir = exe.parent().context("resolving executable directory")?;
-    let bin = exe_dir.join(arch.binary_name());
-    if !bin.exists() {
-        return Err(anyhow::anyhow!(
-            "binary '{}' not found next to {}",
-            arch.binary_name(),
-            exe.display(),
-        ));
-    }
-    Ok(bin)
-}
-
-/// Copy the rumpel binary into the container so hook shims can invoke it.
-///
-/// Inspects the container image architecture and, when it differs from
-/// the host, resolves the arch-specific binary from the same directory.
-fn copy_rumpel_binary(docker: &Docker, container_id: &str, image: &str) -> Result<()> {
-    let container_arch = get_image_architecture(docker, image)?;
-    let bin = resolve_rumpel_binary(container_arch)?;
-    let bin_display = bin.display();
-    let data = std::fs::read(&bin).with_context(|| format!("reading {bin_display}"))?;
-
-    exec_command(
-        docker,
-        container_id,
-        Some("root"),
-        None,
-        None,
-        vec!["mkdir", "-p", "/opt/rumpelpod/bin"],
-    )
-    .context("creating /opt/rumpelpod/bin")?;
-
-    let escaped_path = shell_escape("/opt/rumpelpod/bin/rumpel");
-    let cmd = format!("cat > {escaped_path}");
-    exec_with_stdin(
-        docker,
-        container_id,
-        Some("root"),
-        None,
-        None,
-        vec!["sh", "-c", &cmd],
-        Some(&data),
-    )
-    .context("writing rumpel binary")?;
-
-    exec_command(
-        docker,
-        container_id,
-        Some("root"),
-        None,
-        None,
-        vec!["chmod", "+x", "/opt/rumpelpod/bin/rumpel"],
-    )
-    .context("making rumpel binary executable")?;
-
-    Ok(())
-}
-
 /// Determine the port container-serve should bind inside the container.
 ///
 /// In host network mode the container shares the host's loopback, so we
@@ -2206,6 +2104,18 @@ impl DaemonServer {
         let client = crate::k8s::K8sClient::new(context, namespace)?;
         let gateway_path = gateway::gateway_path(repo_path)?;
 
+        // Build a prepared image with the rumpel binary, repo clone,
+        // and Claude CLI baked in so we skip those steps at runtime.
+        let prepared = crate::prepared_image::build_prepared_image(
+            &Image(image.to_string()),
+            docker_host,
+            &gateway_path,
+            &container_repo_path,
+            &user,
+            None,
+        )?;
+        let image = &prepared.image.0;
+
         // Check DB for existing pod; if the k8s pod is still Running, reconnect
         {
             let conn = self.db.lock().unwrap();
@@ -2550,34 +2460,6 @@ impl DaemonServer {
             .wait_running(&k8s_name, std::time::Duration::from_secs(120))
             .map_err(|e| mark_error(e.context("waiting for k8s pod to start")))?;
 
-        let arch = client
-            .get_pod_arch(&k8s_name)
-            .map_err(|e| mark_error(e.context("detecting pod architecture")))?;
-
-        let bin_path = crate::k8s::resolve_rumpel_binary(&arch).map_err(mark_error)?;
-        let bin_data = std::fs::read(&bin_path)
-            .with_context(|| {
-                let bin_path = bin_path.display();
-                format!("reading {bin_path}")
-            })
-            .map_err(mark_error)?;
-
-        client
-            .exec_output(&k8s_name, &["mkdir", "-p", "/opt/rumpelpod/bin"])
-            .map_err(|e| mark_error(e.context("creating /opt/rumpelpod/bin in k8s pod")))?;
-
-        client
-            .exec_with_stdin(
-                &k8s_name,
-                &[
-                    "sh",
-                    "-c",
-                    "cat > /opt/rumpelpod/bin/rumpel && chmod +x /opt/rumpelpod/bin/rumpel",
-                ],
-                &bin_data,
-            )
-            .map_err(|e| mark_error(e.context("copying rumpel binary to k8s pod")))?;
-
         let container_serve_cmd = format!(
             "/opt/rumpelpod/bin/rumpel container-serve --port {} --token {}",
             crate::pod::DEFAULT_PORT,
@@ -2802,6 +2684,7 @@ impl DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
+        let build_tx_clone = build_tx.clone();
         let on_output: Option<crate::image::BuildOutputFn> = {
             let tx = build_tx;
             Some(Box::new(move |line: crate::image::OutputLine| {
@@ -2896,6 +2779,24 @@ impl DaemonServer {
 
         let name = docker_name(&repo_path, &pod_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
+
+        // Build a prepared image with the rumpel binary, repo clone,
+        // and Claude CLI baked in so we skip those steps at runtime.
+        let prepared_on_output: Option<crate::image::BuildOutputFn> = {
+            let tx = build_tx_clone;
+            Some(Box::new(move |line: crate::image::OutputLine| {
+                let _ = tx.send(line);
+            }) as crate::image::BuildOutputFn)
+        };
+        let prepared = crate::prepared_image::build_prepared_image(
+            &image,
+            &docker_host,
+            &gateway_path,
+            &container_repo_path,
+            &user,
+            prepared_on_output,
+        )?;
+        let image = prepared.image;
 
         let localhost_server_port = self.localhost_server_port;
 
@@ -3236,10 +3137,6 @@ impl DaemonServer {
                 &mounts,
                 &publish_ports,
             )?;
-
-            // The rumpel binary must be present before git operations
-            // that trigger the reference-transaction hook shim.
-            copy_rumpel_binary(&docker, &container_id.0, &image.0)?;
 
             // Route container-serve access through an exec proxy so we
             // don't need bridge IPs or SSH port forwards.

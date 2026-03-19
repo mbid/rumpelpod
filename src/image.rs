@@ -304,7 +304,7 @@ fn registry_host(registry: &str) -> &str {
 ///
 /// TODO: This stores builder config in ~/.docker/buildx/. Consider using
 /// BUILDX_CONFIG or --config to avoid polluting the user's Docker config.
-fn ensure_buildx_builder(context: &str, registry: &str) -> Result<String> {
+pub(crate) fn ensure_buildx_builder(context: &str, registry: &str) -> Result<String> {
     let name = buildx_builder_name(context);
 
     // Check if builder already exists.
@@ -503,7 +503,7 @@ pub fn buildx_build(
 }
 
 /// Check whether a Docker image already exists on the target host.
-fn image_exists(image_name: &str, docker_host: &Host) -> bool {
+pub(crate) fn image_exists(image_name: &str, docker_host: &Host) -> bool {
     let mut cmd = Command::new("docker");
     if let Some(uri) = docker_host.docker_host_uri() {
         cmd.args(["-H", &uri]);

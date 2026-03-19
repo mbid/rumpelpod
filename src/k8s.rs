@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::Pod;
@@ -26,33 +25,6 @@ const ANNOTATION_CREATED: &str = "rumpelpod/created";
 pub struct K8sClient {
     client: Client,
     namespace: String,
-}
-
-/// Architecture of a container's OS/platform.
-pub enum ContainerArch {
-    Amd64,
-    Arm64,
-}
-
-impl ContainerArch {
-    fn from_uname(s: &str) -> Result<Self> {
-        match s.trim() {
-            "x86_64" => Ok(Self::Amd64),
-            "aarch64" => Ok(Self::Arm64),
-            other => Err(anyhow::anyhow!(
-                "unsupported container architecture '{}'",
-                other
-            )),
-        }
-    }
-
-    /// Filename for the cross-arch binary, e.g. "rumpel-linux-amd64".
-    pub fn binary_name(&self) -> &'static str {
-        match self {
-            Self::Amd64 => "rumpel-linux-amd64",
-            Self::Arm64 => "rumpel-linux-arm64",
-        }
-    }
 }
 
 /// Options for creating a Kubernetes pod beyond the basics (image, labels, etc.).
@@ -526,61 +498,12 @@ impl K8sClient {
         })
     }
 
-    /// Execute a command in a pod, writing stdin and returning stdout.
-    /// Used for operations like copying a binary into the pod.
-    pub fn exec_with_stdin(&self, name: &str, cmd: &[&str], stdin_data: &[u8]) -> Result<()> {
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let cmd: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
-        let data = stdin_data.to_vec();
-
-        block_on(async {
-            let mut attached = pods
-                .exec(
-                    name,
-                    cmd,
-                    &AttachParams::default()
-                        .stdout(true)
-                        .stderr(true)
-                        .stdin(true),
-                )
-                .await
-                .context("exec in pod")?;
-
-            if let Some(mut stdin) = attached.stdin() {
-                use tokio::io::AsyncWriteExt;
-                stdin.write_all(&data).await?;
-                stdin.shutdown().await?;
-            }
-
-            let status = attached
-                .take_status()
-                .unwrap()
-                .await
-                .context("waiting for exec status")?;
-
-            if let Some(reason) = status.reason {
-                if reason != "Completed" && reason != "ExitCode" {
-                    return Err(anyhow::anyhow!("exec with stdin failed: {reason}"));
-                }
-            }
-
-            Ok(())
-        })
-    }
-
     /// Start a detached background process in the pod.
     /// Uses nohup + background to detach from the exec session.
     pub fn exec_detached(&self, name: &str, cmd: &str) -> Result<()> {
         let wrapped = format!("nohup {cmd} </dev/null >/dev/null 2>&1 &");
         self.exec_output(name, &["sh", "-c", &wrapped])?;
         Ok(())
-    }
-
-    /// Detect the CPU architecture of a running pod.
-    pub fn get_pod_arch(&self, name: &str) -> Result<ContainerArch> {
-        let output = self.exec_output(name, &["uname", "-m"])?;
-        let arch_str = String::from_utf8_lossy(&output);
-        ContainerArch::from_uname(&arch_str)
     }
 
     /// Start a multiplexed TCP tunnel into a pod.
@@ -732,24 +655,4 @@ pub fn convert_memory_to_k8s(s: &str) -> Option<String> {
     // No suffix -- treat as raw bytes
     let bytes: u64 = s.parse().ok()?;
     Some(format!("{bytes}"))
-}
-
-/// Resolve the rumpel binary path for a given container architecture.
-/// Mirrors resolve_rumpel_binary in daemon.rs.
-pub fn resolve_rumpel_binary(arch: &ContainerArch) -> Result<PathBuf> {
-    let current_exe = std::env::current_exe().context("failed to get current executable path")?;
-    let exe_dir = current_exe
-        .parent()
-        .context("executable has no parent directory")?;
-
-    let binary_path = exe_dir.join(arch.binary_name());
-    if binary_path.exists() {
-        Ok(binary_path)
-    } else {
-        Err(anyhow::anyhow!(
-            "Cross-architecture binary '{}' not found at {}",
-            arch.binary_name(),
-            exe_dir.display()
-        ))
-    }
 }

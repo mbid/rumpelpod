@@ -26,6 +26,7 @@ mod llm;
 mod merge;
 pub mod pod;
 mod ports;
+mod prepared_image;
 mod prune;
 mod pty_attach;
 mod recreate;
