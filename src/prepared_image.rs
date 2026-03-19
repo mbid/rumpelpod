@@ -31,6 +31,10 @@ struct HostClaudeInfo {
     version: String,
 }
 
+/// TODO: Both detect_host_claude and hash_rumpel_binary are called on
+/// every launch but their results cannot change while the daemon is
+/// running.  Cache them if this becomes a bottleneck.
+
 /// Try to detect Claude CLI on the host and return its version.
 ///
 /// `claude --version` outputs e.g. "2.1.79 (Claude Code)"; we extract
