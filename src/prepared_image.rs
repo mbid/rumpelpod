@@ -112,8 +112,9 @@ fn compute_prepared_tag(
 
 /// Generate the Dockerfile content for the prepared image.
 ///
-/// The gateway bare repo is included in the build context as `gateway/`
-/// and cleaned up after cloning.
+/// The gateway bare repo is passed as a named build context (`gateway`)
+/// and bind-mounted at build time so its contents never end up in an
+/// image layer.
 fn generate_dockerfile(
     base_image: &str,
     container_repo_path: &Path,
@@ -149,9 +150,16 @@ fn generate_dockerfile(
     writeln!(df, "    chmod +x /opt/rumpelpod/bin/rumpel; \\").unwrap();
     writeln!(df, "    rm -f /tmp/rumpel-linux-*").unwrap();
     writeln!(df).unwrap();
-    writeln!(df, "# Clone repo from gateway bare repo").unwrap();
-    writeln!(df, "COPY gateway/ /tmp/gateway/").unwrap();
-    writeln!(df, "RUN set -e; \\").unwrap();
+    writeln!(
+        df,
+        "# Clone repo from gateway bare repo (bind-mounted, not copied into layer)"
+    )
+    .unwrap();
+    writeln!(
+        df,
+        "RUN --mount=type=bind,from=gateway,target=/tmp/gateway \\"
+    )
+    .unwrap();
     writeln!(df, "    if [ ! -d '{repo_path}/.git' ]; then \\").unwrap();
     writeln!(
         df,
@@ -159,8 +167,7 @@ fn generate_dockerfile(
     )
     .unwrap();
     writeln!(df, "      chown -R {user} '{repo_path}'; \\").unwrap();
-    writeln!(df, "    fi; \\").unwrap();
-    writeln!(df, "    rm -rf /tmp/gateway").unwrap();
+    writeln!(df, "    fi").unwrap();
 
     if let Some(info) = claude_info {
         let version = &info.version;
@@ -203,37 +210,13 @@ fn generate_dockerfile(
     df
 }
 
-/// Recursively copy a directory tree.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).with_context(|| {
-        let dst = dst.display();
-        format!("creating {dst}")
-    })?;
-    for entry in fs::read_dir(src).with_context(|| {
-        let src = src.display();
-        format!("reading {src}")
-    })? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path).with_context(|| {
-                let src = src_path.display();
-                let dst = dst_path.display();
-                format!("copying {src} to {dst}")
-            })?;
-        }
-    }
-    Ok(())
-}
-
-/// Assemble the build context directory with the Dockerfile, binaries,
-/// and a copy of the gateway bare repo.
+/// Assemble the build context directory with the Dockerfile and binaries.
+///
+/// The gateway is NOT included here -- it is passed separately via
+/// `--build-context` so buildx can transfer it efficiently and the
+/// Dockerfile bind-mounts it without baking it into a layer.
 fn assemble_build_context(
     base_image: &str,
-    gateway_path: &Path,
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
@@ -251,20 +234,30 @@ fn assemble_build_context(
         })?;
     }
 
-    // Include the gateway bare repo so the Dockerfile can clone from it.
-    copy_dir_recursive(gateway_path, &tmp.path().join("gateway"))
-        .context("copying gateway repo to build context")?;
-
     Ok(tmp)
 }
 
-/// Run `docker build` and stream output through the callback.
+/// Run `docker buildx build` and stream output through the callback.
+///
+/// Uses `--build-context` to pass the gateway bare repo to the builder.
+/// Buildx misidentifies bare git repos (paths containing a HEAD file)
+/// as remote git URLs, so we create a symlink without the `.git` suffix
+/// to force local-directory treatment.
 fn run_docker_build(
     tag: &str,
     build_context: &Path,
+    gateway_path: &Path,
     docker_host: &Host,
     on_output: Option<BuildOutputFn>,
 ) -> Result<()> {
+    // Symlink the gateway to a name without `.git` so buildx treats it
+    // as a plain directory rather than a git URL.
+    let gateway_link = build_context.join("gateway-link");
+    std::os::unix::fs::symlink(gateway_path, &gateway_link).with_context(|| {
+        let gw = gateway_path.display();
+        format!("symlinking gateway {gw}")
+    })?;
+
     let mut cmd = Command::new("docker");
 
     match docker_host {
@@ -272,7 +265,7 @@ fn run_docker_build(
             if let Some(uri) = docker_host.docker_host_uri() {
                 cmd.args(["-H", &uri]);
             }
-            cmd.args(["build", "--rm"]);
+            cmd.args(["buildx", "build", "--load"]);
             cmd.arg(format!("-t={tag}"));
         }
         Host::Kubernetes {
@@ -294,6 +287,9 @@ fn run_docker_build(
             ));
         }
     }
+
+    let gateway_link = gateway_link.display();
+    cmd.arg(format!("--build-context=gateway={gateway_link}"));
 
     let dockerfile = build_context.join("Dockerfile");
     let dockerfile = dockerfile.display();
@@ -426,13 +422,12 @@ pub fn build_prepared_image(
 
     let build_ctx = assemble_build_context(
         &buildable_base,
-        gateway_path,
         container_repo_path,
         user,
         claude_info.as_ref(),
     )?;
 
-    run_docker_build(&tag, build_ctx.path(), docker_host, on_output)?;
+    run_docker_build(&tag, build_ctx.path(), gateway_path, docker_host, on_output)?;
 
     let final_image = match docker_host {
         Host::Kubernetes {
