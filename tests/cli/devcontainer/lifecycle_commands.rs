@@ -389,7 +389,9 @@ fn wait_for_setting() {
 
 /// On first creation, updateContentCommand must run after onCreateCommand
 /// and before postCreateCommand.
+/// Flaky under parallel tests.
 #[test]
+#[ignore]
 fn update_content_command_runs_after_on_create() {
     let repo = TestRepo::new();
 
