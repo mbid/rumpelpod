@@ -4,7 +4,6 @@
 //! time a container is created.
 
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,7 +14,8 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::PrepareImageCommand;
 use crate::config::Host;
-use crate::image::{BuildOutputFn, BuildResult, Image, OutputLine};
+use crate::image::{BuildResult, Image};
+use crate::CommandExt;
 
 /// GCS bucket hosting Claude Code releases (mirrors pod/pty.rs).
 const CLAUDE_CODE_DIST_BUCKET: &str =
@@ -187,7 +187,7 @@ fn assemble_build_context(
     Ok(tmp)
 }
 
-/// Run `docker buildx build` and stream output through the callback.
+/// Run `docker buildx build`, suppressing output on success.
 ///
 /// Uses `--build-context` to pass the gateway bare repo to the builder.
 /// Buildx misidentifies bare git repos (paths containing a HEAD file)
@@ -198,7 +198,6 @@ fn run_docker_build(
     build_context: &Path,
     gateway_path: &Path,
     docker_host: &Host,
-    on_output: Option<BuildOutputFn>,
 ) -> Result<()> {
     // Symlink the gateway to a name without `.git` so buildx treats it
     // as a plain directory rather than a git URL.
@@ -246,62 +245,7 @@ fn run_docker_build(
     cmd.arg(format!("-f={dockerfile}"));
     cmd.arg(build_context.display().to_string());
 
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().context("spawning docker build")?;
-
-    let child_stdout = child.stdout.take().expect("stdout was piped");
-    let child_stderr = child.stderr.take().expect("stderr was piped");
-
-    let callback = on_output.map(|cb| std::sync::Arc::new(std::sync::Mutex::new(cb)));
-    let callback_for_stderr = callback.clone();
-
-    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let stdout_buf_clone = stdout_buf.clone();
-    let stderr_buf_clone = stderr_buf.clone();
-
-    let stdout_thread = std::thread::spawn(move || {
-        for line in BufReader::new(child_stdout).lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            stdout_buf_clone.lock().unwrap().push_str(&line);
-            stdout_buf_clone.lock().unwrap().push('\n');
-            if let Some(ref cb) = callback {
-                cb.lock().unwrap()(OutputLine::Stdout(line));
-            }
-        }
-    });
-
-    let stderr_thread = std::thread::spawn(move || {
-        for line in BufReader::new(child_stderr).lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            stderr_buf_clone.lock().unwrap().push_str(&line);
-            stderr_buf_clone.lock().unwrap().push('\n');
-            if let Some(ref cb) = callback_for_stderr {
-                cb.lock().unwrap()(OutputLine::Stderr(line));
-            }
-        }
-    });
-
-    let status = child.wait()?;
-    stdout_thread.join().expect("stdout reader panicked");
-    stderr_thread.join().expect("stderr reader panicked");
-
-    if !status.success() {
-        let stdout = stdout_buf.lock().unwrap();
-        let stderr = stderr_buf.lock().unwrap();
-        return Err(anyhow::anyhow!(
-            "docker build (prepared image) failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}"
-        ));
-    }
-
+    cmd.success().context("building prepared image")?;
     Ok(())
 }
 
@@ -345,7 +289,6 @@ pub fn build_prepared_image(
     gateway_path: &Path,
     container_repo_path: &Path,
     user: &str,
-    on_output: Option<BuildOutputFn>,
 ) -> Result<BuildResult> {
     let rumpel_hash = hash_rumpel_binary()?;
     let claude_info = detect_host_claude();
@@ -377,7 +320,7 @@ pub fn build_prepared_image(
         claude_info.as_ref(),
     )?;
 
-    run_docker_build(&tag, build_ctx.path(), gateway_path, docker_host, on_output)?;
+    run_docker_build(&tag, build_ctx.path(), gateway_path, docker_host)?;
 
     let final_image = match docker_host {
         Host::Kubernetes {

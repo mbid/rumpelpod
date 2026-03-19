@@ -2112,7 +2112,6 @@ impl DaemonServer {
             &gateway_path,
             &container_repo_path,
             &user,
-            None,
         )?;
         let image = &prepared.image.0;
 
@@ -2684,7 +2683,6 @@ impl DaemonServer {
         // before the config was sent to us.
         let devcontainer = resolve_daemon_vars(devcontainer, &repo_path, &pod_name.0);
 
-        let build_tx_clone = build_tx.clone();
         let on_output: Option<crate::image::BuildOutputFn> = {
             let tx = build_tx;
             Some(Box::new(move |line: crate::image::OutputLine| {
@@ -2782,19 +2780,12 @@ impl DaemonServer {
 
         // Build a prepared image with the rumpel binary, repo clone,
         // and Claude CLI baked in so we skip those steps at runtime.
-        let prepared_on_output: Option<crate::image::BuildOutputFn> = {
-            let tx = build_tx_clone;
-            Some(Box::new(move |line: crate::image::OutputLine| {
-                let _ = tx.send(line);
-            }) as crate::image::BuildOutputFn)
-        };
         let prepared = crate::prepared_image::build_prepared_image(
             &image,
             &docker_host,
             &gateway_path,
             &container_repo_path,
             &user,
-            prepared_on_output,
         )?;
         let image = prepared.image;
 
