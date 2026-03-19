@@ -92,7 +92,7 @@ fn write_claude_test_devcontainer(repo: &TestRepo) {
 /// the daemon, so tests don't depend on the real user's Claude config.
 /// Includes fake OAuth credentials so the CLI considers the user
 /// "logged in" without needing the host's real tokens.
-fn setup_controlled_home(home: &TestHome) {
+pub(super) fn setup_controlled_home(home: &TestHome) {
     // Minimal .claude.json: skip onboarding and accept bypass mode.
     // strip_claude_json in the daemon will add per-project trust entries.
     std::fs::write(
