@@ -31,9 +31,9 @@ struct HostClaudeInfo {
     version: String,
 }
 
-/// TODO: Both detect_host_claude and hash_rumpel_binary are called on
-/// every launch but their results cannot change while the daemon is
-/// running.  Cache them if this becomes a bottleneck.
+// TODO: Both detect_host_claude and hash_rumpel_binary are called on
+// every launch but their results cannot change while the daemon is
+// running.  Cache them if this becomes a bottleneck.
 
 /// Try to detect Claude CLI on the host and return its version.
 ///
@@ -116,6 +116,76 @@ fn compute_prepared_tag(
     format!("rumpelpod-prepared-{hash}")
 }
 
+/// Probe the base image's default USER by running a dummy build.
+///
+/// We cannot inspect the image directly because it may live on a remote
+/// builder or registry.  A minimal `docker buildx build` with
+/// `--progress=plain` runs `id -un` inside the image and we parse the
+/// username from the build log.  The base image layers are already
+/// cached, so this adds negligible overhead.
+fn probe_base_image_user(base_image: &str, docker_host: &Host) -> Result<String> {
+    let tmp = tempfile::tempdir().context("creating probe build context")?;
+    let marker = "RUMPELPOD_BASE_USER";
+    let dockerfile = formatdoc! {r#"
+        FROM {base_image}
+        RUN echo {marker}=$(id -un)
+    "#};
+    fs::write(tmp.path().join("Dockerfile"), dockerfile).context("writing probe Dockerfile")?;
+
+    let mut cmd = Command::new("docker");
+    match docker_host {
+        Host::Localhost | Host::Ssh { .. } => {
+            if let Some(uri) = docker_host.docker_host_uri() {
+                cmd.args(["-H", &uri]);
+            }
+            cmd.args(["buildx", "build"]);
+        }
+        Host::Kubernetes {
+            context,
+            registry: Some(ref registry),
+            ref pull_registry,
+            ..
+        } => {
+            let push_reg = pull_registry.as_deref().unwrap_or(registry);
+            let builder = crate::image::ensure_buildx_builder(context, push_reg)?;
+            cmd.args(["buildx", "build"]);
+            cmd.args(["--builder", &builder]);
+        }
+        Host::Kubernetes { registry: None, .. } => {
+            return Err(anyhow::anyhow!(
+                "Probing base image user for Kubernetes requires a registry"
+            ));
+        }
+    }
+    cmd.args(["--progress=plain"]);
+    let dockerfile_path = tmp.path().join("Dockerfile");
+    let dockerfile_path = dockerfile_path.display();
+    cmd.arg(format!("-f={dockerfile_path}"));
+    cmd.arg(tmp.path().display().to_string());
+
+    let output = cmd.combined_output().context("probing base image user")?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "probe build failed:\n{}",
+            output.combined_output
+        ));
+    }
+
+    // Parse "RUMPELPOD_BASE_USER=<name>" from the build log.
+    let prefix = format!("{marker}=");
+    for line in output.combined_output.lines() {
+        if let Some(pos) = line.find(&prefix) {
+            let user = line[pos + prefix.len()..].trim();
+            if !user.is_empty() {
+                return Ok(user.to_string());
+            }
+        }
+    }
+
+    // No USER directive in the base image means root.
+    Ok("root".to_string())
+}
+
 /// Generate the Dockerfile content for the prepared image.
 ///
 /// The gateway bare repo is passed as a named build context (`gateway`)
@@ -141,9 +211,11 @@ fn generate_dockerfile(
 
     formatdoc! {r#"
         FROM {base_image}
-        USER root
 
         ARG TARGETARCH
+        ARG BASE_USER=root
+        USER root
+
         COPY --chmod=755 rumpel-linux-${{TARGETARCH}} {rumpel}
 
         RUN --mount=type=bind,from=gateway,target=/tmp/gateway \
@@ -152,7 +224,7 @@ fn generate_dockerfile(
               --repo-path '{repo_path}' \
               --user '{user}'{claude_flag}
 
-        USER {user}
+        USER ${{BASE_USER}}
     "#}
 }
 
@@ -194,6 +266,7 @@ fn run_docker_build(
     build_context: &Path,
     gateway_path: &Path,
     docker_host: &Host,
+    base_user: &str,
 ) -> Result<()> {
     // Symlink the gateway to a name without `.git` so buildx treats it
     // as a plain directory rather than a git URL.
@@ -235,6 +308,7 @@ fn run_docker_build(
 
     let gateway_link = gateway_link.display();
     cmd.arg(format!("--build-context=gateway={gateway_link}"));
+    cmd.arg(format!("--build-arg=BASE_USER={base_user}"));
 
     let dockerfile = build_context.join("Dockerfile");
     let dockerfile = dockerfile.display();
@@ -309,6 +383,8 @@ pub fn build_prepared_image(
     // `docker build FROM` cannot resolve bare sha256 digests; tag them first.
     let buildable_base = ensure_buildable_tag(&base_image.0, docker_host)?;
 
+    let base_user = probe_base_image_user(&buildable_base, docker_host)?;
+
     let build_ctx = assemble_build_context(
         &buildable_base,
         container_repo_path,
@@ -316,7 +392,13 @@ pub fn build_prepared_image(
         claude_info.as_ref(),
     )?;
 
-    run_docker_build(&tag, build_ctx.path(), gateway_path, docker_host)?;
+    run_docker_build(
+        &tag,
+        build_ctx.path(),
+        gateway_path,
+        docker_host,
+        &base_user,
+    )?;
 
     let final_image = match docker_host {
         Host::Kubernetes {
