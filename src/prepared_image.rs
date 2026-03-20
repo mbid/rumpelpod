@@ -157,7 +157,7 @@ fn probe_base_image_user(base_image: &str, docker_host: &Host) -> Result<String>
             ));
         }
     }
-    cmd.args(["--progress=plain"]);
+    cmd.args(["--progress=plain", "--no-cache"]);
     let dockerfile_path = tmp.path().join("Dockerfile");
     let dockerfile_path = dockerfile_path.display();
     cmd.arg(format!("-f={dockerfile_path}"));
@@ -172,14 +172,21 @@ fn probe_base_image_user(base_image: &str, docker_host: &Host) -> Result<String>
     }
 
     // Parse "RUMPELPOD_BASE_USER=<name>" from the build log.
+    // Take the last match: buildx --progress=plain prints the RUN
+    // instruction itself (containing the unexpanded `$(id -un)`)
+    // before the actual command output with the resolved username.
     let prefix = format!("{marker}=");
+    let mut found_user = None;
     for line in output.combined_output.lines() {
         if let Some(pos) = line.find(&prefix) {
             let user = line[pos + prefix.len()..].trim();
             if !user.is_empty() {
-                return Ok(user.to_string());
+                found_user = Some(user.to_string());
             }
         }
+    }
+    if let Some(user) = found_user {
+        return Ok(user);
     }
 
     // No USER directive in the base image means root.
