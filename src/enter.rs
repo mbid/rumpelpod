@@ -317,7 +317,7 @@ fn resolve_container_env_vars(value: &str, pod: &crate::pod::PodClient) -> Strin
             };
 
             let val = pod
-                .run(&["printenv", var_name], None, None, &[], None, Some(5))
+                .run(&["printenv", var_name], None, &[], None, Some(5))
                 .ok()
                 .filter(|r| r.exit_code == 0)
                 .and_then(|r| {

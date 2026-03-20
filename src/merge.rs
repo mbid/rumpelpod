@@ -25,7 +25,6 @@ fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<(
                 "status",
                 "--porcelain",
             ],
-            Some(&result.user),
             None,
             &[],
             None,

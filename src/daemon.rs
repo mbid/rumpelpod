@@ -1179,7 +1179,6 @@ fn try_remove_container(
 ///   ~/.claude.json               -- whitelisted global keys only
 fn copy_claude_config_via_pod(
     pod: &PodClient,
-    user: &str,
     repo_path: &Path,
     container_repo_path: &Path,
     pod_name: &str,
@@ -1188,7 +1187,7 @@ fn copy_claude_config_via_pod(
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
 
     // Determine the container user's home directory
-    let user_info = pod.user_info(user)?;
+    let user_info = pod.user_info()?;
     let container_home = user_info.home;
 
     // Build a minimal .claude.json with only the keys needed to suppress
@@ -1198,7 +1197,7 @@ fn copy_claude_config_via_pod(
         Ok(data) => {
             let minimal = strip_claude_json(&data, repo_path, container_repo_path);
             let dest = format!("{container_home}/.claude.json");
-            pod.fs_write(Path::new(&dest), &minimal, Some(user), true)
+            pod.fs_write(Path::new(&dest), &minimal, true)
                 .context("writing .claude.json")?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1209,14 +1208,14 @@ fn copy_claude_config_via_pod(
     // so create the directory unconditionally.
     let claude_dir = host_home.join(".claude");
     let container_claude_dir = format!("{container_home}/.claude");
-    pod.fs_mkdir(Path::new(&container_claude_dir), Some(user))
+    pod.fs_mkdir(Path::new(&container_claude_dir))
         .context("creating .claude directory")?;
 
     // Copy credentials if present.
     match std::fs::read(claude_dir.join(".credentials.json")) {
         Ok(data) => {
             let dest = format!("{container_home}/.claude/.credentials.json");
-            pod.fs_write(Path::new(&dest), &data, Some(user), false)
+            pod.fs_write(Path::new(&dest), &data, false)
                 .context("writing .claude/.credentials.json")?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -1237,14 +1236,13 @@ fn copy_claude_config_via_pod(
         data
     };
     let dest = format!("{container_home}/.claude/settings.json");
-    pod.fs_write(Path::new(&dest), &data, Some(user), false)
+    pod.fs_write(Path::new(&dest), &data, false)
         .context("writing .claude/settings.json")?;
 
     // Copy project-specific conversation history and memory so claude inside
     // the sandbox can see prior context for the same project.
     copy_claude_project_dir_via_pod(
         pod,
-        user,
         &host_home,
         &container_home,
         repo_path,
@@ -1255,7 +1253,6 @@ fn copy_claude_config_via_pod(
     // recall works for prior prompts.
     copy_claude_history_via_pod(
         pod,
-        user,
         &host_home,
         &container_home,
         repo_path,
@@ -1282,7 +1279,6 @@ fn claude_project_dir_name(repo_path: &Path) -> String {
 /// repo path.
 fn copy_claude_project_dir_via_pod(
     pod: &PodClient,
-    user: &str,
     host_home: &Path,
     container_home: &str,
     repo_path: &Path,
@@ -1298,7 +1294,7 @@ fn copy_claude_project_dir_via_pod(
 
     let container_project_dir = format!("{container_home}/.claude/projects/{container_dir_name}");
 
-    pod.fs_mkdir(Path::new(&container_project_dir), Some(user))
+    pod.fs_mkdir(Path::new(&container_project_dir))
         .context("creating claude project directory")?;
 
     // Stream the whole directory via tar to avoid one HTTP call per file.
@@ -1320,7 +1316,6 @@ fn copy_claude_project_dir_via_pod(
     if !tar_output.stdout.is_empty() {
         let result = pod.run(
             &["tar", "-x", "-C", &container_project_dir],
-            Some(user),
             None,
             &[],
             Some(&tar_output.stdout),
@@ -1342,7 +1337,6 @@ fn copy_claude_project_dir_via_pod(
 /// this project and rewriting the project path so up-arrow input recall works.
 fn copy_claude_history_via_pod(
     pod: &PodClient,
-    user: &str,
     host_home: &Path,
     container_home: &str,
     repo_path: &Path,
@@ -1389,7 +1383,7 @@ fn copy_claude_history_via_pod(
     }
 
     let dest = format!("{container_home}/.claude/history.jsonl");
-    pod.fs_write(Path::new(&dest), &filtered, Some(user), false)
+    pod.fs_write(Path::new(&dest), &filtered, false)
         .context("writing .claude/history.jsonl")?;
 
     Ok(())
@@ -1421,7 +1415,7 @@ fn snapshot_claude_config(pod: &PodClient, container_repo_path: &Path) -> Result
          [ -n \"$items\" ] && tar -c $items || exit 1"
     );
 
-    let result = pod.run(&["sh", "-c", &script], None, None, &[], None, Some(30))?;
+    let result = pod.run(&["sh", "-c", &script], None, &[], None, Some(30))?;
 
     if result.exit_code != 0 {
         return Ok(None);
@@ -1441,18 +1435,11 @@ fn snapshot_claude_config(pod: &PodClient, container_repo_path: &Path) -> Result
 
 /// Restore a previously snapshotted ~/.claude/ and ~/.claude.json into
 /// a new container.
-fn restore_claude_config(pod: &PodClient, user: &str, tar_data: &[u8]) -> Result<()> {
-    let user_info = pod.user_info(user)?;
+fn restore_claude_config(pod: &PodClient, tar_data: &[u8]) -> Result<()> {
+    let user_info = pod.user_info()?;
     let home = &user_info.home;
 
-    let result = pod.run(
-        &["tar", "-x", "-C", home],
-        Some(user),
-        None,
-        &[],
-        Some(tar_data),
-        None,
-    )?;
+    let result = pod.run(&["tar", "-x", "-C", home], None, &[], Some(tar_data), None)?;
     if result.exit_code != 0 {
         let stderr = base64_decode_lossy(&result.stderr);
         return Err(anyhow::anyhow!("restoring claude config: {stderr}"));
@@ -1670,6 +1657,7 @@ fn start_container_server(
     container_id: &str,
     container_url: &str,
     container_port: u16,
+    user: &str,
 ) -> Result<String> {
     use bollard::exec::StartExecOptions;
     use bollard::secret::ExecConfig;
@@ -1685,7 +1673,7 @@ fn start_container_server(
         let token_bytes = exec_command(
             docker,
             container_id,
-            Some("root"),
+            Some(user),
             None,
             None,
             vec!["cat", crate::pod::TOKEN_FILE],
@@ -1709,7 +1697,7 @@ fn start_container_server(
             "--token".to_string(),
             token.clone(),
         ]),
-        user: Some("root".to_string()),
+        user: Some(user.to_string()),
         ..Default::default()
     };
 
@@ -1756,7 +1744,6 @@ fn ensure_repo_initialized_via_pod(
     git_http_url: &str,
     token: &str,
     container_repo_path: &Path,
-    user: &str,
 ) -> Result<()> {
     let git_dir = container_repo_path.join(".git");
     let stat = pod.fs_stat(&git_dir)?;
@@ -1767,69 +1754,30 @@ fn ensure_repo_initialized_via_pod(
         let hook_path = container_repo_path.join(".git/hooks/reference-transaction");
         let hook_stat = pod.fs_stat(&hook_path)?;
         if !hook_stat.exists {
-            pod.git_sanitize(container_repo_path, Some(user))?;
+            pod.git_sanitize(container_repo_path)?;
         }
         return Ok(());
     }
 
     // Ensure parent directories exist
     let parent = container_repo_path.parent().unwrap_or(container_repo_path);
-    pod.fs_mkdir(parent, None)?;
-    pod.fs_chown(&[parent], user)?;
+    pod.fs_mkdir(parent)?;
 
     // Clone from the git-http bridge with auth header
     let auth_header = format!("Authorization: Bearer {token}");
-    pod.git_clone(
-        git_http_url,
-        container_repo_path,
-        Some(&auth_header),
-        true,
-        Some(user),
-    )?;
-
-    Ok(())
-}
-
-/// Check that the .git directory is owned by the expected user.
-fn check_git_ownership_via_pod(
-    pod: &PodClient,
-    container_repo_path: &Path,
-    user: &str,
-) -> Result<()> {
-    let git_dir = container_repo_path.join(".git");
-    let stat = pod.fs_stat(&git_dir)?;
-    let expected_user = user.split(':').next().unwrap_or(user);
-
-    if let Some(ref owner) = stat.owner {
-        if owner != expected_user {
-            return Err(anyhow::anyhow!(
-                "Git directory {} is owned by '{}', but pod is configured to run as '{}'.\n\
-                 Please ensure the repository inside the container is owned by the configured user.\n\
-                 You can fix this by running: chown -R {} {}",
-                git_dir.display(),
-                owner,
-                expected_user,
-                user,
-                container_repo_path.display()
-            ));
-        }
-    }
+    pod.git_clone(git_http_url, container_repo_path, Some(&auth_header), true)?;
 
     Ok(())
 }
 
 /// Probe user env via the in-container server.
-fn probe_user_env_via_pod(
-    pod: &PodClient,
-    user: &str,
-    probe: &UserEnvProbe,
-) -> HashMap<String, String> {
+fn probe_user_env_via_pod(pod: &PodClient, probe: &UserEnvProbe) -> HashMap<String, String> {
     let flags = match probe.shell_flags_exec() {
         Some(f) => f,
         None => return HashMap::new(),
     };
 
-    pod.probe_env(user, flags).unwrap_or_else(|e| {
+    pod.probe_env(flags).unwrap_or_else(|e| {
         log::warn!("userEnvProbe via pod failed: {e}");
         HashMap::new()
     })
@@ -1838,14 +1786,13 @@ fn probe_user_env_via_pod(
 /// Execute a single lifecycle command via the in-container HTTP server.
 fn run_lifecycle_command_via_pod(
     pod: &PodClient,
-    user: &str,
     workdir: &Path,
     command: &LifecycleCommand,
     env: &[String],
 ) -> Result<()> {
     match command {
         LifecycleCommand::String(s) => {
-            let result = pod.run(&["sh", "-c", s], Some(user), Some(workdir), env, None, None)?;
+            let result = pod.run(&["sh", "-c", s], Some(workdir), env, None, None)?;
             if result.exit_code != 0 {
                 let stderr = base64_decode_lossy(&result.stderr);
                 return Err(anyhow::anyhow!(
@@ -1857,7 +1804,7 @@ fn run_lifecycle_command_via_pod(
         }
         LifecycleCommand::Array(args) => {
             let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let result = pod.run(&args_ref, Some(user), Some(workdir), env, None, None)?;
+            let result = pod.run(&args_ref, Some(workdir), env, None, None)?;
             if result.exit_code != 0 {
                 let stderr = base64_decode_lossy(&result.stderr);
                 return Err(anyhow::anyhow!(
@@ -1879,7 +1826,6 @@ fn run_lifecycle_command_via_pod(
                     };
                     let pod_url = pod.url().to_string();
                     let pod_token = pod.token().to_string();
-                    let u = user.to_string();
                     let wd = workdir.to_path_buf();
                     let task_name = name.clone();
                     let thread_env = env.to_vec();
@@ -1887,8 +1833,7 @@ fn run_lifecycle_command_via_pod(
                     std::thread::spawn(move || {
                         let pod = PodClient::new(&pod_url, &pod_token)?;
                         let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-                        let result =
-                            pod.run(&args_ref, Some(&u), Some(&wd), &thread_env, None, None)?;
+                        let result = pod.run(&args_ref, Some(&wd), &thread_env, None, None)?;
                         if result.exit_code != 0 {
                             let stderr = base64_decode_lossy(&result.stderr);
                             return Err(anyhow::anyhow!(
@@ -1926,7 +1871,6 @@ fn base64_decode_lossy(s: &str) -> String {
 fn spawn_background_lifecycle_commands_via_pod(
     container_url: String,
     container_token: String,
-    user: String,
     workdir: PathBuf,
     commands: Vec<(String, LifecycleCommand)>,
     env: Vec<String>,
@@ -1943,7 +1887,7 @@ fn spawn_background_lifecycle_commands_via_pod(
             }
         };
         for (label, cmd) in &commands {
-            if let Err(e) = run_lifecycle_command_via_pod(&pod, &user, &workdir, cmd, &env) {
+            if let Err(e) = run_lifecycle_command_via_pod(&pod, &workdir, cmd, &env) {
                 error!("background {label} failed: {e:#}");
                 break;
             }
@@ -1957,7 +1901,6 @@ fn spawn_background_lifecycle_commands_via_pod(
 #[allow(clippy::too_many_arguments)]
 fn run_once_lifecycle_commands_via_pod(
     pod: &PodClient,
-    user: &str,
     workdir: &Path,
     dc: &DevContainer,
     pod_id: db::PodId,
@@ -1975,7 +1918,7 @@ fn run_once_lifecycle_commands_via_pod(
     if !on_create_ran {
         if let Some(cmd) = &dc.on_create_command {
             if *wait_for >= WaitFor::OnCreateCommand {
-                if let Err(e) = run_lifecycle_command_via_pod(pod, user, workdir, cmd, env) {
+                if let Err(e) = run_lifecycle_command_via_pod(pod, workdir, cmd, env) {
                     // Mark both as ran to prevent retries and skip postCreate
                     let conn = db_mutex.lock().unwrap();
                     db::mark_on_create_ran(&conn, pod_id)?;
@@ -1992,7 +1935,7 @@ fn run_once_lifecycle_commands_via_pod(
 
     if let Some(cmd) = &dc.update_content_command {
         if *wait_for >= WaitFor::UpdateContentCommand {
-            if let Err(e) = run_lifecycle_command_via_pod(pod, user, workdir, cmd, env) {
+            if let Err(e) = run_lifecycle_command_via_pod(pod, workdir, cmd, env) {
                 // Skip postCreateCommand on failure
                 let conn = db_mutex.lock().unwrap();
                 db::mark_post_create_ran(&conn, pod_id)?;
@@ -2011,7 +1954,7 @@ fn run_once_lifecycle_commands_via_pod(
     if !post_create_ran {
         if let Some(cmd) = &dc.post_create_command {
             if *wait_for >= WaitFor::PostCreateCommand {
-                if let Err(e) = run_lifecycle_command_via_pod(pod, user, workdir, cmd, env) {
+                if let Err(e) = run_lifecycle_command_via_pod(pod, workdir, cmd, env) {
                     let conn = db_mutex.lock().unwrap();
                     db::mark_post_create_ran(&conn, pod_id)?;
                     return Err(e.context("postCreateCommand failed"));
@@ -2183,14 +2126,7 @@ impl DaemonServer {
                     // task hasn't noticed yet), drop the stale handle so
                     // the next enter creates a fresh tunnel.
                     let git_result: Result<()> = (|| {
-                        ensure_repo_initialized_via_pod(
-                            &pod,
-                            &url,
-                            &token,
-                            &container_repo_path,
-                            &user,
-                        )?;
-                        check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
+                        ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path)?;
 
                         pod.git_setup(
                             &container_repo_path,
@@ -2198,7 +2134,6 @@ impl DaemonServer {
                             &token,
                             &pod_name.0,
                             None,
-                            Some(&user),
                             git_identity,
                         )
                         .context("configuring git")?;
@@ -2218,7 +2153,6 @@ impl DaemonServer {
                             &token,
                             &pod_name.0,
                             false,
-                            Some(&user),
                         )
                         .context("setting up submodules")?;
                         Ok(())
@@ -2276,10 +2210,10 @@ impl DaemonServer {
                         .user_env_probe
                         .as_ref()
                         .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-                    let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
+                    let probed_env = probe_user_env_via_pod(&pod, effective_probe);
 
                     let user_info =
-                        pod.user_info(&user)
+                        pod.user_info()
                             .unwrap_or_else(|_| crate::pod::UserInfoResponse {
                                 home: String::new(),
                                 shell: "/bin/sh".to_string(),
@@ -2486,9 +2420,8 @@ impl DaemonServer {
         let base_url = format!("http://127.0.0.1:{tunnel_port}");
         let url = format!("{base_url}/gateway.git");
 
-        ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)
+        ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path)
             .map_err(mark_error)?;
-        check_git_ownership_via_pod(&pod, &container_repo_path, &user).map_err(mark_error)?;
 
         pod.git_setup(
             &container_repo_path,
@@ -2496,7 +2429,6 @@ impl DaemonServer {
             &token,
             &pod_name.0,
             host_branch,
-            Some(&user),
             git_identity,
         )
         .context("configuring git")
@@ -2517,7 +2449,6 @@ impl DaemonServer {
             &token,
             &pod_name.0,
             true,
-            Some(&user),
         )
         .context("setting up submodules")
         .map_err(mark_error)?;
@@ -2586,14 +2517,13 @@ impl DaemonServer {
             .user_env_probe
             .as_ref()
             .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-        let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
+        let probed_env = probe_user_env_via_pod(&pod, effective_probe);
         let env_strings: Vec<String> = probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
         // Run lifecycle commands for new pod
         let wait_for = devcontainer.effective_wait_for();
         let mut bg_commands = run_once_lifecycle_commands_via_pod(
             &pod,
-            &user,
             &container_repo_path,
             devcontainer,
             pod_id,
@@ -2605,7 +2535,7 @@ impl DaemonServer {
 
         if wait_for >= WaitFor::PostStartCommand {
             if let Some(cmd) = &devcontainer.post_start_command {
-                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                run_lifecycle_command_via_pod(&pod, &container_repo_path, cmd, &env_strings)
                     .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_start_command {
@@ -2614,7 +2544,7 @@ impl DaemonServer {
 
         if wait_for >= WaitFor::PostAttachCommand {
             if let Some(cmd) = &devcontainer.post_attach_command {
-                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                run_lifecycle_command_via_pod(&pod, &container_repo_path, cmd, &env_strings)
                     .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_attach_command {
@@ -2625,7 +2555,6 @@ impl DaemonServer {
             spawn_background_lifecycle_commands_via_pod(
                 container_url.clone(),
                 token.clone(),
-                user.clone(),
                 container_repo_path.clone(),
                 bg_commands,
                 env_strings,
@@ -2633,7 +2562,7 @@ impl DaemonServer {
         }
 
         let user_info = pod
-            .user_info(&user)
+            .user_info()
             .unwrap_or_else(|_| crate::pod::UserInfoResponse {
                 home: String::new(),
                 shell: "/bin/sh".to_string(),
@@ -2851,7 +2780,7 @@ impl DaemonServer {
 
             // Ensure the in-container HTTP server is running
             let container_token =
-                start_container_server(&docker, &state.id, &container_url, serve_port)?;
+                start_container_server(&docker, &state.id, &container_url, serve_port, &user)?;
 
             // Ensure pod record exists in database
             let pod_id = {
@@ -2921,10 +2850,7 @@ impl DaemonServer {
 
             // Clone repo if not already present (e.g. devcontainer without COPY)
             let git_result: Result<()> = (|| {
-                ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path, &user)?;
-
-                // Check .git ownership matches the pod user
-                check_git_ownership_via_pod(&pod, &container_repo_path, &user)?;
+                ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path)?;
 
                 // On re-entry, don't pass host_branch - we don't want to change
                 // the upstream of an existing branch.
@@ -2934,7 +2860,6 @@ impl DaemonServer {
                     &token,
                     &pod_name.0,
                     None,
-                    Some(&user),
                     git_identity.as_ref(),
                 )
                 .context("configuring git")?;
@@ -2955,7 +2880,6 @@ impl DaemonServer {
                     &token,
                     &pod_name.0,
                     false,
-                    Some(&user),
                 )
                 .context("setting up submodules")?;
                 Ok(())
@@ -2971,7 +2895,7 @@ impl DaemonServer {
                 .user_env_probe
                 .as_ref()
                 .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-            let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
+            let probed_env = probe_user_env_via_pod(&pod, effective_probe);
             let env_strings: Vec<String> =
                 probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
@@ -2983,13 +2907,7 @@ impl DaemonServer {
             // updateContentCommand runs on every re-entry after git sync
             if let Some(cmd) = &devcontainer.update_content_command {
                 if wait_for >= WaitFor::UpdateContentCommand {
-                    run_lifecycle_command_via_pod(
-                        &pod,
-                        &user,
-                        &container_repo_path,
-                        cmd,
-                        &env_strings,
-                    )?;
+                    run_lifecycle_command_via_pod(&pod, &container_repo_path, cmd, &env_strings)?;
                 } else {
                     bg_commands.push(("updateContentCommand".to_string(), cmd.clone()));
                 }
@@ -3000,7 +2918,6 @@ impl DaemonServer {
                     if wait_for >= WaitFor::PostStartCommand {
                         run_lifecycle_command_via_pod(
                             &pod,
-                            &user,
                             &container_repo_path,
                             cmd,
                             &env_strings,
@@ -3013,13 +2930,7 @@ impl DaemonServer {
 
             if let Some(cmd) = &devcontainer.post_attach_command {
                 if wait_for >= WaitFor::PostAttachCommand {
-                    run_lifecycle_command_via_pod(
-                        &pod,
-                        &user,
-                        &container_repo_path,
-                        cmd,
-                        &env_strings,
-                    )?;
+                    run_lifecycle_command_via_pod(&pod, &container_repo_path, cmd, &env_strings)?;
                 } else {
                     bg_commands.push(("postAttachCommand".to_string(), cmd.clone()));
                 }
@@ -3029,7 +2940,6 @@ impl DaemonServer {
                 spawn_background_lifecycle_commands_via_pod(
                     container_url.clone(),
                     container_token.clone(),
-                    user.clone(),
                     container_repo_path.clone(),
                     bg_commands,
                     env_strings.clone(),
@@ -3053,7 +2963,7 @@ impl DaemonServer {
             }
 
             let user_info = pod
-                .user_info(&user)
+                .user_info()
                 .unwrap_or_else(|_| crate::pod::UserInfoResponse {
                     home: String::new(),
                     shell: "/bin/sh".to_string(),
@@ -3139,17 +3049,31 @@ impl DaemonServer {
                 .unwrap()
                 .insert((repo_path.to_path_buf(), pod_name.0.clone()), proxy);
 
-            let container_token_inner =
-                start_container_server(&docker, &container_id.0, &container_url_inner, serve_port)?;
+            let container_token_inner = start_container_server(
+                &docker,
+                &container_id.0,
+                &container_url_inner,
+                serve_port,
+                &user,
+            )?;
             let pod_inner = PodClient::new(&container_url_inner, &container_token_inner)?;
 
             // Fix ownership of mount targets so the container user can write
             // to them.  Docker creates volume/tmpfs mounts as root by default.
             if !mounts.is_empty() {
-                let targets: Vec<&Path> = mounts.iter().map(|m| Path::new(&m.target)).collect();
-                pod_inner
-                    .fs_chown(&targets, &user)
-                    .context("chown mount targets for container user")?;
+                let mut chown_args = vec!["chown", &user];
+                let target_strings: Vec<String> = mounts.iter().map(|m| m.target.clone()).collect();
+                let target_refs: Vec<&str> = target_strings.iter().map(|s| s.as_str()).collect();
+                chown_args.extend(target_refs);
+                exec_command(
+                    &docker,
+                    &container_id.0,
+                    Some("root"),
+                    None,
+                    None,
+                    chown_args,
+                )
+                .context("chown mount targets for container user")?;
             }
 
             // Start exec tunnel so the container can reach the git HTTP
@@ -3170,10 +3094,7 @@ impl DaemonServer {
             let base_url = format!("http://127.0.0.1:{tunnel_port}");
             let url = format!("{base_url}/gateway.git");
 
-            ensure_repo_initialized_via_pod(&pod_inner, &url, &token, &container_repo_path, &user)?;
-
-            // Check .git ownership matches the pod user
-            check_git_ownership_via_pod(&pod_inner, &container_repo_path, &user)?;
+            ensure_repo_initialized_via_pod(&pod_inner, &url, &token, &container_repo_path)?;
 
             pod_inner
                 .git_setup(
@@ -3182,7 +3103,6 @@ impl DaemonServer {
                     &token,
                     &pod_name.0,
                     host_branch.as_deref(),
-                    Some(&user),
                     git_identity.as_ref(),
                 )
                 .context("configuring git")?;
@@ -3204,7 +3124,6 @@ impl DaemonServer {
                     &token,
                     &pod_name.0,
                     true,
-                    Some(&user),
                 )
                 .context("setting up submodules")?;
 
@@ -3239,7 +3158,7 @@ impl DaemonServer {
             .user_env_probe
             .as_ref()
             .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-        let probed_env = probe_user_env_via_pod(&pod, &user, effective_probe);
+        let probed_env = probe_user_env_via_pod(&pod, effective_probe);
         let env_strings: Vec<String> = probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
         // Run lifecycle commands for new container:
@@ -3251,7 +3170,6 @@ impl DaemonServer {
 
         let mut bg_commands = run_once_lifecycle_commands_via_pod(
             &pod,
-            &user,
             &container_repo_path,
             &devcontainer,
             pod_id,
@@ -3263,7 +3181,7 @@ impl DaemonServer {
 
         if wait_for >= WaitFor::PostStartCommand {
             if let Some(cmd) = &devcontainer.post_start_command {
-                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                run_lifecycle_command_via_pod(&pod, &container_repo_path, cmd, &env_strings)
                     .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_start_command {
@@ -3272,7 +3190,7 @@ impl DaemonServer {
 
         if wait_for >= WaitFor::PostAttachCommand {
             if let Some(cmd) = &devcontainer.post_attach_command {
-                run_lifecycle_command_via_pod(&pod, &user, &container_repo_path, cmd, &env_strings)
+                run_lifecycle_command_via_pod(&pod, &container_repo_path, cmd, &env_strings)
                     .map_err(mark_error)?;
             }
         } else if let Some(cmd) = &devcontainer.post_attach_command {
@@ -3283,7 +3201,6 @@ impl DaemonServer {
             spawn_background_lifecycle_commands_via_pod(
                 container_url.clone(),
                 container_token.clone(),
-                user.clone(),
                 container_repo_path.clone(),
                 bg_commands,
                 env_strings,
@@ -3315,7 +3232,7 @@ impl DaemonServer {
         }
 
         let user_info = pod
-            .user_info(&user)
+            .user_info()
             .unwrap_or_else(|_| crate::pod::UserInfoResponse {
                 home: String::new(),
                 shell: "/bin/sh".to_string(),
@@ -3363,7 +3280,6 @@ impl DaemonServer {
             ..
         } = docker_host
         {
-            let snapshot_user = params.devcontainer.user().map(String::from);
             let k8s_name = crate::k8s::k8s_pod_name(&pod_name.0, repo_path);
             let client = crate::k8s::K8sClient::new(context, namespace)?;
 
@@ -3388,10 +3304,7 @@ impl DaemonServer {
                         let token = String::from_utf8_lossy(&token_bytes).trim().to_string();
                         if let Ok(old_pod) = PodClient::new(&container_url, &token) {
                             patch = old_pod
-                                .git_snapshot(
-                                    Path::new(&container_repo_path),
-                                    snapshot_user.as_deref(),
-                                )
+                                .git_snapshot(Path::new(&container_repo_path))
                                 .context("snapshotting dirty files in k8s pod")?;
 
                             claude_snapshot =
@@ -3421,13 +3334,12 @@ impl DaemonServer {
                             Path::new(&container_repo_path),
                             &patch_content,
                             &created_files,
-                            Some(&launch_result.user),
                         )
                         .context("applying snapshot patch to new k8s pod")?;
                 }
 
                 if let Some(tar_data) = claude_snapshot {
-                    restore_claude_config(&new_pod, &launch_result.user, &tar_data)
+                    restore_claude_config(&new_pod, &tar_data)
                         .context("restoring claude config in k8s pod")?;
                 }
             }
@@ -3463,12 +3375,16 @@ impl DaemonServer {
                     )) {
                         let port = proxy.port;
                         let url = format!("http://127.0.0.1:{port}");
-                        if let Ok(container_token) =
-                            start_container_server(&docker, &state.id, &url, serve_port)
-                        {
+                        if let Ok(container_token) = start_container_server(
+                            &docker,
+                            &state.id,
+                            &url,
+                            serve_port,
+                            snapshot_user.as_deref().unwrap_or("root"),
+                        ) {
                             if let Ok(old_pod) = PodClient::new(&url, &container_token) {
                                 patch = old_pod
-                                    .git_snapshot(&container_repo_path, snapshot_user.as_deref())
+                                    .git_snapshot(&container_repo_path)
                                     .context("snapshotting dirty files")?;
 
                                 claude_snapshot =
@@ -3499,18 +3415,12 @@ impl DaemonServer {
                     get_created_files_from_patch(&patch_content).unwrap_or_default();
 
                 new_pod
-                    .git_apply_patch(
-                        &container_repo_path,
-                        &patch_content,
-                        &created_files,
-                        Some(&launch_result.user),
-                    )
+                    .git_apply_patch(&container_repo_path, &patch_content, &created_files)
                     .context("applying snapshot patch")?;
             }
 
             if let Some(tar_data) = claude_snapshot {
-                restore_claude_config(&new_pod, &launch_result.user, &tar_data)
-                    .context("restoring claude config")?;
+                restore_claude_config(&new_pod, &tar_data).context("restoring claude config")?;
             }
         }
 
@@ -3939,7 +3849,6 @@ impl Daemon for DaemonServer {
 
         copy_claude_config_via_pod(
             &pod,
-            &request.user,
             &request.repo_path,
             &request.container_repo_path,
             &request.pod_name.0,

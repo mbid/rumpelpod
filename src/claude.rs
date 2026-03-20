@@ -106,7 +106,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         pty_attach::SessionParams {
             name: PTY_SESSION_NAME.to_string(),
             cmd: claude_cmd,
-            user: Some(result.user.clone()),
             workdir: Some(workdir_str),
             env: env_strings,
         },

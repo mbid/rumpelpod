@@ -84,7 +84,6 @@ pub fn get_terminal_size() -> Result<(u16, u16)> {
 pub struct SessionParams {
     pub name: String,
     pub cmd: Vec<String>,
-    pub user: Option<String>,
     pub workdir: Option<String>,
     pub env: Vec<String>,
 }
@@ -186,7 +185,6 @@ async fn connect_ws(
     let session_msg = PtyControl::Session {
         name: params.name.clone(),
         cmd: params.cmd.clone(),
-        user: params.user.clone(),
         workdir: params.workdir.clone().map(Into::into),
         env: params.env.clone(),
         cols,

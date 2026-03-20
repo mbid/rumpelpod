@@ -209,12 +209,7 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
         } => {
             let resolved = resolve_container_path(container_path, &repo_path);
             let (reader, handle) = tar_local_path(local_path, cmd.follow_link)?;
-            let owner = if cmd.archive {
-                None
-            } else {
-                Some(result.user.as_str())
-            };
-            client.cp_upload(Path::new(&resolved), reader, owner)?;
+            client.cp_upload(Path::new(&resolved), reader)?;
             handle
                 .join()
                 .expect("tar writer panicked")

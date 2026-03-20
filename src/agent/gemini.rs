@@ -205,7 +205,6 @@ pub fn run_gemini_agent(
     let launch_result = pod_handle
         .join()
         .map_err(|e| anyhow::anyhow!("Pod thread panicked: {:?}", e))??;
-    let user = &launch_result.user;
     let pod = PodClient::connect(&launch_result.container_url, &launch_result.container_token)?;
 
     // Resolve ${containerEnv:VAR} now that the container is running.
@@ -380,7 +379,6 @@ pub fn run_gemini_agent(
                                 let (output, success) = execute_bash_in_pod(
                                     &pod,
                                     pod_name,
-                                    user,
                                     repo_path,
                                     &remote_env,
                                     command,

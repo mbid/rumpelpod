@@ -1,12 +1,11 @@
-//! HTTP server that runs inside containers to replace shell-scripted operations.
+//! HTTP server that runs inside containers as the devcontainer user.
 //!
 //! Started via `rumpel container-serve` after the binary is copied into the container.
-//! Listens on 0.0.0.0:7890 and implements filesystem, git, environment, and command
+//! Listens on 127.0.0.1:7890 and implements filesystem, git, environment, and command
 //! execution operations in Rust instead of composing shell scripts via docker exec.
 
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -14,7 +13,6 @@ use anyhow::{Context, Result};
 use axum::http::StatusCode;
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
-use nix::unistd::{Uid, User};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
@@ -40,6 +38,19 @@ struct ErrorResponse {
 // ---------------------------------------------------------------------------
 
 pub fn run_container_server(port: u16, token: String) -> ! {
+    // Ensure identity env vars match the running user so child
+    // processes (shell profile scripts, git) see the right values.
+    // Docker exec does not always propagate these.
+    if let Some(user) = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+    {
+        let home = user.dir.to_string_lossy();
+        std::env::set_var("HOME", &*home);
+        std::env::set_var("USER", &user.name);
+        std::env::set_var("LOGNAME", &user.name);
+    }
+
     let state = PodServerState {
         pty_sessions: super::pty::PtySessions::new(),
         token: token.clone(),
@@ -51,7 +62,6 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/fs/write", post(fs_write_handler))
         .route("/fs/stat", post(fs_stat_handler))
         .route("/fs/mkdir", post(fs_mkdir_handler))
-        .route("/fs/chown", post(fs_chown_handler))
         .route("/git/clone", post(git_clone_handler))
         .route("/git/setup", post(git_setup_handler))
         .route("/git/install-hook", post(git_install_hook_handler))
@@ -108,19 +118,8 @@ async fn require_bearer_token(
 }
 
 // ---------------------------------------------------------------------------
-// Helper: resolve user name to uid/gid
+// Helpers
 // ---------------------------------------------------------------------------
-
-fn resolve_user(name: &str) -> Result<User> {
-    User::from_name(name)?.with_context(|| format!("user '{name}' not found"))
-}
-
-fn chown_path(path: &Path, owner: &str) -> Result<()> {
-    let user = resolve_user(owner)?;
-    let path_display = path.display();
-    nix::unistd::chown(path, Some(user.uid), Some(user.gid))
-        .with_context(|| format!("chown {path_display} to {owner}"))
-}
 
 fn ok_json<T: Serialize>(val: T) -> Result<Json<T>, (StatusCode, Json<ErrorResponse>)> {
     Ok(Json(val))
@@ -166,27 +165,12 @@ async fn fs_write_handler(
             let path = req.path.display();
             std::fs::create_dir_all(parent)
                 .map_err(|e| err_json(anyhow::anyhow!("creating parent dirs for {path}: {e}")))?;
-            if let Some(ref owner) = req.owner {
-                // chown each ancestor that we may have created
-                let mut p = parent;
-                loop {
-                    let _ = chown_path(p, owner);
-                    match p.parent() {
-                        Some(pp) if pp != p => p = pp,
-                        _ => break,
-                    }
-                }
-            }
         }
     }
 
     let path = req.path.display();
     std::fs::write(&req.path, &content)
         .map_err(|e| err_json(anyhow::anyhow!("writing {path}: {e}")))?;
-
-    if let Some(ref owner) = req.owner {
-        chown_path(&req.path, owner).map_err(err_json)?;
-    }
 
     ok_json(serde_json::json!({}))
 }
@@ -197,8 +181,11 @@ async fn fs_stat_handler(
     match std::fs::metadata(&req.path) {
         Ok(meta) => {
             use std::os::unix::fs::MetadataExt;
-            let owner = Uid::from_raw(meta.uid());
-            let owner_name = User::from_uid(owner).ok().flatten().map(|u| u.name);
+            let owner = nix::unistd::Uid::from_raw(meta.uid());
+            let owner_name = nix::unistd::User::from_uid(owner)
+                .ok()
+                .flatten()
+                .map(|u| u.name);
             ok_json(FsStatResponse {
                 exists: true,
                 is_dir: meta.is_dir(),
@@ -226,23 +213,6 @@ async fn fs_mkdir_handler(
     std::fs::create_dir_all(&req.path)
         .map_err(|e| err_json(anyhow::anyhow!("mkdir {path}: {e}")))?;
 
-    if let Some(ref owner) = req.owner {
-        chown_path(&req.path, owner).map_err(err_json)?;
-    }
-
-    ok_json(serde_json::json!({}))
-}
-
-async fn fs_chown_handler(
-    Json(req): Json<FsChownRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_user(&req.owner).map_err(err_json)?;
-    let owner = &req.owner;
-    for path in &req.paths {
-        let path_display = path.display();
-        nix::unistd::chown(path, Some(user.uid), Some(user.gid))
-            .map_err(|e| err_json(anyhow::anyhow!("chown {path_display} to {owner}: {e}")))?;
-    }
     ok_json(serde_json::json!({}))
 }
 
@@ -250,9 +220,6 @@ async fn git_clone_handler(
     Json(req): Json<GitCloneRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     let result = (|| -> Result<()> {
-        let user = resolve_user_opt(&req.user)?;
-        let u = user.as_ref();
-
         let mut args = vec!["clone".to_string()];
 
         if let Some(ref auth) = req.auth_header {
@@ -264,14 +231,14 @@ async fn git_clone_handler(
         args.push(req.dest.to_string_lossy().to_string());
 
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_git_command(&args_ref, None, u)?;
+        run_git_command(&args_ref, None)?;
 
         if req.lfs {
             // Try to install git-lfs; skip if not available
             let lfs_installed =
-                run_git_command(&["lfs", "install", "--local"], Some(&req.dest), u).is_ok();
+                run_git_command(&["lfs", "install", "--local"], Some(&req.dest)).is_ok();
             if lfs_installed {
-                run_git_command(&["lfs", "pull"], Some(&req.dest), u)
+                run_git_command(&["lfs", "pull"], Some(&req.dest))
                     .context("git lfs pull failed")?;
             }
         }
@@ -286,13 +253,12 @@ async fn git_clone_handler(
 async fn git_setup_handler(
     Json(req): Json<GitSetupRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_user_opt(&req.user).map_err(err_json)?;
-    let result = setup_git_impl(&req, user.as_ref());
+    let result = setup_git_impl(&req);
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
+fn setup_git_impl(req: &GitSetupRequest) -> Result<()> {
     let repo_path = &req.repo_path;
     let pod_name = &req.pod_name;
     let token = &req.token;
@@ -305,12 +271,11 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
             &format!("Authorization: Bearer {token}"),
         ],
         Some(repo_path),
-        u,
     )?;
 
     // Set up host remote
-    if run_git_command(&["remote", "add", "host", &req.url], Some(repo_path), u).is_err() {
-        run_git_command(&["remote", "set-url", "host", &req.url], Some(repo_path), u)?;
+    if run_git_command(&["remote", "add", "host", &req.url], Some(repo_path)).is_err() {
+        run_git_command(&["remote", "set-url", "host", &req.url], Some(repo_path))?;
     }
     run_git_command(
         &[
@@ -319,36 +284,26 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
             "+refs/heads/host/*:refs/remotes/host/*",
         ],
         Some(repo_path),
-        u,
     )?;
     run_git_command(
         &["config", "remote.host.pushurl", "PUSH_DISABLED"],
         Some(repo_path),
-        u,
     )?;
 
     // Set up rumpelpod remote
-    if run_git_command(
-        &["remote", "add", "rumpelpod", &req.url],
-        Some(repo_path),
-        u,
-    )
-    .is_err()
-    {
+    if run_git_command(&["remote", "add", "rumpelpod", &req.url], Some(repo_path)).is_err() {
         run_git_command(
             &["remote", "set-url", "rumpelpod", &req.url],
             Some(repo_path),
-            u,
         )?;
     }
     run_git_command(
         &["config", "remote.rumpelpod.push", &push_refspec],
         Some(repo_path),
-        u,
     )?;
 
     // Fetch from host
-    run_git_command(&["fetch", "host"], Some(repo_path), u)?;
+    run_git_command(&["fetch", "host"], Some(repo_path))?;
 
     // Install reference-transaction hook; detect first entry from return value
     let is_first_entry = install_hook_impl(repo_path)?;
@@ -364,7 +319,6 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
                 &format!("refs/heads/{branch_name}"),
             ],
             Some(repo_path),
-            u,
         )
         .is_ok();
 
@@ -372,19 +326,17 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
             run_git_command(
                 &["branch", "-f", "--no-track", branch_name, "host/HEAD"],
                 Some(repo_path),
-                u,
             )
             .with_context(|| format!("resetting branch '{branch_name}' to host/HEAD"))?;
         } else {
             run_git_command(
                 &["branch", "--no-track", branch_name, "host/HEAD"],
                 Some(repo_path),
-                u,
             )
             .with_context(|| format!("creating branch '{branch_name}'"))?;
         }
 
-        run_git_command(&["checkout", branch_name], Some(repo_path), u)
+        run_git_command(&["checkout", branch_name], Some(repo_path))
             .with_context(|| format!("checking out branch '{branch_name}'"))?;
 
         if let Some(ref host_branch) = req.host_branch {
@@ -392,7 +344,6 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
             run_git_command(
                 &["branch", "--set-upstream-to", &upstream, branch_name],
                 Some(repo_path),
-                u,
             )
             .with_context(|| format!("setting upstream of '{branch_name}' to '{upstream}'"))?;
         }
@@ -401,10 +352,10 @@ fn setup_git_impl(req: &GitSetupRequest, u: Option<&User>) -> Result<()> {
     // Write host git identity into the pod's .git/config
     if let Some(ref identity) = req.git_identity {
         if let Some(ref name) = identity.name {
-            run_git_command(&["config", "user.name", name], Some(repo_path), u)?;
+            run_git_command(&["config", "user.name", name], Some(repo_path))?;
         }
         if let Some(ref email) = identity.email {
-            run_git_command(&["config", "user.email", email], Some(repo_path), u)?;
+            run_git_command(&["config", "user.email", email], Some(repo_path))?;
         }
     }
 
@@ -466,13 +417,12 @@ fn install_hook_impl(repo_path: &Path) -> Result<bool> {
 async fn git_setup_submodules_handler(
     Json(req): Json<GitSetupSubmodulesRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_user_opt(&req.user).map_err(err_json)?;
-    let result = setup_submodules_impl(&req, user.as_ref());
+    let result = setup_submodules_impl(&req);
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> Result<()> {
+fn setup_submodules_impl(req: &GitSetupSubmodulesRequest) -> Result<()> {
     if req.submodules.is_empty() {
         return Ok(());
     }
@@ -502,16 +452,15 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
             let displaypath = &sub.displaypath;
             let sub_url = format!("{base_url}/submodules/{displaypath}/gateway.git");
 
-            run_git_command(&["submodule", "init", &sub.path], Some(&parent_dir), u)?;
+            run_git_command(&["submodule", "init", &sub.path], Some(&parent_dir))?;
             let sub_name = &sub.name;
             let sub_config_key = format!("submodule.{sub_name}.url");
-            run_git_command(&["config", &sub_config_key, &sub_url], Some(&parent_dir), u)?;
+            run_git_command(&["config", &sub_config_key, &sub_url], Some(&parent_dir))?;
             let token = &req.token;
             let auth_header = format!("http.extraHeader=Authorization: Bearer {token}");
             run_git_command(
                 &["-c", &auth_header, "submodule", "update", &sub.path],
                 Some(&parent_dir),
-                u,
             )?;
         }
     }
@@ -526,7 +475,7 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
         let push_refspec = format!("+refs/heads/*:refs/heads/rumpelpod/*@{pod_name}");
 
         // Resolve the git dir (submodules use gitlink files)
-        let git_dir_output = git_command(u)
+        let git_dir_output = git_command()
             .args(["rev-parse", "--git-dir"])
             .current_dir(&sub_path)
             .output()
@@ -548,11 +497,10 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
                 &format!("Authorization: Bearer {token}"),
             ],
             Some(&sub_path),
-            u,
         )?;
 
-        if run_git_command(&["remote", "add", "host", &sub_url], Some(&sub_path), u).is_err() {
-            run_git_command(&["remote", "set-url", "host", &sub_url], Some(&sub_path), u)?;
+        if run_git_command(&["remote", "add", "host", &sub_url], Some(&sub_path)).is_err() {
+            run_git_command(&["remote", "set-url", "host", &sub_url], Some(&sub_path))?;
         }
         run_git_command(
             &[
@@ -561,34 +509,24 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
                 "+refs/heads/host/*:refs/remotes/host/*",
             ],
             Some(&sub_path),
-            u,
         )?;
         run_git_command(
             &["config", "remote.host.pushurl", "PUSH_DISABLED"],
             Some(&sub_path),
-            u,
         )?;
 
-        if run_git_command(
-            &["remote", "add", "rumpelpod", &sub_url],
-            Some(&sub_path),
-            u,
-        )
-        .is_err()
-        {
+        if run_git_command(&["remote", "add", "rumpelpod", &sub_url], Some(&sub_path)).is_err() {
             run_git_command(
                 &["remote", "set-url", "rumpelpod", &sub_url],
                 Some(&sub_path),
-                u,
             )?;
         }
         run_git_command(
             &["config", "remote.rumpelpod.push", &push_refspec],
             Some(&sub_path),
-            u,
         )?;
 
-        run_git_command(&["fetch", "host"], Some(&sub_path), u)
+        run_git_command(&["fetch", "host"], Some(&sub_path))
             .with_context(|| format!("fetching host in submodule '{displaypath}'"))?;
 
         // Install hook in submodule
@@ -626,7 +564,6 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
                     &format!("refs/heads/{branch_name}"),
                 ],
                 Some(&sub_path),
-                u,
             )
             .is_ok();
 
@@ -634,16 +571,14 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
                 run_git_command(
                     &["branch", "-f", "--no-track", branch_name, "host/HEAD"],
                     Some(&sub_path),
-                    u,
                 )?;
             } else {
                 run_git_command(
                     &["branch", "--no-track", branch_name, "host/HEAD"],
                     Some(&sub_path),
-                    u,
                 )?;
             }
-            run_git_command(&["checkout", branch_name], Some(&sub_path), u)?;
+            run_git_command(&["checkout", branch_name], Some(&sub_path))?;
         }
     }
 
@@ -653,13 +588,12 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest, u: Option<&User>) -> R
 async fn git_sanitize_handler(
     Json(req): Json<GitSanitizeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_user_opt(&req.user).map_err(err_json)?;
-    let result = sanitize_impl(&req.repo_path, user.as_ref());
+    let result = sanitize_impl(&req.repo_path);
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn sanitize_impl(repo_path: &Path, u: Option<&User>) -> Result<()> {
+fn sanitize_impl(repo_path: &Path) -> Result<()> {
     // Abort any in-progress operations
     for op in &[
         &["merge", "--abort"][..],
@@ -669,7 +603,7 @@ fn sanitize_impl(repo_path: &Path, u: Option<&User>) -> Result<()> {
         &["am", "--abort"],
         &["bisect", "reset"],
     ] {
-        let _ = git_command(u)
+        let _ = git_command()
             .args(*op)
             .current_dir(repo_path)
             .stdout(Stdio::null())
@@ -678,7 +612,7 @@ fn sanitize_impl(repo_path: &Path, u: Option<&User>) -> Result<()> {
     }
 
     // Check if HEAD is valid
-    let has_head = git_command(u)
+    let has_head = git_command()
         .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(repo_path)
         .stdout(Stdio::null())
@@ -687,9 +621,9 @@ fn sanitize_impl(repo_path: &Path, u: Option<&User>) -> Result<()> {
         .is_ok_and(|s| s.success());
 
     if has_head {
-        run_git_command(&["reset", "--hard", "HEAD"], Some(repo_path), u)?;
+        run_git_command(&["reset", "--hard", "HEAD"], Some(repo_path))?;
     } else {
-        let _ = git_command(u)
+        let _ = git_command()
             .args(["rm", "--cached", "-r", "."])
             .current_dir(repo_path)
             .stdout(Stdio::null())
@@ -697,15 +631,14 @@ fn sanitize_impl(repo_path: &Path, u: Option<&User>) -> Result<()> {
             .status();
     }
 
-    run_git_command(&["clean", "-fd"], Some(repo_path), u)?;
+    run_git_command(&["clean", "-fd"], Some(repo_path))?;
     Ok(())
 }
 
 async fn git_snapshot_handler(
     Json(req): Json<GitSnapshotRequest>,
 ) -> Result<Json<GitSnapshotResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_user_opt(&req.user).map_err(err_json)?;
-    let result = snapshot_impl(&req.repo_path, user.as_ref());
+    let result = snapshot_impl(&req.repo_path);
     match result {
         Ok(patch) => ok_json(GitSnapshotResponse {
             patch: patch.map(|p| base64_encode(&p)),
@@ -714,10 +647,10 @@ async fn git_snapshot_handler(
     }
 }
 
-fn snapshot_impl(repo_path: &Path, u: Option<&User>) -> Result<Option<Vec<u8>>> {
-    run_git_command(&["add", "-A"], Some(repo_path), u)?;
+fn snapshot_impl(repo_path: &Path) -> Result<Option<Vec<u8>>> {
+    run_git_command(&["add", "-A"], Some(repo_path))?;
 
-    let output = git_command(u)
+    let output = git_command()
         .args(["diff", "--binary", "--cached"])
         .current_dir(repo_path)
         .output()
@@ -738,13 +671,12 @@ fn snapshot_impl(repo_path: &Path, u: Option<&User>) -> Result<Option<Vec<u8>>> 
 async fn git_apply_patch_handler(
     Json(req): Json<GitApplyPatchRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_user_opt(&req.user).map_err(err_json)?;
-    let result = apply_patch_impl(&req, user.as_ref());
+    let result = apply_patch_impl(&req);
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn apply_patch_impl(req: &GitApplyPatchRequest, u: Option<&User>) -> Result<()> {
+fn apply_patch_impl(req: &GitApplyPatchRequest) -> Result<()> {
     let patch = base64_decode(&req.patch)?;
 
     // Remove files that the patch creates (they may already exist from the image)
@@ -753,7 +685,7 @@ fn apply_patch_impl(req: &GitApplyPatchRequest, u: Option<&User>) -> Result<()> 
     }
 
     // Apply patch via stdin
-    let mut child = git_command(u)
+    let mut child = git_command()
         .args(["apply", "-"])
         .current_dir(&req.repo_path)
         .stdin(Stdio::piped())
@@ -776,7 +708,7 @@ fn apply_patch_impl(req: &GitApplyPatchRequest, u: Option<&User>) -> Result<()> 
     }
 
     // Best-effort submodule sync
-    let _ = git_command(u)
+    let _ = git_command()
         .args(["submodule", "update", "--recursive"])
         .current_dir(&req.repo_path)
         .status();
@@ -784,10 +716,13 @@ fn apply_patch_impl(req: &GitApplyPatchRequest, u: Option<&User>) -> Result<()> 
     Ok(())
 }
 
-async fn env_user_info_handler(
-    Json(req): Json<UserInfoRequest>,
-) -> Result<Json<UserInfoResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let user = resolve_user(&req.user).map_err(err_json)?;
+/// Return info about the server's own user (the devcontainer user).
+async fn env_user_info_handler() -> Result<Json<UserInfoResponse>, (StatusCode, Json<ErrorResponse>)>
+{
+    let uid = nix::unistd::getuid();
+    let user = nix::unistd::User::from_uid(uid)
+        .map_err(|e| err_json(anyhow::anyhow!("looking up current user: {e}")))?
+        .ok_or_else(|| err_json(anyhow::anyhow!("current uid {uid} not found in passwd")))?;
     ok_json(UserInfoResponse {
         home: user.dir.to_string_lossy().to_string(),
         shell: user.shell.to_string_lossy().to_string(),
@@ -799,24 +734,17 @@ async fn env_user_info_handler(
 async fn env_probe_handler(
     Json(req): Json<ProbeEnvRequest>,
 ) -> Result<Json<ProbeEnvResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = probe_env_impl(&req.user, &req.shell_flags);
+    let result = probe_env_impl(&req.shell_flags);
     match result {
         Ok(env) => ok_json(ProbeEnvResponse { env }),
         Err(e) => Err(err_json(e)),
     }
 }
 
-fn probe_env_impl(user: &str, shell_flags: &str) -> Result<HashMap<String, String>> {
-    let user_info = resolve_user(user)?;
-    let uid = user_info.uid;
-    let gid = user_info.gid;
-    let home = user_info.dir.to_string_lossy().to_string();
-
+fn probe_env_impl(shell_flags: &str) -> Result<HashMap<String, String>> {
     // Check if bash is available
     let has_bash = Command::new("which")
         .arg("bash")
-        .uid(uid.as_raw())
-        .gid(gid.as_raw())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -826,17 +754,9 @@ fn probe_env_impl(user: &str, shell_flags: &str) -> Result<HashMap<String, Strin
         return Ok(HashMap::new());
     }
 
-    // Set identity env vars so login shells source the right profile files.
-    // Without these, the inherited root environment causes bash to read
-    // /root/.profile instead of the target user's.
-    let user_env = [("HOME", home.as_str()), ("USER", user), ("LOGNAME", user)];
-
     // Get base environment
     let base_output = Command::new("env")
         .arg("-0")
-        .uid(uid.as_raw())
-        .gid(gid.as_raw())
-        .envs(user_env)
         .output()
         .context("getting base env")?;
     let base = parse_null_delimited_env(&base_output.stdout);
@@ -845,9 +765,6 @@ fn probe_env_impl(user: &str, shell_flags: &str) -> Result<HashMap<String, Strin
     let probed_output = Command::new("bash")
         .arg(shell_flags)
         .arg("env -0")
-        .uid(uid.as_raw())
-        .gid(gid.as_raw())
-        .envs(user_env)
         .output()
         .context("probing env")?;
     let probed = parse_null_delimited_env(&probed_output.stdout);
@@ -968,10 +885,6 @@ async fn cp_upload_handler(
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| err_json(anyhow::anyhow!("missing X-Path header")))?;
     let path = PathBuf::from(path);
-    let owner = headers
-        .get("X-Owner")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
 
     use tokio_stream::StreamExt;
     let stream = body
@@ -980,17 +893,15 @@ async fn cp_upload_handler(
     let async_reader = tokio_util::io::StreamReader::new(stream);
     let sync_reader = tokio_util::io::SyncIoBridge::new(async_reader);
 
-    let result =
-        tokio::task::spawn_blocking(move || cp_upload_impl(&path, sync_reader, owner.as_deref()))
-            .await
-            .expect("cp_upload_impl panicked");
+    let result = tokio::task::spawn_blocking(move || cp_upload_impl(&path, sync_reader))
+        .await
+        .expect("cp_upload_impl panicked");
     result.map_err(err_json)?;
     ok_json(serde_json::json!({}))
 }
 
-fn cp_upload_impl(path: &Path, reader: impl std::io::Read, owner: Option<&str>) -> Result<()> {
+fn cp_upload_impl(path: &Path, reader: impl std::io::Read) -> Result<()> {
     let path_display = path.display();
-    let user = owner.map(resolve_user).transpose()?;
 
     let mut archive = tar::Archive::new(reader);
     for entry in archive
@@ -1021,43 +932,14 @@ fn cp_upload_impl(path: &Path, reader: impl std::io::Read, owner: Option<&str>) 
             if let Some(parent) = target.parent() {
                 std::fs::create_dir_all(parent)
                     .with_context(|| format!("creating parent for {path_display}"))?;
-                // Chown any implicitly created parent directories
-                if let Some(ref user) = user {
-                    chown_up_to(parent, path, user)?;
-                }
             }
             let target_display = target.display();
             entry
                 .unpack(&target)
                 .with_context(|| format!("extracting to {target_display}"))?;
         }
-
-        if let Some(ref user) = user {
-            let target_display = target.display();
-            // Use lchown instead of chown: chown follows symlinks,
-            // which fails with ENOENT when the symlink target has
-            // not been extracted yet.
-            std::os::unix::fs::lchown(&target, Some(user.uid.into()), Some(user.gid.into()))
-                .with_context(|| format!("chown {target_display}"))?;
-        }
     }
 
-    Ok(())
-}
-
-/// Chown `from` and its ancestors up to and including `root`.
-fn chown_up_to(from: &Path, root: &Path, user: &User) -> Result<()> {
-    let mut current = from;
-    loop {
-        nix::unistd::chown(current, Some(user.uid), Some(user.gid))?;
-        if current == root {
-            break;
-        }
-        match current.parent() {
-            Some(p) if p.starts_with(root) || p == root => current = p,
-            _ => break,
-        }
-    }
     Ok(())
 }
 
@@ -1082,12 +964,6 @@ fn run_impl(req: RunRequest) -> Result<RunResponse> {
 
     let mut cmd = Command::new(&req.cmd[0]);
     cmd.args(&req.cmd[1..]);
-
-    if let Some(ref user) = req.user {
-        let user_info = resolve_user(user)?;
-        cmd.uid(user_info.uid.as_raw());
-        cmd.gid(user_info.gid.as_raw());
-    }
 
     if let Some(ref workdir) = req.workdir {
         cmd.current_dir(workdir);
@@ -1177,30 +1053,15 @@ fn run_impl(req: RunRequest) -> Result<RunResponse> {
 // Utilities
 // ---------------------------------------------------------------------------
 
-/// Build a `git` Command that trusts all repo directories and
-/// optionally runs as a specific user.
-///
-/// The container server runs as root, so git's safe.directory check
-/// would otherwise reject repos owned by container users.
-fn git_command(user: Option<&User>) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.args(["-c", "safe.directory=*"]);
-    if let Some(u) = user {
-        cmd.uid(u.uid.as_raw());
-        cmd.gid(u.gid.as_raw());
-    }
-    cmd
+/// Build a `git` Command. The server runs as the devcontainer user
+/// who owns the repo, so no safe.directory override or uid switching
+/// is needed.
+fn git_command() -> Command {
+    Command::new("git")
 }
 
-fn resolve_user_opt(name: &Option<String>) -> Result<Option<User>> {
-    match name {
-        Some(n) => Ok(Some(resolve_user(n)?)),
-        None => Ok(None),
-    }
-}
-
-fn run_git_command(args: &[&str], workdir: Option<&Path>, user: Option<&User>) -> Result<Vec<u8>> {
-    let mut cmd = git_command(user);
+fn run_git_command(args: &[&str], workdir: Option<&Path>) -> Result<Vec<u8>> {
+    let mut cmd = git_command();
     cmd.args(args);
     if let Some(dir) = workdir {
         cmd.current_dir(dir);

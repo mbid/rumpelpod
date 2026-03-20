@@ -31,7 +31,6 @@ pub struct FsWriteRequest {
     pub path: PathBuf,
     /// Base64-encoded file content.
     pub content: String,
-    pub owner: Option<String>,
     #[serde(default)]
     pub create_parents: bool,
 }
@@ -52,13 +51,6 @@ pub struct FsStatResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FsMkdirRequest {
     pub path: PathBuf,
-    pub owner: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FsChownRequest {
-    pub paths: Vec<PathBuf>,
-    pub owner: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -72,8 +64,6 @@ pub struct GitCloneRequest {
     pub auth_header: Option<String>,
     #[serde(default)]
     pub lfs: bool,
-    /// Run git as this user so working tree files have correct ownership.
-    pub user: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,8 +73,6 @@ pub struct GitSetupRequest {
     pub token: String,
     pub pod_name: String,
     pub host_branch: Option<String>,
-    /// Run git as this user so fetched objects have correct ownership.
-    pub user: Option<String>,
     /// Git user identity from the host to write into the pod's .git/config.
     pub git_identity: Option<GitIdentity>,
 }
@@ -115,21 +103,16 @@ pub struct GitSetupSubmodulesRequest {
     pub pod_name: String,
     #[serde(default)]
     pub is_first_entry: bool,
-    /// Run git as this user so submodule files have correct ownership.
-    pub user: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitSanitizeRequest {
     pub repo_path: PathBuf,
-    /// Run git as this user so restored files have correct ownership.
-    pub user: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitSnapshotRequest {
     pub repo_path: PathBuf,
-    pub user: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -145,17 +128,11 @@ pub struct GitApplyPatchRequest {
     pub patch: String,
     #[serde(default)]
     pub created_files: Vec<String>,
-    pub user: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UserInfoRequest {
-    pub user: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UserInfoResponse {
@@ -167,7 +144,6 @@ pub struct UserInfoResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProbeEnvRequest {
-    pub user: String,
     pub shell_flags: String,
 }
 
@@ -183,7 +159,6 @@ pub struct ProbeEnvResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunRequest {
     pub cmd: Vec<String>,
-    pub user: Option<String>,
     pub workdir: Option<PathBuf>,
     #[serde(default)]
     pub env: Vec<String>,
@@ -216,7 +191,7 @@ pub struct CpDownloadRequest {
 
 // Download is GET /cp with query parameters from CpDownloadRequest,
 // returning a streamed tar body. Upload is POST /cp with a tar body
-// and metadata in request headers (X-Path, X-Owner).
+// and X-Path header.
 
 // ---------------------------------------------------------------------------
 // Health

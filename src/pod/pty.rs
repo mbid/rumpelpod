@@ -7,7 +7,6 @@
 
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,7 +17,7 @@ use axum::extract::State;
 use axum::response::Response;
 use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{Pid, User};
+use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
@@ -65,8 +64,7 @@ impl PtySessions {
     async fn spawn_or_attach(
         &self,
         name: String,
-        mut cmd: Vec<String>,
-        user: Option<String>,
+        cmd: Vec<String>,
         workdir: Option<PathBuf>,
         env: Vec<String>,
         cols: u16,
@@ -92,12 +90,7 @@ impl PtySessions {
             if !create {
                 return Ok(None);
             }
-            // Resolve the Claude CLI binary before first spawn.
-            let claude_bin = tokio::task::spawn_blocking(ensure_claude_cli)
-                .await
-                .expect("ensure_claude_cli panicked")?;
-            cmd[0] = claude_bin.to_string_lossy().into_owned();
-            let session = spawn_session(&name, &cmd, user, workdir, &env, cols, rows, self)?;
+            let session = spawn_session(&name, &cmd, workdir, &env, cols, rows, self)?;
             sessions.insert(name.clone(), session);
         }
 
@@ -149,11 +142,9 @@ impl PtySessions {
 // Session spawning
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_session(
     name: &str,
     cmd: &[String],
-    user: Option<String>,
     workdir: Option<PathBuf>,
     env: &[String],
     cols: u16,
@@ -167,46 +158,20 @@ fn spawn_session(
         ws_ypixel: 0,
     };
 
-    let user_info = match &user {
-        Some(u) => {
-            let info = User::from_name(u)?.with_context(|| format!("user '{u}' not found"))?;
-            Some(info)
-        }
-        None => None,
-    };
-
     if cmd.is_empty() {
         return Err(anyhow::anyhow!("empty command"));
     }
 
-    // Safety: we only call async-signal-safe functions (setuid, setgid,
-    // chdir, execvp) in the child before exec. The mutex is held in the
-    // parent, so the child (which has its own address space after fork)
-    // never touches it.
+    // Safety: we only call async-signal-safe functions (chdir, execvp)
+    // in the child before exec. The mutex is held in the parent, so
+    // the child (which has its own address space after fork) never
+    // touches it.
     let result = unsafe { forkpty(&winsize, None) }.context("forkpty")?;
 
     match result {
         ForkptyResult::Child => {
             // -- child process --
             // These calls do not return on success (exec replaces the process).
-
-            if let Some(ref info) = user_info {
-                // Set gid before uid to avoid permission errors
-                if let Err(e) = nix::unistd::setgid(info.gid) {
-                    eprintln!("pty: setgid failed: {e}");
-                    std::process::exit(1);
-                }
-                if let Err(e) = nix::unistd::setuid(info.uid) {
-                    eprintln!("pty: setuid failed: {e}");
-                    std::process::exit(1);
-                }
-
-                // HOME must match the target user for shell init scripts
-                let home = info.dir.to_string_lossy();
-                std::env::set_var("HOME", &*home);
-                std::env::set_var("USER", &info.name);
-                std::env::set_var("LOGNAME", &info.name);
-            }
 
             if let Some(ref dir) = workdir {
                 if let Err(e) = std::env::set_current_dir(dir) {
@@ -388,17 +353,12 @@ fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Claude CLI installation
+// Claude CLI resolution
 // ---------------------------------------------------------------------------
 
-const CLAUDE_CODE_DIST_BUCKET: &str =
-    "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases";
-
-/// Return the path to the Claude CLI binary, downloading it if
-/// necessary.  Prefers an existing binary in PATH or at our install
-/// location to avoid re-downloading.
-fn ensure_claude_cli() -> Result<PathBuf> {
-    // Already installed by us on a previous call.
+/// Return the path to the Claude CLI binary, which must be pre-installed
+/// in the container image (baked in by the prepared image build).
+fn find_claude_cli() -> Result<PathBuf> {
     let bin_path = Path::new(crate::daemon::CLAUDE_CONTAINER_BIN);
     if bin_path.exists() {
         return Ok(bin_path.to_path_buf());
@@ -409,42 +369,10 @@ fn ensure_claude_cli() -> Result<PathBuf> {
         return Ok(found);
     }
 
-    let platform = match std::env::consts::ARCH {
-        "x86_64" => "linux-x64",
-        "aarch64" => "linux-arm64",
-        other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
-    };
-
-    let client = reqwest::blocking::Client::new();
-
-    let version = client
-        .get(format!("{CLAUDE_CODE_DIST_BUCKET}/latest"))
-        .send()
-        .context("fetching latest Claude Code version")?
-        .error_for_status()
-        .context("fetching latest Claude Code version")?
-        .text()
-        .context("reading latest Claude Code version")?;
-    let version = version.trim();
-
-    let url = format!("{CLAUDE_CODE_DIST_BUCKET}/{version}/{platform}/claude");
-    let data = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("downloading Claude Code from {url}"))?
-        .error_for_status()
-        .with_context(|| format!("downloading Claude Code from {url}"))?
-        .bytes()
-        .with_context(|| format!("reading Claude Code binary from {url}"))?;
-
-    if let Some(parent) = bin_path.parent() {
-        std::fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
-    }
-    std::fs::write(bin_path, &data).context("writing Claude Code binary")?;
-    std::fs::set_permissions(bin_path, std::fs::Permissions::from_mode(0o755))
-        .context("making Claude Code binary executable")?;
-
-    Ok(bin_path.to_path_buf())
+    Err(anyhow::anyhow!(
+        "Claude CLI not found at {} or in PATH",
+        crate::daemon::CLAUDE_CONTAINER_BIN
+    ))
 }
 
 /// Resolve a binary name via PATH, like `which(1)`.
@@ -472,7 +400,6 @@ pub enum PtyControl {
     Session {
         name: String,
         cmd: Vec<String>,
-        user: Option<String>,
         workdir: Option<PathBuf>,
         env: Vec<String>,
         cols: u16,
@@ -509,18 +436,17 @@ pub async fn claude_session_handler(
 
 async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
     // First message must be a Session control message.
-    let (name, cmd, user, workdir, env, cols, rows, create) = match socket.recv().await {
+    let (name, mut cmd, workdir, env, cols, rows, create) = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
             Ok(PtyControl::Session {
                 name,
                 cmd,
-                user,
                 workdir,
                 env,
                 cols,
                 rows,
                 create,
-            }) => (name, cmd, user, workdir, env, cols, rows, create),
+            }) => (name, cmd, workdir, env, cols, rows, create),
             Ok(other) => {
                 eprintln!("pty: expected session message, got {other:?}");
                 return;
@@ -541,8 +467,24 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
         None => return,
     };
 
+    // Resolve the Claude CLI binary before first spawn.
+    if create {
+        match tokio::task::spawn_blocking(find_claude_cli)
+            .await
+            .expect("find_claude_cli panicked")
+        {
+            Ok(claude_bin) => {
+                cmd[0] = claude_bin.to_string_lossy().into_owned();
+            }
+            Err(e) => {
+                eprintln!("pty: failed to find Claude CLI: {e:#}");
+                return;
+            }
+        }
+    }
+
     let (write_fd, screen, mut output_rx) = match sessions
-        .spawn_or_attach(name.clone(), cmd, user, workdir, env, cols, rows, create)
+        .spawn_or_attach(name.clone(), cmd, workdir, env, cols, rows, create)
         .await
     {
         Ok(Some(tuple)) => tuple,

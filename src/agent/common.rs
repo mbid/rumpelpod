@@ -243,7 +243,7 @@ pub fn execute_edit_in_pod(
     let new_content = content.replacen(old_string, new_string, 1);
 
     debug!("Writing edited file: {file_path}");
-    if let Err(e) = pod.fs_write(&full_path, new_content.as_bytes(), None, false) {
+    if let Err(e) = pod.fs_write(&full_path, new_content.as_bytes(), false) {
         return Ok((format!("Error writing file: {e}"), false));
     }
     debug!("Write completed");
@@ -269,7 +269,7 @@ pub fn execute_write_in_pod(
 
     debug!("Writing new file: {file_path}");
     // create_parents: true will create parent directories
-    if let Err(e) = pod.fs_write(&full_path, content.as_bytes(), None, true) {
+    if let Err(e) = pod.fs_write(&full_path, content.as_bytes(), true) {
         return Ok((format!("Error writing file: {e}"), false));
     }
     debug!("Write completed");
@@ -280,7 +280,6 @@ pub fn execute_write_in_pod(
 pub fn execute_bash_in_pod(
     pod: &PodClient,
     pod_name: &str,
-    user: &str,
     repo_path: &Path,
     remote_env: &[(String, String)],
     command: &str,
@@ -326,7 +325,6 @@ pub fn execute_bash_in_pod(
                 "-c",
                 &format!("echo {ns_last_pid} > /proc/sys/kernel/ns_last_pid"),
             ],
-            Some("root"),
             None,
             &[],
             None,
@@ -343,7 +341,6 @@ pub fn execute_bash_in_pod(
     let result = pod
         .run(
             &["bash", "-c", &wrapped_command],
-            Some(user),
             Some(repo_path),
             &env,
             None,
