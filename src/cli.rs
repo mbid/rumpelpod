@@ -490,10 +490,6 @@ pub struct CpCommand {
 
 #[derive(Args)]
 pub struct PrepareImageCommand {
-    /// Path to the gateway bare repo (bind-mounted at build time)
-    #[arg(long)]
-    pub gateway: PathBuf,
-
     /// Where to clone the repo inside the container
     #[arg(long)]
     pub repo_path: PathBuf,

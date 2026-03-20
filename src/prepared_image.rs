@@ -25,6 +25,10 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 /// invalidates previously built prepared images.
 const SCHEMA_VERSION: u32 = 2;
 
+/// Where the gateway bare repo is bind-mounted during `docker build`.
+/// Must match the `--mount` target in `generate_dockerfile`.
+const BUILD_GATEWAY_PATH: &str = "/tmp/gateway";
+
 /// Information about the Claude CLI on the host, used to pin the
 /// exact version inside the prepared image.
 struct HostClaudeInfo {
@@ -185,12 +189,7 @@ fn probe_base_image_user(base_image: &str, docker_host: &Host) -> Result<String>
             }
         }
     }
-    if let Some(user) = found_user {
-        return Ok(user);
-    }
-
-    // No USER directive in the base image means root.
-    Ok("root".to_string())
+    found_user.context("failed to parse base image user from build log")
 }
 
 /// Generate the Dockerfile content for the prepared image.
@@ -225,9 +224,8 @@ fn generate_dockerfile(
 
         COPY --chmod=755 rumpel-linux-${{TARGETARCH}} {rumpel}
 
-        RUN --mount=type=bind,from=gateway,target=/tmp/gateway \
+        RUN --mount=type=bind,from=gateway,target={BUILD_GATEWAY_PATH} \
             {rumpel} prepare-image \
-              --gateway /tmp/gateway \
               --repo-path '{repo_path}' \
               --user '{user}'{claude_flag}
 
@@ -435,9 +433,8 @@ pub fn build_prepared_image(
 /// been copied in.  Replaces what used to be shell scripting.
 pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
     if !cmd.repo_path.join(".git").exists() {
-        let gateway = cmd.gateway.display();
         let status = Command::new("git")
-            .args(["clone", &format!("file://{gateway}")])
+            .args(["clone", &format!("file://{BUILD_GATEWAY_PATH}")])
             .arg(&cmd.repo_path)
             .status()
             .context("cloning repository from gateway")?;

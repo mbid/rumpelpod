@@ -2104,8 +2104,6 @@ impl DaemonServer {
         let client = crate::k8s::K8sClient::new(context, namespace)?;
         let gateway_path = gateway::gateway_path(repo_path)?;
 
-        // Build a prepared image with the rumpel binary, repo clone,
-        // and Claude CLI baked in so we skip those steps at runtime.
         let prepared = crate::prepared_image::build_prepared_image(
             &Image(image.to_string()),
             docker_host,
@@ -2778,8 +2776,6 @@ impl DaemonServer {
         let name = docker_name(&repo_path, &pod_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
 
-        // Build a prepared image with the rumpel binary, repo clone,
-        // and Claude CLI baked in so we skip those steps at runtime.
         let prepared = crate::prepared_image::build_prepared_image(
             &image,
             &docker_host,
