@@ -58,6 +58,9 @@ impl PtySessions {
 
     /// Spawn a new session or reuse an existing one.  Returns a dup'd
     /// write fd, the screen buffer for replay, and a broadcast receiver.
+    /// Returns `Ok(None)` when `create` is false and the session does
+    /// not exist (used by reconnecting clients to avoid spawning a
+    /// fresh session after the original child exited).
     #[allow(clippy::too_many_arguments)]
     async fn spawn_or_attach(
         &self,
@@ -68,11 +71,14 @@ impl PtySessions {
         env: Vec<String>,
         cols: u16,
         rows: u16,
-    ) -> Result<(
-        OwnedFd,
-        Arc<Mutex<vt100::Parser>>,
-        tokio::sync::broadcast::Receiver<Vec<u8>>,
-    )> {
+        create: bool,
+    ) -> Result<
+        Option<(
+            OwnedFd,
+            Arc<Mutex<vt100::Parser>>,
+            tokio::sync::broadcast::Receiver<Vec<u8>>,
+        )>,
+    > {
         let mut sessions = self.inner.lock().await;
 
         // Reap dead sessions so we start fresh if the child exited.
@@ -83,6 +89,9 @@ impl PtySessions {
         }
 
         if !sessions.contains_key(&name) {
+            if !create {
+                return Ok(None);
+            }
             // Resolve the Claude CLI binary before first spawn.
             let claude_bin = tokio::task::spawn_blocking(ensure_claude_cli)
                 .await
@@ -93,9 +102,21 @@ impl PtySessions {
         }
 
         let session = sessions.get(&name).unwrap();
+
+        // Resize to match the attaching client's terminal, so
+        // reattaching after a window resize (or reconnection) shows
+        // the right dimensions.
+        set_winsize(session.master_fd.as_raw_fd(), cols, rows)?;
+        session
+            .screen
+            .lock()
+            .await
+            .screen_mut()
+            .set_size(rows, cols);
+
         let duped = nix::unistd::dup(&session.master_fd).context("dup master fd")?;
         let rx = session.output_tx.subscribe();
-        Ok((duped, Arc::clone(&session.screen), rx))
+        Ok(Some((duped, Arc::clone(&session.screen), rx)))
     }
 
     async fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
@@ -299,11 +320,12 @@ fn spawn_persistent_reader(
                     // which is normal when no client is attached.
                     let _ = tx.send(data.to_vec());
                 }
-                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // EOF (read returned 0) or EIO (PTY slave closed on
+                // Linux) -- the child exited.
+                Ok(Err(_)) => {
                     sessions.remove_if_dead(&name).await;
                     break;
                 }
-                Ok(Err(_)) => break,
                 // WouldBlock -- AsyncFd will re-poll
                 Err(_) => continue,
             }
@@ -455,9 +477,19 @@ pub enum PtyControl {
         env: Vec<String>,
         cols: u16,
         rows: u16,
+        /// When false, the server will not spawn a new session if the
+        /// named one does not exist (used for reconnection).
+        #[serde(default = "default_true")]
+        create: bool,
     },
     /// Terminal resize (client -> server).
     Resize { cols: u16, rows: u16 },
+    /// Sent by the server when the PTY child process has exited.
+    SessionEnded,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +509,7 @@ pub async fn claude_session_handler(
 
 async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
     // First message must be a Session control message.
-    let (name, cmd, user, workdir, env, cols, rows) = match socket.recv().await {
+    let (name, cmd, user, workdir, env, cols, rows, create) = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
             Ok(PtyControl::Session {
                 name,
@@ -487,7 +519,8 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
                 env,
                 cols,
                 rows,
-            }) => (name, cmd, user, workdir, env, cols, rows),
+                create,
+            }) => (name, cmd, user, workdir, env, cols, rows, create),
             Ok(other) => {
                 eprintln!("pty: expected session message, got {other:?}");
                 return;
@@ -509,10 +542,18 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
     };
 
     let (write_fd, screen, mut output_rx) = match sessions
-        .spawn_or_attach(name.clone(), cmd, user, workdir, env, cols, rows)
+        .spawn_or_attach(name.clone(), cmd, user, workdir, env, cols, rows, create)
         .await
     {
-        Ok(tuple) => tuple,
+        Ok(Some(tuple)) => tuple,
+        Ok(None) => {
+            // Session does not exist and create=false (reconnection
+            // to a session that already exited).
+            let msg = serde_json::to_string(&PtyControl::SessionEnded)
+                .expect("SessionEnded is always serializable");
+            let _ = socket.send(Message::Text(msg.into())).await;
+            return;
+        }
         Err(e) => {
             eprintln!("pty session failed for '{name}': {e:#}");
             return;
@@ -542,8 +583,14 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
                     }
                     // Lagged: we missed some output, not fatal for a terminal
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    // Sender dropped: child exited
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    // Sender dropped: child exited.  Tell the client
+                    // so it can distinguish this from a network error.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        let msg = serde_json::to_string(&PtyControl::SessionEnded)
+                            .expect("SessionEnded is always serializable");
+                        let _ = socket.send(Message::Text(msg.into())).await;
+                        break;
+                    }
                 }
             }
 
@@ -566,6 +613,9 @@ async fn handle_pty_socket(mut socket: WebSocket, sessions: PtySessions) {
                             }
                             Ok(PtyControl::Session { .. }) => {
                                 // Session message after handshake is nonsensical
+                            }
+                            Ok(PtyControl::SessionEnded) => {
+                                // Server-to-client only, ignore if received
                             }
                             Err(e) => {
                                 eprintln!("pty: invalid control message: {e}");

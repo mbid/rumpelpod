@@ -2,10 +2,14 @@
 //! over WebSocket.
 //!
 //! Replaces `docker exec -it ... screen ...` with a direct WebSocket
-//! connection to the in-container PTY server.
+//! connection to the in-container PTY server.  Automatically reconnects
+//! when the connection is lost (e.g. after laptop suspend).
 
 use std::io;
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::stream::{SplitSink, SplitStream};
@@ -22,6 +26,13 @@ use crate::pod::pty::PtyControl;
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsWriter = SplitSink<WsStream, Message>;
 type WsReader = SplitStream<WsStream>;
+
+/// How often the write loop sends a WebSocket ping.  The connection
+/// goes through docker exec or kubectl port-forward tunnels, so TCP
+/// keepalive on the loopback socket is useless.  Periodic pings force
+/// data through the tunnel and cause it to detect a dead underlying
+/// connection (e.g. after laptop suspend).
+const PING_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Ctrl-a (0x01) is the first byte of the detach sequence (same as
 /// GNU screen).
@@ -83,6 +94,7 @@ pub struct SessionParams {
 /// Puts the terminal into raw mode, connects to `ws://HOST:PORT/claude`,
 /// sends the session parameters as the first message, and bridges local
 /// stdin/stdout until the user detaches (Ctrl-a d) or the session ends.
+/// Automatically reconnects if the WebSocket connection drops.
 pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
     eprintln!("[Ctrl-a d to detach]");
 
@@ -106,9 +118,25 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
     crate::async_runtime::block_on(attach_async(&url, &token, params))
 }
 
-async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
-    // -- WebSocket connection -------------------------------------------
+// ---------------------------------------------------------------------------
+// Internal bridge outcome (distinguishes connection loss from session end)
+// ---------------------------------------------------------------------------
 
+enum BridgeOutcome {
+    Detached,
+    SessionEnded,
+    ConnectionLost,
+}
+
+// ---------------------------------------------------------------------------
+// Connection
+// ---------------------------------------------------------------------------
+
+/// Build the WebSocket URL and handshake request from the container URL.
+fn build_ws_request(
+    url: &str,
+    token: &str,
+) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut ws_url = Url::parse(url).context("parsing container URL")?;
     let scheme = match ws_url.scheme() {
         "http" => "ws",
@@ -124,7 +152,7 @@ async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<A
         Some(port) => format!("{}:{port}", ws_url.host_str().unwrap_or("localhost")),
         None => ws_url.host_str().unwrap_or("localhost").to_string(),
     };
-    let request = tokio_tungstenite::tungstenite::http::Request::builder()
+    tokio_tungstenite::tungstenite::http::Request::builder()
         .uri(ws_url.as_str())
         .header("Host", &host)
         .header("Authorization", format!("Bearer {token}"))
@@ -136,61 +164,133 @@ async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<A
             tokio_tungstenite::tungstenite::handshake::client::generate_key(),
         )
         .body(())
-        .context("building WebSocket request")?;
+        .context("building WebSocket request")
+}
+
+/// Connect a WebSocket, configure TCP keepalive for fast dead-connection
+/// detection (important after laptop suspend/resume), and send the
+/// session parameters.
+async fn connect_ws(
+    url: &str,
+    token: &str,
+    params: &SessionParams,
+    create: bool,
+) -> Result<WsStream> {
+    let request = build_ws_request(url, token)?;
 
     let (mut ws, _response) = tokio_tungstenite::connect_async(request)
         .await
         .context("WebSocket handshake failed")?;
 
-    // -- Send session parameters ----------------------------------------
-
     let (cols, rows) = get_terminal_size().unwrap_or((80, 24));
     let session_msg = PtyControl::Session {
-        name: params.name,
-        cmd: params.cmd,
-        user: params.user,
-        workdir: params.workdir.map(Into::into),
-        env: params.env,
+        name: params.name.clone(),
+        cmd: params.cmd.clone(),
+        user: params.user.clone(),
+        workdir: params.workdir.clone().map(Into::into),
+        env: params.env.clone(),
         cols,
         rows,
+        create,
     };
     let json = serde_json::to_string(&session_msg).context("serializing session params")?;
     ws.send(Message::Text(json.into()))
         .await
         .context("sending session parameters")?;
 
-    // -- Bridge ---------------------------------------------------------
-    // Two independent directions: the writer task owns ws_write and
-    // forwards stdin + SIGWINCH; the reader task pipes ws_read to stdout.
-    // tungstenite handles WebSocket pings internally (auto-pongs before
-    // returning a message), so the reader never needs write access.
+    Ok(ws)
+}
 
-    let (ws_write, ws_read) = ws.split();
+// ---------------------------------------------------------------------------
+// Async entry point with reconnection
+// ---------------------------------------------------------------------------
 
-    tokio::select! {
-        outcome = write_loop(ws_write) => outcome,
-        _ = read_loop(ws_read) => Ok(AttachOutcome::SessionEnded),
+async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
+    // First connection: propagate errors (invalid URL, unreachable pod).
+    let ws = connect_ws(url, token, &params, true).await?;
+
+    match bridge(ws).await {
+        BridgeOutcome::Detached => return Ok(AttachOutcome::Detached),
+        BridgeOutcome::SessionEnded => return Ok(AttachOutcome::SessionEnded),
+        BridgeOutcome::ConnectionLost => {}
+    }
+
+    // Reconnection loop.  Uses create=false so the server does not
+    // spawn a fresh session if the original child already exited.
+    loop {
+        write_status("\r\n[connection lost, reconnecting...]\r\n").await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let ws = match connect_ws(url, token, &params, false).await {
+            Ok(ws) => ws,
+            Err(_) => continue,
+        };
+
+        write_status("[reconnected]\r\n").await;
+
+        match bridge(ws).await {
+            BridgeOutcome::Detached => return Ok(AttachOutcome::Detached),
+            BridgeOutcome::SessionEnded => return Ok(AttachOutcome::SessionEnded),
+            BridgeOutcome::ConnectionLost => continue,
+        }
     }
 }
 
-/// Forward stdin and window-resize signals to the WebSocket.
-async fn write_loop(mut ws_write: WsWriter) -> Result<AttachOutcome> {
+/// Write a status message to stdout.  Uses \r\n because the terminal
+/// is in raw mode.
+async fn write_status(msg: &str) {
+    let mut stdout = tokio::io::stdout();
+    let _ = stdout.write_all(msg.as_bytes()).await;
+    let _ = stdout.flush().await;
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket <-> terminal bridge
+// ---------------------------------------------------------------------------
+
+async fn bridge(ws: WsStream) -> BridgeOutcome {
+    let (ws_write, ws_read) = ws.split();
+
+    // Shared flag: set by read_loop on every received message, cleared
+    // by write_loop after each ping.  If write_loop sees the flag
+    // still clear after READ_TIMEOUT, the connection is dead.
+    let received = Arc::new(AtomicBool::new(true));
+
+    tokio::select! {
+        result = write_loop(ws_write, Arc::clone(&received)) => {
+            match result {
+                Ok(BridgeOutcome::Detached) => BridgeOutcome::Detached,
+                Ok(BridgeOutcome::SessionEnded) => BridgeOutcome::SessionEnded,
+                // WebSocket send error = connection lost
+                Ok(BridgeOutcome::ConnectionLost) | Err(_) => BridgeOutcome::ConnectionLost,
+            }
+        }
+        outcome = read_loop(ws_read, Arc::clone(&received)) => outcome,
+    }
+}
+
+/// Forward stdin, window-resize signals, and periodic keepalive pings
+/// to the WebSocket.
+async fn write_loop(mut ws_write: WsWriter, received: Arc<AtomicBool>) -> Result<BridgeOutcome> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 4096];
     let mut saw_ctrl_a = false;
     let mut sigwinch =
         signal(SignalKind::window_change()).context("registering SIGWINCH handler")?;
+    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+    // First tick fires immediately; skip it.
+    ping_interval.tick().await;
 
     loop {
         tokio::select! {
             n = stdin.read(&mut stdin_buf) => {
                 let n = match n {
-                    Ok(0) | Err(_) => return Ok(AttachOutcome::SessionEnded),
+                    Ok(0) | Err(_) => return Ok(BridgeOutcome::SessionEnded),
                     Ok(n) => n,
                 };
 
                 match process_stdin(&stdin_buf[..n], &mut saw_ctrl_a) {
-                    StdinAction::Detach => return Ok(AttachOutcome::Detached),
+                    StdinAction::Detach => return Ok(BridgeOutcome::Detached),
                     StdinAction::Send(data) => {
                         ws_write.send(Message::Binary(data.into())).await
                             .context("sending to WebSocket")?;
@@ -209,28 +309,50 @@ async fn write_loop(mut ws_write: WsWriter) -> Result<AttachOutcome> {
                         .context("sending resize")?;
                 }
             }
+            _ = ping_interval.tick() => {
+                // If nothing was received since the last ping,
+                // the tunnel is likely dead.
+                if !received.swap(false, Ordering::Relaxed) {
+                    return Ok(BridgeOutcome::ConnectionLost);
+                }
+                ws_write.send(Message::Ping(vec![].into())).await
+                    .context("sending keepalive ping")?;
+            }
         }
     }
 }
 
-/// Forward WebSocket output to stdout.
-async fn read_loop(mut ws_read: WsReader) {
+/// Forward WebSocket output to stdout.  Returns `SessionEnded` if the
+/// server sends a `SessionEnded` control message, `ConnectionLost` if
+/// the WebSocket closes or errors without one.
+async fn read_loop(mut ws_read: WsReader, received: Arc<AtomicBool>) -> BridgeOutcome {
     let mut stdout = tokio::io::stdout();
     while let Some(Ok(msg)) = ws_read.next().await {
+        received.store(true, Ordering::Relaxed);
         match msg {
             Message::Binary(data) => {
                 if stdout.write_all(&data).await.is_err() || stdout.flush().await.is_err() {
                     break;
                 }
             }
+            Message::Text(text) => {
+                if let Ok(PtyControl::SessionEnded) = serde_json::from_str(&text) {
+                    return BridgeOutcome::SessionEnded;
+                }
+            }
             Message::Close(_) => break,
             // tungstenite handles Ping internally (auto-pongs before
             // returning a message to the caller).
-            // Text/Pong/Frame are not expected from the server.
-            Message::Text(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
+            Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
         }
     }
+    // WebSocket closed or errored without a SessionEnded message.
+    BridgeOutcome::ConnectionLost
 }
+
+// ---------------------------------------------------------------------------
+// Stdin processing
+// ---------------------------------------------------------------------------
 
 enum StdinAction {
     Detach,
