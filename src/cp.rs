@@ -190,7 +190,7 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
     };
 
     let result = enter::launch_pod(pod_name, cmd.host_args.resolve()?)?;
-    let client = PodClient::new(&result.container_url, &result.container_token)?;
+    let client = PodClient::connect(&result.container_url, &result.container_token)?;
 
     match &direction {
         CopyDirection::FromPod {

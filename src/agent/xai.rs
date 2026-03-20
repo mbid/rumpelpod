@@ -142,7 +142,7 @@ pub fn run_grok_agent(
         .join()
         .map_err(|e| anyhow::anyhow!("Pod thread panicked: {:?}", e))??;
     let user = &launch_result.user;
-    let pod = PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
+    let pod = PodClient::connect(&launch_result.container_url, &launch_result.container_token)?;
 
     // Resolve ${containerEnv:VAR} now that the container is running.
     let resolved = resolve_remote_env_via_pod(&remote_env, &pod);

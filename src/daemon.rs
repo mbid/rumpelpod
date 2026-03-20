@@ -1675,10 +1675,7 @@ fn start_container_server(
     use bollard::secret::ExecConfig;
 
     let url = container_url;
-    let poll_client = reqwest::blocking::Client::builder()
-        .timeout(Some(std::time::Duration::from_secs(1)))
-        .build()
-        .unwrap();
+    let poll_client = reqwest::blocking::Client::builder().build().unwrap();
     if poll_client
         .get(format!("{url}/health"))
         .send()
@@ -1727,23 +1724,20 @@ fn start_container_server(
     ))
     .context("starting container-serve")?;
 
-    // Wait for the server to become ready
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if poll_client
+    // Wait for the server to become ready, using exponential backoff so
+    // high-latency links (remote Docker over slow WiFi) have enough time.
+    let max_delay = std::time::Duration::from_secs(5);
+    let delays = retry::delay::Exponential::from_millis(100).map(move |d| d.min(max_delay));
+    retry::retry(delays.take(20), || {
+        poll_client
             .get(format!("{url}/health"))
             .send()
-            .is_ok_and(|r| r.status().is_success())
-        {
-            return Ok(token);
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(anyhow::anyhow!(
-                "container server did not become ready within 10 seconds"
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+            .ok()
+            .filter(|r| r.status().is_success())
+            .map(|_| token.clone())
+            .ok_or(())
+    })
+    .map_err(|_| anyhow::anyhow!("container server did not become ready"))
 }
 
 /// These commands run at most once per pod lifetime, tracked via the

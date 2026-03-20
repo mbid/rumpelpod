@@ -380,7 +380,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     }
 
     // Resolve ${containerEnv:VAR} via the in-container HTTP server (works for all host types).
-    let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+    let pod = crate::pod::PodClient::connect(&result.container_url, &result.container_token)?;
     let remote_env = resolve_remote_env_via_pod(&remote_env_map, &pod);
     let merged_env = merge_env(result.probed_env, remote_env);
 

@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use retry::delay::Exponential;
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
@@ -26,11 +27,21 @@ pub struct PodClient {
 }
 
 impl PodClient {
-    /// Connect to the container server, waiting up to 10s for it to become ready.
+    /// Connect to the container server, waiting for it to become ready.
     ///
-    /// Health checks are unauthenticated so this works before the caller
-    /// knows whether the server is alive.
+    /// Used by the daemon where no user-facing output is needed.
     pub fn new(url: &str, token: &str) -> Result<Self> {
+        Self::build(url, token, false)
+    }
+
+    /// Connect to the container server, printing progress to stderr.
+    ///
+    /// Used by CLI commands so the user sees feedback on slow connections.
+    pub fn connect(url: &str, token: &str) -> Result<Self> {
+        Self::build(url, token, true)
+    }
+
+    fn build(url: &str, token: &str, verbose: bool) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(None)
             .gzip(true)
@@ -41,7 +52,7 @@ impl PodClient {
             url: url.trim_end_matches('/').to_string(),
             token: token.to_string(),
         };
-        pod.wait_ready(Duration::from_secs(10))?;
+        pod.wait_ready(verbose)?;
         Ok(pod)
     }
 
@@ -53,30 +64,48 @@ impl PodClient {
         &self.token
     }
 
-    /// Block until the container server responds to /health, or timeout.
-    fn wait_ready(&self, timeout: Duration) -> Result<()> {
-        let deadline = std::time::Instant::now() + timeout;
+    /// Block until the container server responds to /health, or give up.
+    ///
+    /// Uses exponential backoff (100ms doubling up to 5s) so high-latency
+    /// links (e.g. remote Docker over slow WiFi) get enough time without
+    /// hammering the connection.
+    fn wait_ready(&self, verbose: bool) -> Result<()> {
+        let url = &self.url;
         let poll_client = reqwest::blocking::Client::builder()
-            .timeout(Some(Duration::from_secs(2)))
             .build()
             .expect("failed to build poll client");
 
-        loop {
-            let url = &self.url;
+        let max_delay = Duration::from_secs(5);
+        let delays = Exponential::from_millis(100).map(move |d| d.min(max_delay));
+        let mut attempt = 0u32;
+
+        retry::retry(delays.take(20), || {
+            attempt += 1;
             match poll_client.get(format!("{url}/health")).send() {
-                Ok(resp) if resp.status().is_success() => return Ok(()),
-                _ => {
-                    if std::time::Instant::now() >= deadline {
-                        return Err(anyhow::anyhow!(
-                            "container server at {} did not become ready within {:?}",
-                            self.url,
-                            timeout
-                        ));
+                Ok(resp) if resp.status().is_success() => {
+                    if verbose && attempt > 1 {
+                        eprintln!("Connected to container server after {attempt} attempts");
                     }
-                    std::thread::sleep(Duration::from_millis(100));
+                    Ok(())
+                }
+                Ok(resp) => {
+                    if verbose {
+                        let status = resp.status();
+                        eprintln!(
+                            "Waiting for container server (attempt {attempt}, status {status})..."
+                        );
+                    }
+                    Err(())
+                }
+                Err(e) => {
+                    if verbose {
+                        eprintln!("Waiting for container server (attempt {attempt}: {e})...");
+                    }
+                    Err(())
                 }
             }
-        }
+        })
+        .map_err(|_| anyhow::anyhow!("container server at {url} did not become ready"))
     }
 
     // -------------------------------------------------------------------

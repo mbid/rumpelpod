@@ -15,7 +15,7 @@ fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<(
     let (devcontainer, _, _default_image_dir) = enter::load_and_resolve(repo_root, None)?;
     let container_repo_path = devcontainer.container_repo_path(repo_root);
 
-    let pod = crate::pod::PodClient::new(&result.container_url, &result.container_token)?;
+    let pod = crate::pod::PodClient::connect(&result.container_url, &result.container_token)?;
     let run_result = pod
         .run(
             &[
