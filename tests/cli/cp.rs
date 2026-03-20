@@ -342,6 +342,128 @@ fn cp_relative_path_to_pod() {
 }
 
 #[test]
+fn cp_directory_with_symlinks_to_pod() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cp-symlink");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "cp-symlink-test", "--", "true"])
+        .success()
+        .expect("failed to start pod");
+
+    // Build a directory containing symlinks to exercise the chown
+    // path -- plain chown follows symlinks and fails with ENOENT
+    // when the target has not been extracted yet.
+    let local_dir = home.path().join("with-symlinks");
+    let sub = local_dir.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("real.txt"), "hello\n").unwrap();
+    std::os::unix::fs::symlink("sub/real.txt", local_dir.join("link.txt")).unwrap();
+    // Dangling symlink (target does not exist on the host)
+    std::os::unix::fs::symlink("nonexistent", local_dir.join("dangling")).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args([
+            "cp",
+            local_dir.to_str().unwrap(),
+            "cp-symlink-test:/tmp/symlinked",
+        ])
+        .success()
+        .expect("rumpel cp directory with symlinks failed");
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-symlink-test",
+            "--",
+            "cat",
+            "/tmp/symlinked/sub/real.txt",
+        ])
+        .success()
+        .expect("failed to read real.txt in pod");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello");
+
+    // The symlink itself should exist (readlink should work)
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-symlink-test",
+            "--",
+            "readlink",
+            "/tmp/symlinked/link.txt",
+        ])
+        .success()
+        .expect("failed to readlink in pod");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "sub/real.txt");
+}
+
+#[test]
+#[ignore] // Requires network access and clones ~400 MB from GitHub.
+fn cp_large_directory_to_pod() {
+    // Clone a large repository and copy it into a pod to exercise the
+    // streaming tar/gzip upload path with a realistic payload.
+    let clone_path = std::path::Path::new("/tmp/rumpelpod-rust-clone");
+    if !clone_path.exists() {
+        std::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth=1",
+                "https://github.com/rust-lang/rust.git",
+                clone_path.to_str().unwrap(),
+            ])
+            .status()
+            .expect("failed to spawn git clone")
+            .success()
+            .then_some(())
+            .expect("git clone failed");
+    }
+
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cp-large");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "cp-large-test", "--", "true"])
+        .success()
+        .expect("failed to start pod");
+
+    pod_command(&repo, &daemon)
+        .args([
+            "cp",
+            clone_path.to_str().unwrap(),
+            "cp-large-test:/tmp/rust",
+        ])
+        .success()
+        .expect("rumpel cp large directory to pod failed");
+
+    // Spot-check: the Cargo.toml at the repo root should exist
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-large-test",
+            "--",
+            "head",
+            "-1",
+            "/tmp/rust/Cargo.toml",
+        ])
+        .success()
+        .expect("failed to read Cargo.toml in pod");
+
+    let first_line = String::from_utf8_lossy(&stdout);
+    assert!(
+        first_line.contains("[workspace]") || first_line.contains("[package]"),
+        "Expected Cargo.toml header, got: {first_line}"
+    );
+}
+
+#[test]
 fn cp_to_pod_owns_files_as_container_user() {
     let repo = TestRepo::new();
     let home = TestHome::new();

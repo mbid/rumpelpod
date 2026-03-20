@@ -1033,8 +1033,12 @@ fn cp_upload_impl(path: &Path, reader: impl std::io::Read, owner: Option<&str>) 
         }
 
         if let Some(ref user) = user {
-            nix::unistd::chown(&target, Some(user.uid), Some(user.gid))
-                .with_context(|| format!("chown {path_display}"))?;
+            let target_display = target.display();
+            // Use lchown instead of chown: chown follows symlinks,
+            // which fails with ENOENT when the symlink target has
+            // not been extracted yet.
+            std::os::unix::fs::lchown(&target, Some(user.uid.into()), Some(user.gid.into()))
+                .with_context(|| format!("chown {target_display}"))?;
         }
     }
 
