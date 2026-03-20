@@ -2863,3 +2863,44 @@ fn gateway_lfs_not_used() {
 
     assert_eq!(output, b"hello\n", "file content should match");
 }
+
+#[test]
+fn pod_has_host_remotes() {
+    // Remotes from the host repo (other than rumpelpod-managed ones)
+    // should be present inside the pod.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-host-remotes");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Add an "origin" remote to the host repo before launching.
+    Command::new("git")
+        .args(["remote", "add", "origin", "https://example.com/repo.git"])
+        .current_dir(repo.path())
+        .success()
+        .expect("adding origin remote failed");
+
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", "remote-sync", "--", "echo", "setup"])
+        .success()
+        .expect("rumpel enter failed");
+
+    // The pod should have the "origin" remote with the host's URL.
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "remote-sync",
+            "--",
+            "git",
+            "remote",
+            "get-url",
+            "origin",
+        ])
+        .success()
+        .expect("getting origin URL in pod failed");
+    let pod_origin_url = String::from_utf8_lossy(&output).trim().to_string();
+    assert_eq!(pod_origin_url, "https://example.com/repo.git");
+}

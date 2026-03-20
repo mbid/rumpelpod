@@ -501,6 +501,10 @@ pub struct PrepareImageCommand {
     /// Claude CLI version to install (skip if not provided)
     #[arg(long)]
     pub claude_version: Option<String>,
+
+    /// Host git remote to configure (NAME=URL, repeatable)
+    #[arg(long = "remote")]
+    pub remotes: Vec<String>,
 }
 
 #[derive(Subcommand)]

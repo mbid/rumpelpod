@@ -69,3 +69,33 @@ pub fn get_current_branch(repo_path: &std::path::Path) -> Option<String> {
         None
     }
 }
+
+/// A git remote's name and fetch URL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitRemote {
+    pub name: String,
+    pub url: String,
+}
+
+/// Read the list of remotes (name + fetch URL) from a repository.
+///
+/// Skips remotes that have no URL configured. Results are sorted by
+/// name so the output is stable regardless of git config ordering.
+pub fn get_remotes(repo_path: &Path) -> Result<Vec<GitRemote>> {
+    let repo = Repository::open(repo_path).context("opening repository")?;
+    let remote_names = repo.remotes().context("listing remotes")?;
+    let mut remotes = Vec::new();
+    for name in remote_names.iter().flatten() {
+        let remote = repo
+            .find_remote(name)
+            .with_context(|| format!("reading remote '{name}'"))?;
+        if let Some(url) = remote.url() {
+            remotes.push(GitRemote {
+                name: name.to_string(),
+                url: url.to_string(),
+            });
+        }
+    }
+    remotes.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(remotes)
+}

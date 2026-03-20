@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::PrepareImageCommand;
 use crate::config::Host;
+use crate::git::GitRemote;
 use crate::image::{BuildResult, Image};
 use crate::CommandExt;
 
@@ -23,7 +24,7 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 
 /// Bump this when the Dockerfile template changes in a way that
 /// invalidates previously built prepared images.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 
 /// Where the gateway bare repo is bind-mounted during `docker build`.
 /// Must match the `--mount` target in `generate_dockerfile`.
@@ -106,6 +107,7 @@ fn compute_prepared_tag(
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
+    host_remotes: &[GitRemote],
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_image.as_bytes());
@@ -114,6 +116,12 @@ fn compute_prepared_tag(
     hasher.update(user.as_bytes());
     if let Some(info) = claude_info {
         hasher.update(info.version.as_bytes());
+    }
+    for remote in host_remotes {
+        hasher.update(remote.name.as_bytes());
+        hasher.update(b"=");
+        hasher.update(remote.url.as_bytes());
+        hasher.update(b"\0");
     }
     hasher.update(SCHEMA_VERSION.to_le_bytes());
     let hash = hex::encode(&hasher.finalize()[..8]);
@@ -206,6 +214,7 @@ fn generate_dockerfile(
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
+    host_remotes: &[GitRemote],
 ) -> String {
     let repo_path = container_repo_path.display();
     let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
@@ -214,6 +223,11 @@ fn generate_dockerfile(
         Some(info) => format!(" \\\n      --claude-version '{}'", info.version),
         None => String::new(),
     };
+
+    let remote_flags: String = host_remotes
+        .iter()
+        .map(|r| format!(" \\\n      --remote '{}={}'", r.name, r.url))
+        .collect();
 
     formatdoc! {r#"
         FROM {base_image}
@@ -227,7 +241,7 @@ fn generate_dockerfile(
         RUN --mount=type=bind,from=gateway,target={BUILD_GATEWAY_PATH} \
             {rumpel} prepare-image \
               --repo-path '{repo_path}' \
-              --user '{user}'{claude_flag}
+              --user '{user}'{claude_flag}{remote_flags}
 
         USER ${{BASE_USER}}
     "#}
@@ -243,8 +257,15 @@ fn assemble_build_context(
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
+    host_remotes: &[GitRemote],
 ) -> Result<tempfile::TempDir> {
-    let dockerfile = generate_dockerfile(base_image, container_repo_path, user, claude_info);
+    let dockerfile = generate_dockerfile(
+        base_image,
+        container_repo_path,
+        user,
+        claude_info,
+        host_remotes,
+    );
     let binaries = find_rumpel_binaries()?;
 
     let tmp = tempfile::tempdir().context("creating build context temp dir")?;
@@ -364,6 +385,7 @@ pub fn build_prepared_image(
     gateway_path: &Path,
     container_repo_path: &Path,
     user: &str,
+    host_remotes: &[GitRemote],
 ) -> Result<BuildResult> {
     let rumpel_hash = hash_rumpel_binary()?;
     let claude_info = detect_host_claude();
@@ -374,6 +396,7 @@ pub fn build_prepared_image(
         container_repo_path,
         user,
         claude_info.as_ref(),
+        host_remotes,
     );
 
     // Check cache: for Docker hosts check locally, for k8s we always
@@ -395,6 +418,7 @@ pub fn build_prepared_image(
         container_repo_path,
         user,
         claude_info.as_ref(),
+        host_remotes,
     )?;
 
     run_docker_build(
@@ -452,8 +476,79 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         }
     }
 
+    // Configure host remotes in the cloned repo so they match the
+    // host's configuration from the start.
+    configure_remotes(&cmd.repo_path, &cmd.remotes)?;
+
     if let Some(ref version) = cmd.claude_version {
         install_claude_cli(version)?;
+    }
+
+    Ok(())
+}
+
+/// Parse "NAME=URL" remote specs and add/update them in the repo.
+///
+/// Also removes any pre-existing remotes (from the base image) that
+/// are not in the provided list and not rumpelpod-managed.
+fn configure_remotes(repo_path: &Path, remote_specs: &[String]) -> Result<()> {
+    if remote_specs.is_empty() {
+        return Ok(());
+    }
+
+    let parsed: Vec<(&str, &str)> = remote_specs
+        .iter()
+        .map(|s| {
+            s.split_once('=')
+                .with_context(|| format!("invalid --remote spec '{s}', expected NAME=URL"))
+        })
+        .collect::<Result<_>>()?;
+
+    // List existing remotes in the repo.
+    let existing_output = Command::new("git")
+        .args(["remote"])
+        .current_dir(repo_path)
+        .output()
+        .context("listing existing remotes")?;
+    let existing: Vec<&str> = std::str::from_utf8(&existing_output.stdout)
+        .context("non-UTF-8 remote names")?
+        .lines()
+        .collect();
+
+    const MANAGED: &[&str] = &["host", "rumpelpod"];
+
+    // Remove stale remotes that are not in the host list and not managed.
+    for name in &existing {
+        if MANAGED.contains(name) {
+            continue;
+        }
+        if !parsed.iter().any(|(n, _)| n == name) {
+            Command::new("git")
+                .args(["remote", "remove", name])
+                .current_dir(repo_path)
+                .status()
+                .with_context(|| format!("removing remote '{name}'"))?;
+        }
+    }
+
+    // Add or update remotes from the host.
+    for (name, url) in &parsed {
+        if MANAGED.contains(name) {
+            continue;
+        }
+        if existing.contains(name) {
+            Command::new("git")
+                .args(["remote", "set-url", name, url])
+                .current_dir(repo_path)
+                .status()
+                .with_context(|| format!("setting URL for remote '{name}'"))?;
+        } else {
+            Command::new("git")
+                .args(["remote", "add", name, url])
+                .current_dir(repo_path)
+                .status()
+                .with_context(|| format!("adding remote '{name}'"))?;
+        }
     }
 
     Ok(())

@@ -2104,12 +2104,14 @@ impl DaemonServer {
         let client = crate::k8s::K8sClient::new(context, namespace)?;
         let gateway_path = gateway::gateway_path(repo_path)?;
 
+        let host_remotes = crate::git::get_remotes(repo_path).unwrap_or_default();
         let prepared = crate::prepared_image::build_prepared_image(
             &Image(image.to_string()),
             docker_host,
             &gateway_path,
             &container_repo_path,
             &user,
+            &host_remotes,
         )?;
         let image = &prepared.image.0;
 
@@ -2776,12 +2778,14 @@ impl DaemonServer {
         let name = docker_name(&repo_path, &pod_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
 
+        let host_remotes = crate::git::get_remotes(&repo_path).unwrap_or_default();
         let prepared = crate::prepared_image::build_prepared_image(
             &image,
             &docker_host,
             &gateway_path,
             &container_repo_path,
             &user,
+            &host_remotes,
         )?;
         let image = prepared.image;
 
