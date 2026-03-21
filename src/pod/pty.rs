@@ -127,14 +127,9 @@ impl PtySessions {
         Ok(())
     }
 
-    /// Remove a dead session from the registry.
-    async fn remove_if_dead(&self, name: &str) {
-        let mut sessions = self.inner.lock().await;
-        if let Some(s) = sessions.get(name) {
-            if !child_is_alive(s.child_pid) {
-                sessions.remove(name);
-            }
-        }
+    /// Remove a session from the registry unconditionally.
+    async fn remove_session(&self, name: &str) {
+        self.inner.lock().await.remove(name);
     }
 }
 
@@ -286,9 +281,9 @@ fn spawn_persistent_reader(
                     let _ = tx.send(data.to_vec());
                 }
                 // EOF (read returned 0) or EIO (PTY slave closed on
-                // Linux) -- the child exited.
+                // Linux) -- the session is over.
                 Ok(Err(_)) => {
-                    sessions.remove_if_dead(&name).await;
+                    sessions.remove_session(&name).await;
                     break;
                 }
                 // WouldBlock -- AsyncFd will re-poll

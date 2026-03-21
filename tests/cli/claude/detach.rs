@@ -51,10 +51,9 @@ fn claude_detach_reattach() {
     session2.wait_for("~/workspace");
 }
 
-/// When Claude exits inside the pod (e.g. /exit), the client must
-/// detect it and exit cleanly instead of hanging.  Before the
-/// SessionEnded control message this would hang forever because the
-/// PTY master returns EIO (not EOF) on Linux when the slave closes.
+/// When Claude exits inside the pod (via Ctrl-D), the client must
+/// detect it and exit cleanly instead of hanging.  Restarting must
+/// launch a fresh session, not try to reattach to the dead one.
 #[test]
 fn claude_session_exit() {
     let proxy = claude_proxy();
@@ -65,11 +64,21 @@ fn claude_session_exit() {
 
     session.wait_for("~/workspace");
 
-    // /exit is handled client-side by the Claude CLI.  It causes the
-    // node process to exit, closing the PTY slave.
-    session.send("/exit");
+    // Ctrl-D (0x04) at an empty prompt causes Claude Code to exit.
+    // Send it twice: the first triggers the exit intent, the second
+    // confirms in case the TUI consumed the first one.
+    session.write_raw(&[0x04]);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    session.write_raw(&[0x04]);
 
     // The rumpel process must exit, not hang.  wait_for_exit panics
     // after 10s if the child is still alive.
     session.wait_for_exit();
+
+    // Restarting must launch a fresh Claude session rather than
+    // reattaching to the now-dead one.
+    let mut session2 =
+        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
+
+    session2.wait_for("~/workspace");
 }
