@@ -1470,6 +1470,7 @@ fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) 
         "clientDataCache",
         "customApiKeyResponses",
         "effortCalloutDismissed",
+        "effortCalloutV2Dismissed",
         "feedbackSurveyState",
         "firstStartTime",
         "groveConfigCache",
