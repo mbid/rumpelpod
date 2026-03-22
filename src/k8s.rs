@@ -8,6 +8,7 @@ use kube::{Client, Config};
 use log::{info, trace};
 use tokio::io::AsyncReadExt;
 
+use crate::RetryPolicy;
 use crate::async_runtime::block_on;
 use crate::daemon::protocol::PodStatus;
 
@@ -305,10 +306,18 @@ impl K8sClient {
     }
 
     /// Wait for a pod to reach the Running phase.
-    /// Polls with a short sleep interval. Fails after the timeout.
-    pub fn wait_running(&self, name: &str, timeout: std::time::Duration) -> Result<()> {
+    ///
+    /// `UserBlocking` polls indefinitely (user can Ctrl-C).
+    /// `Background` gives up after 120 s.
+    pub fn wait_running(&self, name: &str, policy: RetryPolicy) -> Result<()> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let deadline = std::time::Instant::now() + timeout;
+        let deadline = match policy {
+            RetryPolicy::Background => {
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(120))
+            }
+            RetryPolicy::UserBlocking => None,
+        };
+        let mut last_log = std::time::Instant::now();
 
         loop {
             let pod = block_on(pods.get(name)).with_context(|| format!("getting pod '{name}'"))?;
@@ -354,12 +363,17 @@ impl K8sClient {
                 _ => {}
             }
 
-            if std::time::Instant::now() > deadline {
-                return Err(anyhow::anyhow!(
-                    "Timed out waiting for pod '{}' to reach Running phase (current: {})",
-                    name,
-                    phase
-                ));
+            if let Some(deadline) = deadline {
+                if std::time::Instant::now() > deadline {
+                    return Err(anyhow::anyhow!(
+                        "Timed out waiting for pod '{}' to reach Running phase (current: {})",
+                        name,
+                        phase
+                    ));
+                }
+            } else if last_log.elapsed() >= std::time::Duration::from_secs(10) {
+                info!("Still waiting for pod '{name}' to start (status: {phase})");
+                last_log = std::time::Instant::now();
             }
 
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -516,9 +530,15 @@ impl K8sClient {
         &self,
         k8s_name: &str,
         target_addr: &str,
+        policy: RetryPolicy,
     ) -> Result<crate::tunnel::TunnelHandle> {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        block_on(crate::tunnel::start_tunnel(pods, k8s_name, target_addr))
+        block_on(crate::tunnel::start_tunnel(
+            pods,
+            k8s_name,
+            target_addr,
+            policy,
+        ))
     }
 
     /// Set up port forwarding from a local port to a pod port.
@@ -595,9 +615,7 @@ impl K8sClient {
 
         trace!(
             "Port forward established: 127.0.0.1:{} -> {}:{}",
-            local_port,
-            name,
-            remote_port
+            local_port, name, remote_port
         );
 
         Ok(PortForwardHandle {

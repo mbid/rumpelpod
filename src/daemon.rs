@@ -8,6 +8,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use bollard::Docker;
 use bollard::query_parameters::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
 };
@@ -15,19 +16,18 @@ use bollard::secret::{
     ContainerCreateBody, DeviceMapping, HostConfig, Mount as BollardMount, MountTypeEnum,
     PortBinding,
 };
-use bollard::Docker;
 use listenfd::ListenFd;
 use log::error;
-use rand::distr::Alphanumeric;
 use rand::RngExt;
+use rand::distr::Alphanumeric;
 use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{is_deterministic_test_mode, Host};
+use crate::config::{Host, is_deterministic_test_mode};
 use crate::devcontainer::{
-    self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
-    PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
+    self, DevContainer, LifecycleCommand, Port, PortAttributes, StringOrArray, SubstitutionContext,
+    UserEnvProbe, WaitFor, compute_devcontainer_id, substitute_vars,
 };
 use crate::docker_exec::exec_command;
 use crate::gateway;
@@ -38,6 +38,7 @@ use protocol::{
 };
 use ssh_forward::SshForwardManager;
 
+use crate::RetryPolicy;
 use crate::pod::{PodClient, SubmoduleEntry};
 
 /// Environment variable to override the daemon socket path for testing.
@@ -1080,7 +1081,7 @@ fn try_stop_container(
     let socket_path = if let Some(host) = host_str {
         let host = serde_json::from_str::<Host>(host)?;
         match &host {
-            Host::Ssh { .. } => ssh_forward.get_socket(&host)?,
+            Host::Ssh { .. } => ssh_forward.get_socket(&host, RetryPolicy::UserBlocking)?,
             Host::Localhost => default_docker_socket(),
             Host::Kubernetes { .. } => {
                 return Err(anyhow::anyhow!(
@@ -1128,7 +1129,7 @@ fn try_remove_container(
     let socket_path = if let Some(host) = host_str {
         let host = serde_json::from_str::<Host>(host)?;
         match &host {
-            Host::Ssh { .. } => ssh_forward.get_socket(&host)?,
+            Host::Ssh { .. } => ssh_forward.get_socket(&host, RetryPolicy::UserBlocking)?,
             Host::Localhost => default_docker_socket(),
             Host::Kubernetes { .. } => {
                 return Err(anyhow::anyhow!(
@@ -1832,7 +1833,7 @@ fn run_lifecycle_command_via_pod(
                     let thread_env = env.to_vec();
 
                     std::thread::spawn(move || {
-                        let pod = PodClient::new(&pod_url, &pod_token)?;
+                        let pod = PodClient::new(&pod_url, &pod_token, RetryPolicy::UserBlocking)?;
                         let args_ref: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
                         let result = pod.run(&args_ref, Some(&wd), &thread_env, None, None)?;
                         if result.exit_code != 0 {
@@ -1877,7 +1878,7 @@ fn spawn_background_lifecycle_commands_via_pod(
     env: Vec<String>,
 ) {
     std::thread::spawn(move || {
-        let pod = match PodClient::new(&container_url, &container_token) {
+        let pod = match PodClient::new(&container_url, &container_token, RetryPolicy::Background) {
             Ok(p) => p,
             Err(e) => {
                 error!(
@@ -2073,7 +2074,11 @@ impl DaemonServer {
                         client.exec_output(&k8s_name, &["cat", crate::pod::TOKEN_FILE])?;
                     let container_token = String::from_utf8_lossy(&token_bytes).trim().to_string();
 
-                    let pod = PodClient::new(&container_url, &container_token)?;
+                    let pod = PodClient::new(
+                        &container_url,
+                        &container_token,
+                        RetryPolicy::UserBlocking,
+                    )?;
 
                     let token = self.git_server_state.register(
                         gateway_path.clone(),
@@ -2108,10 +2113,14 @@ impl DaemonServer {
                         Some(port) => port,
                         None => {
                             let tunnel = client
-                                .start_tunnel(&k8s_name, {
-                                    let port = self.localhost_server_port;
-                                    &format!("127.0.0.1:{port}")
-                                })
+                                .start_tunnel(
+                                    &k8s_name,
+                                    {
+                                        let port = self.localhost_server_port;
+                                        &format!("127.0.0.1:{port}")
+                                    },
+                                    RetryPolicy::UserBlocking,
+                                )
                                 .context("starting tunnel to existing k8s pod")?;
                             let port = tunnel.port;
                             self.k8s_tunnels.lock().unwrap().insert(tunnel_key, tunnel);
@@ -2385,7 +2394,7 @@ impl DaemonServer {
             .map_err(|e| mark_error(e.context("creating k8s pod")))?;
 
         client
-            .wait_running(&k8s_name, std::time::Duration::from_secs(120))
+            .wait_running(&k8s_name, RetryPolicy::UserBlocking)
             .map_err(|e| mark_error(e.context("waiting for k8s pod to start")))?;
 
         let container_serve_cmd = format!(
@@ -2404,13 +2413,18 @@ impl DaemonServer {
         let container_url = format!("http://127.0.0.1:{local_port}");
 
         // PodClient::new polls /health until the server is ready.
-        let pod = PodClient::new(&container_url, &token).map_err(mark_error)?;
+        let pod = PodClient::new(&container_url, &token, RetryPolicy::UserBlocking)
+            .map_err(mark_error)?;
 
         let tunnel = client
-            .start_tunnel(&k8s_name, &{
-                let port = self.localhost_server_port;
-                format!("127.0.0.1:{port}")
-            })
+            .start_tunnel(
+                &k8s_name,
+                &{
+                    let port = self.localhost_server_port;
+                    format!("127.0.0.1:{port}")
+                },
+                RetryPolicy::UserBlocking,
+            )
             .map_err(|e| mark_error(e.context("starting tunnel to k8s pod")))?;
         let tunnel_port = tunnel.port;
         self.k8s_tunnels
@@ -2680,7 +2694,9 @@ impl DaemonServer {
 
         // Get the Docker socket to use (local or forwarded from remote)
         let docker_socket = match &docker_host {
-            Host::Ssh { .. } => self.ssh_forward.get_socket(&docker_host)?,
+            Host::Ssh { .. } => self
+                .ssh_forward
+                .get_socket(&docker_host, RetryPolicy::UserBlocking)?,
             Host::Localhost => default_docker_socket(),
             Host::Kubernetes { .. } => unreachable!(),
         };
@@ -2807,7 +2823,7 @@ impl DaemonServer {
                 .unwrap()
                 .insert((repo_path.clone(), pod_name.0.clone()), token.clone());
 
-            let pod = PodClient::new(&container_url, &container_token)?;
+            let pod = PodClient::new(&container_url, &container_token, RetryPolicy::UserBlocking)?;
 
             // Reuse the existing tunnel if alive, otherwise start a new one.
             // When the container was stopped, the tunnel-server inside it is
@@ -2834,6 +2850,7 @@ impl DaemonServer {
                         &state.id,
                         &format!("127.0.0.1:{localhost_server_port}"),
                         0,
+                        RetryPolicy::UserBlocking,
                     ))
                     .context("starting tunnel to existing docker container")?;
                     let port = tunnel.port;
@@ -3057,7 +3074,11 @@ impl DaemonServer {
                 serve_port,
                 &user,
             )?;
-            let pod_inner = PodClient::new(&container_url_inner, &container_token_inner)?;
+            let pod_inner = PodClient::new(
+                &container_url_inner,
+                &container_token_inner,
+                RetryPolicy::UserBlocking,
+            )?;
 
             // Fix ownership of mount targets so the container user can write
             // to them.  Docker creates volume/tmpfs mounts as root by default.
@@ -3084,6 +3105,7 @@ impl DaemonServer {
                 &container_id.0,
                 &format!("127.0.0.1:{localhost_server_port}"),
                 0,
+                RetryPolicy::UserBlocking,
             ))
             .context("starting tunnel to docker container")?;
             let tunnel_port = tunnel.port;
@@ -3152,7 +3174,7 @@ impl DaemonServer {
             Err(e) => return Err(mark_error(e)),
         };
 
-        let pod = PodClient::new(&container_url, &container_token)?;
+        let pod = PodClient::new(&container_url, &container_token, RetryPolicy::UserBlocking)?;
 
         // Probe user env from shell init files
         let effective_probe = devcontainer
@@ -3303,7 +3325,9 @@ impl DaemonServer {
                         client.exec_output(&k8s_name, &["cat", crate::pod::TOKEN_FILE])
                     {
                         let token = String::from_utf8_lossy(&token_bytes).trim().to_string();
-                        if let Ok(old_pod) = PodClient::new(&container_url, &token) {
+                        if let Ok(old_pod) =
+                            PodClient::new(&container_url, &token, RetryPolicy::Background)
+                        {
                             patch = old_pod
                                 .git_snapshot(Path::new(&container_repo_path))
                                 .context("snapshotting dirty files in k8s pod")?;
@@ -3324,8 +3348,11 @@ impl DaemonServer {
 
             // 4. Restore snapshots
             if patch.is_some() || claude_snapshot.is_some() {
-                let new_pod =
-                    PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
+                let new_pod = PodClient::new(
+                    &launch_result.container_url,
+                    &launch_result.container_token,
+                    RetryPolicy::UserBlocking,
+                )?;
 
                 if let Some(patch_content) = patch {
                     let created_files =
@@ -3350,7 +3377,9 @@ impl DaemonServer {
 
         // Get the Docker socket to use (local or forwarded from remote)
         let docker_socket = match docker_host {
-            Host::Ssh { .. } => self.ssh_forward.get_socket(docker_host)?,
+            Host::Ssh { .. } => self
+                .ssh_forward
+                .get_socket(docker_host, RetryPolicy::UserBlocking)?,
             Host::Localhost => default_docker_socket(),
             Host::Kubernetes { .. } => unreachable!(),
         };
@@ -3383,7 +3412,9 @@ impl DaemonServer {
                             serve_port,
                             snapshot_user.as_deref().unwrap_or("root"),
                         ) {
-                            if let Ok(old_pod) = PodClient::new(&url, &container_token) {
+                            if let Ok(old_pod) =
+                                PodClient::new(&url, &container_token, RetryPolicy::Background)
+                            {
                                 patch = old_pod
                                     .git_snapshot(&container_repo_path)
                                     .context("snapshotting dirty files")?;
@@ -3406,8 +3437,11 @@ impl DaemonServer {
 
         // 4. Restore snapshots
         if patch.is_some() || claude_snapshot.is_some() {
-            let new_pod =
-                PodClient::new(&launch_result.container_url, &launch_result.container_token)?;
+            let new_pod = PodClient::new(
+                &launch_result.container_url,
+                &launch_result.container_token,
+                RetryPolicy::UserBlocking,
+            )?;
 
             if let Some(patch_content) = patch {
                 // Parse patch to identify files being created that might
@@ -3846,7 +3880,11 @@ impl Daemon for DaemonServer {
             pod_rec.id
         };
 
-        let pod = PodClient::new(&request.container_url, &request.container_token)?;
+        let pod = PodClient::new(
+            &request.container_url,
+            &request.container_token,
+            RetryPolicy::UserBlocking,
+        )?;
 
         copy_claude_config_via_pod(
             &pod,

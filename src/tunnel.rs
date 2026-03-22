@@ -22,14 +22,16 @@
 /// address for each stream.
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::task::Poll;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
+
+use crate::RetryPolicy;
 
 /// Default port for the tunnel listener CLI flag.  In practice,
 /// `start_tunnel` always passes 0 (ephemeral) so each tunnel gets a
@@ -406,7 +408,32 @@ fn spawn_host_mux(
 /// waits for the readiness message on stderr, then spawns a mux task
 /// that bridges frames from the pod to local TCP connections to
 /// `target_addr`.
+///
+/// `UserBlocking` retries the entire exec + readiness sequence on
+/// failure.  `Background` fails after a single attempt.
 pub async fn start_tunnel(
+    pods: kube::api::Api<k8s_openapi::api::core::v1::Pod>,
+    name: &str,
+    target_addr: &str,
+    policy: RetryPolicy,
+) -> Result<TunnelHandle> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match start_tunnel_inner(pods.clone(), name, target_addr).await {
+            Ok(handle) => return Ok(handle),
+            Err(e) => {
+                if policy == RetryPolicy::Background {
+                    return Err(e);
+                }
+                log::warn!("Tunnel to pod '{name}' failed (attempt {attempt}): {e:#}. Retrying...");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn start_tunnel_inner(
     pods: kube::api::Api<k8s_openapi::api::core::v1::Pod>,
     name: &str,
     target_addr: &str,
@@ -613,7 +640,32 @@ impl AsyncRead for BollardStdoutReader {
 /// `docker exec`, waits for the readiness message on stderr, then
 /// spawns a mux task that bridges frames to local TCP connections to
 /// `target_addr`.
+///
+/// `UserBlocking` retries on failure.  `Background` fails immediately.
 pub async fn start_docker_tunnel(
+    docker: &bollard::Docker,
+    container_id: &str,
+    target_addr: &str,
+    port: u16,
+    policy: RetryPolicy,
+) -> Result<TunnelHandle> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        match start_docker_tunnel_inner(docker, container_id, target_addr, port).await {
+            Ok(handle) => return Ok(handle),
+            Err(e) => {
+                if policy == RetryPolicy::Background {
+                    return Err(e);
+                }
+                log::warn!("Docker tunnel failed (attempt {attempt}): {e:#}. Retrying...");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+    }
+}
+
+async fn start_docker_tunnel_inner(
     docker: &bollard::Docker,
     container_id: &str,
     target_addr: &str,

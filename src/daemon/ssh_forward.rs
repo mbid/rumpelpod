@@ -13,16 +13,17 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use sha2::{Digest, Sha256};
 
+use crate::RetryPolicy;
 use crate::command_ext::CommandExt;
-use crate::config::{get_runtime_dir, Host};
+use crate::config::{Host, get_runtime_dir};
 
 /// Initial delay for exponential backoff on reconnection.
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -243,10 +244,30 @@ impl SshForwardManager {
 
     /// Get or create a forwarded socket for the given remote Docker specification.
     ///
-    /// Returns the local socket path to use for Docker connections.
-    pub fn get_socket(&self, docker_host: &Host) -> Result<PathBuf> {
+    /// `UserBlocking` resets any accumulated backoff and retries
+    /// indefinitely (the user can Ctrl-C).  `Background` uses the
+    /// existing backoff state and gives up after one attempt.
+    pub fn get_socket(&self, docker_host: &Host, policy: RetryPolicy) -> Result<PathBuf> {
         let remote_host = RemoteHost::from_docker_host(docker_host);
-        self.ensure_connection(&remote_host)
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            match self.ensure_connection(&remote_host, policy) {
+                Ok(path) => return Ok(path),
+                Err(e) => {
+                    if policy == RetryPolicy::Background {
+                        return Err(e);
+                    }
+                    let dest = &remote_host.destination;
+                    let port = remote_host.port;
+                    warn!(
+                        "SSH connection to {dest}:{port} failed \
+                         (attempt {attempt}): {e:#}. Retrying..."
+                    );
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            }
+        }
     }
 
     /// Try to get an existing forwarded socket for the given remote Docker specification.
@@ -266,7 +287,11 @@ impl SshForwardManager {
     }
 
     /// Ensure a connection exists and is alive for the given remote host.
-    fn ensure_connection(&self, host: &RemoteHost) -> Result<PathBuf> {
+    ///
+    /// `UserBlocking` resets accumulated backoff so a fresh user action
+    /// does not inherit delays from earlier failures.  `Background`
+    /// keeps the accumulated backoff from the previous session.
+    fn ensure_connection(&self, host: &RemoteHost, policy: RetryPolicy) -> Result<PathBuf> {
         let mut connections = self.connections.lock().unwrap();
 
         // Check if we have an existing connection
@@ -279,13 +304,20 @@ impl SshForwardManager {
                 return Ok(session.docker_socket.clone());
             }
 
-            // Connection died, remove it and reconnect with backoff
+            // Connection died, remove it and reconnect.
             let destination = &host.destination;
             let port = host.port;
             warn!("SSH connection to {destination}:{port} died, reconnecting...");
             let old_session = connections.remove(host).unwrap();
-            let backoff = next_backoff(old_session.backoff);
-            let failures = old_session.failures + 1;
+
+            // UserBlocking: fresh user action, start clean.
+            // Background: carry forward the accumulated backoff.
+            let (backoff, failures) = match policy {
+                RetryPolicy::UserBlocking => (INITIAL_DELAY, 0),
+                RetryPolicy::Background => {
+                    (next_backoff(old_session.backoff), old_session.failures + 1)
+                }
+            };
 
             // Drop the old session BEFORE starting the new one.
             // This is important because Drop cleans up socket files, and the new

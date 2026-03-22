@@ -39,6 +39,18 @@ mod tunnel;
 use anyhow::Result;
 use clap::Parser;
 
+/// Whether an operation should retry indefinitely (user can cancel) or
+/// give up after a sensible limit (no user waiting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPolicy {
+    /// A user is waiting and can cancel (e.g. Ctrl-C).  Retry
+    /// indefinitely, reporting errors so the user knows what is happening.
+    UserBlocking,
+    /// No user is waiting.  Retry with sensible limits determined by the
+    /// retry logic itself.
+    Background,
+}
+
 use cli::{ClaudeHookSubcommand, Cli, Command, GitHookSubcommand, ImageSubcommand};
 
 pub fn run() -> Result<()> {
