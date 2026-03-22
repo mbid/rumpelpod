@@ -32,6 +32,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::RetryPolicy;
+use crate::jitter;
 
 /// Default port for the tunnel listener CLI flag.  In practice,
 /// `start_tunnel` always passes 0 (ephemeral) so each tunnel gets a
@@ -427,7 +428,7 @@ pub async fn start_tunnel(
                     return Err(e);
                 }
                 log::warn!("Tunnel to pod '{name}' failed (attempt {attempt}): {e:#}. Retrying...");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(jitter(std::time::Duration::from_secs(1))).await;
             }
         }
     }
@@ -659,7 +660,7 @@ pub async fn start_docker_tunnel(
                     return Err(e);
                 }
                 log::warn!("Docker tunnel failed (attempt {attempt}): {e:#}. Retrying...");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(jitter(std::time::Duration::from_secs(1))).await;
             }
         }
     }

@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::types::*;
 use crate::RetryPolicy;
 use crate::git::GitIdentity;
+use crate::jitter;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -109,7 +110,7 @@ impl PodClient {
                     "container server at {url} did not become ready"
                 ));
             }
-            std::thread::sleep(delay);
+            std::thread::sleep(jitter(delay));
             delay = delay.saturating_mul(2).min(max_delay);
         }
     }

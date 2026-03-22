@@ -36,6 +36,8 @@ mod stop;
 mod tcp_proxy;
 mod tunnel;
 
+use std::time::Duration;
+
 use anyhow::Result;
 use clap::Parser;
 
@@ -49,6 +51,13 @@ pub enum RetryPolicy {
     /// No user is waiting.  Retry with sensible limits determined by the
     /// retry logic itself.
     Background,
+}
+
+/// Apply jitter to a delay so concurrent retriers don't stampede.
+///
+/// Returns a uniformly random duration in [delay/2, delay].
+pub fn jitter(d: Duration) -> Duration {
+    d.mul_f64(0.5 + rand::random::<f64>() * 0.5)
 }
 
 use cli::{ClaudeHookSubcommand, Cli, Command, GitHookSubcommand, ImageSubcommand};

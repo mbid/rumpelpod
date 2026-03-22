@@ -24,6 +24,7 @@ use sha2::{Digest, Sha256};
 use crate::RetryPolicy;
 use crate::command_ext::CommandExt;
 use crate::config::{Host, get_runtime_dir};
+use crate::jitter;
 
 /// Initial delay for exponential backoff on reconnection.
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -264,7 +265,7 @@ impl SshForwardManager {
                         "SSH connection to {dest}:{port} failed \
                          (attempt {attempt}): {e:#}. Retrying..."
                     );
-                    std::thread::sleep(Duration::from_secs(2));
+                    std::thread::sleep(jitter(Duration::from_secs(2)));
                 }
             }
         }
@@ -326,8 +327,9 @@ impl SshForwardManager {
 
             // Apply backoff delay
             if failures > 1 {
-                info!("Waiting {backoff:?} before reconnecting (attempt {failures})");
-                std::thread::sleep(backoff);
+                let delay = jitter(backoff);
+                info!("Waiting {delay:?} before reconnecting (attempt {failures})");
+                std::thread::sleep(delay);
             }
 
             // Start new connection with accumulated backoff
