@@ -8,7 +8,6 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use bollard::Docker;
 use bollard::query_parameters::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions, StopContainerOptions,
 };
@@ -16,18 +15,19 @@ use bollard::secret::{
     ContainerCreateBody, DeviceMapping, HostConfig, Mount as BollardMount, MountTypeEnum,
     PortBinding,
 };
+use bollard::Docker;
 use listenfd::ListenFd;
 use log::error;
-use rand::RngExt;
 use rand::distr::Alphanumeric;
+use rand::RngExt;
 use rusqlite::Connection;
 use tokio::net::UnixListener;
 
 use crate::async_runtime::block_on;
-use crate::config::{Host, is_deterministic_test_mode};
+use crate::config::{is_deterministic_test_mode, Host};
 use crate::devcontainer::{
-    self, DevContainer, LifecycleCommand, Port, PortAttributes, StringOrArray, SubstitutionContext,
-    UserEnvProbe, WaitFor, compute_devcontainer_id, substitute_vars,
+    self, compute_devcontainer_id, substitute_vars, DevContainer, LifecycleCommand, Port,
+    PortAttributes, StringOrArray, SubstitutionContext, UserEnvProbe, WaitFor,
 };
 use crate::docker_exec::exec_command;
 use crate::gateway;
@@ -38,8 +38,8 @@ use protocol::{
 };
 use ssh_forward::SshForwardManager;
 
-use crate::RetryPolicy;
 use crate::pod::{PodClient, SubmoduleEntry};
+use crate::RetryPolicy;
 
 /// Environment variable to override the daemon socket path for testing.
 pub const SOCKET_PATH_ENV: &str = "RUMPELPOD_DAEMON_SOCKET";

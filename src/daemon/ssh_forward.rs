@@ -13,18 +13,18 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use sha2::{Digest, Sha256};
 
-use crate::RetryPolicy;
 use crate::command_ext::CommandExt;
-use crate::config::{Host, get_runtime_dir};
+use crate::config::{get_runtime_dir, Host};
 use crate::jitter;
+use crate::RetryPolicy;
 
 /// Initial delay for exponential backoff on reconnection.
 const INITIAL_DELAY: Duration = Duration::from_secs(1);

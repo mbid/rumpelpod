@@ -12,9 +12,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
-use crate::RetryPolicy;
 use crate::git::GitIdentity;
 use crate::jitter;
+use crate::RetryPolicy;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -336,8 +336,8 @@ impl PodClient {
         path: &Path,
         reader: impl std::io::Read + Send + 'static,
     ) -> Result<()> {
-        use flate2::Compression;
         use flate2::read::GzEncoder;
+        use flate2::Compression;
 
         let gz_reader = GzEncoder::new(reader, Compression::fast());
         let body = reqwest::blocking::Body::new(gz_reader);

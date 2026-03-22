@@ -22,17 +22,17 @@
 /// address for each stream.
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use std::task::Poll;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 
-use crate::RetryPolicy;
 use crate::jitter;
+use crate::RetryPolicy;
 
 /// Default port for the tunnel listener CLI flag.  In practice,
 /// `start_tunnel` always passes 0 (ephemeral) so each tunnel gets a

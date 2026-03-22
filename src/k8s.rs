@@ -8,9 +8,9 @@ use kube::{Client, Config};
 use log::{info, trace};
 use tokio::io::AsyncReadExt;
 
-use crate::RetryPolicy;
 use crate::async_runtime::block_on;
 use crate::daemon::protocol::PodStatus;
+use crate::RetryPolicy;
 
 /// Label applied to all pods created by rumpelpod for identification.
 const LABEL_MANAGED_BY: &str = "app.kubernetes.io/managed-by";
@@ -615,7 +615,9 @@ impl K8sClient {
 
         trace!(
             "Port forward established: 127.0.0.1:{} -> {}:{}",
-            local_port, name, remote_port
+            local_port,
+            name,
+            remote_port
         );
 
         Ok(PortForwardHandle {
