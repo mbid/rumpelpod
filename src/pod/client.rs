@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use retry::delay::Exponential;
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
@@ -77,18 +78,22 @@ impl PodClient {
             .expect("failed to build poll client");
 
         let max_delay = Duration::from_secs(5);
-        let mut delay = Duration::from_millis(100);
-        let mut attempt = 0u32;
+        let delays = Exponential::from_millis(100).map(move |d| d.min(max_delay));
+        let delays: Box<dyn Iterator<Item = Duration>> = match policy {
+            RetryPolicy::UserBlocking => Box::new(delays),
+            RetryPolicy::Background => Box::new(delays.take(20)),
+        };
         let verbose = policy == RetryPolicy::UserBlocking;
+        let mut attempt = 0u32;
 
-        loop {
+        retry::retry(delays, || {
             attempt += 1;
             match poll_client.get(format!("{url}/health")).send() {
                 Ok(resp) if resp.status().is_success() => {
                     if verbose && attempt > 1 {
                         eprintln!("Connected to container server after {attempt} attempts");
                     }
-                    return Ok(());
+                    Ok(())
                 }
                 Ok(resp) => {
                     if verbose {
@@ -97,21 +102,17 @@ impl PodClient {
                             "Waiting for container server (attempt {attempt}, status {status})..."
                         );
                     }
+                    Err(())
                 }
                 Err(e) => {
                     if verbose {
                         eprintln!("Waiting for container server (attempt {attempt}: {e})...");
                     }
+                    Err(())
                 }
             }
-            if policy == RetryPolicy::Background && attempt >= 20 {
-                return Err(anyhow::anyhow!(
-                    "container server at {url} did not become ready"
-                ));
-            }
-            std::thread::sleep(delay);
-            delay = delay.saturating_mul(2).min(max_delay);
-        }
+        })
+        .map_err(|_| anyhow::anyhow!("container server at {url} did not become ready"))
     }
 
     // -------------------------------------------------------------------
