@@ -226,6 +226,19 @@ Examples:
     )]
     Claude(ClaudeCommand),
 
+    /// Manage SSH keys available to a pod
+    #[command(
+        long_about = "Manage SSH private keys available to a pod via ssh-agent.
+
+An ssh-agent runs on the host for each pod. The agent socket is bind-mounted into the container so processes inside the pod can use the keys for authentication (e.g. git push over SSH) but cannot extract the private key material.
+
+Examples:
+  rumpel ssh dev add ~/.ssh/id_ed25519   # Add a key to 'dev' pod
+  rumpel ssh dev list                    # List loaded keys
+"
+    )]
+    Ssh(SshCommand),
+
     /// Internal git hook handlers (invoked from git hooks inside containers)
     #[command(subcommand, hide = true)]
     GitHook(GitHookSubcommand),
@@ -585,4 +598,29 @@ pub struct PostCheckoutCommand {
     pub new_ref: String,
     /// Checkout type: "0" for file checkout, "1" for branch checkout
     pub flag: String,
+}
+
+#[derive(Args)]
+pub struct SshCommand {
+    /// Name of the pod
+    #[arg(value_parser = validate_pod_name)]
+    pub name: String,
+
+    #[command(subcommand)]
+    pub action: SshAction,
+}
+
+#[derive(Subcommand)]
+pub enum SshAction {
+    /// Add an SSH private key to the pod's ssh-agent
+    Add(SshAddArgs),
+    /// List SSH keys loaded in the pod's ssh-agent
+    List,
+}
+
+#[derive(Args)]
+pub struct SshAddArgs {
+    /// Path to the SSH private key file on the host
+    #[arg(value_name = "KEY_FILE")]
+    pub key_file: PathBuf,
 }

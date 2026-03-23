@@ -74,6 +74,9 @@ struct PodInfo {
     pod_name: String,
     /// Path to the host repository, used to locate `.git/lfs/objects/`.
     host_repo_path: PathBuf,
+    /// Path to the host-side ssh-agent Unix socket for this pod.
+    /// May not exist yet if no keys have been added.
+    agent_sock: Option<PathBuf>,
 }
 
 /// Shared state for the git HTTP server.
@@ -96,6 +99,7 @@ impl SharedGitServerState {
         gateway_path: PathBuf,
         pod_name: String,
         host_repo_path: PathBuf,
+        agent_sock: Option<PathBuf>,
     ) -> String {
         let token: String = rand::rng()
             .sample_iter(&Alphanumeric)
@@ -107,6 +111,7 @@ impl SharedGitServerState {
             gateway_path,
             pod_name,
             host_repo_path,
+            agent_sock,
         };
 
         self.inner.lock().unwrap().insert(token.clone(), info);
@@ -218,6 +223,7 @@ fn build_router(state: SharedGitServerState) -> Router {
             "/gateway.git/lfs/objects/{oid}",
             get(lfs_download_handler).put(lfs_upload_handler),
         )
+        .route("/ssh-agent", get(ssh_agent_handler))
         .fallback(handle_request)
         .with_state(state)
 }
@@ -565,4 +571,105 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
         Ok(response) => response.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+// -- SSH agent relay ----------------------------------------------------------
+
+/// WebSocket endpoint that bridges to the host-side ssh-agent Unix socket.
+///
+/// The container-serve process inside the pod connects here (through the
+/// existing tunnel) when an SSH client connects to SSH_AUTH_SOCK.  Bytes
+/// are piped bidirectionally between the WebSocket and the agent socket.
+async fn ssh_agent_handler(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    State(state): State<SharedGitServerState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let auth = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok());
+    let token = match auth {
+        Some(h) if h.starts_with("Bearer ") => &h[7..],
+        _ => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    let info = match state.get(token) {
+        Some(i) => i,
+        None => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let agent_sock = match info.agent_sock {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                "no ssh-agent configured for this pod",
+            )
+                .into_response()
+        }
+    };
+
+    ws.on_upgrade(move |socket| ssh_agent_bridge(socket, agent_sock))
+}
+
+async fn ssh_agent_bridge(mut ws: axum::extract::ws::WebSocket, agent_sock: PathBuf) {
+    use axum::extract::ws::Message;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let agent = match tokio::net::UnixStream::connect(&agent_sock).await {
+        Ok(s) => s,
+        Err(e) => {
+            let path = agent_sock.display();
+            warn!("ssh-agent relay: cannot connect to {path}: {e}");
+            let _ = ws.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let (mut agent_read, mut agent_write) = tokio::io::split(agent);
+
+    // Read from the agent socket in a background task and feed a channel,
+    // because we cannot split axum's WebSocket into independent read/write
+    // halves.
+    let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let agent_reader = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            let n = match agent_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if agent_tx.send(buf[..n].to_vec()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            ws_msg = ws.recv() => {
+                match ws_msg {
+                    Some(Ok(Message::Binary(data))) => {
+                        if agent_write.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+            agent_data = agent_rx.recv() => {
+                match agent_data {
+                    Some(data) => {
+                        if ws.send(Message::Binary(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    agent_reader.abort();
+    let _ = ws.send(Message::Close(None)).await;
 }

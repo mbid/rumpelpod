@@ -199,6 +199,33 @@ struct ListPortsResponse {
     ports: Vec<PortInfo>,
 }
 
+/// Request body for ssh_add_key endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct SshAddKeyRequest {
+    pod_name: PodName,
+    repo_path: PathBuf,
+    key_path: PathBuf,
+}
+
+/// Response body for ssh_add_key endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct SshAddKeyResponse {
+    message: String,
+}
+
+/// Request body for ssh_list_keys endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct SshListKeysRequest {
+    pod_name: PodName,
+    repo_path: PathBuf,
+}
+
+/// Response body for ssh_list_keys endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct SshListKeysResponse {
+    keys: String,
+}
+
 /// Request body for save_conversation endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SaveConversationRequest {
@@ -358,6 +385,19 @@ pub trait Daemon: Send + Sync + 'static {
     // Ensure Claude Code config files are present in the container.
     // Idempotent: skips the copy if it has already been done for this pod.
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()>;
+
+    // POST /pod/ssh-add
+    // Add an SSH private key to the pod's host-side ssh-agent.
+    fn ssh_add_key(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        key_path: PathBuf,
+    ) -> Result<String>;
+
+    // GET /pod/ssh-keys
+    // List SSH keys loaded in the pod's host-side ssh-agent.
+    fn ssh_list_keys(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String>;
 }
 
 pub struct DaemonClient {
@@ -789,6 +829,68 @@ impl Daemon for DaemonClient {
             Err(anyhow::anyhow!("Server error: {msg}"))
         }
     }
+
+    fn ssh_add_key(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        key_path: PathBuf,
+    ) -> Result<String> {
+        let url = self.url.join("/pod/ssh-add")?;
+        let request = SshAddKeyRequest {
+            pod_name,
+            repo_path,
+            key_path,
+        };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+
+        if response.status().is_success() {
+            let body: SshAddKeyResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
+            Ok(body.message)
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
+        }
+    }
+
+    fn ssh_list_keys(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String> {
+        let url = self.url.join("/pod/ssh-keys")?;
+        let request = SshListKeysRequest {
+            pod_name,
+            repo_path,
+        };
+
+        let response = self
+            .client
+            .get(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+
+        if response.status().is_success() {
+            let body: SshListKeysResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
+            Ok(body.keys)
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
+        }
+    }
 }
 
 /// Format a single SSE event with the given type and JSON-encoded data.
@@ -1052,6 +1154,44 @@ async fn ensure_claude_config_handler<D: Daemon>(
     }
 }
 
+/// Handler for POST /pod/ssh-add endpoint.
+async fn ssh_add_key_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<SshAddKeyRequest>,
+) -> Result<Json<SshAddKeyResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| {
+        daemon.ssh_add_key(request.pod_name, request.repo_path, request.key_path)
+    });
+
+    match result {
+        Ok(message) => Ok(Json(SshAddKeyResponse { message })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{e:#}"),
+            }),
+        )),
+    }
+}
+
+/// Handler for GET /pod/ssh-keys endpoint.
+async fn ssh_list_keys_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<SshListKeysRequest>,
+) -> Result<Json<SshListKeysResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.ssh_list_keys(request.pod_name, request.repo_path));
+
+    match result {
+        Ok(keys) => Ok(Json(SshListKeysResponse { keys })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{e:#}"),
+            }),
+        )),
+    }
+}
+
 /// Serve the daemon using the provided listener.
 ///
 /// The listener can be a `tokio::net::TcpListener` or `tokio::net::UnixListener`.
@@ -1088,6 +1228,8 @@ where
         .route("/conversations", get(list_conversations_handler::<D>))
         .route("/conversation/{id}", get(get_conversation_handler::<D>))
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
+        .route("/pod/ssh-add", post(ssh_add_key_handler::<D>))
+        .route("/pod/ssh-keys", get(ssh_list_keys_handler::<D>))
         .with_state(daemon);
 
     block_on(async move {

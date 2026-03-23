@@ -291,6 +291,21 @@ impl PodClient {
     }
 
     // -------------------------------------------------------------------
+    // SSH agent relay
+    // -------------------------------------------------------------------
+
+    /// Tell the container-serve where to relay SSH agent connections.
+    pub fn ssh_configure(&self, url: &str, token: &str) -> Result<()> {
+        self.post_unit(
+            "/ssh/configure",
+            &SshConfigureRequest {
+                url: url.to_string(),
+                token: token.to_string(),
+            },
+        )
+    }
+
+    // -------------------------------------------------------------------
     // Copy (tar-based file transfer)
     // -------------------------------------------------------------------
 

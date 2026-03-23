@@ -36,6 +36,8 @@ mod recreate;
 mod review;
 #[path = "cli/ssh/mod.rs"]
 mod ssh;
+#[path = "cli/ssh_agent.rs"]
+mod ssh_agent;
 #[path = "cli/stop.rs"]
 mod stop;
 #[cfg(target_os = "linux")]

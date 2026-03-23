@@ -194,6 +194,18 @@ pub struct CpDownloadRequest {
 // and X-Path header.
 
 // ---------------------------------------------------------------------------
+// SSH agent relay
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SshConfigureRequest {
+    /// URL of the git HTTP server (tunneled into the container).
+    pub url: String,
+    /// Bearer token for authenticating to the git HTTP server.
+    pub token: String,
+}
+
+// ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
 

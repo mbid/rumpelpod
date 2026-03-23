@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
@@ -20,12 +21,24 @@ use crate::async_runtime::block_on;
 
 pub const DEFAULT_PORT: u16 = 7890;
 pub const TOKEN_FILE: &str = "/opt/rumpelpod/server-token";
+/// In-container path for the bind-mounted SSH agent socket.
+pub const SSH_AGENT_SOCK_PATH: &str = "/tmp/rumpelpod-ssh-agent/agent.sock";
+
+/// Configuration for relaying SSH agent connections back to the host.
+#[derive(Clone)]
+pub struct SshRelayConfig {
+    /// Base URL of the git HTTP server (reachable via tunnel).
+    pub url: String,
+    /// Bearer token for authenticating to the git HTTP server.
+    pub token: String,
+}
 
 /// Shared state for the in-container HTTP server.
 #[derive(Clone)]
 pub struct PodServerState {
     pub pty_sessions: super::pty::PtySessions,
     pub token: String,
+    pub ssh_relay: std::sync::Arc<tokio::sync::Mutex<Option<SshRelayConfig>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,6 +67,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
     let state = PodServerState {
         pty_sessions: super::pty::PtySessions::new(),
         token: token.clone(),
+        ssh_relay: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     // POST routes require bearer token authentication
@@ -73,6 +87,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/env/probe", post(env_probe_handler))
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
+        .route("/ssh/configure", post(ssh_configure_handler))
         .route("/claude", any(super::pty::claude_session_handler))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
@@ -1054,6 +1069,165 @@ fn run_impl(req: RunRequest) -> Result<RunResponse> {
         stderr: base64_encode(&stderr),
         timed_out,
     })
+}
+
+// ---------------------------------------------------------------------------
+// SSH agent relay
+// ---------------------------------------------------------------------------
+
+async fn ssh_configure_handler(
+    State(state): State<PodServerState>,
+    Json(req): Json<SshConfigureRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let config = SshRelayConfig {
+        url: req.url,
+        token: req.token,
+    };
+
+    // Create the socket directory.
+    let sock_path = Path::new(SSH_AGENT_SOCK_PATH);
+    if let Some(parent) = sock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| err_json(anyhow::anyhow!("creating ssh-agent socket directory: {e}")))?;
+    }
+
+    // Remove stale socket from a previous run.
+    if sock_path.exists() {
+        let _ = std::fs::remove_file(sock_path);
+    }
+
+    let relay = state.ssh_relay.clone();
+    *relay.lock().await = Some(config);
+
+    // Spawn the Unix socket listener.
+    let relay_for_task = state.ssh_relay.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_ssh_agent_listener(relay_for_task).await {
+            eprintln!("ssh-agent relay listener failed: {e:#}");
+        }
+    });
+
+    ok_json(serde_json::json!({}))
+}
+
+/// Listen on the SSH_AUTH_SOCK Unix socket and relay each connection
+/// to the host-side ssh-agent via WebSocket through the git HTTP server.
+async fn run_ssh_agent_listener(
+    relay: std::sync::Arc<tokio::sync::Mutex<Option<SshRelayConfig>>>,
+) -> Result<()> {
+    let sock_path = SSH_AGENT_SOCK_PATH;
+    let listener = tokio::net::UnixListener::bind(sock_path)
+        .with_context(|| format!("binding {sock_path}"))?;
+
+    // Make the socket accessible to all users in the container.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o666))
+            .context("chmod ssh-agent socket")?;
+    }
+
+    loop {
+        let (stream, _) = listener.accept().await.context("accepting connection")?;
+        let relay = relay.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_ssh_agent_connection(stream, relay).await {
+                eprintln!("ssh-agent relay connection failed: {e:#}");
+            }
+        });
+    }
+}
+
+/// Bridge a single SSH agent connection to the host via WebSocket.
+async fn handle_ssh_agent_connection(
+    stream: tokio::net::UnixStream,
+    relay: std::sync::Arc<tokio::sync::Mutex<Option<SshRelayConfig>>>,
+) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite;
+
+    let config = relay
+        .lock()
+        .await
+        .clone()
+        .context("ssh-agent relay not configured (tunnel not ready yet?)")?;
+
+    // Connect to the git HTTP server's /ssh-agent WebSocket endpoint.
+    let ws_url = format!(
+        "{}/ssh-agent",
+        config
+            .url
+            .replace("http://", "ws://")
+            .replace("https://", "wss://")
+    );
+    let ws_request = tungstenite::http::Request::builder()
+        .uri(&ws_url)
+        .header("Authorization", format!("Bearer {}", config.token))
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header(
+            "Sec-WebSocket-Key",
+            tungstenite::handshake::client::generate_key(),
+        )
+        .header("Host", "localhost")
+        .body(())
+        .context("building WebSocket request")?;
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_request)
+        .await
+        .context("connecting to ssh-agent relay WebSocket")?;
+
+    use futures_util::{SinkExt, StreamExt};
+
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+    let (mut unix_read, mut unix_write) = tokio::io::split(stream);
+
+    // Unix socket -> WebSocket (via channel, since we need select!)
+    let (unix_tx, mut unix_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let reader_task = tokio::spawn(async move {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            let n = match unix_read.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if unix_tx.send(buf[..n].to_vec()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    loop {
+        tokio::select! {
+            ws_msg = ws_read.next() => {
+                match ws_msg {
+                    Some(Ok(tungstenite::Message::Binary(data))) => {
+                        if unix_write.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(tungstenite::Message::Close(_))) | None => break,
+                    Some(Err(_)) => break,
+                    _ => {}
+                }
+            }
+            unix_data = unix_rx.recv() => {
+                match unix_data {
+                    Some(data) => {
+                        if ws_write.send(tungstenite::Message::Binary(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    reader_task.abort();
+    let _ = ws_write.send(tungstenite::Message::Close(None)).await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

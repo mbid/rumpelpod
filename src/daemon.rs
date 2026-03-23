@@ -128,6 +128,43 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(runtime_dir.join("rumpelpod.sock"))
 }
 
+/// Compute the host-side directory for a pod's ssh-agent socket.
+///
+/// Uses the same runtime directory logic as `socket_path()`, placing agent
+/// sockets under `<runtime_dir>/rumpelpod/agents/<hash>/`.  The directory
+/// name is a short hash to stay within the Unix socket path length limit
+/// (108 bytes on Linux).
+fn ssh_agent_dir(repo_path: &Path, pod_name: &PodName) -> PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let uid = unsafe { libc::getuid() };
+            PathBuf::from(format!("/tmp/rumpelpod-{uid}"))
+        });
+
+    let mut hasher = Sha256::new();
+    hasher.update(repo_path.as_os_str().as_encoded_bytes());
+    hasher.update(pod_name.0.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    let hash_prefix = &hash[..12];
+
+    runtime_dir.join("rumpelpod/agents").join(hash_prefix)
+}
+
+/// Handle to a running ssh-agent process managed by the daemon.
+struct SshAgentHandle {
+    child: std::process::Child,
+}
+
+impl Drop for SshAgentHandle {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 #[derive(Clone)]
 struct DaemonServer {
     /// SQLite connection for conversation history.
@@ -161,6 +198,10 @@ struct DaemonServer {
     /// of bridge IPs or SSH port forwards.
     #[allow(clippy::type_complexity)]
     exec_proxies: Arc<Mutex<HashMap<(PathBuf, String), crate::exec_proxy::ExecProxyHandle>>>,
+    /// Per-pod ssh-agent processes running on the host.
+    /// The agent socket is bind-mounted into the container.
+    #[allow(clippy::type_complexity)]
+    ssh_agents: Arc<Mutex<HashMap<(PathBuf, String), SshAgentHandle>>>,
 }
 
 /// Label key used to store the repository path on containers.
@@ -577,14 +618,12 @@ fn create_container(
         labels.insert(k.clone(), v.clone());
     }
 
-    let env_vec = match env {
-        Some(e) if !e.is_empty() => Some(
-            e.iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>(),
-        ),
-        _ => None,
+    let mut env_list: Vec<String> = match env {
+        Some(e) if !e.is_empty() => e.iter().map(|(k, v)| format!("{k}={v}")).collect(),
+        _ => Vec::new(),
     };
+    env_list.push(format!("SSH_AUTH_SOCK={}", crate::pod::SSH_AGENT_SOCK_PATH));
+    let env_vec = Some(env_list);
 
     // In deterministic PID mode (for tests), we need privileged mode to write to
     // /proc/sys/kernel/ns_last_pid. With --privileged, /proc/sys is mounted rw.
@@ -2080,10 +2119,12 @@ impl DaemonServer {
                         RetryPolicy::UserBlocking,
                     )?;
 
+                    let agent_sock = ssh_agent_dir(repo_path, pod_name).join("agent.sock");
                     let token = self.git_server_state.register(
                         gateway_path.clone(),
                         pod_name.0.clone(),
                         repo_path.to_path_buf(),
+                        Some(agent_sock),
                     );
                     self.active_tokens
                         .lock()
@@ -2130,6 +2171,10 @@ impl DaemonServer {
 
                     let base_url = format!("http://127.0.0.1:{tunnel_port}");
                     let url = format!("{base_url}/gateway.git");
+
+                    // Tell container-serve where to relay SSH agent connections.
+                    pod.ssh_configure(&base_url, &token)
+                        .context("configuring ssh-agent relay")?;
 
                     // Git operations go through the tunnel. If they fail
                     // (e.g. because the tunnel-server died but the mux
@@ -2250,10 +2295,12 @@ impl DaemonServer {
         }
 
         // Register pod with the git HTTP server
+        let agent_sock = ssh_agent_dir(repo_path, pod_name).join("agent.sock");
         let token = self.git_server_state.register(
             gateway_path.clone(),
             pod_name.0.clone(),
             repo_path.to_path_buf(),
+            Some(agent_sock),
         );
         self.active_tokens
             .lock()
@@ -2434,6 +2481,11 @@ impl DaemonServer {
 
         let base_url = format!("http://127.0.0.1:{tunnel_port}");
         let url = format!("{base_url}/gateway.git");
+
+        // Tell container-serve where to relay SSH agent connections.
+        pod.ssh_configure(&base_url, &token)
+            .context("configuring ssh-agent relay")
+            .map_err(mark_error)?;
 
         ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path)
             .map_err(mark_error)?;
@@ -2811,10 +2863,12 @@ impl DaemonServer {
             };
 
             // Register pod with the git HTTP server (may already be registered, that's OK)
+            let agent_sock = ssh_agent_dir(&repo_path, &pod_name).join("agent.sock");
             let token = self.git_server_state.register(
                 gateway_path.clone(),
                 pod_name.0.clone(),
                 repo_path.clone(),
+                Some(agent_sock),
             );
 
             // Store the token for cleanup on delete
@@ -2865,6 +2919,10 @@ impl DaemonServer {
 
             let base_url = format!("http://127.0.0.1:{tunnel_port}");
             let url = format!("{base_url}/gateway.git");
+
+            // Tell container-serve where to relay SSH agent connections.
+            pod.ssh_configure(&base_url, &token)
+                .context("configuring ssh-agent relay")?;
 
             // Clone repo if not already present (e.g. devcontainer without COPY)
             let git_result: Result<()> = (|| {
@@ -3004,9 +3062,13 @@ impl DaemonServer {
         }
 
         // Register pod with the git HTTP server
-        let token =
-            self.git_server_state
-                .register(gateway_path, pod_name.0.clone(), repo_path.clone());
+        let agent_sock = ssh_agent_dir(&repo_path, &PodName(pod_name.0.clone())).join("agent.sock");
+        let token = self.git_server_state.register(
+            gateway_path,
+            pod_name.0.clone(),
+            repo_path.clone(),
+            Some(agent_sock),
+        );
 
         // Store the token for cleanup on delete
         self.active_tokens
@@ -3116,6 +3178,11 @@ impl DaemonServer {
 
             let base_url = format!("http://127.0.0.1:{tunnel_port}");
             let url = format!("{base_url}/gateway.git");
+
+            // Tell container-serve where to relay SSH agent connections.
+            pod_inner
+                .ssh_configure(&base_url, &token)
+                .context("configuring ssh-agent relay")?;
 
             ensure_repo_initialized_via_pod(&pod_inner, &url, &token, &container_repo_path)?;
 
@@ -3587,6 +3654,16 @@ impl Daemon for DaemonServer {
             return Ok(());
         }
 
+        // Kill the ssh-agent and remove its directory.
+        self.ssh_agents
+            .lock()
+            .unwrap()
+            .remove(&(repo_path.clone(), pod_name.0.clone()));
+        let agent_dir = ssh_agent_dir(&repo_path, &pod_name);
+        if agent_dir.exists() {
+            let _ = std::fs::remove_dir_all(&agent_dir);
+        }
+
         let container_name = docker_name(&repo_path, &pod_name);
 
         if wait {
@@ -3902,6 +3979,155 @@ impl Daemon for DaemonServer {
 
         Ok(())
     }
+
+    fn ssh_add_key(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        key_path: PathBuf,
+    ) -> Result<String> {
+        // Verify the pod exists.
+        let conn = self.db.lock().unwrap();
+        db::get_pod(&conn, &repo_path, &pod_name.0)?.context("pod not found")?;
+        drop(conn);
+
+        let agent_dir = ssh_agent_dir(&repo_path, &pod_name);
+        let sock_path = agent_dir.join("agent.sock");
+
+        // Start the agent if not already running.
+        let mut agents = self.ssh_agents.lock().unwrap();
+        let key = (repo_path.clone(), pod_name.0.clone());
+        let need_start = if agents.contains_key(&key) {
+            // Check if the child is still alive.
+            let handle = agents.get_mut(&key).unwrap();
+            match handle.child.try_wait() {
+                Ok(Some(_)) => {
+                    // Exited -- remove stale entry and restart.
+                    agents.remove(&key);
+                    true
+                }
+                Ok(None) => false,
+                Err(_) => {
+                    agents.remove(&key);
+                    true
+                }
+            }
+        } else {
+            true
+        };
+
+        if need_start {
+            // Remove stale socket from a previous daemon run.
+            if sock_path.exists() {
+                std::fs::remove_file(&sock_path).ok();
+            }
+
+            std::fs::create_dir_all(&agent_dir).with_context(|| {
+                let dir = agent_dir.display();
+                format!("creating ssh-agent directory {dir}")
+            })?;
+
+            let mut child = Command::new("ssh-agent")
+                .args(["-D", "-a"])
+                .arg(&sock_path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to start ssh-agent")?;
+
+            // Wait for the socket to appear.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !sock_path.exists() {
+                // Check if the agent exited prematurely.
+                if let Ok(Some(status)) = child.try_wait() {
+                    let stderr = child
+                        .stderr
+                        .take()
+                        .and_then(|mut s| {
+                            use std::io::Read;
+                            let mut buf = String::new();
+                            s.read_to_string(&mut buf).ok()?;
+                            Some(buf)
+                        })
+                        .unwrap_or_default();
+                    let stderr = stderr.trim();
+                    return Err(anyhow::anyhow!("ssh-agent exited with {status}: {stderr}"));
+                }
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    return Err(anyhow::anyhow!(
+                        "ssh-agent did not create socket within 5 seconds"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
+            agents.insert(key, SshAgentHandle { child });
+
+            // Relax socket permissions so the container user (different UID)
+            // can connect through the bind mount.  Host-side access is already
+            // restricted by the parent directory chain ($XDG_RUNTIME_DIR is
+            // typically 0700).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o666))
+                    .context("chmod ssh-agent socket")?;
+            }
+        }
+        drop(agents);
+
+        let sock = sock_path.to_string_lossy();
+        let output = Command::new("ssh-add")
+            .arg(&key_path)
+            .env("SSH_AUTH_SOCK", &*sock)
+            .output()
+            .context("failed to run ssh-add")?;
+
+        if output.status.success() {
+            // ssh-add prints the confirmation to stderr.
+            let msg = String::from_utf8_lossy(&output.stderr);
+            Ok(msg.trim().to_string())
+        } else {
+            let err = String::from_utf8_lossy(&output.stderr);
+            Err(anyhow::anyhow!("ssh-add failed: {}", err.trim()))
+        }
+    }
+
+    fn ssh_list_keys(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String> {
+        let agent_dir = ssh_agent_dir(&repo_path, &pod_name);
+        let sock_path = agent_dir.join("agent.sock");
+
+        if !sock_path.exists() {
+            return Ok("No keys (ssh-agent not started for this pod)".to_string());
+        }
+
+        let sock = sock_path.to_string_lossy();
+        let output = Command::new("ssh-add")
+            .arg("-l")
+            .env("SSH_AUTH_SOCK", &*sock)
+            .output()
+            .context("failed to run ssh-add -l")?;
+
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+
+        // Exit code 1 with "no identities" is normal (agent running, no keys).
+        // Exit code 2 means the agent is not reachable.
+        match output.status.code() {
+            Some(0) => Ok(out.trim().to_string()),
+            Some(1) => Ok(out.trim().to_string()),
+            _ => {
+                let msg = if err.is_empty() {
+                    out.trim().to_string()
+                } else {
+                    err.trim().to_string()
+                };
+                Err(anyhow::anyhow!("ssh-add -l failed: {msg}"))
+            }
+        }
+    }
 }
 
 pub fn run_daemon() -> Result<()> {
@@ -3961,6 +4187,7 @@ pub fn run_daemon() -> Result<()> {
         k8s_tunnels: Arc::new(Mutex::new(HashMap::new())),
         docker_tunnels: Arc::new(Mutex::new(HashMap::new())),
         exec_proxies: Arc::new(Mutex::new(HashMap::new())),
+        ssh_agents: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Keep the server alive for the lifetime of the daemon.

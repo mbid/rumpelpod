@@ -32,6 +32,7 @@ mod pty_attach;
 mod recreate;
 mod review;
 mod service;
+mod ssh;
 mod stop;
 mod tcp_proxy;
 mod tunnel;
@@ -130,6 +131,9 @@ pub fn run() -> Result<()> {
                 claude::claude(cmd)?;
             }
         },
+        Command::Ssh(ref cmd) => {
+            ssh::ssh(cmd)?;
+        }
         Command::PrepareImage(ref cmd) => {
             prepared_image::run_prepare_image(cmd)?;
         }
