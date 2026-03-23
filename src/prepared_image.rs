@@ -24,7 +24,7 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 
 /// Bump this when the Dockerfile template changes in a way that
 /// invalidates previously built prepared images.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 /// Where the gateway bare repo is bind-mounted during `docker build`.
 /// Must match the `--mount` target in `generate_dockerfile`.
@@ -482,6 +482,16 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
 
     if let Some(ref version) = cmd.claude_version {
         install_claude_cli(version)?;
+    }
+
+    // Let the container user write to /opt/rumpelpod (e.g. the server token
+    // file).  The binary keeps its 755 permissions regardless of owner.
+    let status = Command::new("chown")
+        .args(["-R", &cmd.user, "/opt/rumpelpod"])
+        .status()
+        .context("setting /opt/rumpelpod ownership")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("chown /opt/rumpelpod failed"));
     }
 
     Ok(())

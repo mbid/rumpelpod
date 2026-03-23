@@ -19,7 +19,7 @@ use super::types::*;
 use crate::async_runtime::block_on;
 
 pub const DEFAULT_PORT: u16 = 7890;
-pub const TOKEN_FILE: &str = "/tmp/rumpelpod-server-token";
+pub const TOKEN_FILE: &str = "/opt/rumpelpod/server-token";
 
 /// Shared state for the in-container HTTP server.
 #[derive(Clone)]

@@ -173,11 +173,11 @@ impl K8sClient {
             })
             .collect();
 
-        // Always include a writable emptyDir for the rumpel binary so we
-        // can write to /opt/rumpelpod/bin as a non-root user.
+        // Always include a writable emptyDir so the non-root container user
+        // can write binaries and the server token file.
         volume_mounts.push(serde_json::json!({
             "name": "rumpelpod-bin",
-            "mountPath": "/opt/rumpelpod/bin",
+            "mountPath": "/opt/rumpelpod",
         }));
         volumes.push(serde_json::json!({
             "name": "rumpelpod-bin",
