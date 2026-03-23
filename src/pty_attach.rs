@@ -5,7 +5,7 @@
 //! connection to the in-container PTY server.  Automatically reconnects
 //! when the connection is lost (e.g. after laptop suspend).
 
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -132,11 +132,10 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
     // Reset terminal emulator state that escape sequences from the remote
     // may have changed (termios is restored by TerminalGuard, but modes
     // like alternate screen or hidden cursor need explicit cleanup).
-    {
-        use std::io::Write;
-        let _ = io::stdout().write_all(b"\x1b[?1049l\x1b[0m\x1b[?25h");
-        let _ = io::stdout().flush();
-    }
+    io::stdout()
+        .write_all(b"\x1b[?1049l\x1b[0m\x1b[?25h")
+        .and_then(|()| io::stdout().flush())
+        .context("resetting terminal emulator state")?;
 
     Ok(outcome)
 }
