@@ -122,9 +122,14 @@ pub fn run() -> Result<()> {
         Command::Cp(ref cmd) => {
             cp::cp(cmd)?;
         }
-        Command::Claude(ref cmd) => {
-            claude::claude(cmd)?;
-        }
+        Command::Claude(ref cmd) => match cmd.action {
+            Some(cli::ClaudeAction::Reauth) => {
+                claude::reauth(cmd)?;
+            }
+            None => {
+                claude::claude(cmd)?;
+            }
+        },
         Command::PrepareImage(ref cmd) => {
             prepared_image::run_prepare_image(cmd)?;
         }

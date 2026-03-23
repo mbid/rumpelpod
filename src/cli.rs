@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::config::{Host, Model};
 
@@ -444,11 +444,20 @@ pub struct AgentCommand {
     pub thinking_budget: Option<u32>,
 }
 
+#[derive(Clone, ValueEnum)]
+pub enum ClaudeAction {
+    /// Refresh authentication credentials in the pod from the host
+    Reauth,
+}
+
 #[derive(Args)]
 pub struct ClaudeCommand {
     /// Name for this pod instance
     #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
     pub name: String,
+
+    /// Action to perform (omit for interactive Claude Code session)
+    pub action: Option<ClaudeAction>,
 
     #[command(flatten)]
     pub host_args: HostArgs,

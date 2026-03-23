@@ -1,6 +1,7 @@
+use std::path::Path;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::trace;
 
 use crate::cli::ClaudeCommand;
@@ -11,6 +12,7 @@ use crate::daemon::protocol::{
 };
 use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env_via_pod};
 use crate::git::get_repo_root;
+use crate::pod::PodClient;
 use crate::pty_attach;
 
 const PTY_SESSION_NAME: &str = "claude";
@@ -118,5 +120,69 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
         pty_attach::AttachOutcome::SessionEnded => {}
     }
 
+    Ok(())
+}
+
+/// Copy only authentication credentials from the host into the pod.
+///
+/// Supports both OAuth (.credentials.json) and API keys (primaryApiKey
+/// in .claude.json). Useful when host credentials have been refreshed
+/// (e.g. token expiry) without needing to recreate the pod.
+pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
+    let host_override = cmd.host_args.resolve()?;
+    let result = launch_pod(&cmd.name, host_override)?;
+    let pod = PodClient::connect(&result.container_url, &result.container_token)?;
+    let user_info = pod.user_info()?;
+    let container_home = user_info.home;
+
+    let host_home = dirs::home_dir().context("could not determine home directory")?;
+
+    copy_credentials(&pod, &host_home, &container_home)?;
+    copy_api_key(&pod, &host_home, &container_home)?;
+
+    eprintln!("Authentication credentials updated.");
+    Ok(())
+}
+
+/// Overwrite .claude/.credentials.json in the container with the host copy.
+fn copy_credentials(pod: &PodClient, host_home: &Path, container_home: &str) -> Result<()> {
+    match std::fs::read(host_home.join(".claude/.credentials.json")) {
+        Ok(data) => {
+            let dest = format!("{container_home}/.claude/.credentials.json");
+            pod.fs_write(Path::new(&dest), &data, false)
+                .context("writing .claude/.credentials.json")?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
+    }
+    Ok(())
+}
+
+/// Update primaryApiKey in the container's .claude.json from the host copy.
+fn copy_api_key(pod: &PodClient, host_home: &Path, container_home: &str) -> Result<()> {
+    let host_data = match std::fs::read(host_home.join(".claude.json")) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude.json")),
+    };
+    let host_obj: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&host_data).context("parsing ~/.claude.json")?;
+
+    // Nothing to do if the host has no API key.
+    let Some(key) = host_obj.get("primaryApiKey") else {
+        return Ok(());
+    };
+
+    let container_path = format!("{container_home}/.claude.json");
+    let container_data = pod.fs_read(Path::new(&container_path)).unwrap_or_default();
+    let mut container_obj: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&container_data).unwrap_or_default();
+
+    container_obj.insert("primaryApiKey".to_string(), key.clone());
+
+    let updated =
+        serde_json::to_vec_pretty(&container_obj).context("serializing updated .claude.json")?;
+    pod.fs_write(Path::new(&container_path), &updated, false)
+        .context("writing container .claude.json")?;
     Ok(())
 }

@@ -9,5 +9,6 @@ pub(super) mod proxy;
 
 mod detach;
 mod install;
+mod reauth;
 mod smoke;
 mod tool_use;
