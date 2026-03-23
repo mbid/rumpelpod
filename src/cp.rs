@@ -139,6 +139,9 @@ fn tar_local_path(
 fn untar_to_local(reader: impl Read, local_path: &str) -> Result<()> {
     let dest = Path::new(local_path);
     let dest_display = dest.display();
+    // Match standard cp: when the destination is an existing directory,
+    // place the content inside it rather than overwriting it.
+    let dest_is_dir = dest.is_dir();
 
     let mut archive = tar::Archive::new(reader);
     for entry in archive.entries().context("reading tar entries")? {
@@ -151,16 +154,20 @@ fn untar_to_local(reader: impl Read, local_path: &str) -> Result<()> {
             _ => continue,
         };
 
-        // Strip the content name (file name or directory name), leaving
-        // the path relative to the destination.
-        let mut components = relative.components();
-        components.next();
-        let rest: PathBuf = components.collect();
-
-        let target = if rest.as_os_str().is_empty() {
-            dest.to_path_buf()
+        let target = if dest_is_dir {
+            dest.join(relative)
         } else {
-            dest.join(&rest)
+            // Strip the content name (file name or directory name), leaving
+            // the path relative to the destination.
+            let mut components = relative.components();
+            components.next();
+            let rest: PathBuf = components.collect();
+
+            if rest.as_os_str().is_empty() {
+                dest.to_path_buf()
+            } else {
+                dest.join(&rest)
+            }
         };
 
         if entry.header().entry_type().is_dir() {

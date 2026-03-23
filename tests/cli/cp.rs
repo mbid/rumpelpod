@@ -513,3 +513,181 @@ fn cp_to_pod_owns_files_as_container_user() {
         "File should be owned by the container user, not root"
     );
 }
+
+/// `cp file pod:/existing-dir` should place the file inside the directory,
+/// matching standard cp behavior.
+#[test]
+fn cp_file_to_existing_directory_in_pod() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cp-fdir-to");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Create a directory inside the pod
+    pod_command(&repo, &daemon)
+        .args(["enter", "cp-fdir-test", "--", "mkdir", "-p", "/tmp/destdir"])
+        .success()
+        .expect("failed to create directory in pod");
+
+    // Write a local file
+    let local_file = home.path().join("myfile.txt");
+    fs::write(&local_file, "file-in-dir\n").unwrap();
+
+    // Copy file into the pod, specifying the directory as destination
+    pod_command(&repo, &daemon)
+        .args([
+            "cp",
+            local_file.to_str().unwrap(),
+            "cp-fdir-test:/tmp/destdir",
+        ])
+        .success()
+        .expect("rumpel cp file to existing dir failed");
+
+    // The file should appear inside the directory, not replace it
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-fdir-test",
+            "--",
+            "cat",
+            "/tmp/destdir/myfile.txt",
+        ])
+        .success()
+        .expect("file should be inside the directory");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "file-in-dir");
+}
+
+/// `cp pod:/file /existing-dir` should place the file inside the directory.
+#[test]
+fn cp_file_from_pod_to_existing_directory() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cp-fdir-from");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Create a file inside the pod
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-fdir-from-test",
+            "--",
+            "sh",
+            "-c",
+            "echo from-pod > /tmp/podfile.txt",
+        ])
+        .success()
+        .expect("failed to create file in pod");
+
+    // Create a local directory as destination
+    let local_dir = home.path().join("localdir");
+    fs::create_dir(&local_dir).unwrap();
+
+    // Copy from pod into the existing local directory
+    pod_command(&repo, &daemon)
+        .args([
+            "cp",
+            "cp-fdir-from-test:/tmp/podfile.txt",
+            local_dir.to_str().unwrap(),
+        ])
+        .success()
+        .expect("rumpel cp file from pod to existing dir failed");
+
+    // The file should be placed inside the directory
+    let content = fs::read_to_string(local_dir.join("podfile.txt"))
+        .expect("file should be inside the directory");
+    assert_eq!(content.trim(), "from-pod");
+}
+
+/// `cp dir pod:/existing-dir` should nest the source directory inside the
+/// destination, matching `cp -r src dst/` when dst exists.
+#[test]
+fn cp_directory_to_existing_directory_in_pod() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cp-ddir-to");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Create a directory inside the pod
+    pod_command(&repo, &daemon)
+        .args(["enter", "cp-ddir-test", "--", "mkdir", "-p", "/tmp/parent"])
+        .success()
+        .expect("failed to create directory in pod");
+
+    // Create a local directory with a file
+    let local_dir = home.path().join("subdir");
+    fs::create_dir(&local_dir).unwrap();
+    fs::write(local_dir.join("nested.txt"), "nested\n").unwrap();
+
+    // Copy directory into the pod, targeting the existing directory
+    pod_command(&repo, &daemon)
+        .args([
+            "cp",
+            local_dir.to_str().unwrap(),
+            "cp-ddir-test:/tmp/parent",
+        ])
+        .success()
+        .expect("rumpel cp dir to existing dir failed");
+
+    // The source directory should be nested: /tmp/parent/subdir/nested.txt
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-ddir-test",
+            "--",
+            "cat",
+            "/tmp/parent/subdir/nested.txt",
+        ])
+        .success()
+        .expect("directory should be nested inside the destination");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "nested");
+}
+
+/// `cp pod:/dir /existing-dir` should nest the source directory inside the
+/// local destination.
+#[test]
+fn cp_directory_from_pod_to_existing_directory() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "cp-ddir-from");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Create a directory with files inside the pod
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "cp-ddir-from-test",
+            "--",
+            "sh",
+            "-c",
+            "mkdir -p /tmp/srcdir && echo aaa > /tmp/srcdir/a.txt",
+        ])
+        .success()
+        .expect("failed to create directory in pod");
+
+    // Create a local directory as destination
+    let local_dir = home.path().join("existing");
+    fs::create_dir(&local_dir).unwrap();
+
+    // Copy directory from pod into the existing local directory
+    pod_command(&repo, &daemon)
+        .args([
+            "cp",
+            "cp-ddir-from-test:/tmp/srcdir",
+            local_dir.to_str().unwrap(),
+        ])
+        .success()
+        .expect("rumpel cp dir from pod to existing dir failed");
+
+    // The source directory should be nested: existing/srcdir/a.txt
+    let content = fs::read_to_string(local_dir.join("srcdir").join("a.txt"))
+        .expect("directory should be nested inside the destination");
+    assert_eq!(content.trim(), "aaa");
+}
