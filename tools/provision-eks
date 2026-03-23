@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STATE_FILE="$HOME/.eks-cluster"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR/.."
+ENV_FILE="$REPO_ROOT/.env"
+STATE_DIR="$REPO_ROOT/cloud"
+STATE_FILE="$STATE_DIR/eks-state"
+KUBECONFIG_PATH="$STATE_DIR/eks-kubeconfig"
 CLUSTER_NAME="rumpelpod-test"
 REGION="eu-west-1"
 ECR_REPO="rumpelpod-test"
 NODE_TYPE="t3.small"
 NODE_COUNT=1
+
+# Write or update a key=value pair in the .env file.
+set_env() {
+    local key="$1" value="$2"
+    if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+    else
+        echo "${key}=${value}" >> "$ENV_FILE"
+    fi
+}
 
 if [[ -f "$STATE_FILE" ]]; then
     echo "Error: A cluster state file already exists at $STATE_FILE"
@@ -32,14 +47,15 @@ if ! aws sts get-caller-identity &>/dev/null; then
 fi
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
+
+mkdir -p "$STATE_DIR"
 
 echo "==> Creating ECR repository $ECR_REPO in $REGION..."
 aws ecr create-repository \
     --repository-name "$ECR_REPO" \
     --region "$REGION" \
     >/dev/null
-
-ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO}"
 
 echo "==> Creating EKS cluster $CLUSTER_NAME (type=$NODE_TYPE, nodes=$NODE_COUNT)..."
 echo "    This takes 15-20 minutes."
@@ -50,15 +66,44 @@ eksctl create cluster \
     --nodes "$NODE_COUNT" \
     --managed
 
-# eksctl sets the kubectl context automatically
+# eksctl sets the kubectl context automatically.
 KUBE_CONTEXT=$(kubectl config current-context)
+
+# Save the kubeconfig for this cluster separately so it can be
+# base64-encoded into .env without touching ~/.kube/config.
+eksctl utils write-kubeconfig \
+    --cluster "$CLUSTER_NAME" \
+    --region "$REGION" \
+    --kubeconfig "$KUBECONFIG_PATH"
+
+# EKS managed node groups get AmazonEC2ContainerRegistryReadOnly by
+# default, which lets kubelet pull from ECR.  For buildx pushes the
+# node role also needs write access.
+NODEGROUP_ROLE=$(aws eks describe-nodegroup \
+    --cluster-name "$CLUSTER_NAME" \
+    --nodegroup-name "$(aws eks list-nodegroups --cluster-name "$CLUSTER_NAME" --region "$REGION" --query 'nodegroups[0]' --output text)" \
+    --region "$REGION" \
+    --query 'nodegroup.nodeRole' \
+    --output text)
+
+echo "==> Granting ECR push access to node role..."
+aws iam attach-role-policy \
+    --role-name "$(basename "$NODEGROUP_ROLE")" \
+    --policy-arn arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
 
 cat > "$STATE_FILE" <<EOF
 CLUSTER_NAME=$CLUSTER_NAME
 REGION=$REGION
 ECR_REPO=$ECR_REPO
 ACCOUNT_ID=$ACCOUNT_ID
+NODEGROUP_ROLE_NAME=$(basename "$NODEGROUP_ROLE")
 EOF
+
+touch "$ENV_FILE"
+set_env RUMPELPOD_K8S_KUBECONFIG "$(base64 -w0 "$KUBECONFIG_PATH")"
+set_env RUMPELPOD_TEST_K8S_CONTEXT "$KUBE_CONTEXT"
+set_env RUMPELPOD_TEST_PUSH_REGISTRY "$ECR_URI"
+set_env RUMPELPOD_TEST_PULL_REGISTRY "$ECR_URI"
 
 echo ""
 echo "============================================"
@@ -69,13 +114,16 @@ echo " Region         : $REGION"
 echo " ECR repository : $ECR_REPO"
 echo " ECR URI        : $ECR_URI"
 echo " kubectl context: $KUBE_CONTEXT"
+echo " Kubeconfig     : $KUBECONFIG_PATH"
+echo ""
+echo " State saved to : $STATE_FILE"
+echo " Credentials in : $ENV_FILE"
 echo ""
 echo " .rumpelpod.toml snippet:"
 echo ""
 echo "   [k8s]"
 echo "   context = \"$KUBE_CONTEXT\""
-echo "   registry = \"${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com\""
+echo "   registry = \"$ECR_URI\""
 echo ""
-echo " State saved to : $STATE_FILE"
-echo " To deprovision : deprovision-eks"
+echo " To deprovision : tools/deprovision-eks"
 echo ""
