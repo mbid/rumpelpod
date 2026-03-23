@@ -230,7 +230,7 @@ Examples:
     #[command(
         long_about = "Manage SSH private keys available to a pod via ssh-agent.
 
-An ssh-agent runs on the host for each pod. The agent socket is bind-mounted into the container so processes inside the pod can use the keys for authentication (e.g. git push over SSH) but cannot extract the private key material.
+An ssh-agent runs on the host for each pod. The agent socket is relayed into the container so processes inside the pod can use the keys for authentication (e.g. git push over SSH) but cannot extract the private key material.
 
 Examples:
   rumpel ssh dev add ~/.ssh/id_ed25519   # Add a key to 'dev' pod

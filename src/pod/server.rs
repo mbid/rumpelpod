@@ -21,7 +21,7 @@ use crate::async_runtime::block_on;
 
 pub const DEFAULT_PORT: u16 = 7890;
 pub const TOKEN_FILE: &str = "/opt/rumpelpod/server-token";
-/// In-container path for the bind-mounted SSH agent socket.
+/// In-container path for the SSH agent socket served by the relay.
 pub const SSH_AGENT_SOCK_PATH: &str = "/tmp/rumpelpod-ssh-agent/agent.sock";
 
 /// Configuration for relaying SSH agent connections back to the host.

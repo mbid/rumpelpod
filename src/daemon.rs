@@ -203,7 +203,7 @@ struct DaemonServer {
     #[allow(clippy::type_complexity)]
     exec_proxies: Arc<Mutex<HashMap<(PathBuf, String), crate::exec_proxy::ExecProxyHandle>>>,
     /// Per-pod ssh-agent processes running on the host.
-    /// The agent socket is bind-mounted into the container.
+    /// The agent socket is relayed into containers via WebSocket.
     #[allow(clippy::type_complexity)]
     ssh_agents: Arc<Mutex<HashMap<(PathBuf, String), SshAgentHandle>>>,
 }
@@ -4014,7 +4014,8 @@ impl Daemon for DaemonServer {
                     true
                 }
                 Ok(None) => false,
-                Err(_) => {
+                Err(e) => {
+                    eprintln!("warning: failed to check ssh-agent status: {e}");
                     agents.remove(&key);
                     true
                 }
