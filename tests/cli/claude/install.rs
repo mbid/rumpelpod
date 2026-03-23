@@ -28,7 +28,7 @@ fn setup_install_test_repo(
     let home = TestHome::new();
     super::common::setup_controlled_home(&home);
     let executor = ExecutorResources::setup(&home, test_name);
-    let daemon = TestDaemon::start(&home);
+    let daemon = TestDaemon::start_with_host_claude(&home);
     std::fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml)
         .expect("write .rumpelpod.toml");
     (home, repo, executor, daemon)

@@ -61,6 +61,18 @@ pub struct TestDaemon {
 
 impl TestDaemon {
     pub fn start(home: &TestHome) -> Self {
+        Self::start_inner(home, false)
+    }
+
+    /// Start a daemon that can detect the host Claude CLI.
+    ///
+    /// Most tests should use `start()`, which hides the host claude
+    /// binary to avoid downloading ~200 MB into every prepared image.
+    pub fn start_with_host_claude(home: &TestHome) -> Self {
+        Self::start_inner(home, true)
+    }
+
+    fn start_inner(home: &TestHome, host_claude: bool) -> Self {
         let home_path = home.path();
         let socket_path = home_path.join("rumpelpod.sock");
         let state_dir = home_path.join("state");
@@ -82,8 +94,15 @@ impl TestDaemon {
         std::fs::create_dir_all(runtime_dir.join("rumpelpod"))
             .expect("Failed to create runtime dir");
 
+        let path = if host_claude {
+            std::env::var("PATH").unwrap_or_default()
+        } else {
+            path_without_claude()
+        };
+
         let mut cmd = Command::new("rumpel");
         cmd.env("HOME", home_path)
+            .env("PATH", &path)
             .env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
             .env("XDG_RUNTIME_DIR", &runtime_dir);
@@ -263,6 +282,18 @@ pub fn pod_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
     }
 
     cmd
+}
+
+/// Return PATH with directories containing a `claude` binary removed.
+///
+/// Prevents the daemon from detecting the host Claude CLI and
+/// downloading ~200 MB into every prepared image.
+fn path_without_claude() -> String {
+    let path = std::env::var("PATH").unwrap_or_default();
+    path.split(':')
+        .filter(|dir| !Path::new(dir).join("claude").is_file())
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// Write a standard test devcontainer.json with a Dockerfile build section.
