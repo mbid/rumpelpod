@@ -3,6 +3,13 @@
 //! This ensures tests run against a binary that has all cross-arch
 //! siblings available next to it, matching the production layout.
 //!
+//! By default, rumpel binaries are built with opt-level=z and no debug
+//! info to keep them small (~28 MB vs ~263 MB).  Every test copies this
+//! binary into a Docker image, so size directly affects test speed.
+//!
+//! Set `XTEST_OPT_LEVEL` to override the optimization level (0/1/2/3/s/z).
+//! Set `XTEST_DEBUG` to override the debug info level (0/1/2).
+//!
 //! Usage: cargo xtest [args for cargo test...]
 
 use std::os::unix::fs::symlink;
@@ -52,6 +59,9 @@ fn cargo_cmd() -> Command {
 fn run() -> Result<ExitCode> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    let opt_level = std::env::var("XTEST_OPT_LEVEL").unwrap_or_else(|_| "z".to_string());
+    let debug = std::env::var("XTEST_DEBUG").unwrap_or_else(|_| "0".to_string());
+
     let mut targets: Vec<(&str, &str)> = Vec::new();
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         targets.push(("aarch64-apple-darwin", "rumpel-darwin-arm64"));
@@ -62,6 +72,8 @@ fn run() -> Result<ExitCode> {
         eprint!("Building rumpel for {triple}... ");
         cargo_cmd()
             .args(["build", "--bin", "rumpel", "--target", triple])
+            .env("CARGO_PROFILE_DEV_OPT_LEVEL", &opt_level)
+            .env("CARGO_PROFILE_DEV_DEBUG", &debug)
             .success()
             .with_context(|| format!("building rumpel for {triple}"))?;
         eprintln!("ok");

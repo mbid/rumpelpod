@@ -30,15 +30,21 @@ const SCHEMA_VERSION: u32 = 4;
 /// Must match the `--mount` target in `generate_dockerfile`.
 const BUILD_GATEWAY_PATH: &str = "/tmp/gateway";
 
+/// Remotes managed by rumpelpod itself.  These point to local gateway
+/// paths that change across daemon restarts (and test runs), so they
+/// must not influence the prepared image tag.
+const MANAGED_REMOTES: &[&str] = &["host", "rumpelpod"];
+
 /// Information about the Claude CLI on the host, used to pin the
 /// exact version inside the prepared image.
 struct HostClaudeInfo {
     version: String,
 }
 
-// TODO: Both detect_host_claude and hash_rumpel_binary are called on
-// every launch but their results cannot change while the daemon is
-// running.  Cache them if this becomes a bottleneck.
+/// Build-time version string that changes whenever the source or git
+/// state changes.  Used instead of hashing the (potentially huge)
+/// binary at runtime.
+const RUMPEL_VERSION_INFO: &str = env!("RUMPELPOD_VERSION_INFO");
 
 /// Try to detect Claude CLI on the host and return its version.
 ///
@@ -85,25 +91,13 @@ fn find_rumpel_binaries() -> Result<Vec<(String, PathBuf)>> {
     Ok(binaries)
 }
 
-/// Hash the content of the running rumpel binary (the current exe).
-fn hash_rumpel_binary() -> Result<Vec<u8>> {
-    let exe = std::env::current_exe().context("resolving own binary path")?;
-    let data = fs::read(&exe).with_context(|| {
-        let exe = exe.display();
-        format!("reading {exe}")
-    })?;
-    let mut hasher = Sha256::new();
-    hasher.update(&data);
-    Ok(hasher.finalize().to_vec())
-}
-
 /// Compute a deterministic tag for the prepared image.
 ///
-/// Inputs hashed: base image tag, rumpel binary content, container repo
-/// path, user, Claude CLI version (if available), schema version.
+/// Inputs hashed: base image tag, rumpel version, container repo path,
+/// user, Claude CLI version (if available), user-configured remotes,
+/// schema version.
 fn compute_prepared_tag(
     base_image: &str,
-    rumpel_hash: &[u8],
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
@@ -111,13 +105,16 @@ fn compute_prepared_tag(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_image.as_bytes());
-    hasher.update(rumpel_hash);
+    hasher.update(RUMPEL_VERSION_INFO.as_bytes());
     hasher.update(container_repo_path.as_os_str().as_encoded_bytes());
     hasher.update(user.as_bytes());
     if let Some(info) = claude_info {
         hasher.update(info.version.as_bytes());
     }
     for remote in host_remotes {
+        if MANAGED_REMOTES.contains(&remote.name.as_str()) {
+            continue;
+        }
         hasher.update(remote.name.as_bytes());
         hasher.update(b"=");
         hasher.update(remote.url.as_bytes());
@@ -353,12 +350,10 @@ pub fn build_prepared_image(
     user: &str,
     host_remotes: &[GitRemote],
 ) -> Result<BuildResult> {
-    let rumpel_hash = hash_rumpel_binary()?;
     let claude_info = detect_host_claude();
 
     let tag = compute_prepared_tag(
         &base_image.0,
-        &rumpel_hash,
         container_repo_path,
         user,
         claude_info.as_ref(),
@@ -490,11 +485,11 @@ fn configure_remotes(repo_path: &Path, remote_specs: &[String]) -> Result<()> {
         .lines()
         .collect();
 
-    const MANAGED: &[&str] = &["host", "rumpelpod"];
+    let managed = MANAGED_REMOTES;
 
     // Remove stale remotes that are not in the host list and not managed.
     for name in &existing {
-        if MANAGED.contains(name) {
+        if managed.contains(name) {
             continue;
         }
         if !parsed.iter().any(|(n, _)| n == name) {
@@ -508,7 +503,7 @@ fn configure_remotes(repo_path: &Path, remote_specs: &[String]) -> Result<()> {
 
     // Add or update remotes from the host.
     for (name, url) in &parsed {
-        if MANAGED.contains(name) {
+        if managed.contains(name) {
             continue;
         }
         if existing.contains(name) {
