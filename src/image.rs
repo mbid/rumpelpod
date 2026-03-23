@@ -60,31 +60,13 @@ pub fn resolve_image(
         }
     }
 
-    // For k8s with a build section, use buildx with the kubernetes driver
-    // to build in-cluster and push directly to the registry.
-    if let Host::Kubernetes {
-        context,
-        registry: Some(ref push_reg),
-        ref pull_registry,
-        ..
-    } = docker_host
-    {
-        if let Some(build) = &devcontainer.build {
-            let pull_reg = pull_registry.as_deref().unwrap_or(push_reg);
-            return buildx_build(
-                build,
-                context,
-                pull_reg,
-                repo_root,
-                &BuildFlags::default(),
-                on_output,
-            );
-        }
-    }
-
-    let build_host = match docker_host {
-        Host::Kubernetes { .. } => &Host::Localhost,
-        other => other,
+    let (build_host, registry) = match docker_host {
+        Host::Kubernetes {
+            registry: Some(ref reg),
+            ..
+        } => (&Host::Localhost, Some(reg.as_str())),
+        Host::Kubernetes { registry: None, .. } => (&Host::Localhost, None),
+        other => (other, None),
     };
 
     if let Some(build) = &devcontainer.build {
@@ -101,18 +83,33 @@ pub fn resolve_image(
             ),
         )?;
         if image_exists(&image_name, build_host) {
+            if let Some(registry) = registry {
+                let dest = push_to_registry(&image_name, registry)?;
+                return Ok(BuildResult {
+                    image: Image(dest),
+                    built: false,
+                });
+            }
             return Ok(BuildResult {
                 image: Image(image_name),
                 built: false,
             });
         }
-        build_devcontainer_image(
+        let result = build_devcontainer_image(
             build,
             build_host,
             repo_root,
             &BuildFlags::default(),
             on_output,
-        )
+        )?;
+        if let Some(registry) = registry {
+            let dest = push_to_registry(&result.image.0, registry)?;
+            return Ok(BuildResult {
+                image: Image(dest),
+                built: result.built,
+            });
+        }
+        Ok(result)
     } else {
         Ok(BuildResult {
             image: Image(
@@ -284,222 +281,30 @@ pub fn pull_image(image_name: &str, docker_host: &Host) -> Result<()> {
     Ok(())
 }
 
-/// Deterministic builder name for a k8s context.
-fn buildx_builder_name(context: &str) -> String {
-    format!("rumpelpod-{context}")
-}
-
-/// Extract "host:port" from a registry string like "host:port/repo/path".
-fn registry_host(registry: &str) -> &str {
-    match registry.find('/') {
-        Some(pos) => &registry[..pos],
-        None => registry,
-    }
-}
-
-/// Create or reuse a docker buildx builder backed by the kubernetes driver.
+/// Tag a locally-built image for a remote registry and push it.
 ///
-/// The builder pod lives in the `default` namespace so it persists across
-/// builds regardless of which namespace the workload pods use.
-///
-/// TODO: This stores builder config in ~/.docker/buildx/. Consider using
-/// BUILDX_CONFIG or --config to avoid polluting the user's Docker config.
-pub(crate) fn ensure_buildx_builder(context: &str, registry: &str) -> Result<String> {
-    let name = buildx_builder_name(context);
+/// Returns the full registry reference (`{registry}:{local_tag}`) that
+/// pods will use to pull the image.
+pub(crate) fn push_to_registry(local_tag: &str, registry: &str) -> Result<String> {
+    let dest = format!("{registry}:{local_tag}");
 
-    // Check if builder already exists.
     let status = Command::new("docker")
-        .args(["buildx", "inspect", &name])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .args(["tag", local_tag, &dest])
         .status()
-        .context("running docker buildx inspect")?;
-
-    if status.success() {
-        return Ok(name);
-    }
-
-    // Write a buildkitd config that allows pushing to the registry over
-    // plain HTTP.  In-cluster registries typically lack TLS.
-    let host = registry_host(registry);
-    let config_content = format!("[registry.\"{host}\"]\n  http = true\n  insecure = true\n");
-    let config_dir = std::env::temp_dir().join("rumpelpod-buildx");
-    std::fs::create_dir_all(&config_dir)?;
-    let config_path = config_dir.join(format!("{name}.toml"));
-    std::fs::write(&config_path, &config_content)?;
-    let config_path = config_path.display().to_string();
-
-    // Rootless buildkitd does not auto-discover /etc/buildkit/buildkitd.toml
-    // because rootlesskit remounts the filesystem.  Pass --config explicitly.
-    let output = Command::new("docker")
-        .args([
-            "buildx",
-            "create",
-            "--driver",
-            "kubernetes",
-            "--driver-opt",
-            "namespace=default,rootless=true",
-            "--name",
-            &name,
-            "--buildkitd-config",
-            &config_path,
-            "--buildkitd-flags",
-            "--config /etc/buildkit/buildkitd.toml",
-        ])
-        .output()
-        .context("running docker buildx create")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("docker buildx create failed: {stderr}"));
-    }
-
-    Ok(name)
-}
-
-/// Build a Docker image using buildx with the kubernetes driver, pushing
-/// directly to an in-cluster registry.
-///
-/// The buildkitd pod runs inside the cluster, so `registry` must be the
-/// in-cluster address (the same address pods use to pull).
-pub fn buildx_build(
-    build: &BuildOptions,
-    k8s_context: &str,
-    registry: &str,
-    repo_root: &Path,
-    flags: &BuildFlags,
-    on_output: Option<BuildOutputFn>,
-) -> Result<BuildResult> {
-    let dockerfile = build
-        .dockerfile
-        .as_deref()
-        .expect("resolved build must have dockerfile");
-    let build_context = build
-        .context
-        .as_deref()
-        .expect("resolved build must have context");
-
-    let dockerfile_path = repo_root.join(dockerfile);
-    if !dockerfile_path.exists() {
-        let path = dockerfile_path.display();
-        return Err(anyhow::anyhow!(
-            "Devcontainer Dockerfile '{path}' not found"
-        ));
-    }
-
-    let context_path = repo_root.join(build_context);
-    let image_tag = compute_image_tag(build, &dockerfile_path)?;
-
-    // Buildx pushes from inside the cluster, so use the in-cluster
-    // registry address as the push destination.
-    let dest = format!("{registry}:{image_tag}");
-
-    let builder = ensure_buildx_builder(k8s_context, registry)?;
-
-    let mut cmd = Command::new("docker");
-    cmd.args(["buildx", "build"]);
-    cmd.args(["--builder", &builder]);
-    cmd.arg(format!("--output=type=image,name={dest},push=true"));
-    let dockerfile = dockerfile_path.display();
-    cmd.arg(format!("-f={dockerfile}"));
-
-    if flags.no_cache {
-        cmd.arg("--no-cache");
-    }
-    if flags.pull {
-        cmd.arg("--pull");
-    }
-
-    if let Some(args) = &build.args {
-        for (k, v) in args {
-            cmd.arg("--build-arg").arg(format!("{k}={v}"));
-        }
-    }
-
-    if let Some(target) = &build.target {
-        cmd.arg("--target").arg(target);
-    }
-
-    if let Some(cache_from) = &build.cache_from {
-        match cache_from {
-            crate::devcontainer::StringOrArray::String(s) => {
-                cmd.arg("--cache-from").arg(s);
-            }
-            crate::devcontainer::StringOrArray::Array(arr) => {
-                for s in arr {
-                    cmd.arg("--cache-from").arg(s);
-                }
-            }
-        }
-    }
-
-    if let Some(options) = &build.options {
-        cmd.args(options);
-    }
-
-    cmd.arg(context_path.display().to_string());
-
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-
-    let child_stdout = child.stdout.take().expect("stdout was piped");
-    let child_stderr = child.stderr.take().expect("stderr was piped");
-
-    let callback = on_output.map(|cb| std::sync::Arc::new(std::sync::Mutex::new(cb)));
-    let callback_for_stderr = callback.clone();
-
-    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-    let stdout_buf_clone = stdout_buf.clone();
-    let stderr_buf_clone = stderr_buf.clone();
-
-    let stdout_thread = std::thread::spawn(move || {
-        for line in BufReader::new(child_stdout).lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            stdout_buf_clone.lock().unwrap().push_str(&line);
-            stdout_buf_clone.lock().unwrap().push('\n');
-            if let Some(ref cb) = callback {
-                cb.lock().unwrap()(OutputLine::Stdout(line));
-            }
-        }
-    });
-
-    let stderr_thread = std::thread::spawn(move || {
-        for line in BufReader::new(child_stderr).lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => break,
-            };
-            stderr_buf_clone.lock().unwrap().push_str(&line);
-            stderr_buf_clone.lock().unwrap().push('\n');
-            if let Some(ref cb) = callback_for_stderr {
-                cb.lock().unwrap()(OutputLine::Stderr(line));
-            }
-        }
-    });
-
-    let status = child.wait()?;
-    stdout_thread.join().expect("stdout reader panicked");
-    stderr_thread.join().expect("stderr reader panicked");
-
+        .context("tagging image for registry")?;
     if !status.success() {
-        let stdout = stdout_buf.lock().unwrap();
-        let stderr = stderr_buf.lock().unwrap();
-        return Err(anyhow::anyhow!(
-            "docker buildx build failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}"
-        ));
+        return Err(anyhow::anyhow!("docker tag failed with status {status}"));
     }
 
-    // The image was pushed by buildx; pods pull from the same registry.
-    Ok(BuildResult {
-        image: Image(dest),
-        built: true,
-    })
+    let status = Command::new("docker")
+        .args(["push", &dest])
+        .status()
+        .context("pushing image to registry")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("docker push failed with status {status}"));
+    }
+
+    Ok(dest)
 }
 
 /// Check whether a Docker image already exists on the target host.

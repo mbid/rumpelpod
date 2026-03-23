@@ -6,9 +6,8 @@
 //!
 //! Required env vars (tests are `#[ignore]`d, so only checked when
 //! explicitly run):
-//!   RUMPELPOD_TEST_K8S_CONTEXT   -- kubectl context
-//!   RUMPELPOD_TEST_PUSH_REGISTRY -- where `docker push` sends images (e.g. localhost:5000/rumpelpod)
-//!   RUMPELPOD_TEST_PULL_REGISTRY -- what pods use to pull (e.g. registry.registry.svc.cluster.local:5000/rumpelpod)
+//!   RUMPELPOD_TEST_K8S_CONTEXT -- kubectl context
+//!   RUMPELPOD_TEST_REGISTRY    -- registry for pushing/pulling images (e.g. ghcr.io/user/rumpelpod)
 
 use std::fs;
 use std::net::TcpStream;
@@ -26,22 +25,15 @@ use crate::executor::ExecutorResources;
 /// Cluster configuration read from environment variables.
 pub(super) struct K8sClusterConfig {
     pub(super) context: String,
-    pub(super) push_registry: String,
-    pub(super) pull_registry: String,
+    pub(super) registry: String,
 }
 
 pub(super) fn k8s_cluster_config() -> K8sClusterConfig {
     let context = std::env::var("RUMPELPOD_TEST_K8S_CONTEXT")
         .expect("RUMPELPOD_TEST_K8S_CONTEXT must be set to run k8s tests");
-    let push_registry = std::env::var("RUMPELPOD_TEST_PUSH_REGISTRY")
-        .expect("RUMPELPOD_TEST_PUSH_REGISTRY must be set to run k8s tests");
-    let pull_registry = std::env::var("RUMPELPOD_TEST_PULL_REGISTRY")
-        .expect("RUMPELPOD_TEST_PULL_REGISTRY must be set to run k8s tests");
-    K8sClusterConfig {
-        context,
-        push_registry,
-        pull_registry,
-    }
+    let registry = std::env::var("RUMPELPOD_TEST_REGISTRY")
+        .expect("RUMPELPOD_TEST_REGISTRY must be set to run k8s tests");
+    K8sClusterConfig { context, registry }
 }
 
 /// Per-test namespace that is automatically deleted on drop.

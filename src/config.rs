@@ -104,12 +104,9 @@ pub enum Host {
         context: String,
         /// The Kubernetes namespace (default "default").
         namespace: String,
-        /// Registry to push built images to (host-side address).
+        /// Registry to push/pull built images (e.g. ECR, GHCR, Docker Hub).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         registry: Option<String>,
-        /// Registry address for pods to pull from (defaults to `registry`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pull_registry: Option<String>,
         /// Node selector labels for pod scheduling.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node_selector: Option<BTreeMap<String, String>>,
@@ -276,10 +273,8 @@ pub struct K8sConfig {
     pub context: String,
     /// The Kubernetes namespace (default "default").
     pub namespace: Option<String>,
-    /// Registry to push built images to (host-side address).
+    /// Registry to push/pull built images (e.g. ECR, GHCR, Docker Hub).
     pub registry: Option<String>,
-    /// Registry address for pods to pull from (defaults to `registry`).
-    pub pull_registry: Option<String>,
     /// Node selector labels for pod scheduling.
     #[serde(default)]
     pub node_selector: Option<BTreeMap<String, String>>,
@@ -509,7 +504,6 @@ mod tests {
             context: "my-cluster".to_string(),
             namespace: "default".to_string(),
             registry: None,
-            pull_registry: None,
             node_selector: None,
             tolerations: None,
         };
@@ -522,7 +516,6 @@ mod tests {
             context: "my-cluster".to_string(),
             namespace: "staging".to_string(),
             registry: None,
-            pull_registry: None,
             node_selector: None,
             tolerations: None,
         };
@@ -535,7 +528,6 @@ mod tests {
             context: "my-cluster".to_string(),
             namespace: "default".to_string(),
             registry: None,
-            pull_registry: None,
             node_selector: None,
             tolerations: None,
         };
@@ -559,7 +551,6 @@ mod tests {
                 context: "my-cluster".to_string(),
                 namespace: "staging".to_string(),
                 registry: None,
-                pull_registry: None,
                 node_selector: None,
                 tolerations: None,
             },
@@ -605,7 +596,6 @@ mod tests {
             context: "cluster".to_string(),
             namespace: "default".to_string(),
             registry: None,
-            pull_registry: None,
             node_selector: Some(ns),
             tolerations: Some(vec![K8sToleration {
                 key: "pool".to_string(),

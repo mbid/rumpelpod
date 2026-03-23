@@ -53,14 +53,6 @@ hetzner-k3s create --config "$CONFIG"
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 
-REGISTRY_MANIFEST="$STATE_DIR/k8s-registry.yaml"
-cp "$SCRIPT_DIR/k8s-registry.yaml" "$REGISTRY_MANIFEST"
-
-echo "==> Deploying in-cluster container registry..."
-kubectl apply -f "$REGISTRY_MANIFEST"
-
-kubectl -n registry rollout status deployment/registry --timeout=120s
-
 KUBE_CONTEXT=$(KUBECONFIG="$KUBECONFIG_PATH" kubectl config current-context 2>/dev/null || true)
 
 echo ""
@@ -87,20 +79,16 @@ echo "       effect: NoSchedule"
 echo ""
 echo " Privileged containers work out of the box."
 echo ""
-echo " In-cluster registry (hostPort on master, not public):"
-echo "   Push:  kubectl -n registry port-forward svc/registry 5000:5000 &"
-echo "          docker push localhost:5000/REPO/IMAGE:TAG"
-echo "   Pull (from inside cluster): registry.registry.svc.cluster.local:5000/REPO/IMAGE:TAG"
-echo ""
 echo " Usage:"
 echo "   export KUBECONFIG=$KUBECONFIG_PATH"
 echo ""
 touch "$ENV_FILE"
 set_env RUMPELPOD_K8S_KUBECONFIG "$(base64 -w0 "$KUBECONFIG_PATH")"
 set_env RUMPELPOD_TEST_K8S_CONTEXT "${KUBE_CONTEXT}"
-set_env RUMPELPOD_TEST_PUSH_REGISTRY "localhost:5000/rumpelpod"
-set_env RUMPELPOD_TEST_PULL_REGISTRY "registry.registry.svc.cluster.local:5000/rumpelpod"
 echo " Cluster credentials written to $ENV_FILE"
+echo ""
+echo " To run k8s tests, configure a registry accessible from"
+echo " the cluster and set RUMPELPOD_TEST_REGISTRY in $ENV_FILE."
 echo ""
 echo " Inside the devcontainer:"
 echo "   cargo xtest -- k8s --ignored"

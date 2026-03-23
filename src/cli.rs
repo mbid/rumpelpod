@@ -42,15 +42,10 @@ pub struct HostArgs {
     #[arg(long, requires = "k8s_context")]
     pub k8s_namespace: Option<String>,
 
-    /// Registry to push built images to (host-side address).
+    /// Registry to push/pull built images (e.g. ECR, GHCR, Docker Hub).
     /// Requires --k8s-context.
     #[arg(long, requires = "k8s_context")]
     pub k8s_registry: Option<String>,
-
-    /// Registry address for pods to pull from (defaults to --k8s-registry).
-    /// Requires --k8s-registry.
-    #[arg(long, requires = "k8s_registry")]
-    pub k8s_pull_registry: Option<String>,
 }
 
 impl HostArgs {
@@ -70,7 +65,6 @@ impl HostArgs {
                 context: ctx.clone(),
                 namespace,
                 registry: self.k8s_registry.clone(),
-                pull_registry: self.k8s_pull_registry.clone(),
                 node_selector: None,
                 tolerations: None,
             }))

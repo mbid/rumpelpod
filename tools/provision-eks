@@ -102,8 +102,7 @@ EOF
 touch "$ENV_FILE"
 set_env RUMPELPOD_K8S_KUBECONFIG "$(base64 -w0 "$KUBECONFIG_PATH")"
 set_env RUMPELPOD_TEST_K8S_CONTEXT "$KUBE_CONTEXT"
-set_env RUMPELPOD_TEST_PUSH_REGISTRY "$ECR_URI"
-set_env RUMPELPOD_TEST_PULL_REGISTRY "$ECR_URI"
+set_env RUMPELPOD_TEST_REGISTRY "$ECR_URI"
 
 echo ""
 echo "============================================"

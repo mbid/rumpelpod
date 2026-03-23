@@ -34,22 +34,6 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
             image::OutputLine::Stderr(s) => eprintln!("{s}"),
         }));
 
-    // For k8s, build in-cluster via buildx (pushes directly to registry).
-    if let Host::Kubernetes {
-        ref context,
-        registry: Some(ref push_reg),
-        ref pull_registry,
-        ..
-    } = docker_host
-    {
-        let pull_reg = pull_registry.as_deref().unwrap_or(push_reg);
-        let result =
-            image::buildx_build(build_opts, context, pull_reg, &repo_root, &flags, on_output)?;
-        let image = &result.image.0;
-        println!("Image built and pushed: {image}");
-        return Ok(());
-    }
-
     if matches!(docker_host, Host::Kubernetes { registry: None, .. }) {
         return Err(anyhow::anyhow!(
             "Building images for Kubernetes requires a registry.\n\
@@ -58,8 +42,24 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
         ));
     }
 
+    let build_host = match docker_host {
+        Host::Kubernetes { .. } => &Host::Localhost,
+        ref other => other,
+    };
+
     let result =
-        image::build_devcontainer_image(build_opts, &docker_host, &repo_root, &flags, on_output)?;
+        image::build_devcontainer_image(build_opts, build_host, &repo_root, &flags, on_output)?;
+
+    if let Host::Kubernetes {
+        registry: Some(ref registry),
+        ..
+    } = docker_host
+    {
+        let dest = image::push_to_registry(&result.image.0, registry)?;
+        println!("Image built and pushed: {dest}");
+        return Ok(());
+    }
+
     let image = &result.image.0;
     println!("Image built: {image}");
 

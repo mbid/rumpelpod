@@ -144,31 +144,15 @@ fn probe_base_image_user(base_image: &str, docker_host: &Host) -> Result<String>
     "#};
     fs::write(tmp.path().join("Dockerfile"), dockerfile).context("writing probe Dockerfile")?;
 
+    let build_host = match docker_host {
+        Host::Kubernetes { .. } => &Host::Localhost,
+        other => other,
+    };
     let mut cmd = Command::new("docker");
-    match docker_host {
-        Host::Localhost | Host::Ssh { .. } => {
-            if let Some(uri) = docker_host.docker_host_uri() {
-                cmd.args(["-H", &uri]);
-            }
-            cmd.args(["buildx", "build"]);
-        }
-        Host::Kubernetes {
-            context,
-            registry: Some(ref registry),
-            ref pull_registry,
-            ..
-        } => {
-            let push_reg = pull_registry.as_deref().unwrap_or(registry);
-            let builder = crate::image::ensure_buildx_builder(context, push_reg)?;
-            cmd.args(["buildx", "build"]);
-            cmd.args(["--builder", &builder]);
-        }
-        Host::Kubernetes { registry: None, .. } => {
-            return Err(anyhow::anyhow!(
-                "Probing base image user for Kubernetes requires a registry"
-            ));
-        }
+    if let Some(uri) = build_host.docker_host_uri() {
+        cmd.args(["-H", &uri]);
     }
+    cmd.args(["buildx", "build"]);
     cmd.args(["--progress=plain", "--no-cache"]);
     let dockerfile_path = tmp.path().join("Dockerfile");
     let dockerfile_path = dockerfile_path.display();
@@ -302,35 +286,17 @@ fn run_docker_build(
         format!("symlinking gateway {gw}")
     })?;
 
-    let mut cmd = Command::new("docker");
+    let build_host = match docker_host {
+        Host::Kubernetes { .. } => &Host::Localhost,
+        other => other,
+    };
 
-    match docker_host {
-        Host::Localhost | Host::Ssh { .. } => {
-            if let Some(uri) = docker_host.docker_host_uri() {
-                cmd.args(["-H", &uri]);
-            }
-            cmd.args(["buildx", "build", "--load"]);
-            cmd.arg(format!("-t={tag}"));
-        }
-        Host::Kubernetes {
-            context,
-            registry: Some(ref registry),
-            ref pull_registry,
-            ..
-        } => {
-            let push_reg = pull_registry.as_deref().unwrap_or(registry);
-            let builder = crate::image::ensure_buildx_builder(context, push_reg)?;
-            cmd.args(["buildx", "build"]);
-            cmd.args(["--builder", &builder]);
-            let dest = format!("{push_reg}:{tag}");
-            cmd.arg(format!("--output=type=image,name={dest},push=true"));
-        }
-        Host::Kubernetes { registry: None, .. } => {
-            return Err(anyhow::anyhow!(
-                "Building prepared images for Kubernetes requires a registry"
-            ));
-        }
+    let mut cmd = Command::new("docker");
+    if let Some(uri) = build_host.docker_host_uri() {
+        cmd.args(["-H", &uri]);
     }
+    cmd.args(["buildx", "build", "--load"]);
+    cmd.arg(format!("-t={tag}"));
 
     let gateway_link = gateway_link.display();
     cmd.arg(format!("--build-context=gateway={gateway_link}"));
@@ -432,11 +398,10 @@ pub fn build_prepared_image(
     let final_image = match docker_host {
         Host::Kubernetes {
             registry: Some(ref registry),
-            ref pull_registry,
             ..
         } => {
-            let pull_reg = pull_registry.as_deref().unwrap_or(registry);
-            Image(format!("{pull_reg}:{tag}"))
+            let dest = crate::image::push_to_registry(&tag, registry)?;
+            Image(dest)
         }
         _ => Image(tag),
     };

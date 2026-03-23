@@ -115,14 +115,12 @@ impl ExecutorResources {
 
         let context = &cluster.context;
         let namespace = &ns.name;
-        let push_registry = &cluster.push_registry;
-        let pull_registry = &cluster.pull_registry;
+        let registry = &cluster.registry;
         let toml = formatdoc! {r#"
             [k8s]
             context = "{context}"
             namespace = "{namespace}"
-            registry = "{push_registry}"
-            pull-registry = "{pull_registry}"
+            registry = "{registry}"
 
             [k8s.node-selector]
             pool = "test"
