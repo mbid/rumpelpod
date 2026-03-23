@@ -1093,7 +1093,9 @@ async fn ssh_configure_handler(
 
     // Remove stale socket from a previous run.
     if sock_path.exists() {
-        let _ = std::fs::remove_file(sock_path);
+        if let Err(e) = std::fs::remove_file(sock_path) {
+            eprintln!("warning: failed to remove stale ssh-agent socket: {e}");
+        }
     }
 
     let relay = state.ssh_relay.clone();
@@ -1226,7 +1228,9 @@ async fn handle_ssh_agent_connection(
     }
 
     reader_task.abort();
-    let _ = ws_write.send(tungstenite::Message::Close(None)).await;
+    if let Err(e) = ws_write.send(tungstenite::Message::Close(None)).await {
+        eprintln!("ssh-agent relay: failed to send close frame: {e}");
+    }
     Ok(())
 }
 

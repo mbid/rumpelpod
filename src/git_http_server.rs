@@ -620,7 +620,9 @@ async fn ssh_agent_bridge(mut ws: axum::extract::ws::WebSocket, agent_sock: Path
         Err(e) => {
             let path = agent_sock.display();
             warn!("ssh-agent relay: cannot connect to {path}: {e}");
-            let _ = ws.send(Message::Close(None)).await;
+            if let Err(e) = ws.send(Message::Close(None)).await {
+                warn!("ssh-agent relay: failed to send close frame: {e}");
+            }
             return;
         }
     };
@@ -671,5 +673,7 @@ async fn ssh_agent_bridge(mut ws: axum::extract::ws::WebSocket, agent_sock: Path
     }
 
     agent_reader.abort();
-    let _ = ws.send(Message::Close(None)).await;
+    if let Err(e) = ws.send(Message::Close(None)).await {
+        warn!("ssh-agent relay: failed to send close frame: {e}");
+    }
 }

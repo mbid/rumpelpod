@@ -3665,7 +3665,10 @@ impl Daemon for DaemonServer {
             .remove(&(repo_path.clone(), pod_name.0.clone()));
         let agent_dir = ssh_agent_dir(&repo_path, &pod_name);
         if agent_dir.exists() {
-            let _ = std::fs::remove_dir_all(&agent_dir);
+            if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
+                let dir = agent_dir.display();
+                error!("failed to remove ssh-agent directory {dir}: {e}");
+            }
         }
 
         let container_name = docker_name(&repo_path, &pod_name);
@@ -4023,7 +4026,10 @@ impl Daemon for DaemonServer {
         if need_start {
             // Remove stale socket from a previous daemon run.
             if sock_path.exists() {
-                std::fs::remove_file(&sock_path).ok();
+                if let Err(e) = std::fs::remove_file(&sock_path) {
+                    let path = sock_path.display();
+                    eprintln!("warning: failed to remove stale agent socket {path}: {e}");
+                }
             }
 
             std::fs::create_dir_all(&agent_dir).with_context(|| {
@@ -4059,7 +4065,9 @@ impl Daemon for DaemonServer {
                     return Err(anyhow::anyhow!("ssh-agent exited with {status}: {stderr}"));
                 }
                 if std::time::Instant::now() > deadline {
-                    let _ = child.kill();
+                    if let Err(e) = child.kill() {
+                        eprintln!("warning: failed to kill ssh-agent after timeout: {e}");
+                    }
                     return Err(anyhow::anyhow!(
                         "ssh-agent did not create socket within 5 seconds"
                     ));
