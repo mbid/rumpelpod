@@ -4046,10 +4046,9 @@ impl Daemon for DaemonServer {
                 .spawn()
                 .context("failed to start ssh-agent")?;
 
-            // Wait for the socket to appear.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            // Wait for the socket to appear.  The only failure mode is the
+            // agent exiting prematurely (e.g. bad socket path).
             while !sock_path.exists() {
-                // Check if the agent exited prematurely.
                 if let Ok(Some(status)) = child.try_wait() {
                     let stderr = child
                         .stderr
@@ -4064,29 +4063,10 @@ impl Daemon for DaemonServer {
                     let stderr = stderr.trim();
                     return Err(anyhow::anyhow!("ssh-agent exited with {status}: {stderr}"));
                 }
-                if std::time::Instant::now() > deadline {
-                    if let Err(e) = child.kill() {
-                        eprintln!("warning: failed to kill ssh-agent after timeout: {e}");
-                    }
-                    return Err(anyhow::anyhow!(
-                        "ssh-agent did not create socket within 5 seconds"
-                    ));
-                }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
 
             agents.insert(key, SshAgentHandle { child });
-
-            // Relax socket permissions so the container user (different UID)
-            // can connect through the bind mount.  Host-side access is already
-            // restricted by the parent directory chain ($XDG_RUNTIME_DIR is
-            // typically 0700).
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o666))
-                    .context("chmod ssh-agent socket")?;
-            }
         }
         drop(agents);
 
