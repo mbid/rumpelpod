@@ -297,9 +297,13 @@ async fn bridge(ws: WsStream, raw_termios: Option<&nix::sys::termios::Termios>) 
     // Whether raw mode is active.  write_loop gates stdin forwarding
     // on this so keystrokes aren't forwarded in cooked mode.
     let raw_active = Arc::new(AtomicBool::new(raw_termios.is_none()));
+    // Wakes write_loop when read_loop activates raw mode, so the
+    // select! re-evaluates the stdin branch condition immediately
+    // instead of waiting for the next ping or signal.
+    let raw_notify = Arc::new(tokio::sync::Notify::new());
 
     tokio::select! {
-        result = write_loop(ws_write, Arc::clone(&received), Arc::clone(&raw_active)) => {
+        result = write_loop(ws_write, Arc::clone(&received), Arc::clone(&raw_active), Arc::clone(&raw_notify)) => {
             match result {
                 Ok(BridgeOutcome::Detached) => BridgeOutcome::Detached,
                 Ok(BridgeOutcome::SessionEnded) => BridgeOutcome::SessionEnded,
@@ -307,7 +311,7 @@ async fn bridge(ws: WsStream, raw_termios: Option<&nix::sys::termios::Termios>) 
                 Ok(BridgeOutcome::ConnectionLost) | Err(_) => BridgeOutcome::ConnectionLost,
             }
         }
-        outcome = read_loop(ws_read, Arc::clone(&received), raw_termios, raw_active) => outcome,
+        outcome = read_loop(ws_read, Arc::clone(&received), raw_termios, raw_active, raw_notify) => outcome,
     }
 }
 
@@ -317,6 +321,7 @@ async fn write_loop(
     mut ws_write: WsWriter,
     received: Arc<AtomicBool>,
     raw_active: Arc<AtomicBool>,
+    raw_notify: Arc<tokio::sync::Notify>,
 ) -> Result<BridgeOutcome> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 4096];
@@ -328,11 +333,12 @@ async fn write_loop(
     ping_interval.tick().await;
 
     loop {
+        let is_raw = raw_active.load(Ordering::Relaxed);
         tokio::select! {
             // Only forward stdin once raw mode is active, otherwise
             // the cooked-mode line discipline would echo AND we'd
             // forward -- and ctrl-c should stay a signal, not data.
-            n = stdin.read(&mut stdin_buf), if raw_active.load(Ordering::Relaxed) => {
+            n = stdin.read(&mut stdin_buf), if is_raw => {
                 let n = match n {
                     Ok(0) | Err(_) => return Ok(BridgeOutcome::SessionEnded),
                     Ok(n) => n,
@@ -367,6 +373,9 @@ async fn write_loop(
                 ws_write.send(Message::Ping(vec![].into())).await
                     .context("sending keepalive ping")?;
             }
+            // Restart the loop so the stdin branch condition is
+            // re-evaluated now that raw mode is active.
+            _ = raw_notify.notified(), if !is_raw => {}
         }
     }
 }
@@ -379,6 +388,7 @@ async fn read_loop(
     received: Arc<AtomicBool>,
     raw_termios: Option<&nix::sys::termios::Termios>,
     raw_active: Arc<AtomicBool>,
+    raw_notify: Arc<tokio::sync::Notify>,
 ) -> BridgeOutcome {
     let mut stdout = tokio::io::stdout();
     let mut entered_raw = raw_termios.is_none();
@@ -392,6 +402,7 @@ async fn read_loop(
                     }
                     entered_raw = true;
                     raw_active.store(true, Ordering::Relaxed);
+                    raw_notify.notify_one();
                 }
                 if stdout.write_all(&data).await.is_err() || stdout.flush().await.is_err() {
                     break;
