@@ -24,7 +24,7 @@ echo "✓ No running docker containers"
 
 echo ""
 echo "=== Running tests ==="
-cargo xtest
+cargo xtest "$@"
 
 echo ""
 echo "=== Checking git status ==="

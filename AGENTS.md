@@ -4,6 +4,18 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
   Don't paraphrase code next to the comment.
 - If you write code, you should commit your changes.
 - Run ./pipeline to ensure your commit doesn't break anything.
+  - The full suite is expensive. Before running it, smoke-test with a
+    few tests that exercise the core paths, e.g.:
+    `cargo xtest enter_smoke_test`
+    `cargo xtest enter_verifies_user_and_repo_path`
+    `cargo xtest claude_smoke`
+    `cargo xtest gateway_pod_commit_triggers_push`
+    Pick tests related to what you changed when possible.
+  - ./pipeline accepts test filter args, e.g. `./pipeline list_` runs
+    only tests matching "list_".
+  - Preserve output for diagnosis:
+    `./pipeline 2>&1 | tee /tmp/pipeline.log`
+    so the log is available without rerunning.
 - After committing, fetch from the `host` remote and rebase on your upstream to stay up to date.
 - Unless prompted otherwise, don't try to remain backwards compatible.
   Assume all containers/files/databases were created with the current version.
