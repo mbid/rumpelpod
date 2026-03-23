@@ -160,8 +160,12 @@ struct SshAgentHandle {
 
 impl Drop for SshAgentHandle {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Err(e) = self.child.kill() {
+            eprintln!("warning: failed to kill ssh-agent: {e}");
+        }
+        if let Err(e) = self.child.wait() {
+            eprintln!("warning: failed to wait on ssh-agent: {e}");
+        }
     }
 }
 
