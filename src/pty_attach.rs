@@ -67,6 +67,14 @@ impl Drop for TerminalGuard {
     }
 }
 
+fn apply_termios(termios: &nix::sys::termios::Termios) {
+    if let Err(e) =
+        nix::sys::termios::tcsetattr(io::stdin(), nix::sys::termios::SetArg::TCSANOW, termios)
+    {
+        eprintln!("warning: failed to set terminal attributes: {e}");
+    }
+}
+
 nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, libc::winsize);
 
 /// Get the current terminal dimensions via ioctl.
@@ -90,10 +98,11 @@ pub struct SessionParams {
 
 /// Connect to or launch a Claude session over WebSocket.
 ///
-/// Puts the terminal into raw mode, connects to `ws://HOST:PORT/claude`,
-/// sends the session parameters as the first message, and bridges local
-/// stdin/stdout until the user detaches (Ctrl-a d) or the session ends.
-/// Automatically reconnects if the WebSocket connection drops.
+/// Connects to `ws://HOST:PORT/claude`, sends the session parameters as
+/// the first message, and bridges local stdin/stdout until the user
+/// detaches (Ctrl-a d) or the session ends.  Raw mode is deferred until
+/// the first output arrives from the remote so ctrl-c works during
+/// startup.  Automatically reconnects if the WebSocket connection drops.
 pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
     eprintln!("[Ctrl-a d to detach]");
 
@@ -105,16 +114,31 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
         original: original_termios.clone(),
     };
 
-    let mut raw = original_termios;
+    let mut raw = original_termios.clone();
     nix::sys::termios::cfmakeraw(&mut raw);
-    nix::sys::termios::tcsetattr(io::stdin(), nix::sys::termios::SetArg::TCSANOW, &raw)
-        .context("setting terminal to raw mode")?;
 
     // -- Run async bridge -----------------------------------------------
 
     let url = url.to_string();
     let token = token.to_string();
-    crate::async_runtime::block_on(attach_async(&url, &token, params))
+    let outcome = crate::async_runtime::block_on(attach_async(
+        &url,
+        &token,
+        params,
+        &original_termios,
+        &raw,
+    ))?;
+
+    // Reset terminal emulator state that escape sequences from the remote
+    // may have changed (termios is restored by TerminalGuard, but modes
+    // like alternate screen or hidden cursor need explicit cleanup).
+    {
+        use std::io::Write;
+        let _ = io::stdout().write_all(b"\x1b[?1049l\x1b[0m\x1b[?25h");
+        let _ = io::stdout().flush();
+    }
+
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -203,11 +227,19 @@ async fn connect_ws(
 // Async entry point with reconnection
 // ---------------------------------------------------------------------------
 
-async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
+async fn attach_async(
+    url: &str,
+    token: &str,
+    params: SessionParams,
+    original_termios: &nix::sys::termios::Termios,
+    raw_termios: &nix::sys::termios::Termios,
+) -> Result<AttachOutcome> {
     // First connection: propagate errors (invalid URL, unreachable pod).
     let ws = connect_ws(url, token, &params, true).await?;
 
-    match bridge(ws).await {
+    // Defer raw mode until the remote sends its first output, so ctrl-c
+    // works while waiting for the session to start.
+    match bridge(ws, Some(raw_termios)).await {
         BridgeOutcome::Detached => return Ok(AttachOutcome::Detached),
         BridgeOutcome::SessionEnded => return Ok(AttachOutcome::SessionEnded),
         BridgeOutcome::ConnectionLost => {}
@@ -216,7 +248,10 @@ async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<A
     // Reconnection loop.  Uses create=false so the server does not
     // spawn a fresh session if the original child already exited.
     loop {
-        write_status("\r\n[connection lost, reconnecting...]\r\n").await;
+        // Leave raw mode while disconnected so ctrl-c delivers SIGINT
+        // and the user can kill the process normally.
+        apply_termios(original_termios);
+        eprintln!("[connection lost, reconnecting...]");
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         let ws = match connect_ws(url, token, &params, false).await {
@@ -224,9 +259,12 @@ async fn attach_async(url: &str, token: &str, params: SessionParams) -> Result<A
             Err(_) => continue,
         };
 
+        // Reconnection replays screen state immediately, so enter raw
+        // mode before the bridge starts.
+        apply_termios(raw_termios);
         write_status("[reconnected]\r\n").await;
 
-        match bridge(ws).await {
+        match bridge(ws, None).await {
             BridgeOutcome::Detached => return Ok(AttachOutcome::Detached),
             BridgeOutcome::SessionEnded => return Ok(AttachOutcome::SessionEnded),
             BridgeOutcome::ConnectionLost => continue,
@@ -246,7 +284,10 @@ async fn write_status(msg: &str) {
 // WebSocket <-> terminal bridge
 // ---------------------------------------------------------------------------
 
-async fn bridge(ws: WsStream) -> BridgeOutcome {
+/// When `raw_termios` is `Some`, the terminal is still in cooked mode
+/// and raw mode is deferred until the first output arrives from the
+/// remote.  When `None`, the caller already set raw mode.
+async fn bridge(ws: WsStream, raw_termios: Option<&nix::sys::termios::Termios>) -> BridgeOutcome {
     let (ws_write, ws_read) = ws.split();
 
     // Shared flag: set by read_loop on every received message, cleared
@@ -254,8 +295,12 @@ async fn bridge(ws: WsStream) -> BridgeOutcome {
     // still clear after READ_TIMEOUT, the connection is dead.
     let received = Arc::new(AtomicBool::new(true));
 
+    // Whether raw mode is active.  write_loop gates stdin forwarding
+    // on this so keystrokes aren't forwarded in cooked mode.
+    let raw_active = Arc::new(AtomicBool::new(raw_termios.is_none()));
+
     tokio::select! {
-        result = write_loop(ws_write, Arc::clone(&received)) => {
+        result = write_loop(ws_write, Arc::clone(&received), Arc::clone(&raw_active)) => {
             match result {
                 Ok(BridgeOutcome::Detached) => BridgeOutcome::Detached,
                 Ok(BridgeOutcome::SessionEnded) => BridgeOutcome::SessionEnded,
@@ -263,13 +308,17 @@ async fn bridge(ws: WsStream) -> BridgeOutcome {
                 Ok(BridgeOutcome::ConnectionLost) | Err(_) => BridgeOutcome::ConnectionLost,
             }
         }
-        outcome = read_loop(ws_read, Arc::clone(&received)) => outcome,
+        outcome = read_loop(ws_read, Arc::clone(&received), raw_termios, raw_active) => outcome,
     }
 }
 
 /// Forward stdin, window-resize signals, and periodic keepalive pings
 /// to the WebSocket.
-async fn write_loop(mut ws_write: WsWriter, received: Arc<AtomicBool>) -> Result<BridgeOutcome> {
+async fn write_loop(
+    mut ws_write: WsWriter,
+    received: Arc<AtomicBool>,
+    raw_active: Arc<AtomicBool>,
+) -> Result<BridgeOutcome> {
     let mut stdin = tokio::io::stdin();
     let mut stdin_buf = [0u8; 4096];
     let mut saw_ctrl_a = false;
@@ -281,7 +330,10 @@ async fn write_loop(mut ws_write: WsWriter, received: Arc<AtomicBool>) -> Result
 
     loop {
         tokio::select! {
-            n = stdin.read(&mut stdin_buf) => {
+            // Only forward stdin once raw mode is active, otherwise
+            // the cooked-mode line discipline would echo AND we'd
+            // forward -- and ctrl-c should stay a signal, not data.
+            n = stdin.read(&mut stdin_buf), if raw_active.load(Ordering::Relaxed) => {
                 let n = match n {
                     Ok(0) | Err(_) => return Ok(BridgeOutcome::SessionEnded),
                     Ok(n) => n,
@@ -323,12 +375,25 @@ async fn write_loop(mut ws_write: WsWriter, received: Arc<AtomicBool>) -> Result
 /// Forward WebSocket output to stdout.  Returns `SessionEnded` if the
 /// server sends a `SessionEnded` control message, `ConnectionLost` if
 /// the WebSocket closes or errors without one.
-async fn read_loop(mut ws_read: WsReader, received: Arc<AtomicBool>) -> BridgeOutcome {
+async fn read_loop(
+    mut ws_read: WsReader,
+    received: Arc<AtomicBool>,
+    raw_termios: Option<&nix::sys::termios::Termios>,
+    raw_active: Arc<AtomicBool>,
+) -> BridgeOutcome {
     let mut stdout = tokio::io::stdout();
+    let mut entered_raw = raw_termios.is_none();
     while let Some(Ok(msg)) = ws_read.next().await {
         received.store(true, Ordering::Relaxed);
         match msg {
             Message::Binary(data) => {
+                if !entered_raw {
+                    if let Some(termios) = raw_termios {
+                        apply_termios(termios);
+                    }
+                    entered_raw = true;
+                    raw_active.store(true, Ordering::Relaxed);
+                }
                 if stdout.write_all(&data).await.is_err() || stdout.flush().await.is_err() {
                     break;
                 }
