@@ -43,7 +43,7 @@ impl RemoteBuilder {
                 &format!("{local_port}:{BUILDKITD_PORT}"),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .context("starting kubectl port-forward to buildkitd")?;
 
@@ -59,7 +59,14 @@ impl RemoteBuilder {
                 // Check if kubectl is still alive
                 let status = pf_child.try_wait().context("checking kubectl status")?;
                 let detail = match status {
-                    Some(exit) => format!("kubectl exited with {exit}"),
+                    Some(exit) => {
+                        let mut stderr_str = String::new();
+                        if let Some(mut stderr) = pf_child.stderr.take() {
+                            use std::io::Read;
+                            let _ = stderr.read_to_string(&mut stderr_str);
+                        }
+                        format!("kubectl exited with {exit}: {stderr_str}")
+                    }
                     None => "kubectl still running but port not accepting connections".to_string(),
                 };
                 return Err(anyhow::anyhow!(
