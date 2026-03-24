@@ -51,6 +51,66 @@ fn claude_detach_reattach() {
     session2.wait_for("~/workspace");
 }
 
+/// After Ctrl-a d the terminal must be fully restored: mouse tracking
+/// off, bracketed paste off, TUI content scrolled into scrollback,
+/// and the detach message visible with nothing below it.
+#[test]
+fn claude_detach_restores_terminal() {
+    let proxy = claude_proxy();
+    let (fake_home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-detach-term");
+
+    let mut session = ClaudeSession::spawn(
+        &repo,
+        &daemon,
+        proxy,
+        fake_home.path(),
+        "claude-haiku-4-5",
+        &[],
+    );
+
+    session.wait_for("~/workspace");
+
+    // Detach and let the rumpel process exit.
+    session.write_raw(&[CTRL_A, b'd']);
+    session.wait_for_exit();
+
+    let screen = session.screen();
+
+    // Mouse tracking must be off so the host shell does not receive
+    // garbage escape sequences from mouse movement.
+    assert_eq!(
+        screen.mouse_protocol_mode(),
+        vt100::MouseProtocolMode::None,
+        "mouse tracking should be disabled after detach"
+    );
+
+    // Bracketed paste must be off so the host shell's own paste
+    // handling is not confused.
+    assert!(
+        !screen.bracketed_paste(),
+        "bracketed paste should be disabled after detach"
+    );
+
+    // The detach message must be on the visible screen.
+    let contents = screen.contents();
+    assert!(
+        contents.contains("[detached from session]"),
+        "detach message not found on screen:\n{contents}"
+    );
+
+    // Everything below the detach message should be empty -- the TUI
+    // content was scrolled into scrollback, not left on screen.
+    let (detach_row, _) = screen.cursor_position();
+    let (rows, cols) = screen.size();
+    for row in detach_row..rows {
+        let line: String = screen.rows(0, cols).nth(row as usize).unwrap_or_default();
+        assert!(
+            line.trim().is_empty(),
+            "row {row} below detach message should be empty, got: {line:?}"
+        );
+    }
+}
+
 /// When Claude exits inside the pod (via Ctrl-D), the client must
 /// detect it and exit cleanly instead of hanging.  Restarting must
 /// launch a fresh session, not try to reattach to the dead one.

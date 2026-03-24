@@ -323,6 +323,11 @@ impl ClaudeSession {
         );
     }
 
+    /// Access the vt100 screen for inspecting terminal state after exit.
+    pub fn screen(&self) -> &vt100::Screen {
+        self.parser.screen()
+    }
+
     /// Write raw bytes to the PTY without waiting for echo or pressing Enter.
     pub fn write_raw(&mut self, bytes: &[u8]) {
         self.writer.write_all(bytes).expect("write raw to PTY");
