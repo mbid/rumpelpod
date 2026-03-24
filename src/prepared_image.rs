@@ -388,6 +388,13 @@ pub fn build_prepared_image(
     {
         if let (Some(registry), Some(builder_pod)) = (registry, builder_pod) {
             let builder_ns = builder_namespace.as_deref().unwrap_or("buildkit");
+            let registry_tag = format!("{registry}:{tag}");
+            if crate::k8s_build::registry_tag_exists(context, &registry_tag) {
+                return Ok(BuildResult {
+                    image: Image(registry_tag),
+                    built: false,
+                });
+            }
             return build_prepared_image_via_builder(
                 base_image,
                 docker_host,
