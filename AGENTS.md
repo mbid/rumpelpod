@@ -25,6 +25,7 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
   When an error is expected in normal operation, be as specific about the error as possible.
   E.g. when reading a file that is not expected to exist, ignore only not found errors but not others.
   When there's no choice but to continue after an error has occurred (e.g. in Drop, or while cleaning up after a previous error), log to stderr.
+- No local imports (use inside function bodies). Place all imports at module level.
 - Multiline strings: Use indoc, formatdoc, printdoc etc.
 - Format strings: Prefer the format!("{var}") variant over format!("{}", v).
   Introduce variables if necessary, e.g. let var = var.display(); for paths.

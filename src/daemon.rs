@@ -38,6 +38,7 @@ use protocol::{
 };
 use ssh_forward::SshForwardManager;
 
+use crate::pod::types::{base64_encode, HomeFileEntry, TarExtractEntry};
 use crate::pod::{EnterRequest, PodClient, SubmoduleEntry};
 use crate::RetryPolicy;
 
@@ -1231,8 +1232,6 @@ fn copy_claude_config_via_pod(
     pod_name: &str,
     auto_approve_hook: bool,
 ) -> Result<()> {
-    use crate::pod::types::{base64_encode, HomeFileEntry, TarExtractEntry};
-
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
     let claude_dir = host_home.join(".claude");
 
@@ -1423,7 +1422,6 @@ fn snapshot_claude_config(pod: &PodClient, container_repo_path: &Path) -> Result
 /// Restore a previously snapshotted ~/.claude/ and ~/.claude.json into
 /// a new container.
 fn restore_claude_config(pod: &PodClient, tar_data: &[u8]) -> Result<()> {
-    use crate::pod::types::{base64_encode, TarExtractEntry};
     // The tar was created with paths relative to $HOME (e.g. ".claude/...",
     // ".claude.json").  Extract into "." (the home root).
     pod.write_home_files(

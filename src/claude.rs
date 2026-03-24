@@ -12,6 +12,7 @@ use crate::daemon::protocol::{
 };
 use crate::enter::{launch_pod, load_and_resolve, merge_env, resolve_remote_env_via_pod};
 use crate::git::get_repo_root;
+use crate::pod::types::{base64_encode, HomeFileEntry};
 use crate::pod::PodClient;
 use crate::pty_attach;
 
@@ -129,8 +130,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 /// in .claude.json). Useful when host credentials have been refreshed
 /// (e.g. token expiry) without needing to recreate the pod.
 pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
-    use crate::pod::types::{base64_encode, HomeFileEntry};
-
     let host_override = cmd.host_args.resolve()?;
     let result = launch_pod(&cmd.name, host_override)?;
     let pod = PodClient::connect(&result.container_url, &result.container_token)?;
@@ -153,13 +152,14 @@ pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
     }
 
     // primaryApiKey -- read-modify-write on .claude.json
-    if let Ok(host_data) = std::fs::read(host_home.join(".claude.json")) {
-        if let Ok(host_obj) =
-            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&host_data)
-        {
+    match std::fs::read(host_home.join(".claude.json")) {
+        Ok(host_data) => {
+            let host_obj: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_slice(&host_data).context("parsing ~/.claude.json")?;
             if let Some(key) = host_obj.get("primaryApiKey") {
+                // Write credentials first so we can read the container's
+                // .claude.json to merge the API key into it.
                 let resp = pod.write_home_files(files.clone(), vec![])?;
-                // Read the container's .claude.json to merge the key in
                 let container_path = Path::new(&resp.home).join(".claude.json");
                 let container_data = pod.fs_read(&container_path).unwrap_or_default();
                 let mut container_obj: serde_json::Map<String, serde_json::Value> =
@@ -174,6 +174,8 @@ pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
                 });
             }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude.json")),
     }
 
     if !files.is_empty() {
