@@ -114,12 +114,9 @@ impl PodClient {
     }
 
     // -------------------------------------------------------------------
-    // High-level semantic endpoints
+    // Enter / write-home-files
     // -------------------------------------------------------------------
 
-    /// All-in-one pod entry: ensures the repo exists, configures SSH relay
-    /// and git remotes, sets up submodules, probes the user environment,
-    /// and returns user info.
     pub fn enter(&self, req: &EnterRequest) -> Result<EnterResponse> {
         self.post("/enter", req)
     }

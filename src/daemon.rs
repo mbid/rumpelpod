@@ -1222,9 +1222,6 @@ fn try_remove_container(
 ///   ~/.claude/.credentials.json  -- OAuth tokens (needed unless ANTHROPIC_API_KEY is set)
 ///   ~/.claude/settings.json      -- user preferences (model, mode, attribution)
 ///   ~/.claude.json               -- whitelisted global keys only
-///
-/// Uses the write-home-files endpoint to send everything in a single call
-/// instead of one roundtrip per file.
 fn copy_claude_config_via_pod(
     pod: &PodClient,
     repo_path: &Path,
@@ -2086,9 +2083,8 @@ impl DaemonServer {
                         })
                         .collect();
 
-                    // Single call: repo init + SSH + git + submodules + env probe.
-                    // If it fails (e.g. stale tunnel), drop the tunnel handle
-                    // so the next enter creates a fresh one.
+                    // If enter fails (e.g. stale tunnel), drop the tunnel
+                    // handle so the next enter creates a fresh one.
                     let enter_result = pod.enter(&EnterRequest {
                         repo_path: container_repo_path.clone(),
                         base_url: base_url.clone(),
@@ -2787,7 +2783,6 @@ impl DaemonServer {
                 })
                 .collect();
 
-            // Single call: repo init + SSH + git + submodules + env probe.
             let enter_result = pod.enter(&EnterRequest {
                 repo_path: container_repo_path.clone(),
                 base_url: base_url.clone(),
@@ -3013,8 +3008,7 @@ impl DaemonServer {
                 })
                 .collect();
 
-            // Single call: repo init + SSH + git + submodules (no env probe
-            // here -- that happens after the retry logic, outside the closure).
+            // Env probe deferred to after the retry logic below.
             pod_inner.enter(&EnterRequest {
                 repo_path: container_repo_path.clone(),
                 base_url: base_url.clone(),

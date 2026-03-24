@@ -157,14 +157,11 @@ pub struct CpDownloadRequest {
 // and X-Path header.
 
 // ---------------------------------------------------------------------------
-// Enter (high-level: repo init + SSH + git setup + env probe)
+// Enter
 // ---------------------------------------------------------------------------
 
-/// All-in-one pod entry: ensures the repo exists, configures SSH relay and
-/// git remotes, sets up submodules, probes the user environment, and returns
-/// user info.  Replaces the old sequence of ssh_configure +
-/// ensure_repo_initialized + git_setup + git_setup_submodules + probe_env +
-/// user_info calls.
+/// Ensures the repo exists, configures SSH relay and git remotes, sets up
+/// submodules, probes the user environment, and returns user info.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnterRequest {
     pub repo_path: PathBuf,
@@ -192,12 +189,10 @@ pub struct EnterResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Write home files (batch write config files under $HOME)
+// Write home files
 // ---------------------------------------------------------------------------
 
 /// Write multiple files under the container user's home directory in one call.
-/// Replaces the old sequence of user_info + fs_mkdir + fs_write calls used by
-/// copy_claude_config_via_pod.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WriteHomeFilesRequest {
     /// Files to write, with paths relative to the user's home directory.

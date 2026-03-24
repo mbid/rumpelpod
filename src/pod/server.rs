@@ -72,20 +72,15 @@ pub fn run_container_server(port: u16, token: String) -> ! {
 
     // POST routes require bearer token authentication
     let authenticated_routes = Router::new()
-        // High-level semantic endpoints
         .route("/enter", post(enter_handler))
         .route("/write-home-files", post(write_home_files_handler))
-        // Filesystem (used by agents for ad-hoc file operations)
         .route("/fs/read", post(fs_read_handler))
         .route("/fs/write", post(fs_write_handler))
         .route("/fs/stat", post(fs_stat_handler))
-        // Git (snapshot/patch for change transfer)
         .route("/git/snapshot", post(git_snapshot_handler))
         .route("/git/apply-patch", post(git_apply_patch_handler))
-        // File transfer and command execution
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
-        // PTY sessions
         .route("/claude", any(super::pty::claude_session_handler))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
@@ -158,24 +153,21 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// Enter: all-in-one pod entry (repo init + SSH + git + env)
+// Enter
 // ---------------------------------------------------------------------------
 
 async fn enter_handler(
     State(state): State<PodServerState>,
     Json(req): Json<EnterRequest>,
 ) -> Result<Json<EnterResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Set up SSH relay (needs async for the tokio mutex and listener spawn).
     // Cloned before req is moved into the blocking task.
     let ssh_url = req.base_url.clone();
     let ssh_token = req.token.clone();
 
-    // All remaining work is blocking (filesystem, git, env probe)
     let result = tokio::task::spawn_blocking(move || enter_impl(req))
         .await
         .expect("enter_impl panicked");
 
-    // SSH relay setup runs after the blocking work completes.
     setup_ssh_relay(&state, &ssh_url, &ssh_token)
         .await
         .map_err(err_json)?;
@@ -186,7 +178,6 @@ async fn enter_handler(
     }
 }
 
-/// Factored-out SSH relay setup, shared with the enter handler.
 async fn setup_ssh_relay(state: &PodServerState, url: &str, token: &str) -> Result<()> {
     let config = SshRelayConfig {
         url: url.to_string(),
@@ -323,7 +314,7 @@ fn get_user_info() -> Result<UserInfoResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// Write home files: batch write config files under $HOME
+// Write home files
 // ---------------------------------------------------------------------------
 
 async fn write_home_files_handler(
@@ -399,7 +390,7 @@ fn write_home_files_impl(req: WriteHomeFilesRequest) -> Result<WriteHomeFilesRes
 }
 
 // ---------------------------------------------------------------------------
-// Filesystem (used by agents for ad-hoc file operations)
+// Filesystem
 // ---------------------------------------------------------------------------
 
 async fn fs_read_handler(
