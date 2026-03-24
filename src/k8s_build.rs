@@ -11,17 +11,15 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use log::info;
 
-use crate::k8s::K8sClient;
-
 /// Handle for a buildx builder backed by an in-cluster buildkitd.
 ///
-/// Creates a `docker buildx` builder using the "remote" driver,
-/// connecting through a kube port-forward to the buildkitd pod.
-/// Dropping this handle removes the buildx builder and the
-/// port-forward.
+/// Sets up `kubectl port-forward` to the buildkitd pod and creates a
+/// `docker buildx` builder using the "remote" driver pointed at the
+/// forwarded port.  Dropping this kills the port-forward and removes
+/// the buildx builder.
 pub struct RemoteBuilder {
     name: String,
-    _port_forward: crate::k8s::PortForwardHandle,
+    _port_forward: std::process::Child,
 }
 
 /// Default buildkitd port inside the builder pod.
@@ -30,14 +28,49 @@ const BUILDKITD_PORT: u16 = 1234;
 impl RemoteBuilder {
     /// Connect to a buildkitd pod and set up a docker buildx builder.
     pub fn connect(k8s_context: &str, builder_namespace: &str, builder_pod: &str) -> Result<Self> {
-        let client = K8sClient::new(k8s_context, builder_namespace)?;
+        // Bind to an ephemeral port for the port-forward.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("binding ephemeral port for buildkit port-forward")?;
+        let local_port = listener.local_addr()?.port();
+        drop(listener);
 
-        let pf = client
-            .port_forward(builder_pod, BUILDKITD_PORT)
-            .context("port-forwarding to buildkitd")?;
-        let local_port = pf.local_port;
+        let mut pf_child = Command::new("kubectl")
+            .args(["--context", k8s_context])
+            .args(["-n", builder_namespace])
+            .args([
+                "port-forward",
+                builder_pod,
+                &format!("{local_port}:{BUILDKITD_PORT}"),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("starting kubectl port-forward to buildkitd")?;
+
+        info!("Waiting for kubectl port-forward on 127.0.0.1:{local_port}...");
+
+        // Wait for the port-forward to accept connections.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{local_port}")).is_ok() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                // Check if kubectl is still alive
+                let status = pf_child.try_wait().context("checking kubectl status")?;
+                let detail = match status {
+                    Some(exit) => format!("kubectl exited with {exit}"),
+                    None => "kubectl still running but port not accepting connections".to_string(),
+                };
+                return Err(anyhow::anyhow!(
+                    "kubectl port-forward to buildkitd did not become ready: {detail}"
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        info!("Port-forward ready on 127.0.0.1:{local_port}");
+
         let addr = format!("tcp://127.0.0.1:{local_port}");
-
         let name = format!("rumpelpod-k8s-{local_port}");
 
         // Remove any stale builder with this name (ignore errors).
@@ -47,17 +80,16 @@ impl RemoteBuilder {
             .stderr(Stdio::null())
             .status();
 
-        let status = Command::new("docker")
+        let output = Command::new("docker")
             .args([
                 "buildx", "create", "--name", &name, "--driver", "remote", &addr,
             ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .output()
             .context("creating buildx remote builder")?;
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!(
-                "docker buildx create --driver remote failed (exit {status})"
+                "docker buildx create --driver remote failed: {stderr}"
             ));
         }
 
@@ -65,7 +97,7 @@ impl RemoteBuilder {
 
         Ok(Self {
             name,
-            _port_forward: pf,
+            _port_forward: pf_child,
         })
     }
 
@@ -204,5 +236,7 @@ impl Drop for RemoteBuilder {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        let _ = self._port_forward.kill();
+        let _ = self._port_forward.wait();
     }
 }

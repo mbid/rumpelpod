@@ -312,10 +312,10 @@ pub fn write_test_devcontainer(repo: &TestRepo, extra_dockerfile: &str, extra_js
     let dockerfile = formatdoc! {r#"
         FROM debian:13
         RUN apt-get update && apt-get install -y git
+        {extra_dockerfile}
         RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
         COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
         USER {TEST_USER}
-        {extra_dockerfile}
     "#};
     std::fs::write(devcontainer_dir.join("Dockerfile"), dockerfile)
         .expect("Failed to write Dockerfile");

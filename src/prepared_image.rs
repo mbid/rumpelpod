@@ -443,6 +443,53 @@ pub fn build_prepared_image(
     })
 }
 
+/// Generate a Dockerfile for the remote builder that detects the base
+/// image user at build time via a multi-stage probe.
+///
+/// This avoids needing `probe_base_image_user` on the local host,
+/// which would fail because the base image lives in the cluster registry.
+fn generate_remote_dockerfile(
+    base_image: &str,
+    container_repo_path: &Path,
+    user: &str,
+    claude_info: Option<&HostClaudeInfo>,
+    host_remotes: &[GitRemote],
+) -> String {
+    let repo_path = container_repo_path.display();
+    let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
+
+    let claude_flag = match claude_info {
+        Some(info) => format!(" \\\n      --claude-version '{}'", info.version),
+        None => String::new(),
+    };
+
+    let remote_flags: String = host_remotes
+        .iter()
+        .map(|r| format!(" \\\n      --remote '{}={}'", r.name, r.url))
+        .collect();
+
+    // Stage 1: detect the default USER of the base image by writing
+    // the current username to a file.  Stage 2: do the real build as
+    // root, then switch back to the detected user at the end.
+    formatdoc! {r#"
+        FROM {base_image} AS base-user-probe
+        RUN id -un > /tmp/.rumpelpod-base-user
+
+        FROM {base_image}
+        ARG TARGETARCH
+        USER root
+
+        COPY --chmod=755 rumpel-linux-${{TARGETARCH}} {rumpel}
+
+        RUN --mount=type=bind,from=gateway,target={BUILD_GATEWAY_PATH} \
+            {rumpel} prepare-image \
+              --repo-path '{repo_path}' \
+              --user '{user}'{claude_flag}{remote_flags}
+
+        COPY --from=base-user-probe /tmp/.rumpelpod-base-user /tmp/.rumpelpod-base-user
+    "#}
+}
+
 /// Build the prepared image via an in-cluster buildkitd.
 ///
 /// Uses the remote builder to build and push the image in one step.
@@ -451,7 +498,7 @@ pub fn build_prepared_image(
 #[allow(clippy::too_many_arguments)]
 fn build_prepared_image_via_builder(
     base_image: &Image,
-    docker_host: &Host,
+    _docker_host: &Host,
     gateway_path: &Path,
     container_repo_path: &Path,
     user: &str,
@@ -465,35 +512,41 @@ fn build_prepared_image_via_builder(
 ) -> Result<BuildResult> {
     let registry_tag = format!("{registry}:{tag}");
 
-    // Probe the base image user locally (the probe build runs on
-    // localhost docker, same as the non-builder path).
-    let buildable_base = ensure_buildable_tag(&base_image.0, docker_host)?;
-    let base_user = probe_base_image_user(&buildable_base, docker_host)?;
-
-    let build_ctx = assemble_build_context(
-        &buildable_base,
+    let dockerfile = generate_remote_dockerfile(
+        &base_image.0,
         container_repo_path,
         user,
         claude_info,
         host_remotes,
-    )?;
+    );
+    let binaries = find_rumpel_binaries()?;
+
+    let tmp = tempfile::tempdir().context("creating remote build context temp dir")?;
+    fs::write(tmp.path().join("Dockerfile"), dockerfile)
+        .context("writing remote Dockerfile to build context")?;
+    for (name, path) in &binaries {
+        fs::copy(path, tmp.path().join(name)).with_context(|| {
+            let path = path.display();
+            format!("copying {path} to build context")
+        })?;
+    }
 
     let builder =
         crate::k8s_build::RemoteBuilder::connect(k8s_context, builder_namespace, builder_pod_name)?;
 
     // Symlink the gateway to a name without `.git` so buildx treats it
     // as a plain directory rather than a git URL.
-    let gateway_link = build_ctx.path().join("gateway-link");
+    let gateway_link = tmp.path().join("gateway-link");
     std::os::unix::fs::symlink(gateway_path, &gateway_link).with_context(|| {
         let gw = gateway_path.display();
         format!("symlinking gateway {gw}")
     })?;
 
     builder.build_with_named_context_and_push(
-        build_ctx.path(),
-        &build_ctx.path().join("Dockerfile"),
+        tmp.path(),
+        &tmp.path().join("Dockerfile"),
         &registry_tag,
-        &[("BASE_USER", &base_user)],
+        &[],
         &[("gateway", &gateway_link)],
     )?;
 

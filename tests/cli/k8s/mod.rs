@@ -20,7 +20,6 @@ use rumpelpod::CommandExt;
 use crate::common::{
     pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER,
 };
-use crate::executor::ExecutorResources;
 
 /// Cluster configuration read from environment variables.
 pub(super) struct K8sClusterConfig {
@@ -105,22 +104,62 @@ impl Drop for K8sNamespace {
     }
 }
 
-/// Extract a TOML value from the executor's toml config string.
-///
-/// Looks for a line matching `key = "value"` and returns the value.
-/// Used by tests that need the k8s context or namespace for kubectl
-/// verification.
-fn toml_value(toml: &str, key: &str) -> String {
-    let prefix = format!("{key} = \"");
-    toml.lines()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            trimmed
-                .strip_prefix(&prefix)
-                .and_then(|rest| rest.strip_suffix('"'))
-                .map(String::from)
-        })
-        .unwrap_or_else(|| panic!("key {key:?} not found in executor toml"))
+/// K8s executor resources that always use k8s mode regardless of
+/// RUMPELPOD_TEST_EXECUTOR.  K8s-specific tests (#[ignore]) call
+/// this directly so they don't need the env var set.
+fn k8s_executor(home: &TestHome, test_name: &str) -> K8sExecutor {
+    let cluster = k8s_cluster_config();
+    let ns = K8sNamespace::new(&cluster, test_name);
+
+    let context = cluster.context.clone();
+    let namespace = ns.name.clone();
+    let registry = cluster.registry.clone();
+
+    let builder_lines = match (&cluster.builder_pod, &cluster.builder_namespace) {
+        (Some(pod), Some(bns)) => {
+            format!("builder-pod = \"{pod}\"\nbuilder-namespace = \"{bns}\"\n")
+        }
+        (Some(pod), None) => format!("builder-pod = \"{pod}\"\n"),
+        _ => String::new(),
+    };
+
+    let toml = formatdoc! {r#"
+        [k8s]
+        context = "{context}"
+        namespace = "{namespace}"
+        registry = "{registry}"
+        {builder_lines}
+        [k8s.node-selector]
+        pool = "test"
+
+        [[k8s.tolerations]]
+        key = "pool"
+        value = "test"
+        effect = "NoSchedule"
+    "#};
+
+    // Write kubeconfig so the daemon can find it
+    let kubeconfig_path = home.path().join(".kube");
+    std::fs::create_dir_all(&kubeconfig_path).unwrap();
+    let src = std::env::var("KUBECONFIG")
+        .ok()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string()))
+        .expect("KUBECONFIG or ~/.kube/config must exist");
+    let _ = std::fs::copy(&src, kubeconfig_path.join("config"));
+
+    K8sExecutor {
+        toml,
+        context,
+        namespace,
+        _namespace: ns,
+    }
+}
+
+struct K8sExecutor {
+    toml: String,
+    context: String,
+    namespace: String,
+    _namespace: K8sNamespace,
 }
 
 #[test]
@@ -128,7 +167,7 @@ fn toml_value(toml: &str, key: &str) -> String {
 fn k8s_enter_smoke() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "enter-smoke");
+    let executor = k8s_executor(&home, "enter-smoke");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -155,7 +194,7 @@ fn k8s_enter_smoke() {
 fn k8s_list_shows_pod() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "list-shows-pod");
+    let executor = k8s_executor(&home, "list-shows-pod");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -185,13 +224,13 @@ fn k8s_list_shows_pod() {
 fn k8s_delete_removes_pod() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "delete-removes-pod");
+    let executor = k8s_executor(&home, "delete-removes-pod");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let context = toml_value(&executor.toml, "context");
-    let namespace = toml_value(&executor.toml, "namespace");
+    let context = &executor.context;
+    let namespace = &executor.namespace;
 
     // Create a pod
     pod_command(&repo, &daemon)
@@ -276,7 +315,7 @@ fn k8s_image_build_no_registry() {
         .expect("Failed to write .rumpelpod.toml");
 
     let home = TestHome::new();
-    let _executor = ExecutorResources::setup(&home, "build-no-registry-daemon");
+    let _k8s = k8s_executor(&home, "build-no-registry-daemon");
     let daemon = TestDaemon::start(&home);
 
     let output = pod_command(&repo, &daemon)
@@ -302,7 +341,7 @@ fn k8s_image_build_no_registry() {
 fn k8s_image_build() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "image-build");
+    let executor = k8s_executor(&home, "image-build");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -340,7 +379,7 @@ fn k8s_image_build() {
 fn k8s_cp_to_and_from_pod() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "cp-to-and-from-pod");
+    let executor = k8s_executor(&home, "cp-to-and-from-pod");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -392,7 +431,7 @@ fn k8s_cp_to_and_from_pod() {
 fn k8s_mount_volume() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "mount-volume");
+    let executor = k8s_executor(&home, "mount-volume");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
@@ -428,7 +467,7 @@ fn k8s_mount_volume() {
 fn k8s_mount_tmpfs() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "mount-tmpfs");
+    let executor = k8s_executor(&home, "mount-tmpfs");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
@@ -457,7 +496,7 @@ fn k8s_mount_tmpfs() {
 fn k8s_bind_mount_rejected() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "bind-mount-rejected");
+    let executor = k8s_executor(&home, "bind-mount-rejected");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
@@ -489,7 +528,7 @@ fn k8s_bind_mount_rejected() {
 fn k8s_privileged() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "privileged");
+    let executor = k8s_executor(&home, "privileged");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", r#","privileged": true"#);
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -507,7 +546,7 @@ fn k8s_privileged() {
 fn k8s_cap_add() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "cap-add");
+    let executor = k8s_executor(&home, "cap-add");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", r#","capAdd": ["SYS_PTRACE"]"#);
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -525,7 +564,7 @@ fn k8s_cap_add() {
 fn k8s_override_command_false() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "override-command-false");
+    let executor = k8s_executor(&home, "override-command-false");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
@@ -553,7 +592,7 @@ fn k8s_override_command_false() {
 fn k8s_host_requirements() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "host-requirements");
+    let executor = k8s_executor(&home, "host-requirements");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(
         &repo,
@@ -562,8 +601,8 @@ fn k8s_host_requirements() {
     );
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    let context = toml_value(&executor.toml, "context");
-    let namespace = toml_value(&executor.toml, "namespace");
+    let context = &executor.context;
+    let namespace = &executor.namespace;
 
     pod_command(&repo, &daemon)
         .args(["enter", "k8s-reqs-test", "--", "true"])
@@ -603,7 +642,7 @@ fn k8s_host_requirements() {
 fn k8s_init_succeeds_despite_unsupported() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "init-unsupported");
+    let executor = k8s_executor(&home, "init-unsupported");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", r#","init": true"#);
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -621,7 +660,7 @@ fn k8s_init_succeeds_despite_unsupported() {
 fn k8s_forward_port() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "forward-port");
+    let executor = k8s_executor(&home, "forward-port");
     let daemon = TestDaemon::start(&home);
     // Install socat alongside git for the echo server
     write_test_devcontainer(
@@ -685,7 +724,7 @@ fn k8s_forward_port() {
 fn k8s_recreate() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "recreate");
+    let executor = k8s_executor(&home, "recreate");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
@@ -733,12 +772,12 @@ fn k8s_recreate() {
 fn k8s_node_selector_and_tolerations() {
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "node-selector");
+    let executor = k8s_executor(&home, "node-selector");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
-    let context = toml_value(&executor.toml, "context");
-    let namespace = toml_value(&executor.toml, "namespace");
+    let context = &executor.context;
+    let namespace = &executor.namespace;
 
     // Append extra node-selector and toleration to the executor's toml
     // to verify both appear in the pod spec.
