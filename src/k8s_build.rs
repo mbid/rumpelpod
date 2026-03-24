@@ -213,6 +213,7 @@ impl RemoteBuilder {
         cmd.args(["--builder", &self.name]);
         cmd.args(["--push"]);
         cmd.args(["--provenance=false", "--sbom=false"]);
+        cmd.args(["--progress=plain"]);
         cmd.args(["-t", registry_tag]);
 
         let dockerfile_path = dockerfile_path.display();

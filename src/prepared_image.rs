@@ -574,15 +574,17 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         if !status.success() {
             return Err(anyhow::anyhow!("git clone failed"));
         }
+    }
 
-        let status = Command::new("chown")
-            .args(["-R", &cmd.user])
-            .arg(&cmd.repo_path)
-            .status()
-            .context("setting repository ownership")?;
-        if !status.success() {
-            return Err(anyhow::anyhow!("chown failed"));
-        }
+    // Ensure the repo is owned by the container user.  The base image
+    // may have created it under a different UID (e.g. COPY --chown).
+    let status = Command::new("chown")
+        .args(["-R", &cmd.user])
+        .arg(&cmd.repo_path)
+        .status()
+        .context("setting repository ownership")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("chown failed"));
     }
 
     // Configure host remotes in the cloned repo so they match the

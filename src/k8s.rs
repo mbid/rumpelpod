@@ -148,7 +148,7 @@ impl K8sClient {
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
 
         // Build volume mounts and volume definitions from options
-        let mut volume_mounts: Vec<serde_json::Value> = options
+        let volume_mounts: Vec<serde_json::Value> = options
             .volumes
             .iter()
             .map(|v| {
@@ -160,7 +160,7 @@ impl K8sClient {
             })
             .collect();
 
-        let mut volumes: Vec<serde_json::Value> = options
+        let volumes: Vec<serde_json::Value> = options
             .volumes
             .iter()
             .map(|v| {
@@ -174,17 +174,6 @@ impl K8sClient {
                 })
             })
             .collect();
-
-        // Always include a writable emptyDir so the non-root container user
-        // can write binaries and the server token file.
-        volume_mounts.push(serde_json::json!({
-            "name": "rumpelpod-bin",
-            "mountPath": "/opt/rumpelpod",
-        }));
-        volumes.push(serde_json::json!({
-            "name": "rumpelpod-bin",
-            "emptyDir": {},
-        }));
 
         let mut container = serde_json::json!({
             "name": "main",
