@@ -259,8 +259,8 @@ fn k8s_delete_removes_pod() {
 
     // Verify k8s pod is also gone
     let kubectl_output = Command::new("kubectl")
-        .args(["--context", &context])
-        .args(["--namespace", &namespace])
+        .args(["--context", context])
+        .args(["--namespace", namespace])
         .args(["get", "pod", "-l", "rumpelpod/pod-name=k8s-del-test"])
         .args(["-o", "name"])
         .output()
@@ -611,8 +611,8 @@ fn k8s_host_requirements() {
 
     // Verify resource requests are set via kubectl
     let kubectl_output = Command::new("kubectl")
-        .args(["--context", &context])
-        .args(["--namespace", &namespace])
+        .args(["--context", context])
+        .args(["--namespace", namespace])
         .args([
             "get",
             "pod",
@@ -801,8 +801,8 @@ fn k8s_node_selector_and_tolerations() {
 
     // Verify both nodeSelector labels appear
     let kubectl_output = Command::new("kubectl")
-        .args(["--context", &context])
-        .args(["--namespace", &namespace])
+        .args(["--context", context])
+        .args(["--namespace", namespace])
         .args([
             "get",
             "pod",
@@ -828,8 +828,8 @@ fn k8s_node_selector_and_tolerations() {
 
     // Verify our custom toleration is present alongside the pool one
     let kubectl_output = Command::new("kubectl")
-        .args(["--context", &context])
-        .args(["--namespace", &namespace])
+        .args(["--context", context])
+        .args(["--namespace", namespace])
         .args([
             "get",
             "pod",
