@@ -132,8 +132,26 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
     // Reset terminal emulator state that escape sequences from the remote
     // may have changed (termios is restored by TerminalGuard, but modes
     // like alternate screen or hidden cursor need explicit cleanup).
+    // Scroll the TUI content into scrollback so the shell prompt appears
+    // on a clean visible area while the output remains accessible.
+    let (_, rows) = get_terminal_size().unwrap_or((80, 24));
     io::stdout()
-        .write_all(b"\x1b[?1049l\x1b[0m\x1b[?25h")
+        .write_all(
+            format!(
+                "\x1b[?1049l\
+                 \x1b[?1006l\
+                 \x1b[?1003l\
+                 \x1b[?1002l\
+                 \x1b[?1000l\
+                 \x1b[?2004l\
+                 \x1b[0m\
+                 \x1b[?25h\
+                 \x1b[r\
+                 \x1b[{rows}S\
+                 \x1b[H"
+            )
+            .as_bytes(),
+        )
         .and_then(|()| io::stdout().flush())
         .context("resetting terminal emulator state")?;
 
