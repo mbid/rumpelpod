@@ -167,6 +167,13 @@ fn resolve_image_via_builder(
     let image_name = compute_image_tag(build, &dockerfile_path)?;
     let registry_tag = format!("{registry}:{image_name}");
 
+    if crate::k8s_build::registry_tag_exists(k8s_context, &registry_tag) {
+        return Ok(BuildResult {
+            image: Image(registry_tag),
+            built: false,
+        });
+    }
+
     let builder =
         crate::k8s_build::RemoteBuilder::connect(k8s_context, builder_namespace, builder_pod)?;
 

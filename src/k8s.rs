@@ -25,6 +25,7 @@ const ANNOTATION_CREATED: &str = "rumpelpod/created";
 /// Client for Kubernetes operations, scoped to a specific context and namespace.
 pub struct K8sClient {
     client: Client,
+    context: String,
     namespace: String,
 }
 
@@ -123,6 +124,7 @@ impl K8sClient {
 
         Ok(Self {
             client,
+            context: context.to_string(),
             namespace: namespace.to_string(),
         })
     }
@@ -542,76 +544,65 @@ impl K8sClient {
     }
 
     /// Set up port forwarding from a local port to a pod port.
-    /// Returns the local port that was bound.
+    ///
+    /// Uses a kubectl subprocess instead of kube-rs portforward because
+    /// the kube-rs WebSocket connection drops on high-latency links
+    /// (e.g. devcontainer -> remote k8s over the internet).
     pub fn port_forward(&self, name: &str, remote_port: u16) -> Result<PortForwardHandle> {
-        let pods: Api<Pod> = Api::namespaced(self.client.clone(), &self.namespace);
-        let name_owned = name.to_string();
+        use std::process::{Command, Stdio};
 
-        let (local_port, cancel_tx) = block_on(async {
-            let mut forwarder = pods
-                .portforward(&name_owned, &[remote_port])
-                .await
-                .context("setting up port forward")?;
+        // Bind an ephemeral port, then release it for kubectl to use.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .context("binding ephemeral port for k8s port-forward")?;
+        let local_port = listener.local_addr()?.port();
+        drop(listener);
 
-            // Grab the stream for the requested port
-            let mut port_stream = forwarder
-                .take_stream(remote_port)
-                .context("taking port forward stream")?;
+        let mut child = Command::new("kubectl")
+            .args(["--context", &self.context])
+            .args(["-n", &self.namespace])
+            .args(["port-forward", name, &format!("{local_port}:{remote_port}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("starting kubectl port-forward")?;
 
-            // Bind a local TCP listener on an ephemeral port
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .context("binding local port for forwarding")?;
-            let local_addr = listener.local_addr()?;
-            let local_port = local_addr.port();
-
-            let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
-
-            // Spawn a task that accepts connections and forwards them.
-            // For simplicity, we handle one connection at a time (the
-            // container-serve HTTP server uses keep-alive so a single
-            // connection is typical).
-            let pods_clone = pods.clone();
-            tokio::spawn(async move {
-                // The Portforwarder must stay alive as long as its stream is
-                // in use -- dropping it aborts the underlying WebSocket.
-                let mut _active_forwarder = forwarder;
-                loop {
-                    tokio::select! {
-                        accept = listener.accept() => {
-                            match accept {
-                                Ok((mut tcp_stream, _)) => {
-                                    let _ = tokio::io::copy_bidirectional(
-                                        &mut tcp_stream,
-                                        &mut port_stream,
-                                    ).await;
-                                    // After the connection closes, get a fresh
-                                    // port-forward stream for the next connection.
-                                    match pods_clone.portforward(&name_owned, &[remote_port]).await {
-                                        Ok(mut pf) => {
-                                            match pf.take_stream(remote_port) {
-                                                Some(s) => {
-                                                    port_stream = s;
-                                                    _active_forwarder = pf;
-                                                }
-                                                None => break,
-                                            }
-                                        }
-                                        Err(_) => break,
-                                    }
-                                }
-                                Err(_) => break,
-                            }
+        // Wait for kubectl to start accepting connections.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{local_port}")).is_ok() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                // Check if kubectl is still alive
+                let status = child.try_wait().context("checking kubectl status")?;
+                let detail = match status {
+                    Some(exit) => {
+                        let mut stderr_str = String::new();
+                        if let Some(mut stderr) = child.stderr.take() {
+                            use std::io::Read;
+                            let _ = stderr.read_to_string(&mut stderr_str);
                         }
-                        _ = cancel_rx.changed() => {
-                            break;
-                        }
+                        format!("kubectl exited with {exit}: {stderr_str}")
                     }
+                    None => "kubectl still running but port not accepting connections".to_string(),
+                };
+                return Err(anyhow::anyhow!(
+                    "kubectl port-forward to {name}:{remote_port} did not become ready: {detail}"
+                ));
+            }
+            // Check early exit before sleeping
+            if let Ok(Some(exit)) = child.try_wait() {
+                let mut stderr_str = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_string(&mut stderr_str);
                 }
-            });
-
-            Ok::<_, anyhow::Error>((local_port, cancel_tx))
-        })?;
+                return Err(anyhow::anyhow!(
+                    "kubectl port-forward to {name}:{remote_port} exited with {exit}: {stderr_str}"
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
 
         trace!(
             "Port forward established: 127.0.0.1:{} -> {}:{}",
@@ -622,7 +613,7 @@ impl K8sClient {
 
         Ok(PortForwardHandle {
             local_port,
-            _cancel_tx: cancel_tx,
+            _child: child,
         })
     }
 
@@ -652,8 +643,14 @@ impl K8sClient {
 /// Handle for an active port-forward. Dropping this cancels the forward.
 pub struct PortForwardHandle {
     pub local_port: u16,
-    /// Dropping this sender signals the forwarding task to stop.
-    _cancel_tx: tokio::sync::watch::Sender<bool>,
+    _child: std::process::Child,
+}
+
+impl Drop for PortForwardHandle {
+    fn drop(&mut self) {
+        let _ = self._child.kill();
+        let _ = self._child.wait();
+    }
 }
 
 /// Convert a devcontainer-style memory string (e.g. "4gb", "512mb") to

@@ -65,8 +65,9 @@ fn write_claude_test_devcontainer(repo: &TestRepo) {
     // nodejs without npm: the CLI only needs the node runtime, and
     // omitting npm prevents claude's background `npm view` update
     // check from running inside the container.
+    // No USER switching needed: the template inserts extra_dockerfile
+    // while still running as root and adds USER testuser at the end.
     let extra_dockerfile = formatdoc! {r#"
-        USER root
         RUN apt-get update && apt-get install -y nodejs curl
         RUN curl -fsSL "{tarball_url}" \
             | tar xz -C /usr/local/lib --transform='s,^package,claude-code,' \
@@ -74,7 +75,6 @@ fn write_claude_test_devcontainer(repo: &TestRepo) {
             && chmod +x /usr/local/lib/claude-code/cli.js
         COPY faketime.js /opt/faketime.js
         ENV NODE_OPTIONS="--require /opt/faketime.js"
-        USER testuser
     "#};
 
     let extra_json = r#",

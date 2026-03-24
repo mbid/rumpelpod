@@ -70,8 +70,12 @@ spec:
         - name: config
           configMap:
             name: buildkitd-config
+        # hostPath persists the layer cache across pod restarts.
+        # Safe because buildkitd is pinned to the control-plane node.
         - name: cache
-          emptyDir: {}
+          hostPath:
+            path: /var/lib/buildkitd-cache
+            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

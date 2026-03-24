@@ -236,6 +236,64 @@ impl RemoteBuilder {
     }
 }
 
+/// Check whether an image tag already exists in the cluster registry.
+///
+/// Sends a lightweight HTTP request from inside the cluster to the
+/// registry v2 manifest endpoint.  Returns false on any error so
+/// callers fall through to building.
+///
+/// Uses the registry pod directly (namespace "registry") because the
+/// buildkitd container's privileged cgroup setup prevents kubectl exec.
+pub fn registry_tag_exists(k8s_context: &str, registry_tag: &str) -> bool {
+    // Parse "host:port/repo:tag".  The tag is always after the last
+    // colon that follows a slash (distinguishing it from the port).
+    let (image_ref, tag) = match registry_tag.rsplit_once(':') {
+        Some((r, t)) if r.contains('/') => (r, t),
+        _ => return false,
+    };
+    let (_host_port, repo) = match image_ref.split_once('/') {
+        Some(pair) => pair,
+        None => return false,
+    };
+
+    // Find a registry pod to exec into.  This avoids the cgroup issue
+    // with the privileged buildkitd container.
+    let pod_output = Command::new("kubectl")
+        .args(["--context", k8s_context, "-n", "registry"])
+        .args([
+            "get",
+            "pod",
+            "-l",
+            "app=registry",
+            "-o",
+            "jsonpath={.items[0].metadata.name}",
+        ])
+        .output();
+    let registry_pod = match pod_output {
+        Ok(ref o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return false,
+    };
+    if registry_pod.is_empty() {
+        return false;
+    }
+
+    // The registry API requires the correct Accept header for OCI
+    // image indices (buildx pushes these even with --provenance=false).
+    let url = format!("http://localhost:5000/v2/{repo}/manifests/{tag}");
+    let accept = "Accept: application/vnd.oci.image.index.v1+json, \
+                  application/vnd.docker.distribution.manifest.v2+json, \
+                  application/vnd.docker.distribution.manifest.list.v2+json";
+
+    Command::new("kubectl")
+        .args(["--context", k8s_context, "-n", "registry"])
+        .args(["exec", &registry_pod, "--"])
+        .args(["wget", "-q", "-O", "/dev/null", "--header", accept, &url])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 impl Drop for RemoteBuilder {
     fn drop(&mut self) {
         let _ = Command::new("docker")
