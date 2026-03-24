@@ -72,22 +72,20 @@ pub fn run_container_server(port: u16, token: String) -> ! {
 
     // POST routes require bearer token authentication
     let authenticated_routes = Router::new()
+        // High-level semantic endpoints
+        .route("/enter", post(enter_handler))
+        .route("/write-home-files", post(write_home_files_handler))
+        // Filesystem (used by agents for ad-hoc file operations)
         .route("/fs/read", post(fs_read_handler))
         .route("/fs/write", post(fs_write_handler))
         .route("/fs/stat", post(fs_stat_handler))
-        .route("/fs/mkdir", post(fs_mkdir_handler))
-        .route("/git/clone", post(git_clone_handler))
-        .route("/git/setup", post(git_setup_handler))
-        .route("/git/install-hook", post(git_install_hook_handler))
-        .route("/git/setup-submodules", post(git_setup_submodules_handler))
-        .route("/git/sanitize", post(git_sanitize_handler))
+        // Git (snapshot/patch for change transfer)
         .route("/git/snapshot", post(git_snapshot_handler))
         .route("/git/apply-patch", post(git_apply_patch_handler))
-        .route("/env/user-info", post(env_user_info_handler))
-        .route("/env/probe", post(env_probe_handler))
+        // File transfer and command execution
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
-        .route("/ssh/configure", post(ssh_configure_handler))
+        // PTY sessions
         .route("/claude", any(super::pty::claude_session_handler))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
@@ -159,6 +157,251 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Enter: all-in-one pod entry (repo init + SSH + git + env)
+// ---------------------------------------------------------------------------
+
+async fn enter_handler(
+    State(state): State<PodServerState>,
+    Json(req): Json<EnterRequest>,
+) -> Result<Json<EnterResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Set up SSH relay (needs async for the tokio mutex and listener spawn).
+    // Cloned before req is moved into the blocking task.
+    let ssh_url = req.base_url.clone();
+    let ssh_token = req.token.clone();
+
+    // All remaining work is blocking (filesystem, git, env probe)
+    let result = tokio::task::spawn_blocking(move || enter_impl(req))
+        .await
+        .expect("enter_impl panicked");
+
+    // SSH relay setup runs after the blocking work completes.
+    setup_ssh_relay(&state, &ssh_url, &ssh_token)
+        .await
+        .map_err(err_json)?;
+
+    match result {
+        Ok(resp) => ok_json(resp),
+        Err(e) => Err(err_json(e)),
+    }
+}
+
+/// Factored-out SSH relay setup, shared with the enter handler.
+async fn setup_ssh_relay(state: &PodServerState, url: &str, token: &str) -> Result<()> {
+    let config = SshRelayConfig {
+        url: url.to_string(),
+        token: token.to_string(),
+    };
+
+    let sock_path = Path::new(SSH_AGENT_SOCK_PATH);
+    if let Some(parent) = sock_path.parent() {
+        std::fs::create_dir_all(parent).context("creating ssh-agent socket directory")?;
+    }
+    if sock_path.exists() {
+        if let Err(e) = std::fs::remove_file(sock_path) {
+            eprintln!("warning: failed to remove stale ssh-agent socket: {e}");
+        }
+    }
+
+    *state.ssh_relay.lock().await = Some(config);
+
+    let relay_for_task = state.ssh_relay.clone();
+    tokio::spawn(async move {
+        if let Err(e) = run_ssh_agent_listener(relay_for_task).await {
+            eprintln!("ssh-agent relay listener failed: {e:#}");
+        }
+    });
+
+    Ok(())
+}
+
+fn enter_impl(req: EnterRequest) -> Result<EnterResponse> {
+    let git_http_url = format!("{}/gateway.git", req.base_url);
+
+    // -- 1. Ensure repo exists -----------------------------------------------
+    let git_dir = req.repo_path.join(".git");
+    match std::fs::metadata(&git_dir) {
+        Ok(meta) if meta.is_dir() => {
+            // Repo exists.  If our hook is missing this is the first entry
+            // after the image was built -- sanitize to recover from any
+            // broken state left by the build.
+            let hook_path = req.repo_path.join(".git/hooks/reference-transaction");
+            match std::fs::metadata(&hook_path) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    sanitize_impl(&req.repo_path)?;
+                }
+                Err(e) => {
+                    let path = hook_path.display();
+                    return Err(anyhow::anyhow!("checking hook {path}: {e}"));
+                }
+            }
+        }
+        Ok(_) => {
+            let path = git_dir.display();
+            return Err(anyhow::anyhow!("{path} exists but is not a directory"));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Clone the repo from the git HTTP bridge.
+            if let Some(parent) = req.repo_path.parent() {
+                std::fs::create_dir_all(parent).context("creating parent directories")?;
+            }
+            clone_repo(&git_http_url, &req.repo_path, &req.token)?;
+        }
+        Err(e) => {
+            let path = git_dir.display();
+            return Err(anyhow::anyhow!("checking {path}: {e}"));
+        }
+    }
+
+    // -- 2. Configure git remotes, hooks, branches ---------------------------
+    setup_git_impl(&GitSetupRequest {
+        repo_path: req.repo_path.clone(),
+        url: git_http_url,
+        token: req.token.clone(),
+        pod_name: req.pod_name.clone(),
+        host_branch: req.host_branch,
+        git_identity: req.git_identity,
+    })?;
+
+    // -- 3. Set up submodules ------------------------------------------------
+    setup_submodules_impl(&GitSetupSubmodulesRequest {
+        repo_path: req.repo_path.clone(),
+        submodules: req.submodules,
+        base_url: req.base_url,
+        token: req.token,
+        pod_name: req.pod_name,
+        is_first_entry: req.is_first_entry,
+    })?;
+
+    // -- 4. Probe user environment -------------------------------------------
+    let probed_env = match req.shell_flags {
+        Some(ref flags) => probe_env_impl(flags).unwrap_or_else(|e| {
+            eprintln!("userEnvProbe failed: {e}");
+            HashMap::new()
+        }),
+        None => HashMap::new(),
+    };
+
+    // -- 5. Collect user info ------------------------------------------------
+    let user_info = get_user_info()?;
+
+    Ok(EnterResponse {
+        user_info,
+        probed_env,
+    })
+}
+
+/// Clone a repo from the git HTTP bridge with auth, including LFS.
+fn clone_repo(url: &str, dest: &Path, token: &str) -> Result<()> {
+    let auth_header = format!("Authorization: Bearer {token}");
+    let config_arg = format!("http.extraHeader={auth_header}");
+    let dest_str = dest.to_string_lossy();
+    run_git_command(&["clone", "--config", &config_arg, url, &dest_str], None)?;
+
+    // Try to set up git-lfs; skip if not available
+    let lfs_installed = run_git_command(&["lfs", "install", "--local"], Some(dest)).is_ok();
+    if lfs_installed {
+        run_git_command(&["lfs", "pull"], Some(dest)).context("git lfs pull failed")?;
+    }
+
+    Ok(())
+}
+
+/// Look up the server's own user info (uid, home, shell).
+fn get_user_info() -> Result<UserInfoResponse> {
+    let uid = nix::unistd::getuid();
+    let user = nix::unistd::User::from_uid(uid)
+        .with_context(|| format!("looking up uid {uid}"))?
+        .with_context(|| format!("uid {uid} not found in passwd"))?;
+    Ok(UserInfoResponse {
+        home: user.dir.to_string_lossy().to_string(),
+        shell: user.shell.to_string_lossy().to_string(),
+        uid: user.uid.as_raw(),
+        gid: user.gid.as_raw(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Write home files: batch write config files under $HOME
+// ---------------------------------------------------------------------------
+
+async fn write_home_files_handler(
+    Json(req): Json<WriteHomeFilesRequest>,
+) -> Result<Json<WriteHomeFilesResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = tokio::task::spawn_blocking(move || write_home_files_impl(req))
+        .await
+        .expect("write_home_files_impl panicked");
+    match result {
+        Ok(resp) => ok_json(resp),
+        Err(e) => Err(err_json(e)),
+    }
+}
+
+fn write_home_files_impl(req: WriteHomeFilesRequest) -> Result<WriteHomeFilesResponse> {
+    let user_info = get_user_info()?;
+    let home = Path::new(&user_info.home);
+
+    // Write individual files
+    for entry in &req.files {
+        let dest = home.join(&entry.path);
+        if entry.create_parents {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    let p = parent.display();
+                    format!("creating parent dirs for {p}")
+                })?;
+            }
+        }
+        let content = base64_decode(&entry.content)?;
+        let dest_display = dest.display();
+        std::fs::write(&dest, &content).with_context(|| format!("writing {dest_display}"))?;
+    }
+
+    // Extract tar archives
+    for extract in &req.tar_extracts {
+        let dest = home.join(&extract.dest);
+        let dest_display = dest.display();
+        std::fs::create_dir_all(&dest).with_context(|| format!("creating {dest_display}"))?;
+
+        let data = base64_decode(&extract.data)?;
+        let mut archive = tar::Archive::new(data.as_slice());
+        for entry in archive
+            .entries()
+            .with_context(|| format!("reading tar entries for {dest_display}"))?
+        {
+            let mut entry =
+                entry.with_context(|| format!("reading tar entry for {dest_display}"))?;
+            // Strip the leading "./" that tar -c . produces
+            let path = entry.path()?.into_owned();
+            let path = path.strip_prefix(".").unwrap_or(&path);
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            let target = dest.join(path);
+            if entry.header().entry_type().is_dir() {
+                std::fs::create_dir_all(&target)?;
+            } else {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                entry.unpack(&target).with_context(|| {
+                    let t = target.display();
+                    format!("extracting to {t}")
+                })?;
+            }
+        }
+    }
+
+    Ok(WriteHomeFilesResponse {
+        home: user_info.home,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem (used by agents for ad-hoc file operations)
+// ---------------------------------------------------------------------------
+
 async fn fs_read_handler(
     Json(req): Json<FsReadRequest>,
 ) -> Result<Json<FsReadResponse>, (StatusCode, Json<ErrorResponse>)> {
@@ -219,58 +462,6 @@ async fn fs_stat_handler(
             Err(err_json(anyhow::anyhow!("stat {path}: {e}")))
         }
     }
-}
-
-async fn fs_mkdir_handler(
-    Json(req): Json<FsMkdirRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let path = req.path.display();
-    std::fs::create_dir_all(&req.path)
-        .map_err(|e| err_json(anyhow::anyhow!("mkdir {path}: {e}")))?;
-
-    ok_json(serde_json::json!({}))
-}
-
-async fn git_clone_handler(
-    Json(req): Json<GitCloneRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let result = (|| -> Result<()> {
-        let mut args = vec!["clone".to_string()];
-
-        if let Some(ref auth) = req.auth_header {
-            args.push("--config".to_string());
-            args.push(format!("http.extraHeader={auth}"));
-        }
-
-        args.push(req.url.clone());
-        args.push(req.dest.to_string_lossy().to_string());
-
-        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        run_git_command(&args_ref, None)?;
-
-        if req.lfs {
-            // Try to install git-lfs; skip if not available
-            let lfs_installed =
-                run_git_command(&["lfs", "install", "--local"], Some(&req.dest)).is_ok();
-            if lfs_installed {
-                run_git_command(&["lfs", "pull"], Some(&req.dest))
-                    .context("git lfs pull failed")?;
-            }
-        }
-
-        Ok(())
-    })();
-
-    result.map_err(err_json)?;
-    ok_json(serde_json::json!({}))
-}
-
-async fn git_setup_handler(
-    Json(req): Json<GitSetupRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let result = setup_git_impl(&req);
-    result.map_err(err_json)?;
-    ok_json(serde_json::json!({}))
 }
 
 fn setup_git_impl(req: &GitSetupRequest) -> Result<()> {
@@ -385,15 +576,6 @@ exec /opt/rumpelpod/bin/rumpel git-hook reference-transaction \"$@\"\n";
 
 const HOOK_SIGNATURE: &str = "Installed by rumpelpod to sync branch updates";
 
-async fn git_install_hook_handler(
-    Json(req): Json<GitInstallHookRequest>,
-) -> Result<Json<GitInstallHookResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let first = install_hook_impl(&req.repo_path).map_err(err_json)?;
-    ok_json(GitInstallHookResponse {
-        first_install: first,
-    })
-}
-
 /// Install the reference-transaction hook. Returns true on first install.
 fn install_hook_impl(repo_path: &Path) -> Result<bool> {
     let hooks_dir = repo_path.join(".git/hooks");
@@ -427,14 +609,6 @@ fn install_hook_impl(repo_path: &Path) -> Result<bool> {
     std::fs::set_permissions(&hook_path, perms).context("chmod +x hook")?;
 
     Ok(true)
-}
-
-async fn git_setup_submodules_handler(
-    Json(req): Json<GitSetupSubmodulesRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let result = setup_submodules_impl(&req);
-    result.map_err(err_json)?;
-    ok_json(serde_json::json!({}))
 }
 
 fn setup_submodules_impl(req: &GitSetupSubmodulesRequest) -> Result<()> {
@@ -600,14 +774,6 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest) -> Result<()> {
     Ok(())
 }
 
-async fn git_sanitize_handler(
-    Json(req): Json<GitSanitizeRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let result = sanitize_impl(&req.repo_path);
-    result.map_err(err_json)?;
-    ok_json(serde_json::json!({}))
-}
-
 fn sanitize_impl(repo_path: &Path) -> Result<()> {
     // Abort any in-progress operations
     for op in &[
@@ -729,31 +895,6 @@ fn apply_patch_impl(req: &GitApplyPatchRequest) -> Result<()> {
         .status();
 
     Ok(())
-}
-
-/// Return info about the server's own user (the devcontainer user).
-async fn env_user_info_handler() -> Result<Json<UserInfoResponse>, (StatusCode, Json<ErrorResponse>)>
-{
-    let uid = nix::unistd::getuid();
-    let user = nix::unistd::User::from_uid(uid)
-        .map_err(|e| err_json(anyhow::anyhow!("looking up current user: {e}")))?
-        .ok_or_else(|| err_json(anyhow::anyhow!("current uid {uid} not found in passwd")))?;
-    ok_json(UserInfoResponse {
-        home: user.dir.to_string_lossy().to_string(),
-        shell: user.shell.to_string_lossy().to_string(),
-        uid: user.uid.as_raw(),
-        gid: user.gid.as_raw(),
-    })
-}
-
-async fn env_probe_handler(
-    Json(req): Json<ProbeEnvRequest>,
-) -> Result<Json<ProbeEnvResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = probe_env_impl(&req.shell_flags);
-    match result {
-        Ok(env) => ok_json(ProbeEnvResponse { env }),
-        Err(e) => Err(err_json(e)),
-    }
 }
 
 fn probe_env_impl(shell_flags: &str) -> Result<HashMap<String, String>> {
@@ -1074,43 +1215,6 @@ fn run_impl(req: RunRequest) -> Result<RunResponse> {
 // ---------------------------------------------------------------------------
 // SSH agent relay
 // ---------------------------------------------------------------------------
-
-async fn ssh_configure_handler(
-    State(state): State<PodServerState>,
-    Json(req): Json<SshConfigureRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    let config = SshRelayConfig {
-        url: req.url,
-        token: req.token,
-    };
-
-    // Create the socket directory.
-    let sock_path = Path::new(SSH_AGENT_SOCK_PATH);
-    if let Some(parent) = sock_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| err_json(anyhow::anyhow!("creating ssh-agent socket directory: {e}")))?;
-    }
-
-    // Remove stale socket from a previous run.
-    if sock_path.exists() {
-        if let Err(e) = std::fs::remove_file(sock_path) {
-            eprintln!("warning: failed to remove stale ssh-agent socket: {e}");
-        }
-    }
-
-    let relay = state.ssh_relay.clone();
-    *relay.lock().await = Some(config);
-
-    // Spawn the Unix socket listener.
-    let relay_for_task = state.ssh_relay.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_ssh_agent_listener(relay_for_task).await {
-            eprintln!("ssh-agent relay listener failed: {e:#}");
-        }
-    });
-
-    ok_json(serde_json::json!({}))
-}
 
 /// Listen on the SSH_AUTH_SOCK Unix socket and relay each connection
 /// to the host-side ssh-agent via WebSocket through the git HTTP server.

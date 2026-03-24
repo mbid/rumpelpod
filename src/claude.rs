@@ -129,60 +129,57 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
 /// in .claude.json). Useful when host credentials have been refreshed
 /// (e.g. token expiry) without needing to recreate the pod.
 pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
+    use crate::pod::types::{base64_encode, HomeFileEntry};
+
     let host_override = cmd.host_args.resolve()?;
     let result = launch_pod(&cmd.name, host_override)?;
     let pod = PodClient::connect(&result.container_url, &result.container_token)?;
-    let user_info = pod.user_info()?;
-    let container_home = user_info.home;
 
     let host_home = dirs::home_dir().context("could not determine home directory")?;
 
-    copy_credentials(&pod, &host_home, &container_home)?;
-    copy_api_key(&pod, &host_home, &container_home)?;
+    let mut files: Vec<HomeFileEntry> = Vec::new();
 
-    eprintln!("Authentication credentials updated.");
-    Ok(())
-}
-
-/// Overwrite .claude/.credentials.json in the container with the host copy.
-fn copy_credentials(pod: &PodClient, host_home: &Path, container_home: &str) -> Result<()> {
+    // .claude/.credentials.json -- OAuth tokens
     match std::fs::read(host_home.join(".claude/.credentials.json")) {
         Ok(data) => {
-            let dest = format!("{container_home}/.claude/.credentials.json");
-            pod.fs_write(Path::new(&dest), &data, false)
-                .context("writing .claude/.credentials.json")?;
+            files.push(HomeFileEntry {
+                path: ".claude/.credentials.json".to_string(),
+                content: base64_encode(&data),
+                create_parents: true,
+            });
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
     }
-    Ok(())
-}
 
-/// Update primaryApiKey in the container's .claude.json from the host copy.
-fn copy_api_key(pod: &PodClient, host_home: &Path, container_home: &str) -> Result<()> {
-    let host_data = match std::fs::read(host_home.join(".claude.json")) {
-        Ok(data) => data,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude.json")),
-    };
-    let host_obj: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(&host_data).context("parsing ~/.claude.json")?;
+    // primaryApiKey -- read-modify-write on .claude.json
+    if let Ok(host_data) = std::fs::read(host_home.join(".claude.json")) {
+        if let Ok(host_obj) =
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(&host_data)
+        {
+            if let Some(key) = host_obj.get("primaryApiKey") {
+                let resp = pod.write_home_files(files.clone(), vec![])?;
+                // Read the container's .claude.json to merge the key in
+                let container_path = Path::new(&resp.home).join(".claude.json");
+                let container_data = pod.fs_read(&container_path).unwrap_or_default();
+                let mut container_obj: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_slice(&container_data).unwrap_or_default();
+                container_obj.insert("primaryApiKey".to_string(), key.clone());
+                let updated = serde_json::to_vec_pretty(&container_obj)
+                    .context("serializing updated .claude.json")?;
+                files.push(HomeFileEntry {
+                    path: ".claude.json".to_string(),
+                    content: base64_encode(&updated),
+                    create_parents: false,
+                });
+            }
+        }
+    }
 
-    // Nothing to do if the host has no API key.
-    let Some(key) = host_obj.get("primaryApiKey") else {
-        return Ok(());
-    };
+    if !files.is_empty() {
+        pod.write_home_files(files, vec![])?;
+    }
 
-    let container_path = format!("{container_home}/.claude.json");
-    let container_data = pod.fs_read(Path::new(&container_path)).unwrap_or_default();
-    let mut container_obj: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(&container_data).unwrap_or_default();
-
-    container_obj.insert("primaryApiKey".to_string(), key.clone());
-
-    let updated =
-        serde_json::to_vec_pretty(&container_obj).context("serializing updated .claude.json")?;
-    pod.fs_write(Path::new(&container_path), &updated, false)
-        .context("writing container .claude.json")?;
+    eprintln!("Authentication credentials updated.");
     Ok(())
 }

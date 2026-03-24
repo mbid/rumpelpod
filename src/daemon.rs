@@ -38,7 +38,7 @@ use protocol::{
 };
 use ssh_forward::SshForwardManager;
 
-use crate::pod::{PodClient, SubmoduleEntry};
+use crate::pod::{EnterRequest, PodClient, SubmoduleEntry};
 use crate::RetryPolicy;
 
 /// Environment variable to override the daemon socket path for testing.
@@ -1221,6 +1221,9 @@ fn try_remove_container(
 ///   ~/.claude/.credentials.json  -- OAuth tokens (needed unless ANTHROPIC_API_KEY is set)
 ///   ~/.claude/settings.json      -- user preferences (model, mode, attribution)
 ///   ~/.claude.json               -- whitelisted global keys only
+///
+/// Uses the write-home-files endpoint to send everything in a single call
+/// instead of one roundtrip per file.
 fn copy_claude_config_via_pod(
     pod: &PodClient,
     repo_path: &Path,
@@ -1228,46 +1231,42 @@ fn copy_claude_config_via_pod(
     pod_name: &str,
     auto_approve_hook: bool,
 ) -> Result<()> {
+    use crate::pod::types::{base64_encode, HomeFileEntry, TarExtractEntry};
+
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
+    let claude_dir = host_home.join(".claude");
 
-    // Determine the container user's home directory
-    let user_info = pod.user_info()?;
-    let container_home = user_info.home;
+    let mut files: Vec<HomeFileEntry> = Vec::new();
+    let mut tar_extracts: Vec<TarExtractEntry> = Vec::new();
 
-    // Build a minimal .claude.json with only the keys needed to suppress
-    // warnings and onboarding prompts. Everything else (tips history,
-    // per-project stats, other projects' settings) is left out.
+    // .claude.json -- whitelisted global keys only
     match std::fs::read(host_home.join(".claude.json")) {
         Ok(data) => {
             let minimal = strip_claude_json(&data, repo_path, container_repo_path);
-            let dest = format!("{container_home}/.claude.json");
-            pod.fs_write(Path::new(&dest), &minimal, true)
-                .context("writing .claude.json")?;
+            files.push(HomeFileEntry {
+                path: ".claude.json".to_string(),
+                content: base64_encode(&minimal),
+                create_parents: false,
+            });
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude.json")),
     }
 
-    // We always need ~/.claude/settings.json for the statusline,
-    // so create the directory unconditionally.
-    let claude_dir = host_home.join(".claude");
-    let container_claude_dir = format!("{container_home}/.claude");
-    pod.fs_mkdir(Path::new(&container_claude_dir))
-        .context("creating .claude directory")?;
-
-    // Copy credentials if present.
+    // .claude/.credentials.json -- OAuth tokens
     match std::fs::read(claude_dir.join(".credentials.json")) {
         Ok(data) => {
-            let dest = format!("{container_home}/.claude/.credentials.json");
-            pod.fs_write(Path::new(&dest), &data, false)
-                .context("writing .claude/.credentials.json")?;
+            files.push(HomeFileEntry {
+                path: ".claude/.credentials.json".to_string(),
+                content: base64_encode(&data),
+                create_parents: true,
+            });
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
     }
 
-    // Build settings.json: start from host copy or empty object,
-    // then layer on statusline (and optionally the PermissionRequest hook).
+    // .claude/settings.json -- user preferences + statusline + hooks
     let base_data = match std::fs::read(claude_dir.join("settings.json")) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
@@ -1279,119 +1278,60 @@ fn copy_claude_config_via_pod(
     } else {
         data
     };
-    let dest = format!("{container_home}/.claude/settings.json");
-    pod.fs_write(Path::new(&dest), &data, false)
-        .context("writing .claude/settings.json")?;
+    files.push(HomeFileEntry {
+        path: ".claude/settings.json".to_string(),
+        content: base64_encode(&data),
+        create_parents: true,
+    });
 
-    // Copy project-specific conversation history and memory so claude inside
-    // the sandbox can see prior context for the same project.
-    copy_claude_project_dir_via_pod(
-        pod,
-        &host_home,
-        &container_home,
-        repo_path,
-        container_repo_path,
-    )?;
-
-    // Copy the global input history (filtered to this project) so up-arrow
-    // recall works for prior prompts.
-    copy_claude_history_via_pod(
-        pod,
-        &host_home,
-        &container_home,
-        repo_path,
-        container_repo_path,
-    )?;
-
-    Ok(())
-}
-
-/// Claude stores per-project data under ~/.claude/projects/<dir-name> where
-/// <dir-name> is the absolute path with every non-alphanumeric character
-/// replaced by `-`.  This matches Claude Code's JS implementation:
-///   path.replace(/[^a-zA-Z0-9]/g, "-")
-fn claude_project_dir_name(repo_path: &Path) -> String {
-    repo_path
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
-/// Copy the host's project-specific claude data (conversation history, memory)
-/// into the container, remapping the directory name to match the container's
-/// repo path.
-fn copy_claude_project_dir_via_pod(
-    pod: &PodClient,
-    host_home: &Path,
-    container_home: &str,
-    repo_path: &Path,
-    container_repo_path: &Path,
-) -> Result<()> {
+    // Project-specific data (conversation history, memory) via tar
     let host_dir_name = claude_project_dir_name(repo_path);
     let container_dir_name = claude_project_dir_name(container_repo_path);
-
     let host_project_dir = host_home.join(".claude/projects").join(&host_dir_name);
-    if !host_project_dir.is_dir() {
-        return Ok(());
-    }
-
-    let container_project_dir = format!("{container_home}/.claude/projects/{container_dir_name}");
-
-    pod.fs_mkdir(Path::new(&container_project_dir))
-        .context("creating claude project directory")?;
-
-    // Stream the whole directory via tar to avoid one HTTP call per file.
-    let tar_output = Command::new("tar")
-        .arg("-c")
-        .arg("-C")
-        .arg(&host_project_dir)
-        .arg(".")
-        .output()
-        .context("creating tar archive of claude project data")?;
-
-    if !tar_output.status.success() {
-        return Err(anyhow::anyhow!(
-            "tar failed: {}",
-            String::from_utf8_lossy(&tar_output.stderr)
-        ));
-    }
-
-    if !tar_output.stdout.is_empty() {
-        let result = pod.run(
-            &["tar", "-x", "-C", &container_project_dir],
-            None,
-            &[],
-            Some(&tar_output.stdout),
-            None,
-        )?;
-        if result.exit_code != 0 {
-            let stderr = base64_decode_lossy(&result.stderr);
+    if host_project_dir.is_dir() {
+        let tar_output = Command::new("tar")
+            .arg("-c")
+            .arg("-C")
+            .arg(&host_project_dir)
+            .arg(".")
+            .output()
+            .context("creating tar archive of claude project data")?;
+        if !tar_output.status.success() {
             return Err(anyhow::anyhow!(
-                "extracting claude project data: {}",
-                stderr
+                "tar failed: {}",
+                String::from_utf8_lossy(&tar_output.stderr)
             ));
+        }
+        if !tar_output.stdout.is_empty() {
+            let dest = format!(".claude/projects/{container_dir_name}");
+            tar_extracts.push(TarExtractEntry {
+                dest,
+                data: base64_encode(&tar_output.stdout),
+            });
         }
     }
 
+    // history.jsonl -- filtered to this project, with path rewritten
+    if let Ok(raw) = std::fs::read(host_home.join(".claude/history.jsonl")) {
+        let filtered = filter_history(&raw, repo_path, container_repo_path);
+        if !filtered.is_empty() {
+            files.push(HomeFileEntry {
+                path: ".claude/history.jsonl".to_string(),
+                content: base64_encode(&filtered),
+                create_parents: true,
+            });
+        }
+    }
+
+    pod.write_home_files(files, tar_extracts)
+        .context("writing claude config files")?;
+
     Ok(())
 }
 
-/// Copy ~/.claude/history.jsonl into the container, keeping only entries for
-/// this project and rewriting the project path so up-arrow input recall works.
-fn copy_claude_history_via_pod(
-    pod: &PodClient,
-    host_home: &Path,
-    container_home: &str,
-    repo_path: &Path,
-    container_repo_path: &Path,
-) -> Result<()> {
-    let history_path = host_home.join(".claude/history.jsonl");
-    let data = match std::fs::read(&history_path) {
-        Ok(d) => d,
-        Err(_) => return Ok(()),
-    };
-
+/// Filter history.jsonl to entries matching this project, rewriting the
+/// project path from host to container.
+fn filter_history(data: &[u8], repo_path: &Path, container_repo_path: &Path) -> Vec<u8> {
     let host_project = repo_path.to_string_lossy();
     let container_project = container_repo_path.to_string_lossy();
 
@@ -1421,16 +1361,19 @@ fn copy_claude_history_via_pod(
             filtered.push(b'\n');
         }
     }
+    filtered
+}
 
-    if filtered.is_empty() {
-        return Ok(());
-    }
-
-    let dest = format!("{container_home}/.claude/history.jsonl");
-    pod.fs_write(Path::new(&dest), &filtered, false)
-        .context("writing .claude/history.jsonl")?;
-
-    Ok(())
+/// Claude stores per-project data under ~/.claude/projects/<dir-name> where
+/// <dir-name> is the absolute path with every non-alphanumeric character
+/// replaced by `-`.  This matches Claude Code's JS implementation:
+///   path.replace(/[^a-zA-Z0-9]/g, "-")
+fn claude_project_dir_name(repo_path: &Path) -> String {
+    repo_path
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Snapshot ~/.claude/ and ~/.claude.json from a running container.
@@ -1480,15 +1423,16 @@ fn snapshot_claude_config(pod: &PodClient, container_repo_path: &Path) -> Result
 /// Restore a previously snapshotted ~/.claude/ and ~/.claude.json into
 /// a new container.
 fn restore_claude_config(pod: &PodClient, tar_data: &[u8]) -> Result<()> {
-    let user_info = pod.user_info()?;
-    let home = &user_info.home;
-
-    let result = pod.run(&["tar", "-x", "-C", home], None, &[], Some(tar_data), None)?;
-    if result.exit_code != 0 {
-        let stderr = base64_decode_lossy(&result.stderr);
-        return Err(anyhow::anyhow!("restoring claude config: {stderr}"));
-    }
-
+    use crate::pod::types::{base64_encode, TarExtractEntry};
+    // The tar was created with paths relative to $HOME (e.g. ".claude/...",
+    // ".claude.json").  Extract into "." (the home root).
+    pod.write_home_files(
+        vec![],
+        vec![TarExtractEntry {
+            dest: ".".to_string(),
+            data: base64_encode(tar_data),
+        }],
+    )?;
     Ok(())
 }
 
@@ -1782,52 +1726,6 @@ fn start_container_server(
 /// they are returned for background execution so the enter can complete
 /// without waiting.
 #[allow(clippy::too_many_arguments)]
-/// Ensure a git repo exists inside the container, using the in-container
-/// HTTP server instead of docker exec shell scripts.
-fn ensure_repo_initialized_via_pod(
-    pod: &PodClient,
-    git_http_url: &str,
-    token: &str,
-    container_repo_path: &Path,
-) -> Result<()> {
-    let git_dir = container_repo_path.join(".git");
-    let stat = pod.fs_stat(&git_dir)?;
-
-    if stat.exists && stat.is_dir {
-        // On first entry the image may have left the repo in a broken state.
-        // Detect first entry by the absence of our hook.
-        let hook_path = container_repo_path.join(".git/hooks/reference-transaction");
-        let hook_stat = pod.fs_stat(&hook_path)?;
-        if !hook_stat.exists {
-            pod.git_sanitize(container_repo_path)?;
-        }
-        return Ok(());
-    }
-
-    // Ensure parent directories exist
-    let parent = container_repo_path.parent().unwrap_or(container_repo_path);
-    pod.fs_mkdir(parent)?;
-
-    // Clone from the git-http bridge with auth header
-    let auth_header = format!("Authorization: Bearer {token}");
-    pod.git_clone(git_http_url, container_repo_path, Some(&auth_header), true)?;
-
-    Ok(())
-}
-
-/// Probe user env via the in-container server.
-fn probe_user_env_via_pod(pod: &PodClient, probe: &UserEnvProbe) -> HashMap<String, String> {
-    let flags = match probe.shell_flags_exec() {
-        Some(f) => f,
-        None => return HashMap::new(),
-    };
-
-    pod.probe_env(flags).unwrap_or_else(|e| {
-        log::warn!("userEnvProbe via pod failed: {e}");
-        HashMap::new()
-    })
-}
-
 /// Execute a single lifecycle command via the in-container HTTP server.
 fn run_lifecycle_command_via_pod(
     pod: &PodClient,
@@ -2174,53 +2072,41 @@ impl DaemonServer {
                     };
 
                     let base_url = format!("http://127.0.0.1:{tunnel_port}");
-                    let url = format!("{base_url}/gateway.git");
 
-                    // Tell container-serve where to relay SSH agent connections.
-                    pod.ssh_configure(&base_url, &token)
-                        .context("configuring ssh-agent relay")?;
+                    let effective_probe = devcontainer
+                        .user_env_probe
+                        .as_ref()
+                        .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
+                    let shell_flags = effective_probe.shell_flags_exec();
 
-                    // Git operations go through the tunnel. If they fail
-                    // (e.g. because the tunnel-server died but the mux
-                    // task hasn't noticed yet), drop the stale handle so
-                    // the next enter creates a fresh tunnel.
-                    let git_result: Result<()> = (|| {
-                        ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path)?;
+                    let sub_entries: Vec<SubmoduleEntry> = submodules
+                        .iter()
+                        .map(|s| SubmoduleEntry {
+                            name: s.name.clone(),
+                            path: s.path.clone(),
+                            displaypath: s.displaypath.clone(),
+                        })
+                        .collect();
 
-                        pod.git_setup(
-                            &container_repo_path,
-                            &url,
-                            &token,
-                            &pod_name.0,
-                            None,
-                            git_identity,
-                        )
-                        .context("configuring git")?;
-
-                        let sub_entries: Vec<SubmoduleEntry> = submodules
-                            .iter()
-                            .map(|s| SubmoduleEntry {
-                                name: s.name.clone(),
-                                path: s.path.clone(),
-                                displaypath: s.displaypath.clone(),
-                            })
-                            .collect();
-                        pod.git_setup_submodules(
-                            &container_repo_path,
-                            &sub_entries,
-                            &base_url,
-                            &token,
-                            &pod_name.0,
-                            false,
-                        )
-                        .context("setting up submodules")?;
-                        Ok(())
-                    })();
-                    if git_result.is_err() {
+                    // Single call: repo init + SSH + git + submodules + env probe.
+                    // If it fails (e.g. stale tunnel), drop the tunnel handle
+                    // so the next enter creates a fresh one.
+                    let enter_result = pod.enter(&EnterRequest {
+                        repo_path: container_repo_path.clone(),
+                        base_url: base_url.clone(),
+                        token: token.clone(),
+                        pod_name: pod_name.0.clone(),
+                        host_branch: None,
+                        git_identity: git_identity.cloned(),
+                        submodules: sub_entries,
+                        is_first_entry: false,
+                        shell_flags: shell_flags.map(String::from),
+                    });
+                    if enter_result.is_err() {
                         let key = (repo_path.to_path_buf(), pod_name.0.clone());
                         self.k8s_tunnels.lock().unwrap().remove(&key);
                     }
-                    git_result?;
+                    let enter_resp = enter_result?;
 
                     {
                         let conn = self.db.lock().unwrap();
@@ -2265,29 +2151,14 @@ impl DaemonServer {
                         .unwrap()
                         .insert((repo_path.to_path_buf(), pod_name.0.clone()), handles);
 
-                    let effective_probe = devcontainer
-                        .user_env_probe
-                        .as_ref()
-                        .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-                    let probed_env = probe_user_env_via_pod(&pod, effective_probe);
-
-                    let user_info =
-                        pod.user_info()
-                            .unwrap_or_else(|_| crate::pod::UserInfoResponse {
-                                home: String::new(),
-                                shell: "/bin/sh".to_string(),
-                                uid: 0,
-                                gid: 0,
-                            });
-
                     return Ok(LaunchResult {
                         container_id: ContainerId(k8s_name),
                         user,
                         docker_socket: None,
                         host: docker_host.clone(),
                         image_built,
-                        probed_env,
-                        user_shell: user_info.shell,
+                        probed_env: enter_resp.probed_env,
+                        user_shell: enter_resp.user_info.shell,
                         container_url,
                         container_token,
                     });
@@ -2484,26 +2355,12 @@ impl DaemonServer {
             .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
 
         let base_url = format!("http://127.0.0.1:{tunnel_port}");
-        let url = format!("{base_url}/gateway.git");
 
-        // Tell container-serve where to relay SSH agent connections.
-        pod.ssh_configure(&base_url, &token)
-            .context("configuring ssh-agent relay")
-            .map_err(mark_error)?;
-
-        ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path)
-            .map_err(mark_error)?;
-
-        pod.git_setup(
-            &container_repo_path,
-            &url,
-            &token,
-            &pod_name.0,
-            host_branch,
-            git_identity,
-        )
-        .context("configuring git")
-        .map_err(mark_error)?;
+        let effective_probe = devcontainer
+            .user_env_probe
+            .as_ref()
+            .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
+        let shell_flags = effective_probe.shell_flags_exec();
 
         let sub_entries: Vec<SubmoduleEntry> = submodules
             .iter()
@@ -2513,16 +2370,20 @@ impl DaemonServer {
                 displaypath: s.displaypath.clone(),
             })
             .collect();
-        pod.git_setup_submodules(
-            &container_repo_path,
-            &sub_entries,
-            &base_url,
-            &token,
-            &pod_name.0,
-            true,
-        )
-        .context("setting up submodules")
-        .map_err(mark_error)?;
+
+        let enter_resp = pod
+            .enter(&EnterRequest {
+                repo_path: container_repo_path.clone(),
+                base_url: base_url.clone(),
+                token: token.clone(),
+                pod_name: pod_name.0.clone(),
+                host_branch: host_branch.map(String::from),
+                git_identity: git_identity.cloned(),
+                submodules: sub_entries,
+                is_first_entry: true,
+                shell_flags: shell_flags.map(String::from),
+            })
+            .map_err(mark_error)?;
 
         {
             let conn = self.db.lock().unwrap();
@@ -2584,12 +2445,11 @@ impl DaemonServer {
             .unwrap()
             .insert((repo_path.to_path_buf(), pod_name.0.clone()), handles);
 
-        let effective_probe = devcontainer
-            .user_env_probe
-            .as_ref()
-            .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-        let probed_env = probe_user_env_via_pod(&pod, effective_probe);
-        let env_strings: Vec<String> = probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let env_strings: Vec<String> = enter_resp
+            .probed_env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
 
         // Run lifecycle commands for new pod
         let wait_for = devcontainer.effective_wait_for();
@@ -2632,23 +2492,14 @@ impl DaemonServer {
             );
         }
 
-        let user_info = pod
-            .user_info()
-            .unwrap_or_else(|_| crate::pod::UserInfoResponse {
-                home: String::new(),
-                shell: "/bin/sh".to_string(),
-                uid: 0,
-                gid: 0,
-            });
-
         Ok(LaunchResult {
             container_id: ContainerId(k8s_name),
             user,
             docker_socket: None,
             host: docker_host.clone(),
             image_built,
-            probed_env,
-            user_shell: user_info.shell,
+            probed_env: enter_resp.probed_env,
+            user_shell: enter_resp.user_info.shell,
             container_url,
             container_token: token,
         })
@@ -2922,62 +2773,45 @@ impl DaemonServer {
             };
 
             let base_url = format!("http://127.0.0.1:{tunnel_port}");
-            let url = format!("{base_url}/gateway.git");
 
-            // Tell container-serve where to relay SSH agent connections.
-            pod.ssh_configure(&base_url, &token)
-                .context("configuring ssh-agent relay")?;
-
-            // Clone repo if not already present (e.g. devcontainer without COPY)
-            let git_result: Result<()> = (|| {
-                ensure_repo_initialized_via_pod(&pod, &url, &token, &container_repo_path)?;
-
-                // On re-entry, don't pass host_branch - we don't want to change
-                // the upstream of an existing branch.
-                pod.git_setup(
-                    &container_repo_path,
-                    &url,
-                    &token,
-                    &pod_name.0,
-                    None,
-                    git_identity.as_ref(),
-                )
-                .context("configuring git")?;
-
-                // Set up submodule repos (re-entry: is_first_entry = false)
-                let sub_entries: Vec<SubmoduleEntry> = submodules
-                    .iter()
-                    .map(|s| SubmoduleEntry {
-                        name: s.name.clone(),
-                        path: s.path.clone(),
-                        displaypath: s.displaypath.clone(),
-                    })
-                    .collect();
-                pod.git_setup_submodules(
-                    &container_repo_path,
-                    &sub_entries,
-                    &base_url,
-                    &token,
-                    &pod_name.0,
-                    false,
-                )
-                .context("setting up submodules")?;
-                Ok(())
-            })();
-            if git_result.is_err() {
-                self.docker_tunnels.lock().unwrap().remove(&tunnel_key);
-                self.exec_proxies.lock().unwrap().remove(&proxy_key);
-            }
-            git_result?;
-
-            // Probe user env from shell init files
             let effective_probe = devcontainer
                 .user_env_probe
                 .as_ref()
                 .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-            let probed_env = probe_user_env_via_pod(&pod, effective_probe);
-            let env_strings: Vec<String> =
-                probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let shell_flags = effective_probe.shell_flags_exec();
+
+            let sub_entries: Vec<SubmoduleEntry> = submodules
+                .iter()
+                .map(|s| SubmoduleEntry {
+                    name: s.name.clone(),
+                    path: s.path.clone(),
+                    displaypath: s.displaypath.clone(),
+                })
+                .collect();
+
+            // Single call: repo init + SSH + git + submodules + env probe.
+            let enter_result = pod.enter(&EnterRequest {
+                repo_path: container_repo_path.clone(),
+                base_url: base_url.clone(),
+                token: token.clone(),
+                pod_name: pod_name.0.clone(),
+                host_branch: None,
+                git_identity: git_identity.clone(),
+                submodules: sub_entries,
+                is_first_entry: false,
+                shell_flags: shell_flags.map(String::from),
+            });
+            if enter_result.is_err() {
+                self.docker_tunnels.lock().unwrap().remove(&tunnel_key);
+                self.exec_proxies.lock().unwrap().remove(&proxy_key);
+            }
+            let enter_resp = enter_result?;
+
+            let env_strings: Vec<String> = enter_resp
+                .probed_env
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
 
             // Run updateContentCommand, per-start, and per-attach lifecycle
             // commands, respecting the waitFor target for background execution.
@@ -3042,24 +2876,14 @@ impl DaemonServer {
                 )?;
             }
 
-            let user_info = pod
-                .user_info()
-                .unwrap_or_else(|_| crate::pod::UserInfoResponse {
-                    home: String::new(),
-                    shell: "/bin/sh".to_string(),
-                    uid: 0,
-                    gid: 0,
-                });
-            let user_shell = user_info.shell;
-
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
                 docker_socket: Some(docker_socket),
                 host: docker_host,
                 image_built,
-                probed_env,
-                user_shell,
+                probed_env: enter_resp.probed_env,
+                user_shell: enter_resp.user_info.shell,
                 container_url,
                 container_token,
             });
@@ -3181,27 +3005,7 @@ impl DaemonServer {
                 .insert((repo_path.to_path_buf(), pod_name.0.clone()), tunnel);
 
             let base_url = format!("http://127.0.0.1:{tunnel_port}");
-            let url = format!("{base_url}/gateway.git");
 
-            // Tell container-serve where to relay SSH agent connections.
-            pod_inner
-                .ssh_configure(&base_url, &token)
-                .context("configuring ssh-agent relay")?;
-
-            ensure_repo_initialized_via_pod(&pod_inner, &url, &token, &container_repo_path)?;
-
-            pod_inner
-                .git_setup(
-                    &container_repo_path,
-                    &url,
-                    &token,
-                    &pod_name.0,
-                    host_branch.as_deref(),
-                    git_identity.as_ref(),
-                )
-                .context("configuring git")?;
-
-            // Set up submodule repos (new container: is_first_entry = true)
             let sub_entries: Vec<SubmoduleEntry> = submodules
                 .iter()
                 .map(|s| SubmoduleEntry {
@@ -3210,16 +3014,20 @@ impl DaemonServer {
                     displaypath: s.displaypath.clone(),
                 })
                 .collect();
-            pod_inner
-                .git_setup_submodules(
-                    &container_repo_path,
-                    &sub_entries,
-                    &base_url,
-                    &token,
-                    &pod_name.0,
-                    true,
-                )
-                .context("setting up submodules")?;
+
+            // Single call: repo init + SSH + git + submodules (no env probe
+            // here -- that happens after the retry logic, outside the closure).
+            pod_inner.enter(&EnterRequest {
+                repo_path: container_repo_path.clone(),
+                base_url: base_url.clone(),
+                token: token.clone(),
+                pod_name: pod_name.0.clone(),
+                host_branch: host_branch.clone(),
+                git_identity: git_identity.clone(),
+                submodules: sub_entries,
+                is_first_entry: true,
+                shell_flags: None, // env probe deferred to after retry
+            })?;
 
             Ok((container_id, container_token_inner, container_url_inner))
         };
@@ -3247,13 +3055,42 @@ impl DaemonServer {
 
         let pod = PodClient::new(&container_url, &container_token, RetryPolicy::UserBlocking)?;
 
-        // Probe user env from shell init files
+        // Probe user env from shell init files (separate call because the
+        // env probe was deferred from inside the retry closure above).
         let effective_probe = devcontainer
             .user_env_probe
             .as_ref()
             .unwrap_or(&UserEnvProbe::LoginInteractiveShell);
-        let probed_env = probe_user_env_via_pod(&pod, effective_probe);
-        let env_strings: Vec<String> = probed_env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let shell_flags = effective_probe.shell_flags_exec();
+        // Re-enter to get probed_env + user_info.  The git operations
+        // are idempotent so re-running them is safe.
+        let tunnel_base_url = {
+            let tunnels = self.docker_tunnels.lock().unwrap();
+            let port = tunnels
+                .get(&(repo_path.to_path_buf(), pod_name.0.clone()))
+                .map(|t| t.port)
+                .unwrap_or(0);
+            format!("http://127.0.0.1:{port}")
+        };
+        let enter_resp = pod
+            .enter(&EnterRequest {
+                repo_path: container_repo_path.clone(),
+                base_url: tunnel_base_url,
+                token: token.clone(),
+                pod_name: pod_name.0.clone(),
+                host_branch: host_branch.clone(),
+                git_identity: git_identity.clone(),
+                submodules: vec![],
+                is_first_entry: false,
+                shell_flags: shell_flags.map(String::from),
+            })
+            .map_err(mark_error)?;
+
+        let env_strings: Vec<String> = enter_resp
+            .probed_env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
 
         // Run lifecycle commands for new container:
         // onCreateCommand -> updateContentCommand -> postCreateCommand ->
@@ -3325,24 +3162,14 @@ impl DaemonServer {
             }
         }
 
-        let user_info = pod
-            .user_info()
-            .unwrap_or_else(|_| crate::pod::UserInfoResponse {
-                home: String::new(),
-                shell: "/bin/sh".to_string(),
-                uid: 0,
-                gid: 0,
-            });
-        let user_shell = user_info.shell;
-
         Ok(LaunchResult {
             container_id,
             user,
             docker_socket: Some(docker_socket),
             host: docker_host,
             image_built,
-            probed_env,
-            user_shell,
+            probed_env: enter_resp.probed_env,
+            user_shell: enter_resp.user_info.shell,
             container_url,
             container_token,
         })

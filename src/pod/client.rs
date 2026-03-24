@@ -4,7 +4,6 @@
 //! `reqwest::blocking::Client`, one method per endpoint, returns `Result<T>`.
 //! Callers see synchronous method calls.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -12,7 +11,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
-use crate::git::GitIdentity;
 use crate::jitter;
 use crate::RetryPolicy;
 
@@ -116,7 +114,34 @@ impl PodClient {
     }
 
     // -------------------------------------------------------------------
-    // Filesystem
+    // High-level semantic endpoints
+    // -------------------------------------------------------------------
+
+    /// All-in-one pod entry: ensures the repo exists, configures SSH relay
+    /// and git remotes, sets up submodules, probes the user environment,
+    /// and returns user info.
+    pub fn enter(&self, req: &EnterRequest) -> Result<EnterResponse> {
+        self.post("/enter", req)
+    }
+
+    /// Write multiple files under the container user's home directory.
+    /// Returns the home directory path.
+    pub fn write_home_files(
+        &self,
+        files: Vec<HomeFileEntry>,
+        tar_extracts: Vec<TarExtractEntry>,
+    ) -> Result<WriteHomeFilesResponse> {
+        self.post(
+            "/write-home-files",
+            &WriteHomeFilesRequest {
+                files,
+                tar_extracts,
+            },
+        )
+    }
+
+    // -------------------------------------------------------------------
+    // Filesystem (used by agents for ad-hoc file operations)
     // -------------------------------------------------------------------
 
     pub fn fs_read(&self, path: &Path) -> Result<Vec<u8>> {
@@ -149,99 +174,9 @@ impl PodClient {
         )
     }
 
-    pub fn fs_mkdir(&self, path: &Path) -> Result<()> {
-        self.post_unit(
-            "/fs/mkdir",
-            &FsMkdirRequest {
-                path: path.to_path_buf(),
-            },
-        )
-    }
-
     // -------------------------------------------------------------------
-    // Git
+    // Git (snapshot/patch for change transfer)
     // -------------------------------------------------------------------
-
-    pub fn git_clone(
-        &self,
-        url: &str,
-        dest: &Path,
-        auth_header: Option<&str>,
-        lfs: bool,
-    ) -> Result<()> {
-        self.post_unit(
-            "/git/clone",
-            &GitCloneRequest {
-                url: url.to_string(),
-                dest: dest.to_path_buf(),
-                auth_header: auth_header.map(String::from),
-                lfs,
-            },
-        )
-    }
-
-    pub fn git_setup(
-        &self,
-        repo_path: &Path,
-        url: &str,
-        token: &str,
-        pod_name: &str,
-        host_branch: Option<&str>,
-        git_identity: Option<&GitIdentity>,
-    ) -> Result<()> {
-        self.post_unit(
-            "/git/setup",
-            &GitSetupRequest {
-                repo_path: repo_path.to_path_buf(),
-                url: url.to_string(),
-                token: token.to_string(),
-                pod_name: pod_name.to_string(),
-                host_branch: host_branch.map(String::from),
-                git_identity: git_identity.cloned(),
-            },
-        )
-    }
-
-    pub fn git_install_hook(&self, repo_path: &Path) -> Result<bool> {
-        let resp: GitInstallHookResponse = self.post(
-            "/git/install-hook",
-            &GitInstallHookRequest {
-                repo_path: repo_path.to_path_buf(),
-            },
-        )?;
-        Ok(resp.first_install)
-    }
-
-    pub fn git_setup_submodules(
-        &self,
-        repo_path: &Path,
-        submodules: &[SubmoduleEntry],
-        base_url: &str,
-        token: &str,
-        pod_name: &str,
-        is_first_entry: bool,
-    ) -> Result<()> {
-        self.post_unit(
-            "/git/setup-submodules",
-            &GitSetupSubmodulesRequest {
-                repo_path: repo_path.to_path_buf(),
-                submodules: submodules.to_vec(),
-                base_url: base_url.to_string(),
-                token: token.to_string(),
-                pod_name: pod_name.to_string(),
-                is_first_entry,
-            },
-        )
-    }
-
-    pub fn git_sanitize(&self, repo_path: &Path) -> Result<()> {
-        self.post_unit(
-            "/git/sanitize",
-            &GitSanitizeRequest {
-                repo_path: repo_path.to_path_buf(),
-            },
-        )
-    }
 
     pub fn git_snapshot(&self, repo_path: &Path) -> Result<Option<Vec<u8>>> {
         let resp: GitSnapshotResponse = self.post(
@@ -268,39 +203,6 @@ impl PodClient {
                 repo_path: repo_path.to_path_buf(),
                 patch: base64_encode(patch),
                 created_files: created_files.to_vec(),
-            },
-        )
-    }
-
-    // -------------------------------------------------------------------
-    // Environment
-    // -------------------------------------------------------------------
-
-    pub fn user_info(&self) -> Result<UserInfoResponse> {
-        self.post("/env/user-info", &serde_json::json!({}))
-    }
-
-    pub fn probe_env(&self, shell_flags: &str) -> Result<HashMap<String, String>> {
-        let resp: ProbeEnvResponse = self.post(
-            "/env/probe",
-            &ProbeEnvRequest {
-                shell_flags: shell_flags.to_string(),
-            },
-        )?;
-        Ok(resp.env)
-    }
-
-    // -------------------------------------------------------------------
-    // SSH agent relay
-    // -------------------------------------------------------------------
-
-    /// Tell the container-serve where to relay SSH agent connections.
-    pub fn ssh_configure(&self, url: &str, token: &str) -> Result<()> {
-        self.post_unit(
-            "/ssh/configure",
-            &SshConfigureRequest {
-                url: url.to_string(),
-                token: token.to_string(),
             },
         )
     }

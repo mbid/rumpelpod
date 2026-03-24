@@ -48,23 +48,9 @@ pub struct FsStatResponse {
     pub owner: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FsMkdirRequest {
-    pub path: PathBuf,
-}
-
 // ---------------------------------------------------------------------------
-// Git
+// Git (internal types used by server-side impl functions)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GitCloneRequest {
-    pub url: String,
-    pub dest: PathBuf,
-    pub auth_header: Option<String>,
-    #[serde(default)]
-    pub lfs: bool,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitSetupRequest {
@@ -75,16 +61,6 @@ pub struct GitSetupRequest {
     pub host_branch: Option<String>,
     /// Git user identity from the host to write into the pod's .git/config.
     pub git_identity: Option<GitIdentity>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GitInstallHookRequest {
-    pub repo_path: PathBuf,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GitInstallHookResponse {
-    pub first_install: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,10 +81,7 @@ pub struct GitSetupSubmodulesRequest {
     pub is_first_entry: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GitSanitizeRequest {
-    pub repo_path: PathBuf,
-}
+// Git (snapshot/patch for change transfer)
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitSnapshotRequest {
@@ -140,16 +113,6 @@ pub struct UserInfoResponse {
     pub shell: String,
     pub uid: u32,
     pub gid: u32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProbeEnvRequest {
-    pub shell_flags: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProbeEnvResponse {
-    pub env: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -194,15 +157,80 @@ pub struct CpDownloadRequest {
 // and X-Path header.
 
 // ---------------------------------------------------------------------------
-// SSH agent relay
+// Enter (high-level: repo init + SSH + git setup + env probe)
 // ---------------------------------------------------------------------------
 
+/// All-in-one pod entry: ensures the repo exists, configures SSH relay and
+/// git remotes, sets up submodules, probes the user environment, and returns
+/// user info.  Replaces the old sequence of ssh_configure +
+/// ensure_repo_initialized + git_setup + git_setup_submodules + probe_env +
+/// user_info calls.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct SshConfigureRequest {
-    /// URL of the git HTTP server (tunneled into the container).
-    pub url: String,
-    /// Bearer token for authenticating to the git HTTP server.
+pub struct EnterRequest {
+    pub repo_path: PathBuf,
+    /// Base URL of the git HTTP bridge (tunneled into the container).
+    /// The git remote URL is derived as `{base_url}/gateway.git`.
+    pub base_url: String,
+    /// Bearer token for git HTTP and SSH relay authentication.
     pub token: String,
+    pub pod_name: String,
+    pub host_branch: Option<String>,
+    pub git_identity: Option<GitIdentity>,
+    #[serde(default)]
+    pub submodules: Vec<SubmoduleEntry>,
+    /// Controls submodule cloning.  True on first pod creation.
+    #[serde(default)]
+    pub is_first_entry: bool,
+    /// Shell flags for env probe (e.g. "-lic").  None to skip probing.
+    pub shell_flags: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EnterResponse {
+    pub user_info: UserInfoResponse,
+    pub probed_env: HashMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// Write home files (batch write config files under $HOME)
+// ---------------------------------------------------------------------------
+
+/// Write multiple files under the container user's home directory in one call.
+/// Replaces the old sequence of user_info + fs_mkdir + fs_write calls used by
+/// copy_claude_config_via_pod.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WriteHomeFilesRequest {
+    /// Files to write, with paths relative to the user's home directory.
+    #[serde(default)]
+    pub files: Vec<HomeFileEntry>,
+    /// Optional tar archive to extract under the home directory.
+    #[serde(default)]
+    pub tar_extracts: Vec<TarExtractEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeFileEntry {
+    /// Path relative to home (e.g. ".claude/settings.json").
+    pub path: String,
+    /// Base64-encoded file content.
+    pub content: String,
+    /// Create parent directories if they do not exist.
+    #[serde(default)]
+    pub create_parents: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TarExtractEntry {
+    /// Directory relative to home where the tar should be extracted.
+    pub dest: String,
+    /// Base64-encoded tar data.
+    pub data: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WriteHomeFilesResponse {
+    /// The home directory that was written to.
+    pub home: String,
 }
 
 // ---------------------------------------------------------------------------
