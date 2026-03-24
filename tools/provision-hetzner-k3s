@@ -55,12 +55,28 @@ export KUBECONFIG="$KUBECONFIG_PATH"
 
 KUBE_CONTEXT=$(KUBECONFIG="$KUBECONFIG_PATH" kubectl config current-context 2>/dev/null || true)
 
+echo "==> Deploying in-cluster registry and builder..."
+kubectl apply -f "$SCRIPT_DIR/k8s-registry.yaml"
+kubectl apply -f "$SCRIPT_DIR/k8s-builder.yaml"
+echo "    Waiting for registry pod..."
+kubectl -n registry rollout status deployment/registry --timeout=120s
+echo "    Waiting for buildkitd pod..."
+kubectl -n buildkit rollout status deployment/buildkitd --timeout=120s
+
+# The in-cluster registry is addressable by its cluster DNS name.
+# containerd on each node is configured via registries.yaml to use
+# HTTP for this name.  buildkitd is configured the same way so it
+# can push directly.
+REGISTRY="registry.registry.svc.cluster.local:5000/rumpelpod"
+
 echo ""
 echo "============================================"
 echo " Hetzner K3s cluster ready!"
 echo "============================================"
 echo " Kubeconfig       : $KUBECONFIG_PATH"
 echo " kubectl context  : ${KUBE_CONTEXT:-<see kubeconfig>}"
+echo " Registry (pull)  : $REGISTRY"
+echo " Builder          : buildkitd.buildkit (port 1234)"
 echo ""
 echo " Master (always on):"
 echo "   cx33  -- 4 shared vCPU, 8 GB   (~5.49 EUR/month)"
@@ -85,10 +101,10 @@ echo ""
 touch "$ENV_FILE"
 set_env RUMPELPOD_K8S_KUBECONFIG "$(base64 -w0 "$KUBECONFIG_PATH")"
 set_env RUMPELPOD_TEST_K8S_CONTEXT "${KUBE_CONTEXT}"
+set_env RUMPELPOD_TEST_REGISTRY "$REGISTRY"
+set_env RUMPELPOD_TEST_K8S_BUILDER_POD "$(kubectl -n buildkit get pod -l app=buildkitd -o jsonpath='{.items[0].metadata.name}')"
+set_env RUMPELPOD_TEST_K8S_BUILDER_NAMESPACE "buildkit"
 echo " Cluster credentials written to $ENV_FILE"
-echo ""
-echo " To run k8s tests, configure a registry accessible from"
-echo " the cluster and set RUMPELPOD_TEST_REGISTRY in $ENV_FILE."
 echo ""
 echo " Inside the devcontainer:"
 echo "   cargo xtest -- k8s --ignored"

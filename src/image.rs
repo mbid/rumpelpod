@@ -60,6 +60,31 @@ pub fn resolve_image(
         }
     }
 
+    // When an in-cluster builder is available, delegate the build to it.
+    if let Host::Kubernetes {
+        ref context,
+        ref registry,
+        ref builder_pod,
+        ref builder_namespace,
+        ..
+    } = docker_host
+    {
+        if let (Some(build), Some(registry), Some(builder_pod)) =
+            (&devcontainer.build, registry, builder_pod)
+        {
+            let builder_ns = builder_namespace.as_deref().unwrap_or("buildkit");
+            return resolve_image_via_builder(
+                build,
+                repo_root,
+                context,
+                builder_ns,
+                builder_pod,
+                registry,
+                on_output,
+            );
+        }
+    }
+
     let (build_host, registry) = match docker_host {
         Host::Kubernetes {
             registry: Some(ref reg),
@@ -121,6 +146,57 @@ pub fn resolve_image(
             built: false,
         })
     }
+}
+
+/// Build a devcontainer image via the in-cluster buildkitd and push
+/// it directly to the cluster registry.
+fn resolve_image_via_builder(
+    build: &BuildOptions,
+    repo_root: &Path,
+    k8s_context: &str,
+    builder_namespace: &str,
+    builder_pod: &str,
+    registry: &str,
+    on_output: Option<BuildOutputFn>,
+) -> Result<BuildResult> {
+    let dockerfile = build
+        .dockerfile
+        .as_deref()
+        .expect("resolved build must have dockerfile");
+    let dockerfile_path = repo_root.join(dockerfile);
+    let image_name = compute_image_tag(build, &dockerfile_path)?;
+    let registry_tag = format!("{registry}:{image_name}");
+
+    let builder =
+        crate::k8s_build::RemoteBuilder::connect(k8s_context, builder_namespace, builder_pod)?;
+
+    let context = build
+        .context
+        .as_deref()
+        .expect("resolved build must have context");
+    let context_path = repo_root.join(context);
+
+    let mut build_args: Vec<(&str, &str)> = Vec::new();
+    let args_owned: Vec<(String, String)>;
+    if let Some(ref args) = build.args {
+        args_owned = args.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (k, v) in &args_owned {
+            build_args.push((k, v));
+        }
+    }
+
+    builder.build_and_push(
+        &context_path,
+        &dockerfile_path,
+        &registry_tag,
+        &build_args,
+        on_output,
+    )?;
+
+    Ok(BuildResult {
+        image: Image(registry_tag),
+        built: true,
+    })
 }
 
 /// Build a Docker image from devcontainer.json build configuration.

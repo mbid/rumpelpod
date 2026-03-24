@@ -157,6 +157,8 @@ pub fn load_and_resolve(
             registry: k8s.registry.clone(),
             node_selector: k8s.node_selector.clone(),
             tolerations: k8s.tolerations.clone(),
+            builder_pod: k8s.builder_pod.clone(),
+            builder_namespace: k8s.builder_namespace.clone(),
         }
     } else {
         Host::Localhost

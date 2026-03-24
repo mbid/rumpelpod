@@ -104,7 +104,7 @@ pub enum Host {
         context: String,
         /// The Kubernetes namespace (default "default").
         namespace: String,
-        /// Registry to push/pull built images (e.g. ECR, GHCR, Docker Hub).
+        /// Registry that pods pull built images from (e.g. "10.43.0.100:5000/rumpelpod").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         registry: Option<String>,
         /// Node selector labels for pod scheduling.
@@ -113,6 +113,14 @@ pub enum Host {
         /// Tolerations for pod scheduling.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tolerations: Option<Vec<K8sToleration>>,
+        /// In-cluster buildkitd pod name (in builder_namespace).
+        /// When set, image builds are sent to this pod instead of
+        /// building locally and pushing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builder_pod: Option<String>,
+        /// Namespace of the buildkitd pod (default "buildkit").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builder_namespace: Option<String>,
     },
 }
 
@@ -273,7 +281,7 @@ pub struct K8sConfig {
     pub context: String,
     /// The Kubernetes namespace (default "default").
     pub namespace: Option<String>,
-    /// Registry to push/pull built images (e.g. ECR, GHCR, Docker Hub).
+    /// Registry that pods pull built images from (e.g. "10.43.0.100:5000/rumpelpod").
     pub registry: Option<String>,
     /// Node selector labels for pod scheduling.
     #[serde(default)]
@@ -281,6 +289,10 @@ pub struct K8sConfig {
     /// Tolerations for pod scheduling.
     #[serde(default)]
     pub tolerations: Option<Vec<K8sToleration>>,
+    /// In-cluster buildkitd pod name.
+    pub builder_pod: Option<String>,
+    /// Namespace of the buildkitd pod (default "buildkit").
+    pub builder_namespace: Option<String>,
 }
 
 /// Configuration from `.rumpelpod.toml`.
@@ -506,6 +518,8 @@ mod tests {
             registry: None,
             node_selector: None,
             tolerations: None,
+            builder_pod: None,
+            builder_namespace: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster");
     }
@@ -518,6 +532,8 @@ mod tests {
             registry: None,
             node_selector: None,
             tolerations: None,
+            builder_pod: None,
+            builder_namespace: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster/staging");
     }
@@ -530,6 +546,8 @@ mod tests {
             registry: None,
             node_selector: None,
             tolerations: None,
+            builder_pod: None,
+            builder_namespace: None,
         };
         assert!(host.is_remote());
         assert!(!host.is_docker());
@@ -553,6 +571,8 @@ mod tests {
                 registry: None,
                 node_selector: None,
                 tolerations: None,
+                builder_pod: None,
+                builder_namespace: None,
             },
         ];
         for host in hosts {
@@ -603,6 +623,8 @@ mod tests {
                 effect: "NoSchedule".to_string(),
                 operator: None,
             }]),
+            builder_pod: None,
+            builder_namespace: None,
         };
         let json = serde_json::to_string(&host).unwrap();
         let roundtripped: Host = serde_json::from_str(&json).unwrap();

@@ -26,6 +26,10 @@ use crate::executor::ExecutorResources;
 pub(super) struct K8sClusterConfig {
     pub(super) context: String,
     pub(super) registry: String,
+    /// buildkitd pod name (optional; when set, builds use in-cluster builder).
+    pub(super) builder_pod: Option<String>,
+    /// Namespace of the buildkitd pod.
+    pub(super) builder_namespace: Option<String>,
 }
 
 pub(super) fn k8s_cluster_config() -> K8sClusterConfig {
@@ -33,7 +37,14 @@ pub(super) fn k8s_cluster_config() -> K8sClusterConfig {
         .expect("RUMPELPOD_TEST_K8S_CONTEXT must be set to run k8s tests");
     let registry = std::env::var("RUMPELPOD_TEST_REGISTRY")
         .expect("RUMPELPOD_TEST_REGISTRY must be set to run k8s tests");
-    K8sClusterConfig { context, registry }
+    let builder_pod = std::env::var("RUMPELPOD_TEST_K8S_BUILDER_POD").ok();
+    let builder_namespace = std::env::var("RUMPELPOD_TEST_K8S_BUILDER_NAMESPACE").ok();
+    K8sClusterConfig {
+        context,
+        registry,
+        builder_pod,
+        builder_namespace,
+    }
 }
 
 /// Per-test namespace that is automatically deleted on drop.

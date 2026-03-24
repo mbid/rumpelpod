@@ -21,6 +21,7 @@ mod hook;
 pub(crate) mod image;
 mod image_cmd;
 mod k8s;
+mod k8s_build;
 mod list;
 mod llm;
 mod merge;

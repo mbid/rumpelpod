@@ -376,6 +376,35 @@ pub fn build_prepared_image(
         });
     }
 
+    // When an in-cluster builder is available, use it instead of
+    // building locally.
+    if let Host::Kubernetes {
+        ref context,
+        ref registry,
+        ref builder_pod,
+        ref builder_namespace,
+        ..
+    } = docker_host
+    {
+        if let (Some(registry), Some(builder_pod)) = (registry, builder_pod) {
+            let builder_ns = builder_namespace.as_deref().unwrap_or("buildkit");
+            return build_prepared_image_via_builder(
+                base_image,
+                docker_host,
+                gateway_path,
+                container_repo_path,
+                user,
+                host_remotes,
+                claude_info.as_ref(),
+                &tag,
+                context,
+                builder_ns,
+                builder_pod,
+                registry,
+            );
+        }
+    }
+
     // `docker build FROM` cannot resolve bare sha256 digests; tag them first.
     let buildable_base = ensure_buildable_tag(&base_image.0, docker_host)?;
 
@@ -410,6 +439,66 @@ pub fn build_prepared_image(
 
     Ok(BuildResult {
         image: final_image,
+        built: true,
+    })
+}
+
+/// Build the prepared image via an in-cluster buildkitd.
+///
+/// Uses the remote builder to build and push the image in one step.
+/// The base image must already be available to the builder (either in
+/// the cluster registry or a public registry).
+#[allow(clippy::too_many_arguments)]
+fn build_prepared_image_via_builder(
+    base_image: &Image,
+    docker_host: &Host,
+    gateway_path: &Path,
+    container_repo_path: &Path,
+    user: &str,
+    host_remotes: &[GitRemote],
+    claude_info: Option<&HostClaudeInfo>,
+    tag: &str,
+    k8s_context: &str,
+    builder_namespace: &str,
+    builder_pod_name: &str,
+    registry: &str,
+) -> Result<BuildResult> {
+    let registry_tag = format!("{registry}:{tag}");
+
+    // Probe the base image user locally (the probe build runs on
+    // localhost docker, same as the non-builder path).
+    let buildable_base = ensure_buildable_tag(&base_image.0, docker_host)?;
+    let base_user = probe_base_image_user(&buildable_base, docker_host)?;
+
+    let build_ctx = assemble_build_context(
+        &buildable_base,
+        container_repo_path,
+        user,
+        claude_info,
+        host_remotes,
+    )?;
+
+    let builder =
+        crate::k8s_build::RemoteBuilder::connect(k8s_context, builder_namespace, builder_pod_name)?;
+
+    // Symlink the gateway to a name without `.git` so buildx treats it
+    // as a plain directory rather than a git URL.
+    let gateway_link = build_ctx.path().join("gateway-link");
+    std::os::unix::fs::symlink(gateway_path, &gateway_link).with_context(|| {
+        let gw = gateway_path.display();
+        format!("symlinking gateway {gw}")
+    })?;
+
+    builder.build_with_named_context_and_push(
+        build_ctx.path(),
+        &build_ctx.path().join("Dockerfile"),
+        &registry_tag,
+        &[("BASE_USER", &base_user)],
+        &[("gateway", &gateway_link)],
+    )?;
+
+    Ok(BuildResult {
+        image: Image(registry_tag),
         built: true,
     })
 }

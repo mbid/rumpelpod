@@ -116,12 +116,21 @@ impl ExecutorResources {
         let context = &cluster.context;
         let namespace = &ns.name;
         let registry = &cluster.registry;
+
+        let builder_lines = match (&cluster.builder_pod, &cluster.builder_namespace) {
+            (Some(pod), Some(ns)) => {
+                format!("builder-pod = \"{pod}\"\nbuilder-namespace = \"{ns}\"\n")
+            }
+            (Some(pod), None) => format!("builder-pod = \"{pod}\"\n"),
+            _ => String::new(),
+        };
+
         let toml = formatdoc! {r#"
             [k8s]
             context = "{context}"
             namespace = "{namespace}"
             registry = "{registry}"
-
+            {builder_lines}
             [k8s.node-selector]
             pool = "test"
 
