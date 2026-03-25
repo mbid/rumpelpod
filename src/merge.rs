@@ -2,7 +2,6 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
-use indoc::formatdoc;
 
 use crate::cli::MergeCommand;
 use crate::config::{load_toml_config, DescriptionFileSetting};
@@ -104,13 +103,11 @@ fn file_exists_in_ref(repo_root: &Path, git_ref: &str, path: &str) -> Result<boo
 
 /// Decide whether to use a description file for the merge commit message.
 ///
-/// Resolution order: CLI flags > config > implicit default.
+/// Resolution order: CLI flags > config.
 ///
-/// - Implicit (no config, no CLI): use "DESCRIPTION" if present on the pod
-///   branch, but refuse if the host branch also has one.
-/// - Explicit (config or --description-file): require the file on the pod
-///   branch.
-/// - Disabled (config false or --no-description-file): skip.
+/// --description-file <path> requires the file to exist on the pod branch.
+/// The config path is best-effort -- if the file is absent on the pod
+/// branch, merge proceeds without it.
 fn resolve_description(
     repo_root: &Path,
     pod_ref: &str,
@@ -122,56 +119,27 @@ fn resolve_description(
         return Ok(None);
     }
 
+    // --description-file requires the file to exist
     if let Some(path) = cli_file {
-        return require_description(repo_root, pod_ref, path);
-    }
-
-    match config {
-        DescriptionFileSetting::Disabled => Ok(None),
-
-        DescriptionFileSetting::Explicit(path) => require_description(repo_root, pod_ref, path),
-
-        DescriptionFileSetting::Implicit => {
-            let path = "DESCRIPTION";
-            let content = match read_file_from_ref(repo_root, pod_ref, path)? {
-                Some(c) => c,
-                None => return Ok(None),
-            };
-
-            if file_exists_in_ref(repo_root, "HEAD", path)? {
-                return Err(anyhow::anyhow!(formatdoc! {"
-                    DESCRIPTION exists on both the pod and host branches
-
-                    To use the pod's file as the merge commit message:
-                      rumpel merge <pod> --description-file DESCRIPTION
-
-                    To merge without using it:
-                      rumpel merge <pod> --no-description-file
-
-                    To set a permanent preference in .rumpelpod.toml:
-                      [merge]
-                      description-file = \"DESCRIPTION\"  # always use it
-                      description-file = false            # never use it"}));
-            }
-
-            Ok(Some(Description {
+        return match read_file_from_ref(repo_root, pod_ref, path)? {
+            Some(content) => Ok(Some(Description {
                 content,
                 path: path.to_string(),
-            }))
-        }
+            })),
+            None => Err(anyhow::anyhow!(
+                "description file '{path}' not found on pod branch"
+            )),
+        };
     }
-}
 
-/// Read the description file, failing if it is absent or empty.
-fn require_description(repo_root: &Path, pod_ref: &str, path: &str) -> Result<Option<Description>> {
-    match read_file_from_ref(repo_root, pod_ref, path)? {
-        Some(content) => Ok(Some(Description {
-            content,
-            path: path.to_string(),
-        })),
-        None => Err(anyhow::anyhow!(
-            "description file '{path}' not found on pod branch"
-        )),
+    // Config path is best-effort: use it if found, skip if absent
+    match config {
+        DescriptionFileSetting::Disabled => Ok(None),
+        DescriptionFileSetting::Path(path) => Ok(read_file_from_ref(repo_root, pod_ref, path)?
+            .map(|content| Description {
+                content,
+                path: path.clone(),
+            })),
     }
 }
 

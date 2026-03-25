@@ -387,20 +387,22 @@ pub struct ClaudeConfig {
     pub dangerously_skip_permissions_hook: bool,
 }
 
-/// How the merge description file is resolved.
+/// Whether the merge description file feature is enabled, and if so, which
+/// path to use.
 ///
-/// Three states:
-/// - `Implicit`: field absent in config -- use "DESCRIPTION" but refuse if
-///   the host branch also has the file (ambiguous).
-/// - `Explicit(path)`: field set to a string (or `true` for default path) --
-///   require the file on the pod branch, no ambiguity check.
-/// - `Disabled`: field set to `false` -- skip entirely.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// In `.rumpelpod.toml`:
+///   description-file = "DESCRIPTION"   # custom path (default value)
+///   description-file = false            # disable
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DescriptionFileSetting {
-    #[default]
-    Implicit,
-    Explicit(String),
+    Path(String),
     Disabled,
+}
+
+impl Default for DescriptionFileSetting {
+    fn default() -> Self {
+        DescriptionFileSetting::Path("DESCRIPTION".to_string())
+    }
 }
 
 impl<'de> Deserialize<'de> for DescriptionFileSetting {
@@ -419,7 +421,7 @@ impl<'de> Deserialize<'de> for DescriptionFileSetting {
 
             fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
                 if v {
-                    Ok(DescriptionFileSetting::Explicit("DESCRIPTION".to_string()))
+                    Ok(DescriptionFileSetting::default())
                 } else {
                     Ok(DescriptionFileSetting::Disabled)
                 }
@@ -429,7 +431,7 @@ impl<'de> Deserialize<'de> for DescriptionFileSetting {
                 if v.is_empty() {
                     Err(E::custom("description-file path must not be empty"))
                 } else {
-                    Ok(DescriptionFileSetting::Explicit(v.to_string()))
+                    Ok(DescriptionFileSetting::Path(v.to_string()))
                 }
             }
         }
@@ -444,7 +446,7 @@ impl<'de> Deserialize<'de> for DescriptionFileSetting {
 pub struct MergeConfig {
     /// File in the pod branch whose contents become the merge commit message.
     /// The file is removed from the merge result.
-    /// Set to `false` to disable. Default: "DESCRIPTION" (implicit).
+    /// Set to `false` to disable. Default: "DESCRIPTION".
     #[serde(default)]
     pub description_file: DescriptionFileSetting,
 }
@@ -701,11 +703,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_merge_default_is_implicit() {
+    fn parse_merge_default() {
         let config: TomlConfig = toml::from_str("").unwrap();
         assert_eq!(
             config.merge.description_file,
-            DescriptionFileSetting::Implicit
+            DescriptionFileSetting::Path("DESCRIPTION".to_string())
         );
     }
 
@@ -718,7 +720,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.merge.description_file,
-            DescriptionFileSetting::Explicit("MERGE_MSG".to_string())
+            DescriptionFileSetting::Path("MERGE_MSG".to_string())
         );
     }
 
@@ -736,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_merge_true_is_explicit_default() {
+    fn parse_merge_true_means_default() {
         let config: TomlConfig = toml::from_str(indoc::indoc! {r#"
             [merge]
             description-file = true
@@ -744,7 +746,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.merge.description_file,
-            DescriptionFileSetting::Explicit("DESCRIPTION".to_string())
+            DescriptionFileSetting::Path("DESCRIPTION".to_string())
         );
     }
 

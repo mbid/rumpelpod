@@ -602,39 +602,30 @@ fn merge_custom_description_path() {
 }
 
 #[test]
-fn merge_description_ambiguous_refuses() {
+fn merge_description_file_cli_flag() {
     if !executor_supports_stop() {
         return;
     }
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "merge-ambig");
+    let executor = ExecutorResources::setup(&home, "merge-cli-desc");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
-    // Commit a DESCRIPTION on the host branch first
-    fs::write(repo.path().join("DESCRIPTION"), "host description\n").unwrap();
-    Command::new("git")
-        .args(["add", "DESCRIPTION"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "host description"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
+    // Disable in config, but override with CLI flag
+    let mut toml = executor.toml.clone();
+    toml.push_str("\n[merge]\ndescription-file = false\n");
+    fs::write(repo.path().join(".rumpelpod.toml"), &toml).unwrap();
 
-    // Create a pod with its own DESCRIPTION
+    // Create a pod with a DESCRIPTION file
     let output = pod_command(&repo, &daemon)
         .args([
             "enter",
-            "merge-ambig",
+            "merge-cli-desc",
             "--",
             "sh",
             "-c",
-            "echo 'pod description' > DESCRIPTION && touch pod-file && git add DESCRIPTION pod-file && git commit -m 'pod work'",
+            "echo 'CLI override message' > DESCRIPTION && touch pod-file && git add DESCRIPTION pod-file && git commit -m 'add files'",
         ])
         .output()
         .expect("Failed to create pod commit");
@@ -644,70 +635,11 @@ fn merge_description_ambiguous_refuses() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Merge should refuse (DESCRIPTION on both sides, implicit default)
-    let output = pod_command(&repo, &daemon)
-        .args(["merge", "merge-ambig"])
-        .output()
-        .expect("Failed to run rumpel merge");
-    assert!(
-        !output.status.success(),
-        "merge should refuse when DESCRIPTION exists on both sides"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("both the pod and host"),
-        "should explain the ambiguity: {stderr}"
-    );
-}
-
-#[test]
-fn merge_description_ambiguous_override_with_flag() {
-    if !executor_supports_stop() {
-        return;
-    }
-    let repo = TestRepo::new();
-    let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "merge-ambig-flag");
-    let daemon = TestDaemon::start(&home);
-    write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
-
-    // Commit a DESCRIPTION on the host branch
-    fs::write(repo.path().join("DESCRIPTION"), "host description\n").unwrap();
-    Command::new("git")
-        .args(["add", "DESCRIPTION"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["commit", "-m", "host description"])
-        .current_dir(repo.path())
-        .output()
-        .unwrap();
-
-    // Create a pod with its own DESCRIPTION
-    let output = pod_command(&repo, &daemon)
-        .args([
-            "enter",
-            "merge-ambig-flag",
-            "--",
-            "sh",
-            "-c",
-            "echo 'pod description' > DESCRIPTION && touch pod-file && git add DESCRIPTION pod-file && git commit -m 'pod work'",
-        ])
-        .output()
-        .expect("Failed to create pod commit");
-    assert!(
-        output.status.success(),
-        "pod commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // --description-file should override the ambiguity check
+    // --description-file overrides the disabled config
     let output = pod_command(&repo, &daemon)
         .args([
             "merge",
-            "merge-ambig-flag",
+            "merge-cli-desc",
             "--description-file",
             "DESCRIPTION",
         ])
@@ -719,7 +651,6 @@ fn merge_description_ambiguous_override_with_flag() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Commit message should be the pod's DESCRIPTION
     let log = Command::new("git")
         .args(["log", "-1", "--format=%B", "HEAD"])
         .current_dir(repo.path())
@@ -727,8 +658,44 @@ fn merge_description_ambiguous_override_with_flag() {
         .expect("git log failed");
     let message = String::from_utf8_lossy(&log.stdout);
     assert!(
-        message.contains("pod description"),
-        "merge commit should use pod's DESCRIPTION: {message}"
+        message.contains("CLI override message"),
+        "merge commit should use DESCRIPTION content: {message}"
+    );
+}
+
+#[test]
+fn merge_description_file_cli_flag_requires_file() {
+    if !executor_supports_stop() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "merge-cli-req");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Create a pod WITHOUT a DESCRIPTION file
+    create_ahead_pod(&repo, &daemon, "merge-cli-req");
+
+    // --description-file should fail when the file is missing
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "merge",
+            "merge-cli-req",
+            "--description-file",
+            "DESCRIPTION",
+        ])
+        .output()
+        .expect("Failed to run rumpel merge");
+    assert!(
+        !output.status.success(),
+        "merge should fail when --description-file points to missing file"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found on pod branch"),
+        "should report missing description file: {stderr}"
     );
 }
 
@@ -782,40 +749,5 @@ fn merge_no_description_file_flag() {
     assert!(
         show.status.success(),
         "DESCRIPTION should exist in HEAD when --no-description-file is used"
-    );
-}
-
-#[test]
-fn merge_explicit_config_requires_description() {
-    if !executor_supports_stop() {
-        return;
-    }
-    let repo = TestRepo::new();
-    let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "merge-req");
-    let daemon = TestDaemon::start(&home);
-    write_test_devcontainer(&repo, "", "");
-
-    // Explicit config: description-file = "DESCRIPTION"
-    let mut toml = executor.toml.clone();
-    toml.push_str("\n[merge]\ndescription-file = \"DESCRIPTION\"\n");
-    fs::write(repo.path().join(".rumpelpod.toml"), &toml).unwrap();
-
-    // Create a pod WITHOUT a DESCRIPTION file
-    create_ahead_pod(&repo, &daemon, "merge-req");
-
-    // Merge should fail because the file is required
-    let output = pod_command(&repo, &daemon)
-        .args(["merge", "merge-req"])
-        .output()
-        .expect("Failed to run rumpel merge");
-    assert!(
-        !output.status.success(),
-        "merge should fail when explicit config requires DESCRIPTION but it is missing"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("not found on pod branch"),
-        "should report missing description file: {stderr}"
     );
 }
