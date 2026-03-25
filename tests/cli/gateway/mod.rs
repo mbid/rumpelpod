@@ -2907,3 +2907,91 @@ fn pod_has_host_remotes() {
     let pod_origin_url = String::from_utf8_lossy(&output).trim().to_string();
     assert_eq!(pod_origin_url, "https://example.com/repo.git");
 }
+
+#[test]
+fn inter_pod_branches_visible_without_double_prefix() {
+    // When two pods (foo, bar) are running, each pod should see the other's
+    // primary branch as rumpelpod/<other_pod> after git fetch rumpelpod,
+    // not rumpelpod/rumpelpod/<other_pod>.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-inter-pod");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Launch two pods
+    pod_command(&repo, &daemon)
+        .args(["enter", "foo", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to launch pod foo");
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "bar", "--", "echo", "setup"])
+        .success()
+        .expect("Failed to launch pod bar");
+
+    // Create a commit in bar so its primary branch is pushed to the gateway
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "bar",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "commit from bar",
+        ])
+        .success()
+        .expect("Failed to create commit in bar");
+
+    // From foo: fetch the rumpelpod remote, then list remote-tracking refs
+    pod_command(&repo, &daemon)
+        .args(["enter", "foo", "--", "git", "fetch", "rumpelpod"])
+        .success()
+        .expect("git fetch rumpelpod failed in foo");
+
+    let refs_output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "foo",
+            "--",
+            "git",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/rumpelpod/",
+        ])
+        .success()
+        .expect("listing rumpelpod refs in foo failed");
+    let refs = String::from_utf8_lossy(&refs_output);
+
+    // Should have rumpelpod/bar (the alias), not rumpelpod/rumpelpod/bar
+    assert!(
+        refs.contains("refs/remotes/rumpelpod/bar"),
+        "foo should see rumpelpod/bar, got:\n{refs}",
+    );
+    assert!(
+        !refs.contains("refs/remotes/rumpelpod/rumpelpod/"),
+        "foo should not have double-prefixed refs, got:\n{refs}",
+    );
+
+    // The alias should resolve to the same commit as bar's HEAD
+    let bar_head = pod_command(&repo, &daemon)
+        .args(["enter", "bar", "--", "git", "rev-parse", "HEAD"])
+        .success()
+        .expect("getting bar HEAD failed");
+    let bar_commit = String::from_utf8_lossy(&bar_head).trim().to_string();
+
+    let foo_ref = pod_command(&repo, &daemon)
+        .args(["enter", "foo", "--", "git", "rev-parse", "rumpelpod/bar"])
+        .success()
+        .expect("resolving rumpelpod/bar in foo failed");
+    let foo_sees_commit = String::from_utf8_lossy(&foo_ref).trim().to_string();
+
+    assert_eq!(
+        foo_sees_commit, bar_commit,
+        "rumpelpod/bar in foo should point to bar's HEAD",
+    );
+}
