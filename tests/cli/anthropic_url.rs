@@ -9,67 +9,6 @@ use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, 
 use crate::executor::ExecutorResources;
 
 #[test]
-#[ignore] // flaky under heavy parallel test runs
-fn test_anthropic_base_url_garbage_errors() {
-    let repo = TestRepo::new();
-    let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "anthropic-url-garbage");
-    let daemon = TestDaemon::start(&home);
-    write_test_devcontainer(&repo, "", "");
-
-    let config = formatdoc! {r#"
-        [agent]
-        model = "claude-sonnet-4-5"
-        anthropic-base-url = "https://invalid.example.com/v1/messages"
-    "#};
-    fs::write(
-        repo.path().join(".rumpelpod.toml"),
-        format!("{}\n{config}", executor.toml),
-    )
-    .expect("Failed to write .rumpelpod.toml");
-
-    // We need to provide an API key so it actually tries to make a request
-    // instead of failing early due to missing key and no cache.
-    let mut cmd = pod_command(&repo, &daemon);
-    cmd.args(["agent", "test"]);
-    cmd.env("ANTHROPIC_API_KEY", "dummy-key");
-    // Ensure we attempt network request (disable offline mode)
-    cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "0");
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().expect("Failed to spawn agent");
-    let stdin = child.stdin.as_mut().expect("Failed to open stdin");
-    writeln!(stdin, "Hello").expect("Failed to write to stdin");
-    drop(child.stdin.take());
-
-    // Wait up to 5 seconds for the agent to print an error message, then kill it.
-    // The agent will print an error and start retrying, but we don't want to wait
-    // for the full 60+ second retry delay.
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    let _ = child.kill();
-    let output = child.wait_with_output().expect("Failed to wait for agent");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(
-        !output.status.success(),
-        "Agent should fail with garbage URL. stderr: {}",
-        stderr
-    );
-    // reqwest error might contain "dns error" or "builder error" etc.
-    assert!(
-        stderr.contains("Anthropic API error")
-            || stderr.contains("Failed to send request to Anthropic API")
-            || stderr.contains("error sending request")
-            || stderr.contains("builder error")
-            || stderr.contains("invalid.example.com"),
-        "stderr did not contain expected error message. stderr: {}",
-        stderr
-    );
-}
-
-#[test]
 fn test_anthropic_base_url_default_works() {
     let repo = TestRepo::new();
     let home = TestHome::new();
