@@ -498,6 +498,14 @@ fn setup_git_impl(req: &GitSetupRequest) -> Result<()> {
         &["config", "remote.rumpelpod.push", &push_refspec],
         Some(repo_path),
     )?;
+    run_git_command(
+        &[
+            "config",
+            "remote.rumpelpod.fetch",
+            "+refs/heads/rumpelpod/*:refs/remotes/rumpelpod/*",
+        ],
+        Some(repo_path),
+    )?;
 
     // Fetch from host
     run_git_command(&["fetch", "host"], Some(repo_path))?;

@@ -55,6 +55,11 @@
 //! To make accessing more ergonomic, the host can fetch just branch `bar` (instead of
 //! `rumpelpod/bar@bar`) from the gateway via custom refspecs.
 //!
+//! Pods also have a "rumpelpod" remote with a fetch refspec
+//! (`+refs/heads/rumpelpod/*:refs/remotes/rumpelpod/*`) that strips the namespace prefix,
+//! so `git fetch rumpelpod` in a pod gives clean ref names like `rumpelpod/other-pod`
+//! rather than `rumpelpod/rumpelpod/other-pod`.
+//!
 //! A reference-transaction hook in the pod automatically pushes branch updates to the gateway.
 //!
 //! ## Access control
