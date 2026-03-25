@@ -510,6 +510,47 @@ fn no_devcontainer_enters_with_default_image() {
     assert_eq!(stdout.trim(), "hello from default");
 }
 
+/// The client resolves the claude binary path and sends it to the
+/// daemon, so the prepared image includes Claude CLI even though the
+/// daemon itself cannot find the binary (its PATH is restricted by
+/// TestDaemon::start).
+#[test]
+fn default_image_includes_claude_from_client_path() {
+    assert!(
+        Command::new("claude")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success()),
+        "claude must be in PATH to run this test",
+    );
+
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "default-claude");
+    // start() hides claude from the daemon PATH, so this tests that
+    // the client-side resolution in find_host_claude_cli() works.
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "default-claude-test",
+            "--",
+            "test", "-x", "/opt/rumpelpod/bin/claude",
+        ])
+        .output()
+        .expect("rumpel enter failed");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "claude binary should exist in the container, stderr: {stderr}",
+    );
+}
+
 // ---- streaming build output tests ----
 
 #[test]
