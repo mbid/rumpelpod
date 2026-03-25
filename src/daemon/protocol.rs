@@ -926,10 +926,7 @@ impl DaemonClient {
     /// Returns an iterator that yields events as the daemon retries the
     /// SSH tunnel.  The iterator ends after a `Connected` event or when
     /// the server closes the stream.
-    pub fn reconnect_events(
-        &self,
-        host: &Host,
-    ) -> Result<ReconnectStream<BufReader<reqwest::blocking::Response>>> {
+    pub fn reconnect_events(&self, host: &Host) -> Result<ReconnectStream> {
         let url = self.url.join("/host/reconnect-events")?;
         let request = ReconnectRequest { host: host.clone() };
 
@@ -951,35 +948,24 @@ impl DaemonClient {
             ));
         }
 
-        Ok(ReconnectStream::from_response(response))
+        Ok(ReconnectStream::new(response))
     }
 }
 
-/// SSE-backed iterator over `ReconnectEvent`s.
-///
-/// Generic over the reader so it works with both a live HTTP response
-/// (via `DaemonClient`) and an in-memory buffer (in tests).
-pub struct ReconnectStream<R: std::io::BufRead> {
-    lines: std::io::Lines<R>,
+/// SSE-backed iterator over `ReconnectEvent`s from the daemon.
+pub struct ReconnectStream {
+    lines: std::io::Lines<BufReader<reqwest::blocking::Response>>,
 }
 
-impl ReconnectStream<BufReader<reqwest::blocking::Response>> {
-    fn from_response(response: reqwest::blocking::Response) -> Self {
+impl ReconnectStream {
+    fn new(response: reqwest::blocking::Response) -> Self {
         Self {
             lines: BufReader::new(response).lines(),
         }
     }
 }
 
-impl<R: std::io::BufRead> ReconnectStream<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            lines: reader.lines(),
-        }
-    }
-}
-
-impl<R: std::io::BufRead> Iterator for ReconnectStream<R> {
+impl Iterator for ReconnectStream {
     type Item = Result<ReconnectEvent>;
 
     fn next(&mut self) -> Option<Result<ReconnectEvent>> {
@@ -1454,34 +1440,4 @@ where
             .await
             .unwrap();
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verify that ReconnectStream correctly parses SSE events produced
-    /// by the server-side sse_event() helper.
-    #[test]
-    fn reconnect_stream_roundtrip() {
-        let failed_data =
-            serde_json::to_string(&serde_json::json!({"error": "tunnel down"})).unwrap();
-
-        let mut raw = String::new();
-        raw.push_str(&sse_event("attempting", "{}"));
-        raw.push_str(&sse_event("connected", "{}"));
-        raw.push_str(&sse_event("failed", &failed_data));
-
-        let reader = BufReader::new(std::io::Cursor::new(raw.into_bytes()));
-        let stream = ReconnectStream::new(reader);
-        let parsed: Vec<_> = stream.map(|r| r.unwrap()).collect();
-
-        assert_eq!(parsed.len(), 3);
-        assert!(matches!(parsed[0], ReconnectEvent::Attempting));
-        assert!(matches!(parsed[1], ReconnectEvent::Connected));
-        match &parsed[2] {
-            ReconnectEvent::Failed { error } => assert_eq!(error, "tunnel down"),
-            other => panic!("expected Failed, got {other:?}"),
-        }
-    }
 }

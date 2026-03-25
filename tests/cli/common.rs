@@ -105,7 +105,11 @@ impl TestDaemon {
             .env("PATH", &path)
             .env(SOCKET_PATH_ENV, &socket_path)
             .env(XDG_STATE_HOME_ENV, &state_dir)
-            .env("XDG_RUNTIME_DIR", &runtime_dir);
+            .env("XDG_RUNTIME_DIR", &runtime_dir)
+            .env(
+                "RUMPELPOD_SSH_CONFIG",
+                home_path.join(".ssh/config").as_os_str(),
+            );
 
         // Enable deterministic PIDs for test reproducibility.
         // K8s pods run unprivileged and cannot write ns_last_pid.

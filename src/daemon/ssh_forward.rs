@@ -385,15 +385,11 @@ impl SshForwardManager {
 
         let mut cmd = Command::new("ssh");
 
-        // SSH resolves ~ from the passwd database, not $HOME.  When the
-        // daemon runs with a non-default HOME (e.g. in tests), the user
-        // config at $HOME/.ssh/config would be silently ignored.  Pass
-        // -F explicitly so SSH reads the right file.
-        let home = std::env::var("HOME").context("HOME not set")?;
-        let user_config = PathBuf::from(&home).join(".ssh/config");
-        if user_config.exists() {
-            let user_config = user_config.display();
-            cmd.args(["-F", &format!("{user_config}")]);
+        // Tests run the daemon with a non-default HOME, but SSH resolves
+        // ~/.ssh/config from the passwd database.  Allow tests to point
+        // SSH at the right config file without changing production behavior.
+        if let Ok(config) = std::env::var("RUMPELPOD_SSH_CONFIG") {
+            cmd.args(["-F", &config]);
         }
 
         // Don't execute a remote command

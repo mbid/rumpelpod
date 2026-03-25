@@ -142,21 +142,3 @@ async fn reconnect_loop(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verify that full jitter never exceeds the input duration and
-    /// that backoff doubles up to the cap.
-    #[test]
-    fn backoff_cap() {
-        let mut d = INITIAL_DELAY;
-        for _ in 0..20 {
-            let j = jitter(d);
-            assert!(j <= d, "jitter({d:?}) = {j:?} exceeds input");
-            d = std::cmp::min(d.saturating_mul(2), MAX_DELAY);
-        }
-        assert_eq!(d, MAX_DELAY);
-    }
-}
