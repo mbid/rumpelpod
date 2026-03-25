@@ -1,7 +1,9 @@
 //! Shared request/response types for the pod HTTP protocol.
 //!
 //! Used by both the in-container server (`pod::server`) and the
-//! host-side client (`pod::client`).
+//! host-side client (`pod::client`).  Both sides are always the same
+//! rumpel binary, so these types do not need serde defaults or any
+//! other backwards-compatibility machinery.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -31,7 +33,6 @@ pub struct FsWriteRequest {
     pub path: PathBuf,
     /// Base64-encoded file content.
     pub content: String,
-    #[serde(default)]
     pub create_parents: bool,
 }
 
@@ -77,7 +78,6 @@ pub struct GitSetupSubmodulesRequest {
     pub base_url: String,
     pub token: String,
     pub pod_name: String,
-    #[serde(default)]
     pub is_first_entry: bool,
 }
 
@@ -99,7 +99,6 @@ pub struct GitApplyPatchRequest {
     pub repo_path: PathBuf,
     /// Base64-encoded patch content.
     pub patch: String,
-    #[serde(default)]
     pub created_files: Vec<String>,
 }
 
@@ -123,7 +122,6 @@ pub struct UserInfoResponse {
 pub struct RunRequest {
     pub cmd: Vec<String>,
     pub workdir: Option<PathBuf>,
-    #[serde(default)]
     pub env: Vec<String>,
     /// Base64-encoded stdin data.
     pub stdin: Option<String>,
@@ -137,7 +135,6 @@ pub struct RunResponse {
     pub stdout: String,
     /// Base64-encoded stderr.
     pub stderr: String,
-    #[serde(default)]
     pub timed_out: bool,
 }
 
@@ -148,7 +145,6 @@ pub struct RunResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CpDownloadRequest {
     pub path: PathBuf,
-    #[serde(default)]
     pub follow_symlinks: bool,
 }
 
@@ -173,10 +169,8 @@ pub struct EnterRequest {
     pub pod_name: String,
     pub host_branch: Option<String>,
     pub git_identity: Option<GitIdentity>,
-    #[serde(default)]
     pub submodules: Vec<SubmoduleEntry>,
     /// Controls submodule cloning.  True on first pod creation.
-    #[serde(default)]
     pub is_first_entry: bool,
     /// Shell flags for env probe (e.g. "-lic").  None to skip probing.
     pub shell_flags: Option<String>,
@@ -196,10 +190,8 @@ pub struct EnterResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WriteHomeFilesRequest {
     /// Files to write, with paths relative to the user's home directory.
-    #[serde(default)]
     pub files: Vec<HomeFileEntry>,
     /// Optional tar archive to extract under the home directory.
-    #[serde(default)]
     pub tar_extracts: Vec<TarExtractEntry>,
 }
 
@@ -210,7 +202,6 @@ pub struct HomeFileEntry {
     /// Base64-encoded file content.
     pub content: String,
     /// Create parent directories if they do not exist.
-    #[serde(default)]
     pub create_parents: bool,
 }
 

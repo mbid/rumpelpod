@@ -1,3 +1,10 @@
+//! RPC protocol between the rumpel CLI and the daemon.
+//!
+//! Both sides are always the same rumpel binary, so these types do not
+//! need serde defaults, deny_unknown_fields, or any other backwards-
+//! compatibility machinery.  Treat changes as a regular Rust API: add
+//! or remove fields freely and let the compiler catch all call sites.
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
@@ -126,7 +133,6 @@ pub struct PodLaunchParams {
     pub git_identity: Option<GitIdentity>,
     /// Absolute path to the Claude CLI binary on the host, resolved by the
     /// client so the daemon does not depend on its own PATH.
-    #[serde(default)]
     pub claude_cli_path: Option<PathBuf>,
 }
 
