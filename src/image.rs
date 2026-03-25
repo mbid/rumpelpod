@@ -13,6 +13,22 @@ use std::process::{Command, Stdio};
 use crate::config::Host;
 use crate::devcontainer::{BuildOptions, DevContainer};
 
+/// Set the `-H` (docker host) flag on a docker command.
+///
+/// When a forwarded socket is available (e.g. from `SshForwardManager`),
+/// use it so the docker CLI connects via the local tunnel instead of
+/// Docker's built-in SSH transport.  This avoids problems where the
+/// `ssh` binary invoked by Docker resolves `~/.ssh/config` from the
+/// passwd database rather than `$HOME`.
+pub fn apply_docker_host(cmd: &mut Command, docker_host: &Host, docker_socket: Option<&Path>) {
+    if let Some(socket) = docker_socket {
+        let socket = socket.display();
+        cmd.args(["-H", &format!("unix://{socket}")]);
+    } else if let Some(uri) = docker_host.docker_host_uri() {
+        cmd.args(["-H", &uri]);
+    }
+}
+
 /// A line of Docker build output, tagged with the stream it came from.
 pub enum OutputLine {
     Stdout(String),
@@ -49,6 +65,7 @@ pub fn resolve_image(
     docker_host: &Host,
     repo_root: &Path,
     on_output: Option<BuildOutputFn>,
+    docker_socket: Option<&Path>,
 ) -> Result<BuildResult> {
     if let Host::Kubernetes { registry, .. } = docker_host {
         if devcontainer.has_build() && registry.is_none() {
@@ -104,7 +121,7 @@ pub fn resolve_image(
                     .expect("resolved build must have dockerfile"),
             ),
         )?;
-        if image_exists(&image_name, build_host) {
+        if image_exists(&image_name, build_host, docker_socket) {
             if let Some(push_reg) = push_reg {
                 let dest = push_to_registry(&image_name, push_reg)?;
                 return Ok(BuildResult {
@@ -123,6 +140,7 @@ pub fn resolve_image(
             repo_root,
             &BuildFlags::default(),
             on_output,
+            docker_socket,
         )?;
         if let Some(push_reg) = push_reg {
             let dest = push_to_registry(&result.image.0, push_reg)?;
@@ -168,7 +186,7 @@ fn resolve_image_via_buildx(
     let pull_tag = format!("{pull_registry}:{image_name}");
 
     // Check if the image already exists locally.
-    if image_exists(&image_name, &Host::Localhost) {
+    if image_exists(&image_name, &Host::Localhost, None) {
         let _ = push_to_registry(&image_name, push_registry);
         return Ok(BuildResult {
             image: Image(pull_tag),
@@ -290,6 +308,7 @@ pub fn build_devcontainer_image(
     repo_root: &Path,
     flags: &BuildFlags,
     on_output: Option<BuildOutputFn>,
+    docker_socket: Option<&Path>,
 ) -> Result<BuildResult> {
     let dockerfile = build
         .dockerfile
@@ -315,10 +334,7 @@ pub fn build_devcontainer_image(
 
     // Build the Docker image
     let mut cmd = Command::new("docker");
-
-    if let Some(uri) = docker_host.docker_host_uri() {
-        cmd.args(["-H", &uri]);
-    }
+    apply_docker_host(&mut cmd, docker_host, docker_socket);
 
     cmd.arg("build").arg("--rm");
     if flags.no_cache {
@@ -427,11 +443,13 @@ pub fn build_devcontainer_image(
 /// Pull a Docker image from its registry.
 ///
 /// Inherits stdout/stderr so the user sees download progress.
-pub fn pull_image(image_name: &str, docker_host: &Host) -> Result<()> {
+pub fn pull_image(
+    image_name: &str,
+    docker_host: &Host,
+    docker_socket: Option<&Path>,
+) -> Result<()> {
     let mut cmd = Command::new("docker");
-    if let Some(uri) = docker_host.docker_host_uri() {
-        cmd.args(["-H", &uri]);
-    }
+    apply_docker_host(&mut cmd, docker_host, docker_socket);
     cmd.args(["pull", image_name]);
 
     let status = cmd.status()?;
@@ -468,11 +486,13 @@ pub(crate) fn push_to_registry(local_tag: &str, registry: &str) -> Result<String
 }
 
 /// Check whether a Docker image already exists on the target host.
-pub(crate) fn image_exists(image_name: &str, docker_host: &Host) -> bool {
+pub(crate) fn image_exists(
+    image_name: &str,
+    docker_host: &Host,
+    docker_socket: Option<&Path>,
+) -> bool {
     let mut cmd = Command::new("docker");
-    if let Some(uri) = docker_host.docker_host_uri() {
-        cmd.args(["-H", &uri]);
-    }
+    apply_docker_host(&mut cmd, docker_host, docker_socket);
     cmd.args(["image", "inspect", image_name]);
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());

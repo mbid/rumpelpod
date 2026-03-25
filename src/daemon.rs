@@ -1993,6 +1993,7 @@ impl DaemonServer {
             &user,
             &host_remotes,
             claude_cli_path,
+            None,
         )?;
         let image = &prepared.image.0;
 
@@ -2536,21 +2537,9 @@ impl DaemonServer {
             }) as crate::image::BuildOutputFn)
         };
 
-        // For k8s with a build section, resolve_image uses buildx to build
-        // in-cluster and push directly to the registry in one step.
-        let build_result =
-            crate::image::resolve_image(&devcontainer, &docker_host, &repo_path, on_output)?;
-        let image = build_result.image;
-        let image_built = build_result.built;
-        let container_repo_path = devcontainer.container_repo_path(&repo_path);
-        let user = devcontainer.user().map(String::from);
-        let mounts = devcontainer.resolved_mounts()?;
-        let forward_ports = devcontainer.forward_ports.clone().unwrap_or_default();
-        let ports_attributes = devcontainer.ports_attributes.clone().unwrap_or_default();
-        let other_ports_attributes = devcontainer.other_ports_attributes.clone();
-
         // Reject bind mounts on remote Docker hosts -- the source paths would
         // reference the remote filesystem, not the developer's machine.
+        let mounts = devcontainer.resolved_mounts()?;
         if docker_host.is_remote() {
             for m in &mounts {
                 if m.mount_type == devcontainer::MountType::Bind {
@@ -2588,20 +2577,29 @@ impl DaemonServer {
         }
 
         if matches!(docker_host, Host::Kubernetes { .. }) {
+            let build_result = crate::image::resolve_image(
+                &devcontainer,
+                &docker_host,
+                &repo_path,
+                on_output,
+                None,
+            )?;
             return self.launch_pod_k8s(
                 &pod_name,
                 &repo_path,
                 host_branch.as_deref(),
                 &docker_host,
                 &devcontainer,
-                &image.0,
-                image_built,
+                &build_result.image.0,
+                build_result.built,
                 git_identity.as_ref(),
                 claude_cli_path.as_deref(),
             );
         }
 
-        // Get the Docker socket to use (local or forwarded from remote)
+        // Establish the SSH tunnel before building so `docker build`
+        // connects via the forwarded socket instead of Docker's own SSH
+        // transport (which ignores $HOME when resolving ~/.ssh/config).
         let docker_socket = match &docker_host {
             Host::Ssh { .. } => self
                 .ssh_forward
@@ -2609,6 +2607,21 @@ impl DaemonServer {
             Host::Localhost => default_docker_socket(),
             Host::Kubernetes { .. } => unreachable!(),
         };
+
+        let build_result = crate::image::resolve_image(
+            &devcontainer,
+            &docker_host,
+            &repo_path,
+            on_output,
+            Some(&docker_socket),
+        )?;
+        let image = build_result.image;
+        let image_built = build_result.built;
+        let container_repo_path = devcontainer.container_repo_path(&repo_path);
+        let user = devcontainer.user().map(String::from);
+        let forward_ports = devcontainer.forward_ports.clone().unwrap_or_default();
+        let ports_attributes = devcontainer.ports_attributes.clone().unwrap_or_default();
+        let other_ports_attributes = devcontainer.other_ports_attributes.clone();
 
         let docker = Docker::connect_with_socket(
             docker_socket.to_string_lossy().as_ref(),
@@ -2636,6 +2649,7 @@ impl DaemonServer {
             &user,
             &host_remotes,
             claude_cli_path.as_deref(),
+            Some(&docker_socket),
         )?;
         let image = prepared.image;
 

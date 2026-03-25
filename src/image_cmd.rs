@@ -47,8 +47,9 @@ pub fn build(cmd: &ImageBuildCommand) -> Result<()> {
         ref other => other,
     };
 
-    let result =
-        image::build_devcontainer_image(build_opts, build_host, &repo_root, &flags, on_output)?;
+    let result = image::build_devcontainer_image(
+        build_opts, build_host, &repo_root, &flags, on_output, None,
+    )?;
 
     if let Host::Kubernetes {
         registry: Some(ref registry),
@@ -90,7 +91,7 @@ pub fn fetch(cmd: &ImageFetchCommand) -> Result<()> {
         .as_deref()
         .expect("either image or build must be set");
 
-    image::pull_image(image_name, &docker_host)?;
+    image::pull_image(image_name, &docker_host, None)?;
     println!("Image pulled: {image_name}");
 
     Ok(())

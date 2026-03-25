@@ -138,7 +138,11 @@ fn compute_prepared_tag(
 /// `--progress=plain` runs `id -un` inside the image and we parse the
 /// username from the build log.  The base image layers are already
 /// cached, so this adds negligible overhead.
-fn probe_base_image_user(base_image: &str, docker_host: &Host) -> Result<String> {
+fn probe_base_image_user(
+    base_image: &str,
+    docker_host: &Host,
+    docker_socket: Option<&Path>,
+) -> Result<String> {
     let tmp = tempfile::tempdir().context("creating probe build context")?;
     let marker = "RUMPELPOD_BASE_USER";
     let dockerfile = formatdoc! {r#"
@@ -152,9 +156,7 @@ fn probe_base_image_user(base_image: &str, docker_host: &Host) -> Result<String>
         other => other,
     };
     let mut cmd = Command::new("docker");
-    if let Some(uri) = build_host.docker_host_uri() {
-        cmd.args(["-H", &uri]);
-    }
+    crate::image::apply_docker_host(&mut cmd, build_host, docker_socket);
     cmd.args(["buildx", "build"]);
     cmd.args(["--progress=plain", "--no-cache"]);
     let dockerfile_path = tmp.path().join("Dockerfile");
@@ -280,6 +282,7 @@ fn run_docker_build(
     gateway_path: &Path,
     docker_host: &Host,
     base_user: &str,
+    docker_socket: Option<&Path>,
 ) -> Result<()> {
     // Symlink the gateway to a name without `.git` so buildx treats it
     // as a plain directory rather than a git URL.
@@ -295,9 +298,7 @@ fn run_docker_build(
     };
 
     let mut cmd = Command::new("docker");
-    if let Some(uri) = build_host.docker_host_uri() {
-        cmd.args(["-H", &uri]);
-    }
+    crate::image::apply_docker_host(&mut cmd, build_host, docker_socket);
     cmd.args(["buildx", "build", "--load"]);
     cmd.arg(format!("-t={tag}"));
 
@@ -318,15 +319,17 @@ fn run_docker_build(
 ///
 /// `docker build` cannot resolve bare `sha256:...` image IDs in FROM
 /// lines.  Tagging it with a friendly name works around this.
-fn ensure_buildable_tag(image: &str, docker_host: &Host) -> Result<String> {
+fn ensure_buildable_tag(
+    image: &str,
+    docker_host: &Host,
+    docker_socket: Option<&Path>,
+) -> Result<String> {
     if !image.starts_with("sha256:") {
         return Ok(image.to_string());
     }
     let friendly = format!("rumpelpod-base-{}", &image[7..23]);
     let mut cmd = Command::new("docker");
-    if let Some(uri) = docker_host.docker_host_uri() {
-        cmd.args(["-H", &uri]);
-    }
+    crate::image::apply_docker_host(&mut cmd, docker_host, docker_socket);
     cmd.args(["tag", image, &friendly]);
     let status = cmd
         .stdout(Stdio::null())
@@ -348,6 +351,7 @@ fn ensure_buildable_tag(image: &str, docker_host: &Host) -> Result<String> {
 ///
 /// Returns a `BuildResult` indicating the final image tag and whether
 /// a build actually ran.
+#[allow(clippy::too_many_arguments)]
 pub fn build_prepared_image(
     base_image: &Image,
     docker_host: &Host,
@@ -356,6 +360,7 @@ pub fn build_prepared_image(
     user: &str,
     host_remotes: &[GitRemote],
     claude_cli_path: Option<&Path>,
+    docker_socket: Option<&Path>,
 ) -> Result<BuildResult> {
     let claude_info = detect_host_claude(claude_cli_path);
 
@@ -368,7 +373,7 @@ pub fn build_prepared_image(
     );
 
     // Check local cache first.
-    if docker_host.is_docker() && crate::image::image_exists(&tag, docker_host) {
+    if docker_host.is_docker() && crate::image::image_exists(&tag, docker_host, docker_socket) {
         return Ok(BuildResult {
             image: Image(tag),
             built: false,
@@ -400,9 +405,9 @@ pub fn build_prepared_image(
     }
 
     // `docker build FROM` cannot resolve bare sha256 digests; tag them first.
-    let buildable_base = ensure_buildable_tag(&base_image.0, docker_host)?;
+    let buildable_base = ensure_buildable_tag(&base_image.0, docker_host, docker_socket)?;
 
-    let base_user = probe_base_image_user(&buildable_base, docker_host)?;
+    let base_user = probe_base_image_user(&buildable_base, docker_host, docker_socket)?;
 
     let build_ctx = assemble_build_context(
         &buildable_base,
@@ -418,6 +423,7 @@ pub fn build_prepared_image(
         gateway_path,
         docker_host,
         &base_user,
+        docker_socket,
     )?;
 
     let final_image = match docker_host {
@@ -466,7 +472,7 @@ fn build_prepared_image_via_buildx(
     let pull_tag = format!("{pull_registry}:{tag}");
 
     // Check if the image already exists locally.
-    if crate::image::image_exists(tag, &Host::Localhost) {
+    if crate::image::image_exists(tag, &Host::Localhost, None) {
         let _ = crate::image::push_to_registry(tag, push_registry);
         return Ok(BuildResult {
             image: Image(pull_tag),

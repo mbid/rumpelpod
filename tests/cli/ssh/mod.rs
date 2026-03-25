@@ -501,10 +501,6 @@ fn ssh_smoke_test() {
 /// The reconnect coordinator establishes the SSH tunnel itself via
 /// try_connect_once, bypassing Docker's built-in SSH transport.
 ///
-/// Ignored by default: requires manual SSH infrastructure (same as
-/// ssh_reconnect_test).  Run with `--ignored` on a host where
-/// Docker-in-Docker with SSH works.
-#[ignore]
 #[test]
 fn ssh_reconnect_events() {
     let home = TestHome::new();
@@ -637,7 +633,6 @@ fn ssh_reconnect_events() {
     assert!(got_connected, "expected Connected event after host restart");
 }
 
-#[ignore]
 #[test]
 fn ssh_reconnect_test() {
     // This test needs direct access to the SshRemoteHost to restart it,

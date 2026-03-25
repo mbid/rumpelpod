@@ -539,7 +539,9 @@ fn default_image_includes_claude_from_client_path() {
             "enter",
             "default-claude-test",
             "--",
-            "test", "-x", "/opt/rumpelpod/bin/claude",
+            "test",
+            "-x",
+            "/opt/rumpelpod/bin/claude",
         ])
         .output()
         .expect("rumpel enter failed");
