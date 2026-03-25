@@ -301,10 +301,17 @@ pub struct EnsureClaudeConfigRequest {
     pub auto_approve_hook: bool,
 }
 
-/// Request body for the reconnect-events SSE endpoint.
+/// Request body for the host reconnect-events SSE endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ReconnectRequest {
+pub struct HostReconnectRequest {
     pub host: Host,
+}
+
+/// Request body for the pod reconnect-events SSE endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PodReconnectRequest {
+    pub repo_path: PathBuf,
+    pub pod_name: String,
 }
 
 /// Error response body.
@@ -417,11 +424,22 @@ pub trait Daemon: Send + Sync + 'static {
     fn ssh_list_keys(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String>;
 
     // POST /host/reconnect-events
-    // Subscribe to reconnection events for a remote host.
+    // Subscribe to reconnection events for a remote host (SSH tunnel).
     // Returns None for hosts that do not support reconnection (e.g. localhost).
-    fn subscribe_reconnect(
+    fn subscribe_host_reconnect(
         &self,
         _host: &Host,
+    ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
+        None
+    }
+
+    // POST /pod/reconnect-events
+    // Subscribe to reconnection events for a pod.
+    // Returns None if no event listener is active for the pod.
+    fn subscribe_pod_reconnect(
+        &self,
+        _repo_path: &Path,
+        _pod_name: &str,
     ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
         None
     }
@@ -921,14 +939,43 @@ impl Daemon for DaemonClient {
 }
 
 impl DaemonClient {
-    /// Subscribe to reconnection events for a remote host.
-    ///
-    /// Returns an iterator that yields events as the daemon retries the
-    /// SSH tunnel.  The iterator ends after a `Connected` event or when
-    /// the server closes the stream.
+    /// Subscribe to host-level (SSH tunnel) reconnection events.
     pub fn reconnect_events(&self, host: &Host) -> Result<ReconnectStream> {
         let url = self.url.join("/host/reconnect-events")?;
-        let request = ReconnectRequest { host: host.clone() };
+        let request = HostReconnectRequest { host: host.clone() };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            let msg = &error.error;
+            return Err(anyhow::anyhow!(
+                "reconnect endpoint returned {status}: {msg}"
+            ));
+        }
+
+        Ok(ReconnectStream::new(response))
+    }
+
+    /// Subscribe to pod-level reconnection events (SSH + pod).
+    pub fn pod_reconnect_events(
+        &self,
+        repo_path: &Path,
+        pod_name: &str,
+    ) -> Result<ReconnectStream> {
+        let url = self.url.join("/pod/reconnect-events")?;
+        let request = PodReconnectRequest {
+            repo_path: repo_path.to_path_buf(),
+            pod_name: pod_name.to_string(),
+        };
 
         let response = self
             .client
@@ -1005,6 +1052,7 @@ impl Iterator for ReconnectStream {
 
             match event_type.as_str() {
                 "attempting" => return Some(Ok(ReconnectEvent::Attempting)),
+                "host_connected" => return Some(Ok(ReconnectEvent::HostConnected)),
                 "connected" => return Some(Ok(ReconnectEvent::Connected)),
                 "failed" => {
                     #[derive(Deserialize)]
@@ -1325,31 +1373,8 @@ async fn ssh_list_keys_handler<D: Daemon>(
     }
 }
 
-/// Handler for POST /host/reconnect-events endpoint.
-///
-/// Returns an SSE stream that notifies the client of reconnection attempts
-/// to a remote host.  Subscribing triggers an immediate retry and resets
-/// the exponential backoff.
-async fn reconnect_events_handler<D: Daemon>(
-    State(daemon): State<Arc<D>>,
-    Json(request): Json<ReconnectRequest>,
-) -> Response {
-    let rx = match daemon.subscribe_reconnect(&request.host) {
-        Some(rx) => rx,
-        None => {
-            return Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::to_string(&ErrorResponse {
-                        error: "Host does not support reconnection".to_string(),
-                    })
-                    .expect("ErrorResponse is always serializable"),
-                ))
-                .expect("building response never fails");
-        }
-    };
-
+/// Build an SSE response from a broadcast receiver of reconnect events.
+fn reconnect_sse_response(rx: tokio::sync::broadcast::Receiver<ReconnectEvent>) -> Response {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
 
     tokio::spawn(async move {
@@ -1360,6 +1385,7 @@ async fn reconnect_events_handler<D: Daemon>(
                     let is_connected = matches!(event, ReconnectEvent::Connected);
                     let (event_type, data) = match &event {
                         ReconnectEvent::Attempting => ("attempting", "{}".to_string()),
+                        ReconnectEvent::HostConnected => ("host_connected", "{}".to_string()),
                         ReconnectEvent::Connected => ("connected", "{}".to_string()),
                         ReconnectEvent::Failed { error } => (
                             "failed",
@@ -1388,6 +1414,41 @@ async fn reconnect_events_handler<D: Daemon>(
         .header("content-type", "text/event-stream")
         .body(Body::from_stream(stream))
         .expect("building response never fails")
+}
+
+fn reconnect_not_available(msg: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_string(&ErrorResponse {
+                error: msg.to_string(),
+            })
+            .expect("ErrorResponse is always serializable"),
+        ))
+        .expect("building response never fails")
+}
+
+/// Handler for POST /host/reconnect-events endpoint.
+async fn host_reconnect_events_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<HostReconnectRequest>,
+) -> Response {
+    match daemon.subscribe_host_reconnect(&request.host) {
+        Some(rx) => reconnect_sse_response(rx),
+        None => reconnect_not_available("Host does not support reconnection"),
+    }
+}
+
+/// Handler for POST /pod/reconnect-events endpoint.
+async fn pod_reconnect_events_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<PodReconnectRequest>,
+) -> Response {
+    match daemon.subscribe_pod_reconnect(&request.repo_path, &request.pod_name) {
+        Some(rx) => reconnect_sse_response(rx),
+        None => reconnect_not_available("No event listener active for this pod"),
+    }
 }
 
 /// Serve the daemon using the provided listener.
@@ -1430,7 +1491,11 @@ where
         .route("/pod/ssh-keys", get(ssh_list_keys_handler::<D>))
         .route(
             "/host/reconnect-events",
-            post(reconnect_events_handler::<D>),
+            post(host_reconnect_events_handler::<D>),
+        )
+        .route(
+            "/pod/reconnect-events",
+            post(pod_reconnect_events_handler::<D>),
         )
         .with_state(daemon);
 

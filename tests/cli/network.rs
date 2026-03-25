@@ -21,11 +21,7 @@ fn network_host_connectivity() {
     let daemon = TestDaemon::start(&home);
     // Install netcat-openbsd for testing connectivity
     // Switch to root to install packages
-    write_test_devcontainer(
-        &repo,
-        "RUN apt-get install -y netcat-openbsd",
-        "",
-    );
+    write_test_devcontainer(&repo, "RUN apt-get install -y netcat-openbsd", "");
     // Overwrite devcontainer.json with network=host
     fs::write(
         repo.path().join(".devcontainer/devcontainer.json"),

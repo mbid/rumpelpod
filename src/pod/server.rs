@@ -8,10 +8,13 @@ use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::response::Response;
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,8 @@ pub struct PodServerState {
     pub pty_sessions: super::pty::PtySessions,
     pub token: String,
     pub ssh_relay: std::sync::Arc<tokio::sync::Mutex<Option<SshRelayConfig>>>,
+    /// Repository path inside the container, set after the first /enter call.
+    pub repo_path: std::sync::Arc<tokio::sync::Mutex<Option<PathBuf>>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,6 +73,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         pty_sessions: super::pty::PtySessions::new(),
         token: token.clone(),
         ssh_relay: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        repo_path: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     // POST routes require bearer token authentication
@@ -81,6 +87,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/git/apply-patch", post(git_apply_patch_handler))
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
         .route("/run", post(run_handler))
+        .route("/events", get(events_handler))
         .route("/claude", any(super::pty::claude_session_handler))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
@@ -153,6 +160,85 @@ async fn health_handler() -> Json<HealthResponse> {
 }
 
 // ---------------------------------------------------------------------------
+// Events (SSE)
+// ---------------------------------------------------------------------------
+
+/// Format a single SSE event.
+fn sse_event(event_type: &str, data: &str) -> String {
+    format!("event: {event_type}\ndata: {data}\n\n")
+}
+
+/// SSE endpoint the daemon connects to while a pod is running.
+///
+/// On each new connection the pod pushes all local branches to the
+/// gateway -- recovering any pushes that failed while the daemon was
+/// disconnected.  After the initial push a `state` event is sent
+/// (currently empty; will carry pod state in the future), followed by
+/// periodic keepalives.
+async fn events_handler(State(state): State<PodServerState>) -> Response {
+    let repo_path = match state.repo_path.lock().await.clone() {
+        Some(p) => p,
+        None => {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&ErrorResponse {
+                        error: "pod not initialized (enter not called)".to_string(),
+                    })
+                    .expect("ErrorResponse is always serializable"),
+                ))
+                .expect("building response never fails");
+        }
+    };
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    tokio::task::spawn_blocking(move || {
+        // Push all local branches to the gateway.  Best-effort: the
+        // tunnel may not be fully up yet on the very first connection.
+        match Command::new("git")
+            .args(["push", "rumpelpod", "--force", "--quiet"])
+            .current_dir(&repo_path)
+            .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+        {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let status = output.status;
+                eprintln!("events: git push rumpelpod exited {status}: {stderr}");
+            }
+            Err(e) => {
+                eprintln!("events: git push rumpelpod failed: {e}");
+            }
+            Ok(_) => {}
+        }
+
+        if tx.blocking_send(sse_event("state", "{}")).is_err() {
+            return;
+        }
+
+        loop {
+            std::thread::sleep(Duration::from_secs(30));
+            if tx.blocking_send(sse_event("keepalive", "{}")).is_err() {
+                return;
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let stream = tokio_stream::StreamExt::map(stream, Ok::<_, std::convert::Infallible>);
+
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .expect("building response never fails")
+}
+
+// ---------------------------------------------------------------------------
 // Enter
 // ---------------------------------------------------------------------------
 
@@ -163,10 +249,15 @@ async fn enter_handler(
     // Cloned before req is moved into the blocking task.
     let ssh_url = req.base_url.clone();
     let ssh_token = req.token.clone();
+    let repo_path = req.repo_path.clone();
 
     let result = tokio::task::spawn_blocking(move || enter_impl(req))
         .await
         .expect("enter_impl panicked");
+
+    if result.is_ok() {
+        *state.repo_path.lock().await = Some(repo_path);
+    }
 
     setup_ssh_relay(&state, &ssh_url, &ssh_token)
         .await

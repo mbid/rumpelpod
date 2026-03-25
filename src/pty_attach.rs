@@ -22,7 +22,6 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
-use crate::config::Host;
 use crate::daemon::protocol::DaemonClient;
 use crate::daemon::reconnect::ReconnectEvent;
 use crate::pod::pty::PtyControl;
@@ -100,14 +99,15 @@ pub struct SessionParams {
     pub env: Vec<String>,
 }
 
-/// How to coordinate reconnection with the daemon for remote hosts.
+/// How to coordinate reconnection with the daemon.
 ///
 /// When provided, the attach loop waits for the daemon's SSE endpoint
-/// instead of polling blindly.  This lets the daemon manage SSH tunnel
-/// retries with exponential backoff and notify all waiting clients.
+/// instead of polling blindly.  The daemon manages SSH tunnel retries
+/// (for remote hosts) and pod event endpoint reconnection internally.
 pub struct ReconnectConfig {
     pub daemon_socket: PathBuf,
-    pub host: Host,
+    pub repo_path: PathBuf,
+    pub pod_name: String,
 }
 
 /// Connect to or launch a Claude session over WebSocket.
@@ -292,10 +292,12 @@ async fn attach_async(
         eprintln!("[connection lost]");
 
         if let Some(ref rc) = reconnect {
-            // Let the daemon coordinate the SSH tunnel retry with
-            // exponential backoff.  Each subscription triggers an
-            // immediate attempt and resets the backoff interval.
-            wait_for_host_reconnect(rc).await?;
+            // Let the daemon coordinate SSH tunnel + pod reconnection
+            // with exponential backoff.
+            if let Err(e) = wait_for_pod_reconnect(rc).await {
+                eprintln!("[daemon reconnect failed: {e:#}, retrying directly]");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
         } else {
             eprintln!("[reconnecting...]");
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -322,16 +324,17 @@ async fn attach_async(
 /// Wait for the daemon to re-establish the SSH tunnel to a remote host.
 ///
 /// Subscribes to the daemon's SSE endpoint and prints status messages
-/// as the daemon retries.  Returns Ok(()) when the tunnel is back up.
-async fn wait_for_host_reconnect(config: &ReconnectConfig) -> Result<()> {
+/// as the daemon retries.  Returns Ok(()) when the pod is reachable.
+async fn wait_for_pod_reconnect(config: &ReconnectConfig) -> Result<()> {
     let daemon_socket = config.daemon_socket.clone();
-    let host = config.host.clone();
+    let repo_path = config.repo_path.clone();
+    let pod_name = config.pod_name.clone();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ReconnectEvent>(16);
 
     tokio::task::spawn_blocking(move || -> Result<()> {
         let client = DaemonClient::new_unix(&daemon_socket);
-        for event in client.reconnect_events(&host)? {
+        for event in client.pod_reconnect_events(&repo_path, &pod_name)? {
             let event = event?;
             let is_connected = matches!(event, ReconnectEvent::Connected);
             if tx.blocking_send(event).is_err() {
@@ -348,6 +351,9 @@ async fn wait_for_host_reconnect(config: &ReconnectConfig) -> Result<()> {
         match event {
             ReconnectEvent::Attempting => {
                 eprintln!("[reconnecting to host...]");
+            }
+            ReconnectEvent::HostConnected => {
+                eprintln!("[host connected, reconnecting to pod...]");
             }
             ReconnectEvent::Connected => {
                 return Ok(());

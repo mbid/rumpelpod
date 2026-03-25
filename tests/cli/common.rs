@@ -143,6 +143,12 @@ impl TestDaemon {
             runtime_temp_dir,
         }
     }
+
+    /// Kill the daemon process and wait for it to exit.
+    pub fn kill(&mut self) {
+        self.process.kill().expect("failed to kill daemon");
+        self.process.wait().expect("failed to wait for daemon");
+    }
 }
 
 impl Drop for TestDaemon {

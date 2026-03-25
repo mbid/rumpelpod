@@ -137,13 +137,18 @@ async fn run_tunnel_server_async(port: u16) {
     let next_id = Arc::new(AtomicU32::new(1));
 
     // Stdin reader task: dispatch incoming frames to the right stream.
+    // When stdin closes the exec session is gone, so exit immediately
+    // to free the TCP listener port.
     let streams_for_stdin = streams.clone();
     tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         loop {
             let frame = match read_frame(&mut stdin).await {
                 Ok(f) => f,
-                Err(_) => break,
+                Err(_) => {
+                    eprintln!("tunnel-server: exec session closed, exiting");
+                    std::process::exit(0);
+                }
             };
             match frame.frame_type {
                 FRAME_DATA => {

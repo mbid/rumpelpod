@@ -2990,3 +2990,123 @@ fn pods_see_each_others_branches() {
         "rumpelpod/bar in foo should point to bar's HEAD",
     );
 }
+
+#[test]
+fn gateway_reconnect_push() {
+    // Commits made while the daemon is down should be pushed to the
+    // gateway when the daemon reconnects.  The pod's /events endpoint
+    // triggers a push of all local branches on each new connection.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "gw-reconnect-push");
+    let mut daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+    let pod_name = "reconnect-test";
+
+    // Launch pod
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "setup"])
+        .success()
+        .expect("initial enter failed");
+
+    // Find the container ID by name prefix (repo dir name).
+    let repo_dir = repo
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let container_id = {
+        let output = Command::new("docker")
+            .args(["ps", "-q", "--filter", &format!("name={repo_dir}")])
+            .success()
+            .expect("docker ps failed");
+        String::from_utf8_lossy(&output).trim().to_string()
+    };
+    assert!(
+        !container_id.is_empty(),
+        "container not found for pod {pod_name}"
+    );
+
+    // Stop the daemon so the tunnel goes down.  The tunnel server
+    // inside the container exits on stdin close, so the listening port
+    // is freed and git push gets connection refused.
+    daemon.kill();
+
+    // Point the rumpelpod remote at an unreachable URL as a belt-and-
+    // suspenders measure: if the tunnel server hasn't exited yet (race),
+    // this ensures the hook push fails fast.
+    Command::new("docker")
+        .args([
+            "exec",
+            &container_id,
+            "git",
+            "-C",
+            TEST_REPO_PATH,
+            "remote",
+            "set-url",
+            "rumpelpod",
+            "http://127.0.0.1:1/gone",
+        ])
+        .success()
+        .expect("setting unreachable remote failed");
+
+    // Create a commit inside the container while the daemon is down.
+    // The reference-transaction hook push fails (connection refused).
+    Command::new("docker")
+        .args([
+            "exec",
+            &container_id,
+            "git",
+            "-C",
+            TEST_REPO_PATH,
+            "commit",
+            "--allow-empty",
+            "-m",
+            "offline commit",
+        ])
+        .success()
+        .expect("docker exec git commit failed");
+
+    let rev_output = Command::new("docker")
+        .args([
+            "exec",
+            &container_id,
+            "git",
+            "-C",
+            TEST_REPO_PATH,
+            "rev-parse",
+            "HEAD",
+        ])
+        .success()
+        .expect("docker exec git rev-parse failed");
+    let offline_commit = String::from_utf8_lossy(&rev_output).trim().to_string();
+
+    // The gateway should NOT have this commit yet (daemon was down).
+    let gateway = get_gateway_path(repo.path()).expect("gateway should be configured");
+    let expected_branch = format!("rumpelpod/{pod_name}@{pod_name}");
+    let gateway_commit_before = get_branch_commit(&gateway, &expected_branch);
+    assert_ne!(
+        gateway_commit_before.as_deref(),
+        Some(offline_commit.as_str()),
+        "gateway should not have the offline commit yet"
+    );
+
+    // Restart the daemon and re-enter the pod.  The daemon connects to
+    // /events, which causes the pod to push all branches.
+    let daemon = TestDaemon::start(&home);
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "true"])
+        .success()
+        .expect("re-enter after restart failed");
+
+    // The gateway should now have the offline commit.
+    let gateway_commit_after = get_branch_commit(&gateway, &expected_branch);
+    assert_eq!(
+        gateway_commit_after.as_deref(),
+        Some(offline_commit.as_str()),
+        "gateway should have the offline commit after reconnect"
+    );
+}

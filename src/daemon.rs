@@ -37,7 +37,7 @@ use protocol::{
     ContainerId, ConversationSummary, Daemon, EnsureClaudeConfigRequest, GetConversationResponse,
     Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
 };
-use reconnect::ReconnectCoordinator;
+use reconnect::{PodEventManager, ReconnectCoordinator};
 use ssh_forward::SshForwardManager;
 
 use crate::pod::types::{base64_encode, HomeFileEntry, TarExtractEntry};
@@ -187,6 +187,8 @@ struct DaemonServer {
     ssh_forward: Arc<SshForwardManager>,
     /// Coordinates reconnection retries for SSE clients waiting on a host.
     reconnect: Arc<ReconnectCoordinator>,
+    /// Per-pod event listeners that maintain SSE connections to pod servers.
+    pod_events: Arc<PodEventManager>,
     /// Active port-forward handles for Kubernetes pods.
     /// Dropping handles cancels the forwards.  The first entry is always
     /// the container-serve forward; additional entries are forwardPorts.
@@ -2892,6 +2894,14 @@ impl DaemonServer {
                 )?;
             }
 
+            self.pod_events.start(
+                repo_path.clone(),
+                pod_name.0.clone(),
+                container_url.clone(),
+                container_token.clone(),
+                docker_host.clone(),
+            );
+
             return Ok(LaunchResult {
                 container_id: ContainerId(state.id),
                 user,
@@ -3177,6 +3187,14 @@ impl DaemonServer {
             }
         }
 
+        self.pod_events.start(
+            repo_path.to_path_buf(),
+            pod_name.0.clone(),
+            container_url.clone(),
+            container_token.clone(),
+            docker_host.clone(),
+        );
+
         Ok(LaunchResult {
             container_id,
             user,
@@ -3418,6 +3436,8 @@ impl Daemon for DaemonServer {
         let host_str = pod_record.map(|r| r.host);
         drop(conn);
 
+        self.pod_events.stop(&repo_path, &pod_name.0);
+
         let container_name = docker_name(&repo_path, &pod_name);
 
         if wait {
@@ -3474,6 +3494,8 @@ impl Daemon for DaemonServer {
                 error!("failed to delete k8s pod '{k8s_name}': {e}");
             }
 
+            self.pod_events.stop(&repo_path, &pod_name.0);
+
             // Drop the port-forward and tunnel handles
             self.k8s_forwards
                 .lock()
@@ -3499,6 +3521,8 @@ impl Daemon for DaemonServer {
             db::delete_pod(&conn, &repo_path, &pod_name.0)?;
             return Ok(());
         }
+
+        self.pod_events.stop(&repo_path, &pod_name.0);
 
         // Kill the ssh-agent and remove its directory.
         self.ssh_agents
@@ -3964,7 +3988,7 @@ impl Daemon for DaemonServer {
         }
     }
 
-    fn subscribe_reconnect(
+    fn subscribe_host_reconnect(
         &self,
         host: &Host,
     ) -> Option<tokio::sync::broadcast::Receiver<reconnect::ReconnectEvent>> {
@@ -3972,6 +3996,14 @@ impl Daemon for DaemonServer {
             Host::Ssh { .. } => Some(self.reconnect.subscribe(host)),
             Host::Localhost | Host::Kubernetes { .. } => None,
         }
+    }
+
+    fn subscribe_pod_reconnect(
+        &self,
+        repo_path: &Path,
+        pod_name: &str,
+    ) -> Option<tokio::sync::broadcast::Receiver<reconnect::ReconnectEvent>> {
+        self.pod_events.subscribe(repo_path, pod_name)
     }
 }
 
@@ -4024,6 +4056,7 @@ pub fn run_daemon() -> Result<()> {
 
     let ssh_forward = Arc::new(ssh_forward);
     let reconnect = Arc::new(ReconnectCoordinator::new(ssh_forward.clone()));
+    let pod_events = Arc::new(PodEventManager::new(ssh_forward.clone()));
 
     let daemon = DaemonServer {
         db: Arc::new(Mutex::new(db_conn)),
@@ -4032,6 +4065,7 @@ pub fn run_daemon() -> Result<()> {
         active_tokens: Arc::new(Mutex::new(BTreeMap::new())),
         ssh_forward,
         reconnect,
+        pod_events,
         k8s_forwards: Arc::new(Mutex::new(HashMap::new())),
         k8s_tunnels: Arc::new(Mutex::new(HashMap::new())),
         docker_tunnels: Arc::new(Mutex::new(HashMap::new())),
