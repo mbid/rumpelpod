@@ -215,6 +215,21 @@ fn write_default_dockerfile() -> Result<tempfile::TempDir> {
     Ok(dir)
 }
 
+/// Resolve the absolute path to the `claude` CLI binary on the host.
+///
+/// The client resolves this so the daemon does not depend on its own
+/// PATH (which may be limited, e.g. under systemd).
+pub fn find_host_claude_cli() -> Option<PathBuf> {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    for dir in path_var.split(':') {
+        let candidate = PathBuf::from(dir).join("claude");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Launch a pod and return the container ID and user.
 /// This is shared logic between `enter` and `agent` commands.
 pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
@@ -241,6 +256,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
 
     let host_branch = get_current_branch(&repo_root);
     let git_identity = get_git_user_config(&repo_root);
+    let claude_cli_path = find_host_claude_cli();
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
@@ -253,6 +269,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
         host: docker_host,
         devcontainer,
         git_identity: Some(git_identity),
+        claude_cli_path,
     })?;
     for line in &mut progress {
         match line {

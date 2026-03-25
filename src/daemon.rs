@@ -1951,6 +1951,7 @@ impl DaemonServer {
         image: &str,
         image_built: bool,
         git_identity: Option<&crate::git::GitIdentity>,
+        claude_cli_path: Option<&Path>,
     ) -> Result<LaunchResult> {
         let (context, namespace, node_selector, tolerations) = match docker_host {
             Host::Kubernetes {
@@ -1987,6 +1988,7 @@ impl DaemonServer {
             &container_repo_path,
             &user,
             &host_remotes,
+            claude_cli_path,
         )?;
         let image = &prepared.image.0;
 
@@ -2515,6 +2517,7 @@ impl DaemonServer {
             host: docker_host,
             devcontainer,
             git_identity,
+            claude_cli_path,
         } = params;
 
         // Resolve daemon-side variables (container workspace paths,
@@ -2590,6 +2593,7 @@ impl DaemonServer {
                 &image.0,
                 image_built,
                 git_identity.as_ref(),
+                claude_cli_path.as_deref(),
             );
         }
 
@@ -2627,6 +2631,7 @@ impl DaemonServer {
             &container_repo_path,
             &user,
             &host_remotes,
+            claude_cli_path.as_deref(),
         )?;
         let image = prepared.image;
 

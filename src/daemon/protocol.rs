@@ -124,6 +124,10 @@ pub struct PodLaunchParams {
     pub devcontainer: DevContainer,
     /// Git user identity from the host, to be written into the pod's .git/config.
     pub git_identity: Option<GitIdentity>,
+    /// Absolute path to the Claude CLI binary on the host, resolved by the
+    /// client so the daemon does not depend on its own PATH.
+    #[serde(default)]
+    pub claude_cli_path: Option<PathBuf>,
 }
 
 /// Response body for launch/recreate pod endpoints.

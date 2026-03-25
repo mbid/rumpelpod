@@ -48,10 +48,16 @@ const RUMPEL_VERSION_INFO: &str = env!("RUMPELPOD_VERSION_INFO");
 
 /// Try to detect Claude CLI on the host and return its version.
 ///
-/// `claude --version` outputs e.g. "2.1.79 (Claude Code)"; we extract
-/// just the semver portion.
-fn detect_host_claude() -> Option<HostClaudeInfo> {
-    let output = Command::new("claude")
+/// Uses the client-provided path if available, falling back to a
+/// PATH search (for backwards compatibility with older clients).
+/// `claude --version` outputs e.g. "2.1.79 (Claude Code)"; we
+/// extract just the semver portion.
+fn detect_host_claude(claude_cli_path: Option<&Path>) -> Option<HostClaudeInfo> {
+    let bin = match claude_cli_path {
+        Some(path) => path.to_path_buf(),
+        None => PathBuf::from("claude"),
+    };
+    let output = Command::new(&bin)
         .arg("--version")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -349,8 +355,9 @@ pub fn build_prepared_image(
     container_repo_path: &Path,
     user: &str,
     host_remotes: &[GitRemote],
+    claude_cli_path: Option<&Path>,
 ) -> Result<BuildResult> {
-    let claude_info = detect_host_claude();
+    let claude_info = detect_host_claude(claude_cli_path);
 
     let tag = compute_prepared_tag(
         &base_image.0,

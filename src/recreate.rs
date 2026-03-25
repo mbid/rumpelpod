@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::cli::RecreateCommand;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchProgress, PodLaunchParams, PodName};
-use crate::enter::load_and_resolve;
+use crate::enter::{find_host_claude_cli, load_and_resolve};
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
 
@@ -15,6 +15,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
 
     let host_branch = get_current_branch(&repo_root);
     let git_identity = get_git_user_config(&repo_root);
+    let claude_cli_path = find_host_claude_cli();
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
@@ -26,6 +27,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         host: docker_host,
         devcontainer,
         git_identity: Some(git_identity),
+        claude_cli_path,
     })?;
     for line in &mut progress {
         match line {
