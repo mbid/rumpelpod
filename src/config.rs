@@ -314,6 +314,9 @@ pub struct TomlConfig {
     #[serde(default)]
     pub claude: ClaudeConfig,
 
+    #[serde(default)]
+    pub merge: MergeConfig,
+
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     pub host: Option<String>,
 
@@ -382,6 +385,70 @@ pub struct ClaudeConfig {
     /// Use a PermissionRequest hook instead of --dangerously-skip-permissions.
     #[serde(default)]
     pub dangerously_skip_permissions_hook: bool,
+}
+
+/// Whether the merge description file feature is enabled, and if so, which
+/// path to use.
+///
+/// In `.rumpelpod.toml`:
+///   description-file = "DESCRIPTION"   # custom path (default value)
+///   description-file = false            # disable
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DescriptionFileSetting {
+    Path(String),
+    Disabled,
+}
+
+impl Default for DescriptionFileSetting {
+    fn default() -> Self {
+        DescriptionFileSetting::Path("DESCRIPTION".to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for DescriptionFileSetting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = DescriptionFileSetting;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a file path string, or false to disable")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                if v {
+                    Ok(DescriptionFileSetting::default())
+                } else {
+                    Ok(DescriptionFileSetting::Disabled)
+                }
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                if v.is_empty() {
+                    Err(E::custom("description-file path must not be empty"))
+                } else {
+                    Ok(DescriptionFileSetting::Path(v.to_string()))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+/// Merge configuration from `[merge]` in `.rumpelpod.toml`.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct MergeConfig {
+    /// File in the pod branch whose contents become the merge commit message.
+    /// The file is removed from the merge result.
+    /// Set to `false` to disable. Default: "DESCRIPTION".
+    #[serde(default)]
+    pub description_file: DescriptionFileSetting,
 }
 
 /// Get the state directory for rumpelpod data.
@@ -633,5 +700,62 @@ mod tests {
         let json = serde_json::to_string(&host).unwrap();
         let roundtripped: Host = serde_json::from_str(&json).unwrap();
         assert_eq!(host, roundtripped);
+    }
+
+    #[test]
+    fn parse_merge_default() {
+        let config: TomlConfig = toml::from_str("").unwrap();
+        assert_eq!(
+            config.merge.description_file,
+            DescriptionFileSetting::Path("DESCRIPTION".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_merge_custom_path() {
+        let config: TomlConfig = toml::from_str(indoc::indoc! {r#"
+            [merge]
+            description-file = "MERGE_MSG"
+        "#})
+        .unwrap();
+        assert_eq!(
+            config.merge.description_file,
+            DescriptionFileSetting::Path("MERGE_MSG".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_merge_disabled() {
+        let config: TomlConfig = toml::from_str(indoc::indoc! {r#"
+            [merge]
+            description-file = false
+        "#})
+        .unwrap();
+        assert_eq!(
+            config.merge.description_file,
+            DescriptionFileSetting::Disabled
+        );
+    }
+
+    #[test]
+    fn parse_merge_true_means_default() {
+        let config: TomlConfig = toml::from_str(indoc::indoc! {r#"
+            [merge]
+            description-file = true
+        "#})
+        .unwrap();
+        assert_eq!(
+            config.merge.description_file,
+            DescriptionFileSetting::Path("DESCRIPTION".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_merge_empty_path_rejected() {
+        let err = toml::from_str::<TomlConfig>(indoc::indoc! {r#"
+            [merge]
+            description-file = ""
+        "#});
+        assert!(err.is_err());
     }
 }

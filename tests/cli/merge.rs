@@ -387,3 +387,216 @@ fn merge_squash_flag() {
         staged
     );
 }
+
+#[test]
+fn merge_uses_description_file() {
+    if !executor_supports_stop() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "merge-desc");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // Create a pod with a DESCRIPTION file and a regular file
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "merge-desc",
+            "--",
+            "sh",
+            "-c",
+            "echo 'Feature: add widget support' > DESCRIPTION && touch pod-file && git add DESCRIPTION pod-file && git commit -m 'add widget'",
+        ])
+        .output()
+        .expect("Failed to create pod commit");
+    assert!(
+        output.status.success(),
+        "pod commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Merge
+    let output = pod_command(&repo, &daemon)
+        .args(["merge", "merge-desc"])
+        .output()
+        .expect("Failed to run rumpel merge");
+    assert!(
+        output.status.success(),
+        "merge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Merge commit message should contain DESCRIPTION content
+    let log = Command::new("git")
+        .args(["log", "-1", "--format=%B", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git log failed");
+    let message = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        message.contains("Feature: add widget support"),
+        "merge commit should use DESCRIPTION content: {message}"
+    );
+
+    // DESCRIPTION file should NOT be in HEAD
+    let show = Command::new("git")
+        .args(["show", "HEAD:DESCRIPTION"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git show failed");
+    assert!(
+        !show.status.success(),
+        "DESCRIPTION should not exist in HEAD after merge"
+    );
+
+    // pod-file should be in HEAD
+    let show = Command::new("git")
+        .args(["show", "HEAD:pod-file"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git show failed");
+    assert!(
+        show.status.success(),
+        "pod-file should exist in HEAD after merge"
+    );
+
+    // HEAD should be a merge commit (2 parents)
+    let parents = Command::new("git")
+        .args(["rev-list", "--parents", "-n", "1", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git rev-list failed");
+    let parents_str = String::from_utf8_lossy(&parents.stdout);
+    let parent_count = parents_str.split_whitespace().count() - 1;
+    assert_eq!(
+        parent_count, 2,
+        "HEAD should be a merge commit: {parents_str}"
+    );
+}
+
+#[test]
+fn merge_description_file_disabled() {
+    if !executor_supports_stop() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "merge-nodesc");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+
+    let mut toml = executor.toml.clone();
+    toml.push_str("\n[merge]\ndescription-file = false\n");
+    fs::write(repo.path().join(".rumpelpod.toml"), &toml).unwrap();
+
+    // Create a pod with a DESCRIPTION file
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "merge-nodesc",
+            "--",
+            "sh",
+            "-c",
+            "echo 'Some description' > DESCRIPTION && touch pod-file && git add DESCRIPTION pod-file && git commit -m 'add files'",
+        ])
+        .output()
+        .expect("Failed to create pod commit");
+    assert!(
+        output.status.success(),
+        "pod commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Merge
+    let output = pod_command(&repo, &daemon)
+        .args(["merge", "merge-nodesc"])
+        .output()
+        .expect("Failed to run rumpel merge");
+    assert!(
+        output.status.success(),
+        "merge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // DESCRIPTION should still be in HEAD (feature disabled)
+    let show = Command::new("git")
+        .args(["show", "HEAD:DESCRIPTION"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git show failed");
+    assert!(
+        show.status.success(),
+        "DESCRIPTION should exist in HEAD when feature is disabled"
+    );
+}
+
+#[test]
+fn merge_custom_description_path() {
+    if !executor_supports_stop() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "merge-custom");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+
+    let mut toml = executor.toml.clone();
+    toml.push_str("\n[merge]\ndescription-file = \"MERGE_MSG\"\n");
+    fs::write(repo.path().join(".rumpelpod.toml"), &toml).unwrap();
+
+    // Create a pod with a MERGE_MSG file (the custom path)
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "merge-custom",
+            "--",
+            "sh",
+            "-c",
+            "echo 'Custom merge message' > MERGE_MSG && touch pod-file && git add MERGE_MSG pod-file && git commit -m 'add files'",
+        ])
+        .output()
+        .expect("Failed to create pod commit");
+    assert!(
+        output.status.success(),
+        "pod commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Merge
+    let output = pod_command(&repo, &daemon)
+        .args(["merge", "merge-custom"])
+        .output()
+        .expect("Failed to run rumpel merge");
+    assert!(
+        output.status.success(),
+        "merge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Merge commit message should contain MERGE_MSG content
+    let log = Command::new("git")
+        .args(["log", "-1", "--format=%B", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git log failed");
+    let message = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        message.contains("Custom merge message"),
+        "merge commit should use MERGE_MSG content: {message}"
+    );
+
+    // MERGE_MSG should NOT be in HEAD
+    let show = Command::new("git")
+        .args(["show", "HEAD:MERGE_MSG"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git show failed");
+    assert!(
+        !show.status.success(),
+        "MERGE_MSG should not exist in HEAD after merge"
+    );
+}
