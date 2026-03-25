@@ -23,7 +23,7 @@ fn network_host_connectivity() {
     // Switch to root to install packages
     write_test_devcontainer(
         &repo,
-        "USER root\nRUN apt-get install -y netcat-openbsd\nUSER testuser",
+        "RUN apt-get install -y netcat-openbsd",
         "",
     );
     // Overwrite devcontainer.json with network=host

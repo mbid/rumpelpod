@@ -2677,11 +2677,7 @@ fn pod_unsafe_host_network_mode() {
 // -- Git LFS tests ------------------------------------------------------------
 
 /// Dockerfile snippet that installs git-lfs in the test container.
-/// Switches to root for apt-get, then back to the test user.
-const LFS_DOCKERFILE: &str = "\
-USER root\n\
-RUN apt-get update && apt-get install -y git-lfs\n\
-USER testuser";
+const LFS_DOCKERFILE: &str = "RUN apt-get update && apt-get install -y git-lfs";
 
 /// Set up an LFS-tracked file in a host repo and return the file's content.
 ///

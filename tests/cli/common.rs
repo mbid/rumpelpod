@@ -306,19 +306,23 @@ fn path_without_claude() -> String {
 /// COPYs the repo.  The devcontainer.json uses a build section so the
 /// image is built on first `rumpel enter` (with buildkit layer caching).
 ///
-/// `extra_dockerfile` is appended after the USER directive.
+/// `extra_dockerfile` is inserted after COPY (user and workspace exist)
+/// but before USER, so commands still run as root.
 /// `extra_json` is spliced into the devcontainer.json object (include
 /// a leading comma if non-empty).
 pub fn write_test_devcontainer(repo: &TestRepo, extra_dockerfile: &str, extra_json: &str) {
     let devcontainer_dir = repo.path().join(".devcontainer");
     std::fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer dir");
 
+    // Mark safe.directory so extra_dockerfile can run git as root on
+    // the testuser-owned workspace without "dubious ownership" errors.
     let dockerfile = formatdoc! {r#"
         FROM debian:13
         RUN apt-get update && apt-get install -y git
-        {extra_dockerfile}
         RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
         COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        RUN git config --global --add safe.directory {TEST_REPO_PATH}
+        {extra_dockerfile}
         USER {TEST_USER}
     "#};
     std::fs::write(devcontainer_dir.join("Dockerfile"), dockerfile)
