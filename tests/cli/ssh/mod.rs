@@ -189,6 +189,11 @@ impl SshRemoteHost {
         }
     }
 
+    /// Get the underlying Docker container ID.
+    pub fn container_id(&self) -> &str {
+        &self.container_id
+    }
+
     /// Get the container's IP address (for the ignored reconnect test).
     pub fn ip_address(&self) -> &str {
         &self.ip_address
@@ -487,6 +492,149 @@ fn ssh_smoke_test() {
         stderr
     );
     assert_eq!(stdout.trim(), "hello from remote");
+}
+
+/// Verify that the daemon's reconnect-events SSE endpoint delivers the
+/// right events when the SSH tunnel breaks and is re-established.
+///
+/// The test subscribes to the endpoint without entering a pod first.
+/// The reconnect coordinator establishes the SSH tunnel itself via
+/// try_connect_once, bypassing Docker's built-in SSH transport.
+///
+/// Ignored by default: requires manual SSH infrastructure (same as
+/// ssh_reconnect_test).  Run with `--ignored` on a host where
+/// Docker-in-Docker with SSH works.
+#[ignore]
+#[test]
+fn ssh_reconnect_events() {
+    let home = TestHome::new();
+    let mut remote = SshRemoteHost::start();
+    write_ssh_config(&home, &[&remote]);
+    let daemon = TestDaemon::start(&home);
+
+    let remote_spec = remote.ssh_spec();
+    let host = rumpelpod::config::Host::parse(&remote_spec).unwrap();
+
+    // -- Phase 1: host is reachable, expect Attempting -> Connected ------
+
+    let socket_path = daemon.socket_path.clone();
+    let host_for_thread = host.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let client = rumpelpod::daemon::protocol::DaemonClient::new_unix(&socket_path);
+        let stream = client.reconnect_events(&host_for_thread).unwrap();
+        for event in stream {
+            let event = event.unwrap();
+            let done = matches!(
+                event,
+                rumpelpod::daemon::reconnect::ReconnectEvent::Connected
+            );
+            let _ = tx.send(event);
+            if done {
+                break;
+            }
+        }
+    });
+
+    let first = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("no event from reconnect stream (phase 1)");
+    assert!(
+        matches!(
+            first,
+            rumpelpod::daemon::reconnect::ReconnectEvent::Attempting
+        ),
+        "expected Attempting, got {first:?}",
+    );
+
+    let second = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("no Connected event (phase 1)");
+    assert!(
+        matches!(
+            second,
+            rumpelpod::daemon::reconnect::ReconnectEvent::Connected
+        ),
+        "expected Connected, got {second:?}",
+    );
+
+    // -- Phase 2: stop host, expect Attempting -> Failed -----------------
+
+    Command::new("docker")
+        .args(["stop", remote.container_id()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("docker stop failed");
+
+    let socket_path = daemon.socket_path.clone();
+    let host_for_thread = host.clone();
+    let (tx2, rx2) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let client = rumpelpod::daemon::protocol::DaemonClient::new_unix(&socket_path);
+        let stream = client.reconnect_events(&host_for_thread).unwrap();
+        for event in stream {
+            let event = event.unwrap();
+            let done = matches!(
+                event,
+                rumpelpod::daemon::reconnect::ReconnectEvent::Connected
+            );
+            let _ = tx2.send(event);
+            if done {
+                break;
+            }
+        }
+    });
+
+    // Expect Attempting then Failed (host is stopped).
+    let first = rx2
+        .recv_timeout(Duration::from_secs(60))
+        .expect("no event from reconnect stream (phase 2)");
+    assert!(
+        matches!(
+            first,
+            rumpelpod::daemon::reconnect::ReconnectEvent::Attempting
+        ),
+        "expected Attempting, got {first:?}",
+    );
+
+    // Wait for a Failed event (the SSH attempt should fail quickly).
+    let mut got_failed = false;
+    for _ in 0..5 {
+        match rx2.recv_timeout(Duration::from_secs(60)) {
+            Ok(rumpelpod::daemon::reconnect::ReconnectEvent::Failed { .. }) => {
+                got_failed = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(got_failed, "expected a Failed event while host is stopped");
+
+    // -- Phase 3: bring host back, expect Connected ----------------------
+
+    Command::new("docker")
+        .args(["start", remote.container_id()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("docker start failed");
+    remote.restart(Some(home.path()));
+
+    // The phase 2 subscriber is still connected; drain until Connected.
+    let mut got_connected = false;
+    loop {
+        match rx2.recv_timeout(Duration::from_secs(120)) {
+            Ok(rumpelpod::daemon::reconnect::ReconnectEvent::Connected) => {
+                got_connected = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(got_connected, "expected Connected event after host restart");
 }
 
 #[ignore]
