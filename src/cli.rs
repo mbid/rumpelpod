@@ -391,6 +391,14 @@ pub struct MergeCommand {
     #[arg(help = "Name of the pod to merge", value_parser = validate_pod_name)]
     pub name: String,
 
+    /// Use this file from the pod branch as the merge commit message
+    #[arg(long, value_name = "PATH", conflicts_with = "no_description_file")]
+    pub description_file: Option<String>,
+
+    /// Do not use a description file for the merge commit message
+    #[arg(long, conflicts_with = "description_file")]
+    pub no_description_file: bool,
+
     /// Arguments passed through to git merge (e.g. --no-ff, --squash)
     #[arg(allow_hyphen_values = true)]
     pub git_args: Vec<String>,

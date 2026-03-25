@@ -1,6 +1,8 @@
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
+use indoc::formatdoc;
 
 use crate::cli::MergeCommand;
 use crate::config::{load_toml_config, DescriptionFileSetting};
@@ -11,7 +13,7 @@ use crate::git::get_repo_root;
 
 /// Check for uncommitted changes inside the pod container.
 /// Prints a warning to stderr if the working tree is dirty.
-fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<()> {
+fn check_dirty_checkout(pod_name: &str, repo_root: &Path) -> Result<()> {
     let result = enter::launch_pod(pod_name, None)?;
     let (devcontainer, _, _default_image_dir) = enter::load_and_resolve(repo_root, None)?;
     let container_repo_path = devcontainer.container_repo_path(repo_root);
@@ -57,24 +59,21 @@ fn check_dirty_checkout(pod_name: &str, repo_root: &std::path::Path) -> Result<(
     Ok(())
 }
 
-/// Read the description file from the pod ref, if configured.
-/// Returns the trimmed file contents if found, None otherwise.
-fn read_description(
-    repo_root: &std::path::Path,
-    pod_ref: &str,
-    setting: &DescriptionFileSetting,
-) -> Result<Option<String>> {
-    let path = match setting {
-        DescriptionFileSetting::Path(p) => p,
-        DescriptionFileSetting::Disabled => return Ok(None),
-    };
+// -- description file helpers ------------------------------------------------
 
+struct Description {
+    content: String,
+    path: String,
+}
+
+/// Read a file from a git ref. Returns None if the file does not exist.
+fn read_file_from_ref(repo_root: &Path, git_ref: &str, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
-        .args(["show", &format!("{pod_ref}:{path}")])
+        .args(["show", &format!("{git_ref}:{path}")])
         .current_dir(repo_root)
         .stderr(Stdio::null())
         .output()
-        .context("Failed to read description file from pod ref")?;
+        .context("Failed to read file from git ref")?;
 
     if !output.status.success() {
         return Ok(None);
@@ -82,26 +81,103 @@ fn read_description(
 
     let contents =
         String::from_utf8(output.stdout).context("Description file is not valid UTF-8")?;
-    let contents = contents.trim_end();
+    let trimmed = contents.trim_end();
 
-    if contents.is_empty() {
+    if trimmed.is_empty() {
         return Ok(None);
     }
 
-    Ok(Some(contents.to_string()))
+    Ok(Some(trimmed.to_string()))
 }
 
-/// Remove the description file from HEAD and amend the commit.
-fn remove_description_file(repo_root: &std::path::Path, description_path: &str) -> Result<()> {
-    let in_head = Command::new("git")
-        .args(["cat-file", "-e", &format!("HEAD:{description_path}")])
+/// Check whether a file exists in a git ref.
+fn file_exists_in_ref(repo_root: &Path, git_ref: &str, path: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["cat-file", "-e", &format!("{git_ref}:{path}")])
         .current_dir(repo_root)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .context("Failed to check description file in HEAD")?;
+        .context("Failed to check file in git ref")?;
+    Ok(status.success())
+}
 
-    if !in_head.success() {
+/// Decide whether to use a description file for the merge commit message.
+///
+/// Resolution order: CLI flags > config > implicit default.
+///
+/// - Implicit (no config, no CLI): use "DESCRIPTION" if present on the pod
+///   branch, but refuse if the host branch also has one.
+/// - Explicit (config or --description-file): require the file on the pod
+///   branch.
+/// - Disabled (config false or --no-description-file): skip.
+fn resolve_description(
+    repo_root: &Path,
+    pod_ref: &str,
+    config: &DescriptionFileSetting,
+    cli_file: Option<&str>,
+    cli_no_file: bool,
+) -> Result<Option<Description>> {
+    if cli_no_file {
+        return Ok(None);
+    }
+
+    if let Some(path) = cli_file {
+        return require_description(repo_root, pod_ref, path);
+    }
+
+    match config {
+        DescriptionFileSetting::Disabled => Ok(None),
+
+        DescriptionFileSetting::Explicit(path) => require_description(repo_root, pod_ref, path),
+
+        DescriptionFileSetting::Implicit => {
+            let path = "DESCRIPTION";
+            let content = match read_file_from_ref(repo_root, pod_ref, path)? {
+                Some(c) => c,
+                None => return Ok(None),
+            };
+
+            if file_exists_in_ref(repo_root, "HEAD", path)? {
+                return Err(anyhow::anyhow!(formatdoc! {"
+                    DESCRIPTION exists on both the pod and host branches
+
+                    To use the pod's file as the merge commit message:
+                      rumpel merge <pod> --description-file DESCRIPTION
+
+                    To merge without using it:
+                      rumpel merge <pod> --no-description-file
+
+                    To set a permanent preference in .rumpelpod.toml:
+                      [merge]
+                      description-file = \"DESCRIPTION\"  # always use it
+                      description-file = false            # never use it"}));
+            }
+
+            Ok(Some(Description {
+                content,
+                path: path.to_string(),
+            }))
+        }
+    }
+}
+
+/// Read the description file, failing if it is absent or empty.
+fn require_description(repo_root: &Path, pod_ref: &str, path: &str) -> Result<Option<Description>> {
+    match read_file_from_ref(repo_root, pod_ref, path)? {
+        Some(content) => Ok(Some(Description {
+            content,
+            path: path.to_string(),
+        })),
+        None => Err(anyhow::anyhow!(
+            "description file '{path}' not found on pod branch"
+        )),
+    }
+}
+
+/// Remove the description file from HEAD and amend the commit.
+fn remove_description_file(repo_root: &Path, description_path: &str) -> Result<()> {
+    if !file_exists_in_ref(repo_root, "HEAD", description_path)? {
         return Ok(());
     }
 
@@ -130,6 +206,8 @@ fn remove_description_file(repo_root: &std::path::Path, description_path: &str) 
 
     Ok(())
 }
+
+// -- main entry point --------------------------------------------------------
 
 pub fn merge(cmd: &MergeCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
@@ -177,18 +255,24 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
         return Ok(());
     }
 
-    // 5. Read description file from pod branch (if configured)
-    let description = read_description(&repo_root, &pod_ref, &toml_config.merge.description_file)?;
+    // 5. Resolve the description file
+    let description = resolve_description(
+        &repo_root,
+        &pod_ref,
+        &toml_config.merge.description_file,
+        cmd.description_file.as_deref(),
+        cmd.no_description_file,
+    )?;
 
     // 6. Run git merge with passthrough flags
     let mut merge_cmd = Command::new("git");
     merge_cmd.arg("merge");
 
-    if let Some(ref msg) = description {
+    if let Some(ref desc) = description {
         if !cmd.git_args.iter().any(|a| a == "--no-ff") {
             merge_cmd.arg("--no-ff");
         }
-        merge_cmd.args(["-m", msg]);
+        merge_cmd.args(["-m", &desc.content]);
     }
 
     for arg in &cmd.git_args {
@@ -205,12 +289,8 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
     }
 
     // 7. Remove the description file from the merge result
-    if description.is_some() {
-        let path = match &toml_config.merge.description_file {
-            DescriptionFileSetting::Path(p) => p.as_str(),
-            DescriptionFileSetting::Disabled => unreachable!(),
-        };
-        remove_description_file(&repo_root, path)?;
+    if let Some(ref desc) = description {
+        remove_description_file(&repo_root, &desc.path)?;
     }
 
     // Only stop pod after successful merge
