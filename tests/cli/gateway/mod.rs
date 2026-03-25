@@ -2909,10 +2909,9 @@ fn pod_has_host_remotes() {
 }
 
 #[test]
-fn inter_pod_branches_visible_without_double_prefix() {
+fn pods_see_each_others_branches() {
     // When two pods (foo, bar) are running, each pod should see the other's
-    // primary branch as rumpelpod/<other_pod> after git fetch rumpelpod,
-    // not rumpelpod/rumpelpod/<other_pod>.
+    // primary branch as rumpelpod/<other_pod> after git fetch rumpelpod.
     let repo = TestRepo::new();
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home, "gw-inter-pod");
