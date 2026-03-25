@@ -295,10 +295,7 @@ async fn attach_async(
             // Let the daemon coordinate the SSH tunnel retry with
             // exponential backoff.  Each subscription triggers an
             // immediate attempt and resets the backoff interval.
-            if let Err(e) = wait_for_host_reconnect(rc).await {
-                eprintln!("[daemon reconnect failed: {e:#}, retrying directly]");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            wait_for_host_reconnect(rc).await?;
         } else {
             eprintln!("[reconnecting...]");
             tokio::time::sleep(Duration::from_secs(1)).await;
