@@ -25,10 +25,10 @@ use crate::common::{
 pub(super) struct K8sClusterConfig {
     pub(super) context: String,
     pub(super) registry: String,
-    /// buildkitd pod name (optional; when set, builds use in-cluster builder).
-    pub(super) builder_pod: Option<String>,
-    /// Namespace of the buildkitd pod.
-    pub(super) builder_namespace: Option<String>,
+    /// Push registry (defaults to registry when not set).
+    pub(super) push_registry: Option<String>,
+    /// Name of a docker buildx builder for image builds.
+    pub(super) builder: Option<String>,
 }
 
 pub(super) fn k8s_cluster_config() -> K8sClusterConfig {
@@ -36,13 +36,13 @@ pub(super) fn k8s_cluster_config() -> K8sClusterConfig {
         .expect("RUMPELPOD_TEST_K8S_CONTEXT must be set to run k8s tests");
     let registry = std::env::var("RUMPELPOD_TEST_REGISTRY")
         .expect("RUMPELPOD_TEST_REGISTRY must be set to run k8s tests");
-    let builder_pod = std::env::var("RUMPELPOD_TEST_K8S_BUILDER_POD").ok();
-    let builder_namespace = std::env::var("RUMPELPOD_TEST_K8S_BUILDER_NAMESPACE").ok();
+    let push_registry = std::env::var("RUMPELPOD_TEST_K8S_PUSH_REGISTRY").ok();
+    let builder = std::env::var("RUMPELPOD_TEST_K8S_BUILDER").ok();
     K8sClusterConfig {
         context,
         registry,
-        builder_pod,
-        builder_namespace,
+        push_registry,
+        builder,
     }
 }
 
@@ -115,20 +115,24 @@ fn k8s_executor(home: &TestHome, test_name: &str) -> K8sExecutor {
     let namespace = ns.name.clone();
     let registry = cluster.registry.clone();
 
-    let builder_lines = match (&cluster.builder_pod, &cluster.builder_namespace) {
-        (Some(pod), Some(bns)) => {
-            format!("builder-pod = \"{pod}\"\nbuilder-namespace = \"{bns}\"\n")
-        }
-        (Some(pod), None) => format!("builder-pod = \"{pod}\"\n"),
-        _ => String::new(),
-    };
+    let push_registry_line = cluster
+        .push_registry
+        .as_ref()
+        .map(|r| format!("push-registry = \"{r}\"\n"))
+        .unwrap_or_default();
+
+    let builder_line = cluster
+        .builder
+        .as_ref()
+        .map(|b| format!("builder = \"{b}\"\n"))
+        .unwrap_or_default();
 
     let toml = formatdoc! {r#"
         [k8s]
         context = "{context}"
         namespace = "{namespace}"
         registry = "{registry}"
-        {builder_lines}
+        {push_registry_line}{builder_line}
         [k8s.node-selector]
         pool = "test"
 
@@ -138,7 +142,8 @@ fn k8s_executor(home: &TestHome, test_name: &str) -> K8sExecutor {
         effect = "NoSchedule"
     "#};
 
-    // Write kubeconfig so the daemon can find it
+    // Copy kubeconfig so the daemon (which runs with HOME=test home)
+    // can reach the cluster.
     let kubeconfig_path = home.path().join(".kube");
     std::fs::create_dir_all(&kubeconfig_path).unwrap();
     let src = std::env::var("KUBECONFIG")
@@ -146,6 +151,22 @@ fn k8s_executor(home: &TestHome, test_name: &str) -> K8sExecutor {
         .or_else(|| dirs::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string()))
         .expect("KUBECONFIG or ~/.kube/config must exist");
     let _ = std::fs::copy(&src, kubeconfig_path.join("config"));
+
+    // Copy docker buildx builder config so the daemon can find the
+    // configured builder by name.
+    if let Some(real_home) = dirs::home_dir() {
+        let src_buildx = real_home.join(".docker/buildx");
+        if src_buildx.exists() {
+            let dst_docker = home.path().join(".docker");
+            let dst_buildx = dst_docker.join("buildx/instances");
+            std::fs::create_dir_all(&dst_buildx).unwrap();
+            if let Ok(entries) = std::fs::read_dir(src_buildx.join("instances")) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::copy(entry.path(), dst_buildx.join(entry.file_name()));
+                }
+            }
+        }
+    }
 
     K8sExecutor {
         toml,

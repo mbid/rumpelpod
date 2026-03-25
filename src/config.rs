@@ -104,23 +104,27 @@ pub enum Host {
         context: String,
         /// The Kubernetes namespace (default "default").
         namespace: String,
-        /// Registry that pods pull built images from (e.g. "10.43.0.100:5000/rumpelpod").
+        /// Registry that pods pull built images from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         registry: Option<String>,
+        /// Registry to push built images to.  Defaults to `registry`
+        /// when not set.  Separate push/pull registries are needed when
+        /// the cluster pulls via an internal address (e.g. ClusterIP)
+        /// that differs from the address reachable from the build host.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        push_registry: Option<String>,
         /// Node selector labels for pod scheduling.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node_selector: Option<BTreeMap<String, String>>,
         /// Tolerations for pod scheduling.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tolerations: Option<Vec<K8sToleration>>,
-        /// In-cluster buildkitd pod name (in builder_namespace).
-        /// When set, image builds are sent to this pod instead of
-        /// building locally and pushing.
+        /// Name of a `docker buildx` builder to use for image builds.
+        /// The builder must already exist (created via
+        /// `docker buildx create`).  When not set, images are built
+        /// with the local Docker daemon and pushed to the registry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        builder_pod: Option<String>,
-        /// Namespace of the buildkitd pod (default "buildkit").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        builder_namespace: Option<String>,
+        builder: Option<String>,
     },
 }
 
@@ -281,18 +285,18 @@ pub struct K8sConfig {
     pub context: String,
     /// The Kubernetes namespace (default "default").
     pub namespace: Option<String>,
-    /// Registry that pods pull built images from (e.g. "10.43.0.100:5000/rumpelpod").
+    /// Registry that pods pull built images from.
     pub registry: Option<String>,
+    /// Registry to push built images to (defaults to `registry`).
+    pub push_registry: Option<String>,
     /// Node selector labels for pod scheduling.
     #[serde(default)]
     pub node_selector: Option<BTreeMap<String, String>>,
     /// Tolerations for pod scheduling.
     #[serde(default)]
     pub tolerations: Option<Vec<K8sToleration>>,
-    /// In-cluster buildkitd pod name.
-    pub builder_pod: Option<String>,
-    /// Namespace of the buildkitd pod (default "buildkit").
-    pub builder_namespace: Option<String>,
+    /// Name of a `docker buildx` builder for image builds.
+    pub builder: Option<String>,
 }
 
 /// Configuration from `.rumpelpod.toml`.
@@ -518,8 +522,8 @@ mod tests {
             registry: None,
             node_selector: None,
             tolerations: None,
-            builder_pod: None,
-            builder_namespace: None,
+            builder: None,
+            push_registry: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster");
     }
@@ -532,8 +536,8 @@ mod tests {
             registry: None,
             node_selector: None,
             tolerations: None,
-            builder_pod: None,
-            builder_namespace: None,
+            builder: None,
+            push_registry: None,
         };
         assert_eq!(host.to_string(), "k8s:my-cluster/staging");
     }
@@ -546,8 +550,8 @@ mod tests {
             registry: None,
             node_selector: None,
             tolerations: None,
-            builder_pod: None,
-            builder_namespace: None,
+            builder: None,
+            push_registry: None,
         };
         assert!(host.is_remote());
         assert!(!host.is_docker());
@@ -571,8 +575,8 @@ mod tests {
                 registry: None,
                 node_selector: None,
                 tolerations: None,
-                builder_pod: None,
-                builder_namespace: None,
+                builder: None,
+                push_registry: None,
             },
         ];
         for host in hosts {
@@ -623,8 +627,8 @@ mod tests {
                 effect: "NoSchedule".to_string(),
                 operator: None,
             }]),
-            builder_pod: None,
-            builder_namespace: None,
+            builder: None,
+            push_registry: None,
         };
         let json = serde_json::to_string(&host).unwrap();
         let roundtripped: Host = serde_json::from_str(&json).unwrap();

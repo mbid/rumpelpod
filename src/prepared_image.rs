@@ -367,8 +367,7 @@ pub fn build_prepared_image(
         host_remotes,
     );
 
-    // Check cache: for Docker hosts check locally, for k8s we always
-    // rebuild (buildx handles caching via registry layers).
+    // Check local cache first.
     if docker_host.is_docker() && crate::image::image_exists(&tag, docker_host) {
         return Ok(BuildResult {
             image: Image(tag),
@@ -376,37 +375,25 @@ pub fn build_prepared_image(
         });
     }
 
-    // When an in-cluster builder is available, use it instead of
-    // building locally.
+    // When a buildx builder is configured, build and push via that builder.
     if let Host::Kubernetes {
-        ref context,
         ref registry,
-        ref builder_pod,
-        ref builder_namespace,
+        ref push_registry,
+        ref builder,
         ..
     } = docker_host
     {
-        if let (Some(registry), Some(builder_pod)) = (registry, builder_pod) {
-            let builder_ns = builder_namespace.as_deref().unwrap_or("buildkit");
-            let registry_tag = format!("{registry}:{tag}");
-            if crate::k8s_build::registry_tag_exists(context, &registry_tag) {
-                return Ok(BuildResult {
-                    image: Image(registry_tag),
-                    built: false,
-                });
-            }
-            return build_prepared_image_via_builder(
+        if let (Some(registry), Some(builder)) = (registry, builder) {
+            let push_reg = push_registry.as_deref().unwrap_or(registry);
+            return build_prepared_image_via_buildx(
                 base_image,
-                docker_host,
                 gateway_path,
                 container_repo_path,
-                user,
                 host_remotes,
                 claude_info.as_ref(),
                 &tag,
-                context,
-                builder_ns,
-                builder_pod,
+                builder,
+                push_reg,
                 registry,
             );
         }
@@ -435,6 +422,13 @@ pub fn build_prepared_image(
 
     let final_image = match docker_host {
         Host::Kubernetes {
+            push_registry: Some(ref push_reg),
+            ..
+        } => {
+            let dest = crate::image::push_to_registry(&tag, push_reg)?;
+            Image(dest)
+        }
+        Host::Kubernetes {
             registry: Some(ref registry),
             ..
         } => {
@@ -450,117 +444,131 @@ pub fn build_prepared_image(
     })
 }
 
-/// Generate a Dockerfile for the remote builder that detects the base
-/// image user at build time via a multi-stage probe.
+/// Build the prepared image via a named docker buildx builder and
+/// push it to the registry.
 ///
-/// This avoids needing `probe_base_image_user` on the local host,
-/// which would fail because the base image lives in the cluster registry.
-fn generate_remote_dockerfile(
-    base_image: &str,
-    container_repo_path: &Path,
-    user: &str,
-    claude_info: Option<&HostClaudeInfo>,
-    host_remotes: &[GitRemote],
-) -> String {
-    let repo_path = container_repo_path.display();
-    let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
-
-    let claude_flag = match claude_info {
-        Some(info) => format!(" \\\n      --claude-version '{}'", info.version),
-        None => String::new(),
-    };
-
-    let remote_flags: String = host_remotes
-        .iter()
-        .map(|r| format!(" \\\n      --remote '{}={}'", r.name, r.url))
-        .collect();
-
-    // Stage 1: detect the default USER of the base image by writing
-    // the current username to a file.  Stage 2: do the real build as
-    // root, then switch back to the detected user at the end.
-    formatdoc! {r#"
-        FROM {base_image} AS base-user-probe
-        RUN id -un > /tmp/.rumpelpod-base-user
-
-        FROM {base_image}
-        ARG TARGETARCH
-        USER root
-
-        COPY --chmod=755 rumpel-linux-${{TARGETARCH}} {rumpel}
-
-        RUN --mount=type=bind,from=gateway,target={BUILD_GATEWAY_PATH} \
-            {rumpel} prepare-image \
-              --repo-path '{repo_path}' \
-              --user '{user}'{claude_flag}{remote_flags}
-
-        COPY --from=base-user-probe /tmp/.rumpelpod-base-user /tmp/.rumpelpod-base-user
-    "#}
-}
-
-/// Build the prepared image via an in-cluster buildkitd.
-///
-/// Uses the remote builder to build and push the image in one step.
-/// The base image must already be available to the builder (either in
-/// the cluster registry or a public registry).
+/// Uses the same Dockerfile as local builds but probes the base image
+/// user through the builder (since the base image may only be reachable
+/// from the builder, not from localhost).
 #[allow(clippy::too_many_arguments)]
-fn build_prepared_image_via_builder(
+fn build_prepared_image_via_buildx(
     base_image: &Image,
-    _docker_host: &Host,
     gateway_path: &Path,
     container_repo_path: &Path,
-    user: &str,
     host_remotes: &[GitRemote],
     claude_info: Option<&HostClaudeInfo>,
     tag: &str,
-    k8s_context: &str,
-    builder_namespace: &str,
-    builder_pod_name: &str,
-    registry: &str,
+    builder: &str,
+    push_registry: &str,
+    pull_registry: &str,
 ) -> Result<BuildResult> {
-    let registry_tag = format!("{registry}:{tag}");
+    let push_tag = format!("{push_registry}:{tag}");
+    let pull_tag = format!("{pull_registry}:{tag}");
 
-    let dockerfile = generate_remote_dockerfile(
-        &base_image.0,
-        container_repo_path,
-        user,
-        claude_info,
-        host_remotes,
-    );
-    let binaries = find_rumpel_binaries()?;
-
-    let tmp = tempfile::tempdir().context("creating remote build context temp dir")?;
-    fs::write(tmp.path().join("Dockerfile"), dockerfile)
-        .context("writing remote Dockerfile to build context")?;
-    for (name, path) in &binaries {
-        fs::copy(path, tmp.path().join(name)).with_context(|| {
-            let path = path.display();
-            format!("copying {path} to build context")
-        })?;
+    // Check if the image already exists locally.
+    if crate::image::image_exists(tag, &Host::Localhost) {
+        let _ = crate::image::push_to_registry(tag, push_registry);
+        return Ok(BuildResult {
+            image: Image(pull_tag),
+            built: false,
+        });
     }
 
-    let builder =
-        crate::k8s_build::RemoteBuilder::connect(k8s_context, builder_namespace, builder_pod_name)?;
+    // Probe the base image user via the builder so it works even when
+    // the base image is in a registry only the builder can reach.
+    // The probed user is used both as BASE_USER (final Dockerfile USER)
+    // and as the --user for prepare-image (chown target), because the
+    // devcontainer config's containerUser may not be set and the pod
+    // will run as the image's default USER.
+    let base_user = probe_base_image_user_via_buildx(&base_image.0, builder)?;
+
+    let build_ctx = assemble_build_context(
+        &base_image.0,
+        container_repo_path,
+        &base_user,
+        claude_info,
+        host_remotes,
+    )?;
 
     // Symlink the gateway to a name without `.git` so buildx treats it
     // as a plain directory rather than a git URL.
-    let gateway_link = tmp.path().join("gateway-link");
+    let gateway_link = build_ctx.path().join("gateway-link");
     std::os::unix::fs::symlink(gateway_path, &gateway_link).with_context(|| {
         let gw = gateway_path.display();
         format!("symlinking gateway {gw}")
     })?;
 
-    builder.build_with_named_context_and_push(
-        tmp.path(),
-        &tmp.path().join("Dockerfile"),
-        &registry_tag,
-        &[],
-        &[("gateway", &gateway_link)],
-    )?;
+    let mut cmd = Command::new("docker");
+    cmd.args(["buildx", "build"]);
+    cmd.args(["--builder", builder]);
+    cmd.args(["--push"]);
+    cmd.args(["--provenance=false", "--sbom=false"]);
+    cmd.args(["-t", &push_tag]);
+
+    let gateway_link_display = gateway_link.display();
+    cmd.arg(format!("--build-context=gateway={gateway_link_display}"));
+    cmd.arg(format!("--build-arg=BASE_USER={base_user}"));
+
+    let dockerfile = build_ctx.path().join("Dockerfile");
+    let dockerfile_display = dockerfile.display();
+    cmd.arg(format!("-f={dockerfile_display}"));
+    cmd.arg(build_ctx.path().display().to_string());
+
+    use crate::CommandExt;
+    cmd.success()
+        .context("building prepared image via buildx")?;
 
     Ok(BuildResult {
-        image: Image(registry_tag),
+        image: Image(pull_tag),
         built: true,
     })
+}
+
+/// Probe the base image's default USER via a buildx builder.
+///
+/// Same approach as `probe_base_image_user` but routes through the
+/// named builder so images in registries only the builder can reach
+/// are accessible.
+fn probe_base_image_user_via_buildx(base_image: &str, builder: &str) -> Result<String> {
+    let tmp = tempfile::tempdir().context("creating probe build context")?;
+    let marker = "RUMPELPOD_BASE_USER";
+    let dockerfile = formatdoc! {r#"
+        FROM {base_image}
+        RUN echo {marker}=$(id -un)
+    "#};
+    fs::write(tmp.path().join("Dockerfile"), dockerfile).context("writing probe Dockerfile")?;
+
+    let mut cmd = Command::new("docker");
+    cmd.args(["buildx", "build"]);
+    cmd.args(["--builder", builder]);
+    cmd.args(["--progress=plain", "--no-cache"]);
+    let dockerfile_path = tmp.path().join("Dockerfile");
+    let dockerfile_path = dockerfile_path.display();
+    cmd.arg(format!("-f={dockerfile_path}"));
+    cmd.arg(tmp.path().display().to_string());
+
+    use crate::CommandExt;
+    let output = cmd
+        .combined_output()
+        .context("probing base image user via buildx")?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "probe build failed:\n{}",
+            output.combined_output
+        ));
+    }
+
+    let prefix = format!("{marker}=");
+    let mut found_user = None;
+    for line in output.combined_output.lines() {
+        if let Some(pos) = line.find(&prefix) {
+            let user = line[pos + prefix.len()..].trim();
+            if !user.is_empty() {
+                found_user = Some(user.to_string());
+            }
+        }
+    }
+    found_user.context("failed to parse base image user from build log")
 }
 
 // ---------------------------------------------------------------------------

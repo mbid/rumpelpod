@@ -60,37 +60,34 @@ pub fn resolve_image(
         }
     }
 
-    // When an in-cluster builder is available, delegate the build to it.
+    // For k8s with a buildx builder, build and push via that builder.
     if let Host::Kubernetes {
-        ref context,
         ref registry,
-        ref builder_pod,
-        ref builder_namespace,
+        ref push_registry,
+        ref builder,
         ..
     } = docker_host
     {
-        if let (Some(build), Some(registry), Some(builder_pod)) =
-            (&devcontainer.build, registry, builder_pod)
+        if let (Some(build), Some(registry), Some(builder)) =
+            (&devcontainer.build, registry, builder)
         {
-            let builder_ns = builder_namespace.as_deref().unwrap_or("buildkit");
-            return resolve_image_via_builder(
-                build,
-                repo_root,
-                context,
-                builder_ns,
-                builder_pod,
-                registry,
-                on_output,
+            let push_reg = push_registry.as_deref().unwrap_or(registry);
+            return resolve_image_via_buildx(
+                build, repo_root, builder, push_reg, registry, on_output,
             );
         }
     }
 
-    let (build_host, registry) = match docker_host {
+    let (build_host, push_reg) = match docker_host {
+        Host::Kubernetes {
+            push_registry: Some(ref reg),
+            ..
+        } => (&Host::Localhost, Some(reg.as_str())),
         Host::Kubernetes {
             registry: Some(ref reg),
             ..
         } => (&Host::Localhost, Some(reg.as_str())),
-        Host::Kubernetes { registry: None, .. } => (&Host::Localhost, None),
+        Host::Kubernetes { .. } => (&Host::Localhost, None),
         other => (other, None),
     };
 
@@ -108,8 +105,8 @@ pub fn resolve_image(
             ),
         )?;
         if image_exists(&image_name, build_host) {
-            if let Some(registry) = registry {
-                let dest = push_to_registry(&image_name, registry)?;
+            if let Some(push_reg) = push_reg {
+                let dest = push_to_registry(&image_name, push_reg)?;
                 return Ok(BuildResult {
                     image: Image(dest),
                     built: false,
@@ -127,8 +124,8 @@ pub fn resolve_image(
             &BuildFlags::default(),
             on_output,
         )?;
-        if let Some(registry) = registry {
-            let dest = push_to_registry(&result.image.0, registry)?;
+        if let Some(push_reg) = push_reg {
+            let dest = push_to_registry(&result.image.0, push_reg)?;
             return Ok(BuildResult {
                 image: Image(dest),
                 built: result.built,
@@ -148,15 +145,17 @@ pub fn resolve_image(
     }
 }
 
-/// Build a devcontainer image via the in-cluster buildkitd and push
-/// it directly to the cluster registry.
-fn resolve_image_via_builder(
+/// Build a devcontainer image via a named docker buildx builder and
+/// push it to the registry.
+///
+/// `push_registry` is where images are pushed; `pull_registry` is
+/// what pods use to pull (may differ for in-cluster registries).
+fn resolve_image_via_buildx(
     build: &BuildOptions,
     repo_root: &Path,
-    k8s_context: &str,
-    builder_namespace: &str,
-    builder_pod: &str,
-    registry: &str,
+    builder: &str,
+    push_registry: &str,
+    pull_registry: &str,
     on_output: Option<BuildOutputFn>,
 ) -> Result<BuildResult> {
     let dockerfile = build
@@ -165,17 +164,17 @@ fn resolve_image_via_builder(
         .expect("resolved build must have dockerfile");
     let dockerfile_path = repo_root.join(dockerfile);
     let image_name = compute_image_tag(build, &dockerfile_path)?;
-    let registry_tag = format!("{registry}:{image_name}");
+    let push_tag = format!("{push_registry}:{image_name}");
+    let pull_tag = format!("{pull_registry}:{image_name}");
 
-    if crate::k8s_build::registry_tag_exists(k8s_context, &registry_tag) {
+    // Check if the image already exists locally.
+    if image_exists(&image_name, &Host::Localhost) {
+        let _ = push_to_registry(&image_name, push_registry);
         return Ok(BuildResult {
-            image: Image(registry_tag),
+            image: Image(pull_tag),
             built: false,
         });
     }
-
-    let builder =
-        crate::k8s_build::RemoteBuilder::connect(k8s_context, builder_namespace, builder_pod)?;
 
     let context = build
         .context
@@ -183,25 +182,103 @@ fn resolve_image_via_builder(
         .expect("resolved build must have context");
     let context_path = repo_root.join(context);
 
-    let mut build_args: Vec<(&str, &str)> = Vec::new();
-    let args_owned: Vec<(String, String)>;
-    if let Some(ref args) = build.args {
-        args_owned = args.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        for (k, v) in &args_owned {
-            build_args.push((k, v));
+    let mut cmd = Command::new("docker");
+    cmd.args(["buildx", "build"]);
+    cmd.args(["--builder", builder]);
+    cmd.args(["--push"]);
+    cmd.args(["--provenance=false", "--sbom=false"]);
+    cmd.args(["-t", &push_tag]);
+
+    let dockerfile_display = dockerfile_path.display();
+    cmd.arg(format!("-f={dockerfile_display}"));
+
+    if let Some(args) = &build.args {
+        for (k, v) in args {
+            cmd.arg("--build-arg").arg(format!("{k}={v}"));
         }
     }
 
-    builder.build_and_push(
-        &context_path,
-        &dockerfile_path,
-        &registry_tag,
-        &build_args,
-        on_output,
-    )?;
+    if let Some(target) = &build.target {
+        cmd.arg("--target").arg(target);
+    }
+
+    if let Some(cache_from) = &build.cache_from {
+        match cache_from {
+            crate::devcontainer::StringOrArray::String(s) => {
+                cmd.arg("--cache-from").arg(s);
+            }
+            crate::devcontainer::StringOrArray::Array(arr) => {
+                for s in arr {
+                    cmd.arg("--cache-from").arg(s);
+                }
+            }
+        }
+    }
+
+    if let Some(options) = &build.options {
+        cmd.args(options);
+    }
+
+    cmd.arg(context_path.display().to_string());
+
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn()?;
+
+    let child_stdout = child.stdout.take().expect("stdout was piped");
+    let child_stderr = child.stderr.take().expect("stderr was piped");
+
+    let callback = on_output.map(|cb| std::sync::Arc::new(std::sync::Mutex::new(cb)));
+    let callback_for_stderr = callback.clone();
+
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let stdout_buf_clone = stdout_buf.clone();
+    let stderr_buf_clone = stderr_buf.clone();
+
+    let stdout_thread = std::thread::spawn(move || {
+        for line in BufReader::new(child_stdout).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            stdout_buf_clone.lock().unwrap().push_str(&line);
+            stdout_buf_clone.lock().unwrap().push('\n');
+            if let Some(ref cb) = callback {
+                cb.lock().unwrap()(OutputLine::Stdout(line));
+            }
+        }
+    });
+
+    let stderr_thread = std::thread::spawn(move || {
+        for line in BufReader::new(child_stderr).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            stderr_buf_clone.lock().unwrap().push_str(&line);
+            stderr_buf_clone.lock().unwrap().push('\n');
+            if let Some(ref cb) = callback_for_stderr {
+                cb.lock().unwrap()(OutputLine::Stderr(line));
+            }
+        }
+    });
+
+    let status = child.wait()?;
+    stdout_thread.join().expect("stdout reader panicked");
+    stderr_thread.join().expect("stderr reader panicked");
+
+    if !status.success() {
+        let stdout = stdout_buf.lock().unwrap();
+        let stderr = stderr_buf.lock().unwrap();
+        return Err(anyhow::anyhow!(
+            "buildx build failed:\nSTDOUT: {stdout}\nSTDERR: {stderr}"
+        ));
+    }
 
     Ok(BuildResult {
-        image: Image(registry_tag),
+        image: Image(pull_tag),
         built: true,
     })
 }
