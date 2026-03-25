@@ -215,6 +215,7 @@ fn generate_dockerfile(
 
     let remote_flags: String = host_remotes
         .iter()
+        .filter(|r| !MANAGED_REMOTES.contains(&r.name.as_str()))
         .map(|r| format!(" \\\n      --remote '{}={}'", r.name, r.url))
         .collect();
 
