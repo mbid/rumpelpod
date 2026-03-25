@@ -27,6 +27,7 @@ use url::Url;
 
 use crate::async_runtime::block_on;
 use crate::config::Host;
+use crate::daemon::reconnect::ReconnectEvent;
 use crate::devcontainer::DevContainer;
 use crate::git::GitIdentity;
 use crate::image::OutputLine;
@@ -300,6 +301,12 @@ pub struct EnsureClaudeConfigRequest {
     pub auto_approve_hook: bool,
 }
 
+/// Request body for the reconnect-events SSE endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReconnectRequest {
+    pub host: Host,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -408,6 +415,16 @@ pub trait Daemon: Send + Sync + 'static {
     // GET /pod/ssh-keys
     // List SSH keys loaded in the pod's host-side ssh-agent.
     fn ssh_list_keys(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String>;
+
+    // POST /host/reconnect-events
+    // Subscribe to reconnection events for a remote host.
+    // Returns None for hosts that do not support reconnection (e.g. localhost).
+    fn subscribe_reconnect(
+        &self,
+        _host: &Host,
+    ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
+        None
+    }
 }
 
 pub struct DaemonClient {
@@ -903,6 +920,126 @@ impl Daemon for DaemonClient {
     }
 }
 
+impl DaemonClient {
+    /// Subscribe to reconnection events for a remote host.
+    ///
+    /// Returns an iterator that yields events as the daemon retries the
+    /// SSH tunnel.  The iterator ends after a `Connected` event or when
+    /// the server closes the stream.
+    pub fn reconnect_events(
+        &self,
+        host: &Host,
+    ) -> Result<ReconnectStream<BufReader<reqwest::blocking::Response>>> {
+        let url = self.url.join("/host/reconnect-events")?;
+        let request = ReconnectRequest { host: host.clone() };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            let msg = &error.error;
+            return Err(anyhow::anyhow!(
+                "reconnect endpoint returned {status}: {msg}"
+            ));
+        }
+
+        Ok(ReconnectStream::from_response(response))
+    }
+}
+
+/// SSE-backed iterator over `ReconnectEvent`s.
+///
+/// Generic over the reader so it works with both a live HTTP response
+/// (via `DaemonClient`) and an in-memory buffer (in tests).
+pub struct ReconnectStream<R: std::io::BufRead> {
+    lines: std::io::Lines<R>,
+}
+
+impl ReconnectStream<BufReader<reqwest::blocking::Response>> {
+    fn from_response(response: reqwest::blocking::Response) -> Self {
+        Self {
+            lines: BufReader::new(response).lines(),
+        }
+    }
+}
+
+impl<R: std::io::BufRead> ReconnectStream<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            lines: reader.lines(),
+        }
+    }
+}
+
+impl<R: std::io::BufRead> Iterator for ReconnectStream<R> {
+    type Item = Result<ReconnectEvent>;
+
+    fn next(&mut self) -> Option<Result<ReconnectEvent>> {
+        loop {
+            let line = match self.lines.next()? {
+                Ok(l) => l,
+                Err(e) => return Some(Err(anyhow::anyhow!("Failed to read event stream: {e}"))),
+            };
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let event_type = match line.strip_prefix("event: ") {
+                Some(t) => t.to_string(),
+                None => continue,
+            };
+
+            let data_line = match self.lines.next() {
+                Some(Ok(l)) => l,
+                Some(Err(e)) => return Some(Err(anyhow::anyhow!("Failed to read data line: {e}"))),
+                None => {
+                    return Some(Err(anyhow::anyhow!(
+                        "Stream ended mid-event (no data line)"
+                    )))
+                }
+            };
+
+            let data = match data_line.strip_prefix("data: ") {
+                Some(d) => d,
+                None => {
+                    return Some(Err(anyhow::anyhow!(
+                        "Expected 'data: ' line, got: {data_line}"
+                    )))
+                }
+            };
+
+            match event_type.as_str() {
+                "attempting" => return Some(Ok(ReconnectEvent::Attempting)),
+                "connected" => return Some(Ok(ReconnectEvent::Connected)),
+                "failed" => {
+                    #[derive(Deserialize)]
+                    struct FailedData {
+                        error: String,
+                    }
+                    match serde_json::from_str::<FailedData>(data) {
+                        Ok(f) => return Some(Ok(ReconnectEvent::Failed { error: f.error })),
+                        Err(e) => {
+                            return Some(Err(anyhow::anyhow!(
+                                "Failed to parse failed event data: {e}"
+                            )))
+                        }
+                    }
+                }
+                other => return Some(Err(anyhow::anyhow!("Unknown SSE event type: {other}"))),
+            }
+        }
+    }
+}
+
 /// Format a single SSE event with the given type and JSON-encoded data.
 fn sse_event(event_type: &str, data: &str) -> String {
     format!("event: {event_type}\ndata: {data}\n\n")
@@ -1202,6 +1339,71 @@ async fn ssh_list_keys_handler<D: Daemon>(
     }
 }
 
+/// Handler for POST /host/reconnect-events endpoint.
+///
+/// Returns an SSE stream that notifies the client of reconnection attempts
+/// to a remote host.  Subscribing triggers an immediate retry and resets
+/// the exponential backoff.
+async fn reconnect_events_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ReconnectRequest>,
+) -> Response {
+    let rx = match daemon.subscribe_reconnect(&request.host) {
+        Some(rx) => rx,
+        None => {
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&ErrorResponse {
+                        error: "Host does not support reconnection".to_string(),
+                    })
+                    .expect("ErrorResponse is always serializable"),
+                ))
+                .expect("building response never fails");
+        }
+    };
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    tokio::spawn(async move {
+        let mut rx = rx;
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let is_connected = matches!(event, ReconnectEvent::Connected);
+                    let (event_type, data) = match &event {
+                        ReconnectEvent::Attempting => ("attempting", "{}".to_string()),
+                        ReconnectEvent::Connected => ("connected", "{}".to_string()),
+                        ReconnectEvent::Failed { error } => (
+                            "failed",
+                            serde_json::to_string(&serde_json::json!({ "error": error }))
+                                .expect("json object is always serializable"),
+                        ),
+                    };
+                    let msg = sse_event(event_type, &data);
+                    if event_tx.send(msg).await.is_err() {
+                        break;
+                    }
+                    if is_connected {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx)
+        .map(Ok::<_, std::convert::Infallible>);
+
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .expect("building response never fails")
+}
+
 /// Serve the daemon using the provided listener.
 ///
 /// The listener can be a `tokio::net::TcpListener` or `tokio::net::UnixListener`.
@@ -1240,6 +1442,10 @@ where
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .route("/pod/ssh-add", post(ssh_add_key_handler::<D>))
         .route("/pod/ssh-keys", get(ssh_list_keys_handler::<D>))
+        .route(
+            "/host/reconnect-events",
+            post(reconnect_events_handler::<D>),
+        )
         .with_state(daemon);
 
     block_on(async move {
@@ -1248,4 +1454,34 @@ where
             .await
             .unwrap();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that ReconnectStream correctly parses SSE events produced
+    /// by the server-side sse_event() helper.
+    #[test]
+    fn reconnect_stream_roundtrip() {
+        let failed_data =
+            serde_json::to_string(&serde_json::json!({"error": "tunnel down"})).unwrap();
+
+        let mut raw = String::new();
+        raw.push_str(&sse_event("attempting", "{}"));
+        raw.push_str(&sse_event("connected", "{}"));
+        raw.push_str(&sse_event("failed", &failed_data));
+
+        let reader = BufReader::new(std::io::Cursor::new(raw.into_bytes()));
+        let stream = ReconnectStream::new(reader);
+        let parsed: Vec<_> = stream.map(|r| r.unwrap()).collect();
+
+        assert_eq!(parsed.len(), 3);
+        assert!(matches!(parsed[0], ReconnectEvent::Attempting));
+        assert!(matches!(parsed[1], ReconnectEvent::Connected));
+        match &parsed[2] {
+            ReconnectEvent::Failed { error } => assert_eq!(error, "tunnel down"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
 }

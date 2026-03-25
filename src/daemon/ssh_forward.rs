@@ -271,6 +271,16 @@ impl SshForwardManager {
         }
     }
 
+    /// Make a single connection attempt without retrying.
+    ///
+    /// Returns the socket path on success.  If the tunnel is already alive
+    /// the path is returned immediately; otherwise one SSH attempt is made.
+    /// Used by the reconnect coordinator which manages its own backoff.
+    pub fn try_connect_once(&self, docker_host: &Host) -> Result<PathBuf> {
+        let remote_host = RemoteHost::from_docker_host(docker_host);
+        self.ensure_connection(&remote_host, crate::RetryPolicy::UserBlocking)
+    }
+
     /// Try to get an existing forwarded socket for the given remote Docker specification.
     ///
     /// Returns the socket path if a connection already exists and is alive, otherwise None.

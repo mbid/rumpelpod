@@ -1,5 +1,6 @@
 pub mod db;
 pub mod protocol;
+pub mod reconnect;
 pub mod ssh_forward;
 
 use std::collections::{BTreeMap, HashMap};
@@ -36,6 +37,7 @@ use protocol::{
     ContainerId, ConversationSummary, Daemon, EnsureClaudeConfigRequest, GetConversationResponse,
     Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
 };
+use reconnect::ReconnectCoordinator;
 use ssh_forward::SshForwardManager;
 
 use crate::pod::types::{base64_encode, HomeFileEntry, TarExtractEntry};
@@ -183,6 +185,8 @@ struct DaemonServer {
     active_tokens: Arc<Mutex<BTreeMap<(PathBuf, String), String>>>,
     /// SSH forward manager for remote Docker hosts.
     ssh_forward: Arc<SshForwardManager>,
+    /// Coordinates reconnection retries for SSE clients waiting on a host.
+    reconnect: Arc<ReconnectCoordinator>,
     /// Active port-forward handles for Kubernetes pods.
     /// Dropping handles cancels the forwards.  The first entry is always
     /// the container-serve forward; additional entries are forwardPorts.
@@ -3945,6 +3949,16 @@ impl Daemon for DaemonServer {
             }
         }
     }
+
+    fn subscribe_reconnect(
+        &self,
+        host: &Host,
+    ) -> Option<tokio::sync::broadcast::Receiver<reconnect::ReconnectEvent>> {
+        match host {
+            Host::Ssh { .. } => Some(self.reconnect.subscribe(host)),
+            Host::Localhost | Host::Kubernetes { .. } => None,
+        }
+    }
 }
 
 pub fn run_daemon() -> Result<()> {
@@ -3994,12 +4008,16 @@ pub fn run_daemon() -> Result<()> {
         })?
     };
 
+    let ssh_forward = Arc::new(ssh_forward);
+    let reconnect = Arc::new(ReconnectCoordinator::new(ssh_forward.clone()));
+
     let daemon = DaemonServer {
         db: Arc::new(Mutex::new(db_conn)),
         git_server_state,
         localhost_server_port: localhost_server.port,
         active_tokens: Arc::new(Mutex::new(BTreeMap::new())),
-        ssh_forward: Arc::new(ssh_forward),
+        ssh_forward,
+        reconnect,
         k8s_forwards: Arc::new(Mutex::new(HashMap::new())),
         k8s_tunnels: Arc::new(Mutex::new(HashMap::new())),
         docker_tunnels: Arc::new(Mutex::new(HashMap::new())),

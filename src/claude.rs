@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use log::trace;
 
 use crate::cli::ClaudeCommand;
-use crate::config::load_toml_config;
+use crate::config::{load_toml_config, Host};
 use crate::daemon;
 use crate::daemon::protocol::{
     ContainerId, Daemon, DaemonClient, EnsureClaudeConfigRequest, PodName,
@@ -103,6 +103,14 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let elapsed = t_total.elapsed();
     trace!("total claude startup: {elapsed:?}");
 
+    let reconnect = match &result.host {
+        Host::Ssh { .. } => Some(pty_attach::ReconnectConfig {
+            daemon_socket: daemon::socket_path()?,
+            host: result.host.clone(),
+        }),
+        Host::Localhost | Host::Kubernetes { .. } => None,
+    };
+
     let outcome = pty_attach::attach(
         &result.container_url,
         &result.container_token,
@@ -112,6 +120,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             workdir: Some(workdir_str),
             env: env_strings,
         },
+        reconnect,
     )?;
 
     match outcome {

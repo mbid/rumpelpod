@@ -7,6 +7,7 @@
 
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +22,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use url::Url;
 
+use crate::config::Host;
+use crate::daemon::protocol::DaemonClient;
+use crate::daemon::reconnect::ReconnectEvent;
 use crate::pod::pty::PtyControl;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -96,6 +100,16 @@ pub struct SessionParams {
     pub env: Vec<String>,
 }
 
+/// How to coordinate reconnection with the daemon for remote hosts.
+///
+/// When provided, the attach loop waits for the daemon's SSE endpoint
+/// instead of polling blindly.  This lets the daemon manage SSH tunnel
+/// retries with exponential backoff and notify all waiting clients.
+pub struct ReconnectConfig {
+    pub daemon_socket: PathBuf,
+    pub host: Host,
+}
+
 /// Connect to or launch a Claude session over WebSocket.
 ///
 /// Connects to `ws://HOST:PORT/claude`, sends the session parameters as
@@ -103,7 +117,12 @@ pub struct SessionParams {
 /// detaches (Ctrl-a d) or the session ends.  Raw mode is deferred until
 /// the first output arrives from the remote so ctrl-c works during
 /// startup.  Automatically reconnects if the WebSocket connection drops.
-pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOutcome> {
+pub fn attach(
+    url: &str,
+    token: &str,
+    params: SessionParams,
+    reconnect: Option<ReconnectConfig>,
+) -> Result<AttachOutcome> {
     eprintln!("[Ctrl-a d to detach]");
 
     // -- Terminal setup -------------------------------------------------
@@ -127,6 +146,7 @@ pub fn attach(url: &str, token: &str, params: SessionParams) -> Result<AttachOut
         params,
         &original_termios,
         &raw,
+        reconnect,
     ))?;
 
     // Reset terminal emulator state that escape sequences from the remote
@@ -250,6 +270,7 @@ async fn attach_async(
     params: SessionParams,
     original_termios: &nix::sys::termios::Termios,
     raw_termios: &nix::sys::termios::Termios,
+    reconnect: Option<ReconnectConfig>,
 ) -> Result<AttachOutcome> {
     // First connection: propagate errors (invalid URL, unreachable pod).
     let ws = connect_ws(url, token, &params, true).await?;
@@ -268,8 +289,20 @@ async fn attach_async(
         // Leave raw mode while disconnected so ctrl-c delivers SIGINT
         // and the user can kill the process normally.
         apply_termios(original_termios);
-        eprintln!("[connection lost, reconnecting...]");
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        eprintln!("[connection lost]");
+
+        if let Some(ref rc) = reconnect {
+            // Let the daemon coordinate the SSH tunnel retry with
+            // exponential backoff.  Each subscription triggers an
+            // immediate attempt and resets the backoff interval.
+            if let Err(e) = wait_for_host_reconnect(rc).await {
+                eprintln!("[daemon reconnect failed: {e:#}, retrying directly]");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        } else {
+            eprintln!("[reconnecting...]");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
 
         let ws = match connect_ws(url, token, &params, false).await {
             Ok(ws) => ws,
@@ -287,6 +320,50 @@ async fn attach_async(
             BridgeOutcome::ConnectionLost => continue,
         }
     }
+}
+
+/// Wait for the daemon to re-establish the SSH tunnel to a remote host.
+///
+/// Subscribes to the daemon's SSE endpoint and prints status messages
+/// as the daemon retries.  Returns Ok(()) when the tunnel is back up.
+async fn wait_for_host_reconnect(config: &ReconnectConfig) -> Result<()> {
+    let daemon_socket = config.daemon_socket.clone();
+    let host = config.host.clone();
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ReconnectEvent>(16);
+
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let client = DaemonClient::new_unix(&daemon_socket);
+        for event in client.reconnect_events(&host)? {
+            let event = event?;
+            let is_connected = matches!(event, ReconnectEvent::Connected);
+            if tx.blocking_send(event).is_err() {
+                break;
+            }
+            if is_connected {
+                break;
+            }
+        }
+        Ok(())
+    });
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            ReconnectEvent::Attempting => {
+                eprintln!("[reconnecting to host...]");
+            }
+            ReconnectEvent::Connected => {
+                return Ok(());
+            }
+            ReconnectEvent::Failed { error } => {
+                eprintln!("[reconnect failed: {error}, retrying...]");
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "reconnect stream ended without connected event"
+    ))
 }
 
 /// Write a status message to stdout.  Uses \r\n because the terminal
