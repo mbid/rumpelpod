@@ -576,6 +576,64 @@ fn enter_propagates_host_git_identity() {
 }
 
 #[test]
+fn enter_skips_image_build_when_container_exists() {
+    // Building the image is expensive and pointless when a container already
+    // exists. Verify that the first enter produces build output but a second
+    // enter (even after the Dockerfile changes) does not.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "enter-skip-build");
+    let daemon = TestDaemon::start(&home);
+    // Use a unique Dockerfile so the image is not shared with other tests.
+    write_test_devcontainer(&repo, "RUN echo skip-build-marker", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // First enter -- must build the image.
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "skip-build-test", "--", "echo", "first"])
+        .output()
+        .expect("first rumpel enter failed to run");
+    assert!(
+        output.status.success(),
+        "first enter should succeed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let first_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        first_combined.contains("skip-build-marker"),
+        "first enter should contain docker build output, got:\n{first_combined}",
+    );
+
+    // Modify the Dockerfile so a naive implementation would rebuild.
+    write_test_devcontainer(&repo, "RUN echo skip-build-changed", "");
+
+    // Second enter -- container already exists, skip build entirely.
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "skip-build-test", "--", "echo", "second"])
+        .output()
+        .expect("second rumpel enter failed to run");
+    assert!(
+        output.status.success(),
+        "second enter should succeed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let second_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        !second_combined.contains("skip-build-changed"),
+        "second enter should NOT contain docker build output, got:\n{second_combined}",
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "second",);
+}
+
+#[test]
 fn enter_updates_git_identity_on_reentry() {
     let repo = TestRepo::new();
     let home = TestHome::new();
