@@ -257,44 +257,12 @@ fn resolve_git_dir(path: &Path) -> Result<PathBuf> {
 /// Install the reference-transaction hook in an explicit git directory.
 /// Like `install_reference_transaction_hook` but targets a specific git dir
 /// rather than assuming `<path>/.git/hooks`.
-fn install_reference_transaction_hook_in_git_dir(git_dir: &Path, rumpel_exe: &str) -> Result<()> {
-    let hooks_dir = git_dir.join("hooks");
-    let hook_path = hooks_dir.join("reference-transaction");
-
-    let signature = "Installed by rumpelpod to sync branch updates";
-    let shim = hook_shim(rumpel_exe, signature, "host-reference-transaction", false);
-
-    fs::create_dir_all(&hooks_dir).with_context(|| {
-        let hooks_dir = hooks_dir.display();
-        format!("Failed to create hooks directory: {hooks_dir}")
-    })?;
-
-    if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to read existing hook: {hook_path}")
-        })?;
-
-        if existing.contains(signature) {
-            return Ok(());
-        }
-
-        let existing = existing.trim_end();
-        let combined = format!("{existing}\n\n{shim}");
-        fs::write(&hook_path, combined).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to update hook: {hook_path}")
-        })?;
-    } else {
-        fs::write(&hook_path, shim).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to write hook: {hook_path}")
-        })?;
-    }
-
-    let mut perms = fs::metadata(&hook_path)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&hook_path, perms)?;
+fn install_reference_transaction_hook_in_git_dir(git_dir: &Path) -> Result<()> {
+    install_host_hook(
+        &git_dir.join("hooks"),
+        "reference-transaction",
+        HOST_REF_TX_HOOK,
+    )?;
 
     Ok(())
 }
@@ -374,13 +342,13 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     install_gateway_post_receive_hook(&gateway, &rumpel_exe)?;
 
     // Install hook to sync branch updates from host to gateway.
-    install_reference_transaction_hook(repo_path, &rumpel_exe)?;
+    install_reference_transaction_hook(repo_path)?;
 
     // Older git versions (notably Apple Git 2.39) don't fire the
     // reference-transaction hook when HEAD changes via checkout/switch.
     // Install a post-checkout hook as fallback for those versions.
     if !git_supports_symref_in_ref_transaction(repo_path) {
-        install_post_checkout_hook(repo_path, &rumpel_exe)?;
+        install_post_checkout_hook(repo_path)?;
     }
 
     // Push all existing branches to the gateway
@@ -446,7 +414,7 @@ fn setup_submodule_gateway(
     install_gateway_post_receive_hook(&gateway, rumpel_exe)?;
 
     // Install reference-transaction hook in the submodule's actual git dir
-    install_reference_transaction_hook_in_git_dir(&sub_git_dir, rumpel_exe)?;
+    install_reference_transaction_hook_in_git_dir(&sub_git_dir)?;
 
     // Push submodule branches/HEAD to its gateway
     push_all_branches(&sub_workdir)?;
@@ -542,56 +510,69 @@ fn install_gateway_hook(gateway_path: &Path, hook_name: &str, hook_content: &str
 ///
 /// If a reference-transaction hook already exists and wasn't installed by us, we append
 /// our hook invocation to it.
-fn install_reference_transaction_hook(repo_path: &Path, rumpel_exe: &str) -> Result<()> {
-    let hooks_dir = repo_path.join(".git").join("hooks");
-    let hook_path = hooks_dir.join("reference-transaction");
+fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
+    install_host_hook(
+        &repo_path.join(".git").join("hooks"),
+        "reference-transaction",
+        HOST_REF_TX_HOOK,
+    )
+}
 
-    let signature = "Installed by rumpelpod to sync branch updates";
-    let shim = hook_shim(rumpel_exe, signature, "host-reference-transaction", false);
+/// Two-line block appended to the host repo's reference-transaction hook.
+/// Uses bare `rumpel` (found via PATH) so the string is a fixed constant
+/// that can be matched and stripped inside containers.
+pub const HOST_REF_TX_HOOK: &str = "\
+# Installed by rumpelpod (host)\n\
+rumpel git-hook host-reference-transaction \"$@\"\n";
 
-    // Ensure hooks directory exists
-    fs::create_dir_all(&hooks_dir).with_context(|| {
+/// Two-line block appended to the host repo's post-checkout hook.
+pub const HOST_POST_CHECKOUT_HOOK: &str = "\
+# Installed by rumpelpod (host)\n\
+rumpel git-hook host-post-checkout \"$@\"\n";
+
+/// Remove the exact host hook blocks from a hook file's content,
+/// preserving any other code (e.g. user hooks).
+pub fn strip_host_hooks(content: &str) -> String {
+    content
+        .replace(HOST_REF_TX_HOOK, "")
+        .replace(HOST_POST_CHECKOUT_HOOK, "")
+}
+
+/// Install a host-repo hook by appending the given block to the hook
+/// file.  If the hook file does not exist, creates it with a shebang.
+/// If the block is already present, does nothing.
+fn install_host_hook(hooks_dir: &Path, hook_name: &str, block: &str) -> Result<()> {
+    fs::create_dir_all(hooks_dir).with_context(|| {
         let hooks_dir = hooks_dir.display();
         format!("Failed to create hooks directory: {hooks_dir}")
     })?;
 
-    if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to read existing hook: {hook_path}")
-        })?;
+    let hook_path = hooks_dir.join(hook_name);
 
-        // Check if our hook is already installed (look for our signature comment)
-        if existing.contains(signature) {
-            // Already installed, nothing to do
+    if let Ok(existing) = fs::read_to_string(&hook_path) {
+        if existing.contains(block.trim()) {
             return Ok(());
         }
-
-        // Append our hook to the existing one
         let existing = existing.trim_end();
-        let combined = format!("{existing}\n\n{shim}");
+        let combined = format!("{existing}\n\n{block}");
         fs::write(&hook_path, combined).with_context(|| {
             let hook_path = hook_path.display();
             format!("Failed to update hook: {hook_path}")
         })?;
     } else {
-        // Create new hook
-        fs::write(&hook_path, shim).with_context(|| {
+        let content = format!("#!/bin/sh\n{block}");
+        fs::write(&hook_path, content).with_context(|| {
             let hook_path = hook_path.display();
             format!("Failed to write hook: {hook_path}")
         })?;
     }
 
-    // Make hook executable
     let mut perms = fs::metadata(&hook_path)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&hook_path, perms)?;
 
     Ok(())
 }
-
-/// Signature used to detect whether the post-checkout hook was installed by us.
-const POST_CHECKOUT_SIGNATURE: &str = "Installed by rumpelpod to sync HEAD";
 
 /// Check whether `git checkout` triggers the reference-transaction hook for
 /// HEAD changes. Older git versions (including Apple Git 2.39) only fire the
@@ -623,50 +604,12 @@ fn git_supports_symref_in_ref_transaction(repo_path: &Path) -> bool {
 }
 
 /// Install the post-checkout hook in the host repository.
-fn install_post_checkout_hook(repo_path: &Path, rumpel_exe: &str) -> Result<()> {
-    let hooks_dir = repo_path.join(".git").join("hooks");
-    let hook_path = hooks_dir.join("post-checkout");
-
-    let shim = hook_shim(
-        rumpel_exe,
-        POST_CHECKOUT_SIGNATURE,
-        "host-post-checkout",
-        false,
-    );
-
-    fs::create_dir_all(&hooks_dir).with_context(|| {
-        let hooks_dir = hooks_dir.display();
-        format!("Failed to create hooks directory: {hooks_dir}")
-    })?;
-
-    if hook_path.exists() {
-        let existing = fs::read_to_string(&hook_path).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to read existing hook: {hook_path}")
-        })?;
-
-        if existing.contains(POST_CHECKOUT_SIGNATURE) {
-            return Ok(());
-        }
-
-        let existing = existing.trim_end();
-        let combined = format!("{existing}\n\n{shim}");
-        fs::write(&hook_path, combined).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to update hook: {hook_path}")
-        })?;
-    } else {
-        fs::write(&hook_path, shim).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to write hook: {hook_path}")
-        })?;
-    }
-
-    let mut perms = fs::metadata(&hook_path)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&hook_path, perms)?;
-
-    Ok(())
+fn install_post_checkout_hook(repo_path: &Path) -> Result<()> {
+    install_host_hook(
+        &repo_path.join(".git").join("hooks"),
+        "post-checkout",
+        HOST_POST_CHECKOUT_HOOK,
+    )
 }
 
 /// Push all local branches and current HEAD to the gateway.

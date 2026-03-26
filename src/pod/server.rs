@@ -661,12 +661,15 @@ fn setup_git_impl(req: &GitSetupRequest) -> Result<()> {
 /// Hook content that delegates to the rumpel binary inside the container.
 const POD_REFERENCE_TRANSACTION_HOOK: &str = "\
 #!/bin/sh\n\
-# Installed by rumpelpod to sync branch updates to the gateway repository.\n\
+# Installed by rumpelpod (pod)\n\
 exec /opt/rumpelpod/bin/rumpel git-hook reference-transaction \"$@\"\n";
 
-const HOOK_SIGNATURE: &str = "Installed by rumpelpod to sync branch updates";
+const HOOK_SIGNATURE: &str = "Installed by rumpelpod (pod)";
 
 /// Install the reference-transaction hook. Returns true on first install.
+///
+/// Strips any host-side hook lines first (they reference binaries that
+/// do not exist in the container), then appends the pod hook.
 fn install_hook_impl(repo_path: &Path) -> Result<bool> {
     let hooks_dir = repo_path.join(".git/hooks");
     let hooks_dir_display = hooks_dir.display();
@@ -682,7 +685,8 @@ fn install_hook_impl(repo_path: &Path) -> Result<bool> {
             return Ok(false);
         }
         Some(ref content) => {
-            let trimmed = content.trim_end();
+            let cleaned = crate::gateway::strip_host_hooks(content);
+            let trimmed = cleaned.trim_end();
             format!("{trimmed}\n\n{POD_REFERENCE_TRANSACTION_HOOK}")
         }
         None => POD_REFERENCE_TRANSACTION_HOOK.to_string(),
@@ -821,7 +825,8 @@ fn setup_submodules_impl(req: &GitSetupSubmodulesRequest) -> Result<()> {
         if needs_install {
             let content = match existing {
                 Some(ref c) => {
-                    let trimmed = c.trim_end();
+                    let cleaned = crate::gateway::strip_host_hooks(c);
+                    let trimmed = cleaned.trim_end();
                     format!("{trimmed}\n\n{POD_REFERENCE_TRANSACTION_HOOK}")
                 }
                 None => POD_REFERENCE_TRANSACTION_HOOK.to_string(),

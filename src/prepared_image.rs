@@ -598,6 +598,11 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         }
     }
 
+    // If the base image already had a .git (e.g. from COPY), it may
+    // contain host-side hooks that reference binaries outside the
+    // container.  Remove them so the pod server can install its own.
+    remove_host_hooks(&cmd.repo_path)?;
+
     // Ensure the repo is owned by the container user.  The base image
     // may have created it under a different UID (e.g. COPY --chown).
     let status = Command::new("chown")
@@ -738,6 +743,39 @@ fn install_claude_cli(version: &str) -> Result<()> {
     fs::write(bin_path, &data).context("writing Claude CLI binary")?;
     fs::set_permissions(bin_path, fs::Permissions::from_mode(0o755))
         .context("making Claude CLI binary executable")?;
+
+    Ok(())
+}
+
+/// Strip host-side hook lines that were baked into the image (e.g. via
+/// `COPY` in the Dockerfile).  Host hooks reference binary paths that
+/// do not exist inside the container.  Only the exact lines produced
+/// by the host hook shim are removed; any user hook code is preserved.
+fn remove_host_hooks(repo_path: &Path) -> Result<()> {
+    let hooks_dir = repo_path.join(".git/hooks");
+    if !hooks_dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(&hooks_dir).context("reading hooks directory")? {
+        let entry = entry.context("reading hooks entry")?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let cleaned = crate::gateway::strip_host_hooks(&content);
+        if cleaned == content {
+            continue;
+        }
+        fs::write(&path, cleaned).with_context(|| {
+            let path = path.display();
+            format!("rewriting hook {path}")
+        })?;
+    }
 
     Ok(())
 }
