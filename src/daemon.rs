@@ -353,6 +353,7 @@ fn resolve_daemon_vars(dc: DevContainer, repo_path: &Path, pod_name: &str) -> De
 struct ContainerState {
     status: String,
     id: String,
+    user: String,
 }
 
 /// Get the USER directive from a Docker image.
@@ -399,9 +400,22 @@ fn inspect_container(docker: &Docker, container_name: &str) -> Result<Option<Con
                 .map(|s| format!("{:?}", s).to_lowercase())
                 .unwrap_or_default();
 
+            let user = response
+                .config
+                .as_ref()
+                .and_then(|c| c.user.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let user = if user.is_empty() {
+                "root".to_string()
+            } else {
+                user
+            };
+
             Ok(Some(ContainerState {
                 status,
                 id: response.id.unwrap_or_default(),
+                user,
             }))
         }
         Err(BollardError::DockerResponseServerError {
@@ -2610,17 +2624,7 @@ impl DaemonServer {
             Host::Kubernetes { .. } => unreachable!(),
         };
 
-        let build_result = crate::image::resolve_image(
-            &devcontainer,
-            &docker_host,
-            &repo_path,
-            on_output,
-            Some(&docker_socket),
-        )?;
-        let image = build_result.image;
-        let image_built = build_result.built;
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
-        let user = devcontainer.user().map(String::from);
         let forward_ports = devcontainer.forward_ports.clone().unwrap_or_default();
         let ports_attributes = devcontainer.ports_attributes.clone().unwrap_or_default();
         let other_ports_attributes = devcontainer.other_ports_attributes.clone();
@@ -2632,28 +2636,12 @@ impl DaemonServer {
         )
         .context("connecting to Docker daemon")?;
 
-        // Resolve the user first, before any container operations
-        let user = resolve_user(&docker, user, &image.0)?;
-
         // Set up gateway for git synchronization (idempotent)
         gateway::setup_gateway(&repo_path)?;
         let submodules = gateway::detect_submodules(&repo_path);
 
         let name = docker_name(&repo_path, &pod_name);
         let gateway_path = gateway::gateway_path(&repo_path)?;
-
-        let host_remotes = crate::git::get_remotes(&repo_path).unwrap_or_default();
-        let prepared = crate::prepared_image::build_prepared_image(
-            &image,
-            &docker_host,
-            &gateway_path,
-            &container_repo_path,
-            &user,
-            &host_remotes,
-            claude_cli_path.as_deref(),
-            Some(&docker_socket),
-        )?;
-        let image = prepared.image;
 
         let localhost_server_port = self.localhost_server_port;
 
@@ -2675,7 +2663,13 @@ impl DaemonServer {
         // inspect it. For robustness, we'd need to retry on specific failures,
         // but that adds complexity. For now, we accept this limitation.
 
+        // Check for existing container before building images -- no point
+        // rebuilding when we are just going to restart the same container.
         if let Some(state) = inspect_container(&docker, &name)? {
+            let user = match devcontainer.user() {
+                Some(u) => u.to_string(),
+                None => state.user.clone(),
+            };
             let was_stopped = state.status != "running";
             if was_stopped {
                 // Container exists but is stopped - restart it
@@ -2907,13 +2901,39 @@ impl DaemonServer {
                 user,
                 docker_socket: Some(docker_socket),
                 host: docker_host,
-                image_built,
+                image_built: false,
                 probed_env: enter_resp.probed_env,
                 user_shell: enter_resp.user_info.shell,
                 container_url,
                 container_token,
             });
         }
+
+        // Container does not exist yet -- build the image.
+        let build_result = crate::image::resolve_image(
+            &devcontainer,
+            &docker_host,
+            &repo_path,
+            on_output,
+            Some(&docker_socket),
+        )?;
+        let image = build_result.image;
+        let image_built = build_result.built;
+
+        let user = resolve_user(&docker, devcontainer.user().map(String::from), &image.0)?;
+
+        let host_remotes = crate::git::get_remotes(&repo_path).unwrap_or_default();
+        let prepared = crate::prepared_image::build_prepared_image(
+            &image,
+            &docker_host,
+            &gateway_path,
+            &container_repo_path,
+            &user,
+            &host_remotes,
+            claude_cli_path.as_deref(),
+            Some(&docker_socket),
+        )?;
+        let image = prepared.image;
 
         // Register pod with the git HTTP server
         let agent_sock = ssh_agent_dir(&repo_path, &PodName(pod_name.0.clone())).join("agent.sock");
