@@ -36,6 +36,8 @@ pub enum ReconnectEvent {
     Connected,
     /// A reconnection attempt failed; the daemon will retry.
     Failed { error: String },
+    /// The pod was intentionally stopped; the client should exit.
+    Stopped,
 }
 
 struct HostState {
@@ -217,10 +219,15 @@ impl PodEventManager {
     }
 
     /// Stop the event listener for a pod.
+    ///
+    /// Broadcasts a `Stopped` event to any subscribers before tearing
+    /// down the listener, so clients waiting for reconnection know the
+    /// pod was intentionally stopped and should exit.
     pub fn stop(&self, repo_path: &Path, pod_name: &str) {
         let key = (repo_path.to_path_buf(), pod_name.to_string());
         let mut pods = self.pods.lock().unwrap();
         if let Some(state) = pods.remove(&key) {
+            let _ = state.tx.send(ReconnectEvent::Stopped);
             state.stop.store(true, Ordering::SeqCst);
         }
     }

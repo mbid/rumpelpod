@@ -1054,6 +1054,7 @@ impl Iterator for ReconnectStream {
                 "attempting" => return Some(Ok(ReconnectEvent::Attempting)),
                 "host_connected" => return Some(Ok(ReconnectEvent::HostConnected)),
                 "connected" => return Some(Ok(ReconnectEvent::Connected)),
+                "stopped" => return Some(Ok(ReconnectEvent::Stopped)),
                 "failed" => {
                     #[derive(Deserialize)]
                     struct FailedData {
@@ -1382,7 +1383,8 @@ fn reconnect_sse_response(rx: tokio::sync::broadcast::Receiver<ReconnectEvent>) 
         loop {
             match rx.recv().await {
                 Ok(event) => {
-                    let is_connected = matches!(event, ReconnectEvent::Connected);
+                    let is_terminal =
+                        matches!(event, ReconnectEvent::Connected | ReconnectEvent::Stopped);
                     let (event_type, data) = match &event {
                         ReconnectEvent::Attempting => ("attempting", "{}".to_string()),
                         ReconnectEvent::HostConnected => ("host_connected", "{}".to_string()),
@@ -1392,12 +1394,13 @@ fn reconnect_sse_response(rx: tokio::sync::broadcast::Receiver<ReconnectEvent>) 
                             serde_json::to_string(&serde_json::json!({ "error": error }))
                                 .expect("json object is always serializable"),
                         ),
+                        ReconnectEvent::Stopped => ("stopped", "{}".to_string()),
                     };
                     let msg = sse_event(event_type, &data);
                     if event_tx.send(msg).await.is_err() {
                         break;
                     }
-                    if is_connected {
+                    if is_terminal {
                         break;
                     }
                 }
@@ -1441,13 +1444,21 @@ async fn host_reconnect_events_handler<D: Daemon>(
 }
 
 /// Handler for POST /pod/reconnect-events endpoint.
+///
+/// When no event listener is active the pod was already stopped (or
+/// never started).  Return a single `Stopped` event so the client
+/// exits instead of retrying forever.
 async fn pod_reconnect_events_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<PodReconnectRequest>,
 ) -> Response {
     match daemon.subscribe_pod_reconnect(&request.repo_path, &request.pod_name) {
         Some(rx) => reconnect_sse_response(rx),
-        None => reconnect_not_available("No event listener active for this pod"),
+        None => {
+            let (tx, rx) = tokio::sync::broadcast::channel(1);
+            let _ = tx.send(ReconnectEvent::Stopped);
+            reconnect_sse_response(rx)
+        }
     }
 }
 

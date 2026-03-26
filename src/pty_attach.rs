@@ -294,9 +294,16 @@ async fn attach_async(
         if let Some(ref rc) = reconnect {
             // Let the daemon coordinate SSH tunnel + pod reconnection
             // with exponential backoff.
-            if let Err(e) = wait_for_pod_reconnect(rc).await {
-                eprintln!("[daemon reconnect failed: {e:#}, retrying directly]");
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            match wait_for_pod_reconnect(rc).await {
+                Ok(ReconnectOutcome::Connected) => {}
+                Ok(ReconnectOutcome::Stopped) => {
+                    eprintln!("[pod stopped]");
+                    return Ok(AttachOutcome::SessionEnded);
+                }
+                Err(e) => {
+                    eprintln!("[daemon reconnect failed: {e:#}, retrying directly]");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         } else {
             eprintln!("[reconnecting...]");
@@ -321,11 +328,17 @@ async fn attach_async(
     }
 }
 
-/// Wait for the daemon to re-establish the SSH tunnel to a remote host.
+enum ReconnectOutcome {
+    Connected,
+    Stopped,
+}
+
+/// Wait for the daemon to re-establish the connection to a pod.
 ///
 /// Subscribes to the daemon's SSE endpoint and prints status messages
-/// as the daemon retries.  Returns Ok(()) when the pod is reachable.
-async fn wait_for_pod_reconnect(config: &ReconnectConfig) -> Result<()> {
+/// as the daemon retries.  Returns `Connected` when the pod is
+/// reachable, or `Stopped` if the pod was intentionally stopped.
+async fn wait_for_pod_reconnect(config: &ReconnectConfig) -> Result<ReconnectOutcome> {
     let daemon_socket = config.daemon_socket.clone();
     let repo_path = config.repo_path.clone();
     let pod_name = config.pod_name.clone();
@@ -356,10 +369,13 @@ async fn wait_for_pod_reconnect(config: &ReconnectConfig) -> Result<()> {
                 eprintln!("[host connected, reconnecting to pod...]");
             }
             ReconnectEvent::Connected => {
-                return Ok(());
+                return Ok(ReconnectOutcome::Connected);
             }
             ReconnectEvent::Failed { error } => {
                 eprintln!("[reconnect failed: {error}, retrying...]");
+            }
+            ReconnectEvent::Stopped => {
+                return Ok(ReconnectOutcome::Stopped);
             }
         }
     }
