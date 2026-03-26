@@ -15,7 +15,7 @@ use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
-use crate::executor::ExecutorResources;
+use crate::executor::{executor_mode, ExecutorMode, ExecutorResources};
 
 /// Write a devcontainer.json with the given runtime options block merged in.
 fn write_devcontainer_with_runtime_opts(repo: &TestRepo, runtime_opts: &str) {
@@ -351,8 +351,14 @@ fn host_requirements_logged() {
 
 /// Verify that absurd hostRequirements do not prevent the pod from starting
 /// on local Docker (we do not enforce).
+///
+/// Skipped on k8s: hostRequirements become real resource requests, making
+/// the pod permanently unschedulable.
 #[test]
 fn host_requirements_ignored_on_local() {
+    if matches!(executor_mode(), ExecutorMode::K8s) {
+        return;
+    }
     let repo = TestRepo::new();
 
     write_devcontainer_with_runtime_opts(
