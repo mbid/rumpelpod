@@ -83,7 +83,7 @@ impl ExecutorResources {
         match executor_mode() {
             ExecutorMode::Docker => Self::docker(),
             ExecutorMode::Ssh => Self::ssh(home),
-            ExecutorMode::K8s => Self::k8s(test_name),
+            ExecutorMode::K8s => Self::k8s(home, test_name),
         }
     }
 
@@ -109,7 +109,7 @@ impl ExecutorResources {
         }
     }
 
-    fn k8s(test_name: &str) -> Self {
+    fn k8s(home: &TestHome, test_name: &str) -> Self {
         let cluster = super::k8s::k8s_cluster_config();
         let ns = super::k8s::K8sNamespace::new(&cluster, test_name);
 
@@ -143,6 +143,31 @@ impl ExecutorResources {
             value = "test"
             effect = "NoSchedule"
         "#};
+
+        // The daemon runs with HOME=test home, so it needs kubeconfig
+        // and buildx config copied there.
+        let kubeconfig_dir = home.path().join(".kube");
+        std::fs::create_dir_all(&kubeconfig_dir).unwrap();
+        let src = std::env::var("KUBECONFIG")
+            .ok()
+            .or_else(|| {
+                dirs::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string())
+            })
+            .expect("KUBECONFIG or ~/.kube/config must exist");
+        let _ = std::fs::copy(&src, kubeconfig_dir.join("config"));
+
+        if let Some(real_home) = dirs::home_dir() {
+            let src_buildx = real_home.join(".docker/buildx");
+            if src_buildx.exists() {
+                let dst_buildx = home.path().join(".docker/buildx/instances");
+                std::fs::create_dir_all(&dst_buildx).unwrap();
+                if let Ok(entries) = std::fs::read_dir(src_buildx.join("instances")) {
+                    for entry in entries.flatten() {
+                        let _ = std::fs::copy(entry.path(), dst_buildx.join(entry.file_name()));
+                    }
+                }
+            }
+        }
 
         ExecutorResources {
             toml,
