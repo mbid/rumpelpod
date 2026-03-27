@@ -150,7 +150,8 @@ fn k8s_executor(home: &TestHome, test_name: &str) -> K8sExecutor {
         .ok()
         .or_else(|| dirs::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string()))
         .expect("KUBECONFIG or ~/.kube/config must exist");
-    let _ = std::fs::copy(&src, kubeconfig_path.join("config"));
+    std::fs::copy(&src, kubeconfig_path.join("config"))
+        .expect("failed to copy kubeconfig to test home");
 
     // Copy docker buildx builder config so the daemon can find the
     // configured builder by name.
@@ -162,7 +163,8 @@ fn k8s_executor(home: &TestHome, test_name: &str) -> K8sExecutor {
             std::fs::create_dir_all(&dst_buildx).unwrap();
             if let Ok(entries) = std::fs::read_dir(src_buildx.join("instances")) {
                 for entry in entries.flatten() {
-                    let _ = std::fs::copy(entry.path(), dst_buildx.join(entry.file_name()));
+                    std::fs::copy(entry.path(), dst_buildx.join(entry.file_name()))
+                        .expect("failed to copy buildx instance config");
                 }
             }
         }

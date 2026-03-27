@@ -154,7 +154,8 @@ impl ExecutorResources {
                 dirs::home_dir().map(|h| h.join(".kube/config").to_string_lossy().to_string())
             })
             .expect("KUBECONFIG or ~/.kube/config must exist");
-        let _ = std::fs::copy(&src, kubeconfig_dir.join("config"));
+        std::fs::copy(&src, kubeconfig_dir.join("config"))
+            .expect("failed to copy kubeconfig to test home");
 
         if let Some(real_home) = dirs::home_dir() {
             let src_buildx = real_home.join(".docker/buildx");
@@ -163,7 +164,8 @@ impl ExecutorResources {
                 std::fs::create_dir_all(&dst_buildx).unwrap();
                 if let Ok(entries) = std::fs::read_dir(src_buildx.join("instances")) {
                     for entry in entries.flatten() {
-                        let _ = std::fs::copy(entry.path(), dst_buildx.join(entry.file_name()));
+                        std::fs::copy(entry.path(), dst_buildx.join(entry.file_name()))
+                            .expect("failed to copy buildx instance config");
                     }
                 }
             }
