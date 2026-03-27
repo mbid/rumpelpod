@@ -1,0 +1,5 @@
+Reconnect to existing pod regardless of host config change
+
+When re-entering a pod, use the host stored in the database rather than
+erroring when the current config resolves to a different host.  The pod
+is already running somewhere -- just reconnect to it there.
