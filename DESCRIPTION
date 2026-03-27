@@ -1,0 +1,9 @@
+Track Claude Code session state via hooks
+
+Install Claude Code hooks that POST session state changes to the pod
+server.  The daemon picks them up through the existing SSE /events
+connection and exposes them in `rumpel list` as a CLAUDE column (hidden
+when no pod has state).
+
+Hooks are written once by prepare-image into managed-settings.json
+so they cannot be overridden and do not touch user settings.
