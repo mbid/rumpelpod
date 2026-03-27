@@ -4065,11 +4065,16 @@ impl Daemon for DaemonServer {
         let tokio_listener =
             tokio::net::TcpListener::from_std(listener).context("converting to tokio listener")?;
 
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
         tokio::task::spawn(crate::codex::run_codex_proxy(
             tokio_listener,
             container_url,
             container_token,
+            ready_tx,
         ));
+        // Wait for the accept loop to start so the proxy is actually
+        // processing connections before we return the port to the client.
+        let _ = ready_rx.recv();
 
         self.codex_proxies.lock().unwrap().insert(key, port);
 

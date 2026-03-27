@@ -99,11 +99,16 @@ fn find_host_codex_cli() -> Result<std::path::PathBuf> {
 ///
 /// Each incoming connection from the local codex TUI is forwarded to
 /// the pod server's `/codex` endpoint.
+///
+/// `ready_tx` fires once the accept loop is running so callers know
+/// the proxy is actually processing connections (not just bound).
 pub async fn run_codex_proxy(
     listener: tokio::net::TcpListener,
     container_url: String,
     container_token: String,
+    ready_tx: std::sync::mpsc::SyncSender<()>,
 ) {
+    let _ = ready_tx.send(());
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(conn) => conn,
