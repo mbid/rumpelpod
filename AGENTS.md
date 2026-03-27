@@ -8,7 +8,7 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
   Changes in src/ that affect the rumpel binary need a full pipeline run after smoke and feature tests pass.
   `./pipeline` accepts the same test name regex as `cargo test`, e.g. `./pipeline enter_`.
   Preserve output with `./pipeline 2>&1 | tee /tmp/pipeline.log`.
-  Most tests finish in under 60 seconds with the localhost executor (the default).
+  Most individual test cases finish in under 60 seconds with the localhost executor (the default).
   If a test takes longer, suspect a hang rather than normal slowness.
   The full pipeline takes around 360 seconds.
   Inside a rumpelpod, a parallel run in an adjacent devcontainer can slow things down.
