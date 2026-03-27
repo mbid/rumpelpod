@@ -1,0 +1,5 @@
+Abort merge on conflict to avoid leaving dirty state
+
+A failed merge (e.g. due to conflicts) left the host repo with
+MERGE_HEAD and conflict markers that had to be cleaned up manually.
+Now we run `git merge --abort` before returning the error.
