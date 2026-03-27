@@ -135,6 +135,9 @@ pub struct PodLaunchParams {
     /// Absolute path to the Claude CLI binary on the host, resolved by the
     /// client so the daemon does not depend on its own PATH.
     pub claude_cli_path: Option<PathBuf>,
+    /// Write /etc/claude-code/CLAUDE.md with a rumpelpod environment description
+    /// into the prepared image.
+    pub system_prompt: bool,
 }
 
 /// Response body for launch/recreate pod endpoints.
@@ -299,8 +302,6 @@ pub struct EnsureClaudeConfigRequest {
     pub container_token: String,
     /// Install a Claude PermissionRequest hook that auto-approves all tool use.
     pub auto_approve_hook: bool,
-    /// Write a rumpelpod environment description to /etc/claude-code/CLAUDE.md.
-    pub system_prompt: bool,
 }
 
 /// Request body for the host reconnect-events SSE endpoint.

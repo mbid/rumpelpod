@@ -259,6 +259,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let host_branch = get_current_branch(&repo_root);
     let git_identity = get_git_user_config(&repo_root);
     let claude_cli_path = find_host_claude_cli();
+    let toml_config = load_toml_config(&repo_root)?;
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
@@ -272,6 +273,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
         devcontainer,
         git_identity: Some(git_identity),
         claude_cli_path,
+        system_prompt: toml_config.claude.system_prompt,
     })?;
     for line in &mut progress {
         match line {

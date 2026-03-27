@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
-use indoc::formatdoc;
+use indoc::{formatdoc, indoc};
 use sha2::{Digest, Sha256};
 
 use crate::cli::PrepareImageCommand;
@@ -108,6 +108,7 @@ fn compute_prepared_tag(
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
+    system_prompt: bool,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_image.as_bytes());
@@ -127,6 +128,7 @@ fn compute_prepared_tag(
         hasher.update(b"\0");
     }
     hasher.update(SCHEMA_VERSION.to_le_bytes());
+    hasher.update([u8::from(system_prompt)]);
     let hash = hex::encode(&hasher.finalize()[..8]);
     format!("rumpelpod-prepared-{hash}")
 }
@@ -204,6 +206,7 @@ fn generate_dockerfile(
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
+    system_prompt: bool,
 ) -> String {
     let repo_path = container_repo_path.display();
     let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
@@ -219,6 +222,12 @@ fn generate_dockerfile(
         .map(|r| format!(" \\\n      --remote '{}={}'", r.name, r.url))
         .collect();
 
+    let system_prompt_flag = if system_prompt {
+        " \\\n      --system-prompt"
+    } else {
+        ""
+    };
+
     formatdoc! {r#"
         FROM {base_image}
 
@@ -231,7 +240,7 @@ fn generate_dockerfile(
         RUN --mount=type=bind,from=gateway,target={BUILD_GATEWAY_PATH} \
             {rumpel} prepare-image \
               --repo-path '{repo_path}' \
-              --user '{user}'{claude_flag}{remote_flags}
+              --user '{user}'{claude_flag}{remote_flags}{system_prompt_flag}
 
         USER ${{BASE_USER}}
     "#}
@@ -248,6 +257,7 @@ fn assemble_build_context(
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
+    system_prompt: bool,
 ) -> Result<tempfile::TempDir> {
     let dockerfile = generate_dockerfile(
         base_image,
@@ -255,6 +265,7 @@ fn assemble_build_context(
         user,
         claude_info,
         host_remotes,
+        system_prompt,
     );
     let binaries = find_rumpel_binaries()?;
 
@@ -362,6 +373,7 @@ pub fn build_prepared_image(
     host_remotes: &[GitRemote],
     claude_cli_path: Option<&Path>,
     docker_socket: Option<&Path>,
+    system_prompt: bool,
 ) -> Result<BuildResult> {
     let claude_info = detect_host_claude(claude_cli_path);
 
@@ -371,6 +383,7 @@ pub fn build_prepared_image(
         user,
         claude_info.as_ref(),
         host_remotes,
+        system_prompt,
     );
 
     // Check local cache first.
@@ -401,6 +414,7 @@ pub fn build_prepared_image(
                 builder,
                 push_reg,
                 registry,
+                system_prompt,
             );
         }
     }
@@ -416,6 +430,7 @@ pub fn build_prepared_image(
         user,
         claude_info.as_ref(),
         host_remotes,
+        system_prompt,
     )?;
 
     run_docker_build(
@@ -468,6 +483,7 @@ fn build_prepared_image_via_buildx(
     builder: &str,
     push_registry: &str,
     pull_registry: &str,
+    system_prompt: bool,
 ) -> Result<BuildResult> {
     let push_tag = format!("{push_registry}:{tag}");
     let pull_tag = format!("{pull_registry}:{tag}");
@@ -495,6 +511,7 @@ fn build_prepared_image_via_buildx(
         &base_user,
         claude_info,
         host_remotes,
+        system_prompt,
     )?;
 
     // Symlink the gateway to a name without `.git` so buildx treats it
@@ -622,6 +639,10 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         install_claude_cli(version)?;
     }
 
+    if cmd.system_prompt {
+        write_system_prompt()?;
+    }
+
     // Let the container user write to /opt/rumpelpod (e.g. the server token
     // file).  The binary keeps its 755 permissions regardless of owner.
     let status = Command::new("chown")
@@ -633,6 +654,27 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Write /etc/claude-code/CLAUDE.md with a terse description of the
+/// rumpelpod environment so Claude understands the container layout
+/// and git remote conventions.
+fn write_system_prompt() -> Result<()> {
+    let content = indoc! {"
+        You are running inside a rumpelpod -- an isolated devcontainer.
+
+        Git remotes:
+        - `host/` -- branches from the host repo.
+        - `rumpelpod/` -- branches from other pods on the same repo.
+
+        Committing automatically pushes to a gateway repo reachable from the
+        host. Fetching from these remotes is not automatic; run `git fetch`
+        explicitly when you need updates.
+    "};
+
+    let dir = Path::new("/etc/claude-code");
+    fs::create_dir_all(dir).context("creating /etc/claude-code")?;
+    fs::write(dir.join("CLAUDE.md"), content).context("writing /etc/claude-code/CLAUDE.md")
 }
 
 /// Parse "NAME=URL" remote specs and add/update them in the repo.

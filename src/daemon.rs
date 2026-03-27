@@ -17,7 +17,6 @@ use bollard::secret::{
     PortBinding,
 };
 use bollard::Docker;
-use indoc::indoc;
 use listenfd::ListenFd;
 use log::error;
 use rand::distr::Alphanumeric;
@@ -1249,7 +1248,6 @@ fn copy_claude_config_via_pod(
     container_repo_path: &Path,
     pod_name: &str,
     auto_approve_hook: bool,
-    system_prompt: bool,
 ) -> Result<()> {
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
     let claude_dir = host_home.join(".claude");
@@ -1344,35 +1342,7 @@ fn copy_claude_config_via_pod(
     pod.write_home_files(files, tar_extracts)
         .context("writing claude config files")?;
 
-    if system_prompt {
-        write_system_prompt(pod)?;
-    }
-
     Ok(())
-}
-
-/// Write /etc/claude-code/CLAUDE.md with a terse description of the
-/// rumpelpod environment so Claude understands the container layout
-/// and git remote conventions.
-fn write_system_prompt(pod: &PodClient) -> Result<()> {
-    let content = indoc! {"
-        You are running inside a rumpelpod -- an isolated devcontainer.
-
-        Git remotes:
-        - `host/` -- branches from the host repo.
-        - `rumpelpod/` -- branches from other pods on the same repo.
-
-        Committing automatically pushes to a gateway repo reachable from the
-        host. Fetching from these remotes is not automatic; run `git fetch`
-        explicitly when you need updates.
-    "};
-
-    pod.fs_write(
-        Path::new("/etc/claude-code/CLAUDE.md"),
-        content.as_bytes(),
-        true,
-    )
-    .context("writing /etc/claude-code/CLAUDE.md")
 }
 
 /// Filter history.jsonl to entries matching this project, rewriting the
@@ -2002,6 +1972,7 @@ impl DaemonServer {
         image_built: bool,
         git_identity: Option<&crate::git::GitIdentity>,
         claude_cli_path: Option<&Path>,
+        system_prompt: bool,
     ) -> Result<LaunchResult> {
         let (context, namespace, node_selector, tolerations) = match docker_host {
             Host::Kubernetes {
@@ -2040,6 +2011,7 @@ impl DaemonServer {
             &host_remotes,
             claude_cli_path,
             None,
+            system_prompt,
         )?;
         let image = &prepared.image.0;
 
@@ -2571,6 +2543,7 @@ impl DaemonServer {
             devcontainer,
             git_identity,
             claude_cli_path,
+            system_prompt,
         } = params;
 
         // Resolve daemon-side variables (container workspace paths,
@@ -2642,6 +2615,7 @@ impl DaemonServer {
                 build_result.built,
                 git_identity.as_ref(),
                 claude_cli_path.as_deref(),
+                system_prompt,
             );
         }
 
@@ -2967,6 +2941,7 @@ impl DaemonServer {
             &host_remotes,
             claude_cli_path.as_deref(),
             Some(&docker_socket),
+            system_prompt,
         )?;
         let image = prepared.image;
 
@@ -3899,7 +3874,6 @@ impl Daemon for DaemonServer {
             &request.container_repo_path,
             &request.pod_name.0,
             request.auto_approve_hook,
-            request.system_prompt,
         )?;
 
         // Mark as copied only after the full copy succeeds.

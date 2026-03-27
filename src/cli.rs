@@ -531,6 +531,10 @@ pub struct PrepareImageCommand {
     /// Host git remote to configure (NAME=URL, repeatable)
     #[arg(long = "remote")]
     pub remotes: Vec<String>,
+
+    /// Write /etc/claude-code/CLAUDE.md with a rumpelpod environment description
+    #[arg(long)]
+    pub system_prompt: bool,
 }
 
 #[derive(Subcommand)]
