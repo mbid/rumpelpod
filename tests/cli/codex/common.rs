@@ -110,13 +110,6 @@ impl CodexSession {
             "RUMPELPOD_DAEMON_SOCKET",
             daemon.socket_path.to_str().unwrap(),
         );
-        // The codex command reads OPENAI_API_KEY to write credentials
-        // into the container.
-        cmd.env(
-            "OPENAI_API_KEY",
-            std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set"),
-        );
-
         cmd.args(["codex", "test"]);
         if !codex_args.is_empty() {
             cmd.arg("--");

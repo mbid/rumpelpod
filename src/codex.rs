@@ -43,14 +43,6 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
         child_cmd.args(["--remote", &remote_url]);
         child_cmd.args(&cmd.args);
 
-        // The host-side codex TUI also checks for auth before
-        // connecting. Pass the API key so it skips the login flow.
-        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-            child_cmd.env("CODEX_API_KEY", &key);
-        } else if let Ok(key) = std::env::var("CODEX_API_KEY") {
-            child_cmd.env("CODEX_API_KEY", &key);
-        }
-
         let status = child_cmd
             .status()
             .with_context(|| format!("spawning codex TUI from {}", codex_bin.display()))?;
@@ -65,50 +57,30 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
     })
 }
 
-/// Write OpenAI credentials into the pod's ~/.codex/auth.json.
+/// Copy the host's codex credentials into the pod.
 ///
-/// Reads from OPENAI_API_KEY env var or ~/.codex/auth.json on the host.
+/// Copies ~/.codex/auth.json from the host home directory into the
+/// container so the codex app-server can authenticate with the OpenAI
+/// API. The user is expected to have run `codex login` beforehand.
 fn write_codex_credentials(pod: &crate::pod::PodClient) -> Result<()> {
-    let mut files: Vec<HomeFileEntry> = Vec::new();
-
-    // Prefer OPENAI_API_KEY env var (simple API key auth).
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        let auth_json = serde_json::json!({
-            "auth_mode": "apikey",
-            "OPENAI_API_KEY": api_key,
-        });
-        let data = serde_json::to_vec_pretty(&auth_json).context("serializing auth.json")?;
-        files.push(HomeFileEntry {
-            path: ".codex/auth.json".to_string(),
-            content: base64_encode(&data),
-            create_parents: true,
-        });
-    } else {
-        // Fall back to copying the host's auth.json (from `codex login`).
-        let host_home = dirs::home_dir().context("could not determine home directory")?;
-        match std::fs::read(host_home.join(".codex/auth.json")) {
-            Ok(data) => {
-                files.push(HomeFileEntry {
+    let host_home = dirs::home_dir().context("could not determine home directory")?;
+    match std::fs::read(host_home.join(".codex/auth.json")) {
+        Ok(data) => {
+            pod.write_home_files(
+                vec![HomeFileEntry {
                     path: ".codex/auth.json".to_string(),
                     content: base64_encode(&data),
                     create_parents: true,
-                });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(anyhow::anyhow!(
-                    "No OpenAI credentials found. Set OPENAI_API_KEY or run `codex login`."
-                ));
-            }
-            Err(e) => {
-                return Err(anyhow::Error::from(e).context("reading ~/.codex/auth.json"));
-            }
+                }],
+                vec![],
+            )?;
+            Ok(())
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(anyhow::anyhow!(
+            "No codex credentials found at ~/.codex/auth.json. Run `codex login` first."
+        )),
+        Err(e) => Err(anyhow::Error::from(e).context("reading ~/.codex/auth.json")),
     }
-
-    if !files.is_empty() {
-        pod.write_home_files(files, vec![])?;
-    }
-    Ok(())
 }
 
 /// Start a local TCP WebSocket proxy that forwards to the pod server's
