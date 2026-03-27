@@ -7,7 +7,6 @@ This is a rust project implementing an isolated LLM agent runner (rumpelpod).
   Run smoke tests first: `enter_smoke_test`, `enter_verifies_user_and_repo_path`, `claude_smoke`, `gateway_pod_commit_triggers_push`, plus tests related to what you changed.
   `./pipeline` accepts the same test name regex as `cargo test`, e.g. `./pipeline enter_`.
   Preserve output with `./pipeline 2>&1 | tee /tmp/pipeline.log`.
-- After committing, fetch from the `host` remote and rebase on your upstream to stay up to date.
 - Unless prompted otherwise, don't try to remain backwards compatible.
   Assume all containers/files/databases were created with the current version.
 - No unicode (e.g. emojis, em dashes) in comments, code, commit messages etc.
