@@ -304,12 +304,6 @@ pub struct EnsureClaudeConfigRequest {
     pub auto_approve_hook: bool,
 }
 
-/// Request body for the host reconnect-events SSE endpoint.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct HostReconnectRequest {
-    pub host: Host,
-}
-
 /// Request body for the pod reconnect-events SSE endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PodReconnectRequest {
@@ -425,16 +419,6 @@ pub trait Daemon: Send + Sync + 'static {
     // GET /pod/ssh-keys
     // List SSH keys loaded in the pod's host-side ssh-agent.
     fn ssh_list_keys(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String>;
-
-    // POST /host/reconnect-events
-    // Subscribe to reconnection events for a remote host (SSH tunnel).
-    // Returns None for hosts that do not support reconnection (e.g. localhost).
-    fn subscribe_host_reconnect(
-        &self,
-        _host: &Host,
-    ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
-        None
-    }
 
     // POST /pod/reconnect-events
     // Subscribe to reconnection events for a pod.
@@ -942,32 +926,6 @@ impl Daemon for DaemonClient {
 }
 
 impl DaemonClient {
-    /// Subscribe to host-level (SSH tunnel) reconnection events.
-    pub fn reconnect_events(&self, host: &Host) -> Result<ReconnectStream> {
-        let url = self.url.join("/host/reconnect-events")?;
-        let request = HostReconnectRequest { host: host.clone() };
-
-        let response = self
-            .client
-            .post(url)
-            .json(&request)
-            .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
-            });
-            let msg = &error.error;
-            return Err(anyhow::anyhow!(
-                "reconnect endpoint returned {status}: {msg}"
-            ));
-        }
-
-        Ok(ReconnectStream::new(response))
-    }
-
     /// Subscribe to pod-level reconnection events (SSH + pod).
     pub fn pod_reconnect_events(
         &self,
@@ -1422,30 +1380,6 @@ fn reconnect_sse_response(rx: tokio::sync::broadcast::Receiver<ReconnectEvent>) 
         .expect("building response never fails")
 }
 
-fn reconnect_not_available(msg: &str) -> Response {
-    Response::builder()
-        .status(StatusCode::BAD_REQUEST)
-        .header("content-type", "application/json")
-        .body(Body::from(
-            serde_json::to_string(&ErrorResponse {
-                error: msg.to_string(),
-            })
-            .expect("ErrorResponse is always serializable"),
-        ))
-        .expect("building response never fails")
-}
-
-/// Handler for POST /host/reconnect-events endpoint.
-async fn host_reconnect_events_handler<D: Daemon>(
-    State(daemon): State<Arc<D>>,
-    Json(request): Json<HostReconnectRequest>,
-) -> Response {
-    match daemon.subscribe_host_reconnect(&request.host) {
-        Some(rx) => reconnect_sse_response(rx),
-        None => reconnect_not_available("Host does not support reconnection"),
-    }
-}
-
 /// Handler for POST /pod/reconnect-events endpoint.
 ///
 /// When no event listener is active the pod was already stopped (or
@@ -1503,10 +1437,6 @@ where
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .route("/pod/ssh-add", post(ssh_add_key_handler::<D>))
         .route("/pod/ssh-keys", get(ssh_list_keys_handler::<D>))
-        .route(
-            "/host/reconnect-events",
-            post(host_reconnect_events_handler::<D>),
-        )
         .route(
             "/pod/reconnect-events",
             post(pod_reconnect_events_handler::<D>),
