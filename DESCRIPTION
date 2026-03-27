@@ -1,0 +1,6 @@
+Inject rumpelpod system prompt into Codex via /AGENTS.md
+
+Same environment description already injected into Claude via
+/etc/claude-code/CLAUDE.md is now also written to /AGENTS.md for Codex
+during prepare-image. Appends rather than overwrites so base images
+that ship their own /AGENTS.md are preserved.
