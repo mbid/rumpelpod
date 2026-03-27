@@ -232,7 +232,20 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
         cmd.no_description_file,
     )?;
 
-    // 6. Run git merge with passthrough flags
+    // 6. Check that the merge is clean before touching the working tree
+    let merge_tree = Command::new("git")
+        .args(["merge-tree", "HEAD", &pod_ref])
+        .current_dir(&repo_root)
+        .output()
+        .context("Failed to run git merge-tree")?;
+
+    if !merge_tree.status.success() {
+        return Err(anyhow::anyhow!(
+            "merge would produce conflicts -- aborting without changing the working tree"
+        ));
+    }
+
+    // 7. Run git merge (known to be clean)
     let mut merge_cmd = Command::new("git");
     merge_cmd.arg("merge");
 
@@ -253,14 +266,6 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
 
     if !merge_status.success() {
         let code = merge_status.code().unwrap_or(-1);
-        // Abort the merge so the working tree is not left in a conflicted state.
-        let abort_status = Command::new("git")
-            .args(["merge", "--abort"])
-            .current_dir(&repo_root)
-            .status();
-        if let Err(e) = abort_status {
-            eprintln!("warning: failed to abort merge: {e}");
-        }
         return Err(anyhow::anyhow!("git merge exited with status {code}"));
     }
 

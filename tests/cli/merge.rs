@@ -130,24 +130,15 @@ fn merge_conflict_warns() {
         .expect("Failed to run rumpel merge");
 
     assert!(!output.status.success(), "merge with conflict should fail");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("git merge exited with status"),
-        "should warn about merge failure: {}",
-        stderr
-    );
 
-    // Merge should have been aborted -- no MERGE_HEAD should exist
+    // Failed merge must not leave the working tree in a merge state
     let merge_head = Command::new("git")
         .args(["rev-parse", "--verify", "MERGE_HEAD"])
         .current_dir(repo.path())
         .stderr(std::process::Stdio::null())
         .status()
         .expect("git rev-parse failed");
-    assert!(
-        !merge_head.success(),
-        "MERGE_HEAD should not exist after aborted merge"
-    );
+    assert!(!merge_head.success(), "MERGE_HEAD should not exist");
 
     // Pod should still be running after a failed merge
     let output = pod_command(&repo, &daemon)
