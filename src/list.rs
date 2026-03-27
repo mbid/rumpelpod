@@ -35,29 +35,20 @@ pub fn list() -> Result<()> {
     });
 
     let show_claude = pods.iter().any(|pod| pod.claude_state.is_some());
+    let show_host = pods.iter().any(|pod| pod.host != pods[0].host);
+
+    let mut header: Vec<&str> = vec!["NAME"];
+    if show_claude {
+        header.push("CLAUDE");
+    }
+    header.extend(["GIT", "STATUS", "CREATED"]);
+    if show_host {
+        header.push("HOST");
+    }
+    header.push("CONTAINER ID");
 
     let mut table = Table::new();
-    table.load_preset(NOTHING);
-    if show_claude {
-        table.set_header(vec![
-            "NAME",
-            "CLAUDE",
-            "GIT",
-            "STATUS",
-            "CREATED",
-            "HOST",
-            "CONTAINER ID",
-        ]);
-    } else {
-        table.set_header(vec![
-            "NAME",
-            "GIT",
-            "STATUS",
-            "CREATED",
-            "HOST",
-            "CONTAINER ID",
-        ]);
-    }
+    table.load_preset(NOTHING).set_header(header);
 
     for pod in pods {
         let status_str = match pod.status {
@@ -74,26 +65,20 @@ pub fn list() -> Result<()> {
         let container_id = pod.container_id.as_deref().unwrap_or("");
         let container_id = &container_id[..container_id.len().min(header.len())];
 
+        let mut row = vec![pod.name];
         if show_claude {
-            table.add_row(vec![
-                pod.name,
-                claude_state_str(pod.claude_state).to_string(),
-                repo_state.to_string(),
-                status_str.to_string(),
-                pod.created,
-                pod.host,
-                container_id.to_string(),
-            ]);
-        } else {
-            table.add_row(vec![
-                pod.name,
-                repo_state.to_string(),
-                status_str.to_string(),
-                pod.created,
-                pod.host,
-                container_id.to_string(),
-            ]);
+            row.push(claude_state_str(pod.claude_state).to_string());
         }
+        row.extend([
+            repo_state.to_string(),
+            status_str.to_string(),
+            pod.created,
+        ]);
+        if show_host {
+            row.push(pod.host);
+        }
+        row.push(container_id.to_string());
+        table.add_row(row);
     }
 
     println!("{table}");

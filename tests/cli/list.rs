@@ -2,11 +2,13 @@
 
 use std::fs;
 
+use indoc::formatdoc;
 use retry::delay::Exponential;
 use retry::OperationResult;
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::ExecutorResources;
+use crate::ssh::{write_ssh_config, SshRemoteHost, SSH_USER};
 
 #[test]
 fn list_empty_returns_header_only() {
@@ -33,7 +35,7 @@ fn list_empty_returns_header_only() {
     assert!(stdout.contains("GIT"));
     assert!(stdout.contains("STATUS"));
     assert!(stdout.contains("CREATED"));
-    assert!(stdout.contains("HOST"));
+    assert!(!stdout.contains("HOST"));
     assert!(stdout.contains("CONTAINER ID"));
 }
 
@@ -478,18 +480,18 @@ fn list_does_not_show_other_repo_pods() {
 
 #[test]
 fn ssh_remote_pod_list() {
-    if !matches!(
-        crate::executor::executor_mode(),
-        crate::executor::ExecutorMode::Ssh
-    ) {
-        return;
-    }
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home, "ssh-list-remote");
+    let remote = SshRemoteHost::start();
+    write_ssh_config(&home, &[&remote]);
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
-    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    let remote_spec = remote.ssh_spec();
+    let toml = formatdoc! {r#"
+        host = "{remote_spec}"
+    "#};
+    fs::write(repo.path().join(".rumpelpod.toml"), toml).unwrap();
 
     // Create a pod on the remote
     let output = pod_command(&repo, &daemon)
@@ -524,10 +526,84 @@ fn ssh_remote_pod_list() {
         stdout,
         stderr
     );
-    // The remote host should be shown as "testuser@<ip>"
+    // With a single host, the HOST column is hidden.
     assert!(
-        stdout.contains(&format!("{}@", super::ssh::SSH_USER)),
-        "rumpel list should show the remote host: stdout={}, stderr={}",
+        !stdout.contains("HOST"),
+        "HOST column should be hidden with a single host: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+}
+
+/// The HOST column should appear when pods live on different hosts.
+#[test]
+fn list_shows_host_column_for_mixed_hosts() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let remote = SshRemoteHost::start();
+    write_ssh_config(&home, &[&remote]);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+
+    let remote_spec = remote.ssh_spec();
+    let toml = formatdoc! {r#"
+        host = "{remote_spec}"
+    "#};
+    fs::write(repo.path().join(".rumpelpod.toml"), toml).unwrap();
+
+    // Create a pod on the remote host (via .rumpelpod.toml).
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "remote-pod", "--", "true"])
+        .output()
+        .expect("rumpel enter failed to execute");
+    assert!(
+        output.status.success(),
+        "remote enter failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Create a pod on localhost (override via --host).
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "local-pod", "--host", "localhost", "--", "true"])
+        .output()
+        .expect("rumpel enter failed to execute");
+    assert!(
+        output.status.success(),
+        "local enter failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("rumpel list failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "rumpel list failed: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("HOST"),
+        "HOST column should appear with mixed hosts: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains("localhost"),
+        "should show localhost for the local pod: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+    assert!(
+        stdout.contains(&format!("{SSH_USER}@")),
+        "should show the remote host: stdout={}, stderr={}",
         stdout,
         stderr
     );
