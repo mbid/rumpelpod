@@ -1,0 +1,4 @@
+Hide HOST column when all pods share the same host
+
+The column is only useful when pods are spread across multiple hosts.
+Showing a uniform value in every row is noise.
