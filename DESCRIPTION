@@ -1,0 +1,6 @@
+Strengthen DESCRIPTION file instructions in system prompt
+
+The previous wording ("when your work is ready to merge") was too
+conditional; agents would often not create the file until late or not
+at all. Now the prompt tells the agent to create it with the first
+commit and keep it updated as the branch evolves.
