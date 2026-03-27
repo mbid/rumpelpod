@@ -307,6 +307,20 @@ pub struct EnsureClaudeConfigRequest {
     pub auto_approve_hook: bool,
 }
 
+/// Request body for start_codex_proxy endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartCodexProxyRequest {
+    pub pod_name: PodName,
+    pub repo_path: PathBuf,
+    pub container_url: String,
+    pub container_token: String,
+}
+
+/// Response body for start_codex_proxy endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartCodexProxyResponse {
+    pub port: u16,
+}
 /// Request body for the pod reconnect-events SSE endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PodReconnectRequest {
@@ -422,6 +436,12 @@ pub trait Daemon: Send + Sync + 'static {
     // GET /pod/ssh-keys
     // List SSH keys loaded in the pod's host-side ssh-agent.
     fn ssh_list_keys(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String>;
+
+    // POST /pod/codex-proxy
+    // Start a WebSocket proxy for the Codex App Server in a pod.
+    // Returns the localhost port the proxy is listening on.
+    // Reuses an existing proxy if one is already running for this pod.
+    fn start_codex_proxy(&self, request: StartCodexProxyRequest) -> Result<u16>;
 
     // POST /pod/reconnect-events
     // Subscribe to reconnection events for a pod.
@@ -856,6 +876,30 @@ impl Daemon for DaemonClient {
 
         if response.status().is_success() {
             Ok(())
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "Unknown error".to_string(),
+            });
+            let msg = &error.error;
+            Err(anyhow::anyhow!("Server error: {msg}"))
+        }
+    }
+
+    fn start_codex_proxy(&self, request: StartCodexProxyRequest) -> Result<u16> {
+        let url = self.url.join("/pod/codex-proxy")?;
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+
+        if response.status().is_success() {
+            let resp: StartCodexProxyResponse = response
+                .json()
+                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
+            Ok(resp.port)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
                 error: "Unknown error".to_string(),
@@ -1300,6 +1344,24 @@ async fn ensure_claude_config_handler<D: Daemon>(
     }
 }
 
+/// Handler for POST /pod/codex-proxy endpoint.
+async fn start_codex_proxy_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<StartCodexProxyRequest>,
+) -> Result<Json<StartCodexProxyResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let result = block_in_place(|| daemon.start_codex_proxy(request));
+
+    match result {
+        Ok(port) => Ok(Json(StartCodexProxyResponse { port })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{e:#}"),
+            }),
+        )),
+    }
+}
+
 /// Handler for POST /pod/ssh-add endpoint.
 async fn ssh_add_key_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
@@ -1438,6 +1500,7 @@ where
         .route("/conversations", get(list_conversations_handler::<D>))
         .route("/conversation/{id}", get(get_conversation_handler::<D>))
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
+        .route("/pod/codex-proxy", post(start_codex_proxy_handler::<D>))
         .route("/pod/ssh-add", post(ssh_add_key_handler::<D>))
         .route("/pod/ssh-keys", get(ssh_list_keys_handler::<D>))
         .route(

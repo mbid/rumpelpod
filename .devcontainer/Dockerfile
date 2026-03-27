@@ -123,6 +123,17 @@ RUN dpkg_arch=$(dpkg --print-architecture) && \
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+# Install Codex CLI from GitHub releases.
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64) CODEX_ARCH="x86_64-unknown-linux-gnu" ;; \
+        aarch64) CODEX_ARCH="aarch64-unknown-linux-gnu" ;; \
+    esac && \
+    curl -fsSL "https://github.com/openai/codex/releases/latest/download/codex-$CODEX_ARCH.tar.gz" \
+    | tar xz -C /tmp && \
+    mv "/tmp/codex-$CODEX_ARCH" /usr/local/bin/codex && \
+    chmod +x /usr/local/bin/codex
+
 USER root
 RUN mkdir /workspaces && chown -R ${USER}:${USER} /workspaces
 USER ${USER}

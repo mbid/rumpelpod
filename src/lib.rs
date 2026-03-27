@@ -38,10 +38,23 @@ mod stop;
 mod tcp_proxy;
 mod tunnel;
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
+
+/// Resolve a binary by name on PATH, like which(1).
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    for dir in path_var.split(':') {
+        let candidate = Path::new(dir).join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
 
 /// Whether an operation should retry indefinitely (user can cancel) or
 /// give up after a sensible limit (no user waiting).

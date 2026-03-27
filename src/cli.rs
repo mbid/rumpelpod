@@ -231,9 +231,7 @@ Examples:
     /// Run OpenAI Codex inside a pod
     #[command(long_about = "Run OpenAI Codex inside a pod.
 
-The Codex App Server runs inside the container, while the Codex TUI runs locally. Communication is proxied through the pod server over WebSocket.
-
-On first run, copies OpenAI credentials from the host into the container. Subsequent runs reuse the existing App Server session, allowing disconnect and reconnect.
+The Codex App Server runs inside the container while the TUI runs locally.
 
 Examples:
   rumpel codex dev                       # Launch Codex in 'dev' pod
@@ -554,6 +552,10 @@ pub struct PrepareImageCommand {
     /// Claude CLI version to install (skip if not provided)
     #[arg(long)]
     pub claude_version: Option<String>,
+
+    /// Install the Codex CLI into the prepared image
+    #[arg(long)]
+    pub install_codex: bool,
 
     /// Host git remote to configure (NAME=URL, repeatable)
     #[arg(long = "remote")]

@@ -214,7 +214,7 @@ fn find_codex_cli() -> Result<PathBuf> {
         return Ok(bin_path.to_path_buf());
     }
 
-    if let Ok(found) = which("codex") {
+    if let Some(found) = crate::which("codex") {
         return Ok(found);
     }
 
@@ -222,16 +222,4 @@ fn find_codex_cli() -> Result<PathBuf> {
         "Codex CLI not found at {} or in PATH",
         crate::daemon::CODEX_CONTAINER_BIN
     ))
-}
-
-/// Resolve a binary name via PATH, like `which(1)`.
-fn which(name: &str) -> Result<PathBuf> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    for dir in path_var.split(':') {
-        let candidate = Path::new(dir).join(name);
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow::anyhow!("'{name}' not found in PATH"))
 }

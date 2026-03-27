@@ -41,6 +41,11 @@ struct HostClaudeInfo {
     version: String,
 }
 
+/// Whether the Codex CLI is available on the host.
+fn host_has_codex() -> bool {
+    crate::which("codex").is_some()
+}
+
 /// Build-time version string that changes whenever the source or git
 /// state changes.  Used instead of hashing the (potentially huge)
 /// binary at runtime.
@@ -204,11 +209,13 @@ fn probe_base_image_user(
 /// After the rumpel binary is installed, remaining setup (repo clone,
 /// Claude CLI) is delegated to `rumpel prepare-image` so the logic
 /// lives in Rust instead of shell.
+#[allow(clippy::too_many_arguments)]
 fn generate_dockerfile(
     base_image: &str,
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
+    install_codex: bool,
     host_remotes: &[GitRemote],
     inject_system_prompt: bool,
     description_file: Option<&str>,
@@ -219,6 +226,12 @@ fn generate_dockerfile(
     let claude_flag = match claude_info {
         Some(info) => format!(" \\\n      --claude-version '{}'", info.version),
         None => String::new(),
+    };
+
+    let codex_flag = if install_codex {
+        " \\\n      --install-codex"
+    } else {
+        ""
     };
 
     let remote_flags: String = host_remotes
@@ -250,7 +263,7 @@ fn generate_dockerfile(
         RUN --mount=type=bind,from=gateway,target={BUILD_GATEWAY_PATH} \
             {rumpel} prepare-image \
               --repo-path '{repo_path}' \
-              --user '{user}'{claude_flag}{remote_flags}{system_prompt_flag}{description_flag}
+              --user '{user}'{claude_flag}{codex_flag}{remote_flags}{system_prompt_flag}{description_flag}
 
         USER ${{BASE_USER}}
     "#}
@@ -261,11 +274,13 @@ fn generate_dockerfile(
 /// The gateway is NOT included here -- it is passed separately via
 /// `--build-context` so buildx can transfer it efficiently and the
 /// Dockerfile bind-mounts it without baking it into a layer.
+#[allow(clippy::too_many_arguments)]
 fn assemble_build_context(
     base_image: &str,
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
+    install_codex: bool,
     host_remotes: &[GitRemote],
     inject_system_prompt: bool,
     description_file: Option<&str>,
@@ -275,6 +290,7 @@ fn assemble_build_context(
         container_repo_path,
         user,
         claude_info,
+        install_codex,
         host_remotes,
         inject_system_prompt,
         description_file,
@@ -389,6 +405,7 @@ pub fn build_prepared_image(
     description_file: Option<&str>,
 ) -> Result<BuildResult> {
     let claude_info = detect_host_claude(claude_cli_path);
+    let install_codex = host_has_codex();
 
     let tag = compute_prepared_tag(
         &base_image.0,
@@ -424,6 +441,7 @@ pub fn build_prepared_image(
                 container_repo_path,
                 host_remotes,
                 claude_info.as_ref(),
+                install_codex,
                 &tag,
                 builder,
                 push_reg,
@@ -444,6 +462,7 @@ pub fn build_prepared_image(
         container_repo_path,
         user,
         claude_info.as_ref(),
+        install_codex,
         host_remotes,
         inject_system_prompt,
         description_file,
@@ -495,6 +514,7 @@ fn build_prepared_image_via_buildx(
     container_repo_path: &Path,
     host_remotes: &[GitRemote],
     claude_info: Option<&HostClaudeInfo>,
+    install_codex: bool,
     tag: &str,
     builder: &str,
     push_registry: &str,
@@ -527,6 +547,7 @@ fn build_prepared_image_via_buildx(
         container_repo_path,
         &base_user,
         claude_info,
+        install_codex,
         host_remotes,
         inject_system_prompt,
         description_file,
@@ -655,6 +676,10 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
 
     if let Some(ref version) = cmd.claude_version {
         install_claude_cli(version)?;
+    }
+
+    if cmd.install_codex {
+        install_codex_cli()?;
     }
 
     if cmd.inject_system_prompt {
@@ -820,6 +845,67 @@ fn install_claude_cli(version: &str) -> Result<()> {
     fs::write(bin_path, &data).context("writing Claude CLI binary")?;
     fs::set_permissions(bin_path, fs::Permissions::from_mode(0o755))
         .context("making Claude CLI binary executable")?;
+
+    Ok(())
+}
+
+/// Download and install the Codex CLI from the GitHub release matching
+/// the host architecture.
+///
+/// Skips if a `codex` binary is already present.
+fn install_codex_cli() -> Result<()> {
+    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
+    if bin_path.exists() {
+        return Ok(());
+    }
+    if Command::new("codex")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        return Ok(());
+    }
+
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-unknown-linux-gnu",
+        "aarch64" => "aarch64-unknown-linux-gnu",
+        other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
+    };
+
+    let url =
+        format!("https://github.com/openai/codex/releases/latest/download/codex-{arch}.tar.gz");
+    let client = reqwest::blocking::Client::new();
+    let data = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("downloading Codex CLI from {url}"))?
+        .error_for_status()
+        .with_context(|| format!("downloading Codex CLI from {url}"))?
+        .bytes()
+        .with_context(|| format!("reading Codex CLI tarball from {url}"))?;
+
+    // The tarball contains a single file named codex-<arch>.
+    let decoder = flate2::read::GzDecoder::new(&data[..]);
+    let mut archive = tar::Archive::new(decoder);
+    let mut entry = archive
+        .entries()
+        .context("reading tar entries")?
+        .next()
+        .context("empty tarball")?
+        .context("reading tar entry")?;
+
+    if let Some(parent) = bin_path.parent() {
+        fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
+    }
+    std::io::copy(
+        &mut entry,
+        &mut fs::File::create(bin_path).context("creating codex binary")?,
+    )
+    .context("extracting codex binary")?;
+    fs::set_permissions(bin_path, fs::Permissions::from_mode(0o755))
+        .context("making codex binary executable")?;
 
     Ok(())
 }

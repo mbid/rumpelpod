@@ -64,11 +64,11 @@ impl TestDaemon {
         Self::start_inner(home, false)
     }
 
-    /// Start a daemon that can detect the host Claude CLI.
+    /// Start a daemon that can detect host LLM CLIs (Claude, Codex).
     ///
-    /// Most tests should use `start()`, which hides the host claude
-    /// binary to avoid downloading ~200 MB into every prepared image.
-    pub fn start_with_host_claude(home: &TestHome) -> Self {
+    /// Most tests should use `start()`, which hides these binaries
+    /// to avoid downloading large packages into every prepared image.
+    pub fn start_with_host_llm_clis(home: &TestHome) -> Self {
         Self::start_inner(home, true)
     }
 
@@ -97,7 +97,7 @@ impl TestDaemon {
         let path = if host_claude {
             std::env::var("PATH").unwrap_or_default()
         } else {
-            path_without_claude()
+            path_without_llm_clis()
         };
 
         let mut cmd = Command::new("rumpel");
@@ -294,14 +294,17 @@ pub fn pod_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
     cmd
 }
 
-/// Return PATH with directories containing a `claude` binary removed.
+/// Return PATH with directories containing `claude` or `codex` binaries removed.
 ///
-/// Prevents the daemon from detecting the host Claude CLI and
-/// downloading ~200 MB into every prepared image.
-fn path_without_claude() -> String {
+/// Prevents the daemon from detecting these host CLIs and
+/// downloading large binaries into every prepared image.
+fn path_without_llm_clis() -> String {
     let path = std::env::var("PATH").unwrap_or_default();
     path.split(':')
-        .filter(|dir| !Path::new(dir).join("claude").is_file())
+        .filter(|dir| {
+            let d = Path::new(dir);
+            !d.join("claude").is_file() && !d.join("codex").is_file()
+        })
         .collect::<Vec<_>>()
         .join(":")
 }

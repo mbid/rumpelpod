@@ -39,6 +39,7 @@ use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use protocol::{
     ContainerId, ConversationSummary, Daemon, EnsureClaudeConfigRequest, GetConversationResponse,
     Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
+    StartCodexProxyRequest,
 };
 use reconnect::PodEventManager;
 use ssh_forward::SshForwardManager;
@@ -212,6 +213,11 @@ struct DaemonServer {
     /// The agent socket is relayed into containers via WebSocket.
     #[allow(clippy::type_complexity)]
     ssh_agents: Arc<Mutex<HashMap<(PathBuf, String), SshAgentHandle>>>,
+    /// Per-pod Codex WebSocket proxy listeners.
+    /// Each proxy forwards WebSocket connections from localhost to the
+    /// pod server's /codex endpoint.
+    #[allow(clippy::type_complexity)]
+    codex_proxies: Arc<Mutex<HashMap<(PathBuf, String), u16>>>,
 }
 
 /// Label key used to store the repository path on containers.
@@ -4035,6 +4041,41 @@ impl Daemon for DaemonServer {
         Ok(())
     }
 
+    fn start_codex_proxy(&self, request: StartCodexProxyRequest) -> Result<u16> {
+        let key = (request.repo_path.clone(), request.pod_name.0.clone());
+
+        // Reuse an existing proxy if one is already listening.
+        {
+            let proxies = self.codex_proxies.lock().unwrap();
+            if let Some(&port) = proxies.get(&key) {
+                return Ok(port);
+            }
+        }
+
+        let container_url = request.container_url.clone();
+        let container_token = request.container_token.clone();
+
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").context("binding codex proxy listener")?;
+        listener
+            .set_nonblocking(true)
+            .context("setting nonblocking")?;
+        let port = listener.local_addr()?.port();
+
+        let tokio_listener =
+            tokio::net::TcpListener::from_std(listener).context("converting to tokio listener")?;
+
+        tokio::task::spawn(crate::codex::run_codex_proxy(
+            tokio_listener,
+            container_url,
+            container_token,
+        ));
+
+        self.codex_proxies.lock().unwrap().insert(key, port);
+
+        Ok(port)
+    }
+
     fn ssh_add_key(
         &self,
         pod_name: PodName,
@@ -4241,6 +4282,7 @@ pub fn run_daemon() -> Result<()> {
         docker_tunnels: Arc::new(Mutex::new(HashMap::new())),
         exec_proxies: Arc::new(Mutex::new(HashMap::new())),
         ssh_agents: Arc::new(Mutex::new(HashMap::new())),
+        codex_proxies: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Keep the server alive for the lifetime of the daemon.

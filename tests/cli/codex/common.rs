@@ -8,36 +8,15 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::common::{TestDaemon, TestHome, TestRepo};
 use crate::executor::ExecutorResources;
-
-/// Write a devcontainer that has the codex CLI installed.
-fn write_codex_test_devcontainer(repo: &TestRepo) {
-    // Download a pre-built codex binary from the GitHub release.
-    // The exact URL and version will need to be updated as new
-    // releases are published.
-    let extra_dockerfile = formatdoc! {r#"
-        RUN apt-get update && apt-get install -y curl
-        RUN ARCH=$(dpkg --print-architecture) && \
-            case "$ARCH" in \
-                amd64) CODEX_ARCH="x86_64-unknown-linux-gnu" ;; \
-                arm64) CODEX_ARCH="aarch64-unknown-linux-gnu" ;; \
-                *) echo "unsupported arch: $ARCH" && exit 1 ;; \
-            esac && \
-            curl -fsSL "https://github.com/openai/codex/releases/latest/download/codex-$CODEX_ARCH.tar.gz" \
-            | tar xz -C /usr/local/bin && \
-            mv "/usr/local/bin/codex-$CODEX_ARCH" /usr/local/bin/codex
-    "#};
-
-    write_test_devcontainer(repo, &extra_dockerfile, "");
-}
 
 /// Write controlled codex credentials into the test home directory.
 ///
-/// Reads the OpenAI API key from the OPENAI_API_KEY env var.
+/// Reads the OpenAI API key from the OPENAI_API_KEY env var and writes
+/// a ~/.codex/auth.json, emulating a user who ran `codex login`.
 fn setup_controlled_home(home: &TestHome) {
     let api_key = std::env::var("OPENAI_API_KEY")
         .expect("OPENAI_API_KEY must be set to run codex integration tests");
@@ -53,33 +32,30 @@ fn setup_controlled_home(home: &TestHome) {
 
 /// Set up everything needed before running a codex command.
 ///
-/// Returns in the correct drop order: home must outlive executor and daemon.
+/// Uses `start_with_host_llm_clis` so the daemon can detect the host
+/// codex binary and install it via prepare-image.
 pub fn setup_codex_test_repo(
     test_name: &str,
 ) -> (TestHome, TestRepo, ExecutorResources, TestDaemon) {
     let repo = TestRepo::new();
-    write_codex_test_devcontainer(&repo);
+    // No extra devcontainer setup -- the codex binary is installed
+    // by prepare-image when the daemon detects it on the host.
+    crate::common::write_test_devcontainer(&repo, "", "");
 
     let home = TestHome::new();
     setup_controlled_home(&home);
     let executor = ExecutorResources::setup(&home, test_name);
-    let daemon = TestDaemon::start(&home);
+    let daemon = TestDaemon::start_with_host_llm_clis(&home);
     std::fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml)
         .expect("write .rumpelpod.toml");
     (home, repo, executor, daemon)
 }
 
-// Tall enough to hold long responses without scrolling off, normal width.
 const PTY_ROWS: u16 = 500;
 const PTY_COLS: u16 = 80;
-
-/// How often to dump the screen contents while waiting.
 const SCREEN_DUMP_INTERVAL: Duration = Duration::from_secs(5);
 
 /// An interactive Codex session running via `rumpel codex`.
-///
-/// Uses a vt100 terminal emulator to parse raw escape sequences and
-/// provide rendered screen contents rather than raw byte matching.
 pub struct CodexSession {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     rx: mpsc::Receiver<Vec<u8>>,
@@ -110,6 +86,7 @@ impl CodexSession {
             "RUMPELPOD_DAEMON_SOCKET",
             daemon.socket_path.to_str().unwrap(),
         );
+
         cmd.args(["codex", "test"]);
         if !codex_args.is_empty() {
             cmd.arg("--");
@@ -187,6 +164,26 @@ impl CodexSession {
         }
     }
 
+    /// Dismiss startup dialogs by pressing Enter until we reach the
+    /// main input prompt (not on the alternate screen).
+    pub fn dismiss_dialogs(&mut self) {
+        loop {
+            self.wait_for("\u{203a}");
+
+            while let Ok(bytes) = self.rx.try_recv() {
+                self.raw_log.extend_from_slice(&bytes);
+                self.parser.process(&bytes);
+            }
+
+            if !self.parser.screen().alternate_screen() {
+                break;
+            }
+
+            self.writer.write_all(b"\r").expect("write Enter");
+            self.writer.flush().expect("flush");
+        }
+    }
+
     fn dump_screen(&self, waiting_for: &str) {
         let screen = self.parser.screen();
         let contents = screen.contents();
@@ -197,31 +194,6 @@ impl CodexSession {
             "[wait_for {:?}] alt_screen={} cursor=({},{}) screen:\n{}",
             waiting_for, alt, cur_row, cur_col, trimmed
         );
-    }
-
-    /// Dismiss startup dialogs by pressing Enter until we reach the
-    /// main input prompt (not on the alternate screen).
-    pub fn dismiss_dialogs(&mut self) {
-        loop {
-            // Wait for the TUI to show the prompt character.
-            self.wait_for("\u{203a}");
-
-            // Drain buffered output so the screen state is current.
-            while let Ok(bytes) = self.rx.try_recv() {
-                self.raw_log.extend_from_slice(&bytes);
-                self.parser.process(&bytes);
-            }
-
-            // If we are on the main screen (not alternate), the input
-            // prompt is ready and there are no more dialogs.
-            if !self.parser.screen().alternate_screen() {
-                break;
-            }
-
-            // Still on a dialog -- press Enter to dismiss it.
-            self.writer.write_all(b"\r").expect("write Enter");
-            self.writer.flush().expect("flush");
-        }
     }
 
     /// Type text into the prompt and press Enter.

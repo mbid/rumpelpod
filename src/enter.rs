@@ -224,14 +224,7 @@ fn write_default_dockerfile() -> Result<tempfile::TempDir> {
 /// The client resolves this so the daemon does not depend on its own
 /// PATH (which may be limited, e.g. under systemd).
 pub fn find_host_claude_cli() -> Option<PathBuf> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    for dir in path_var.split(':') {
-        let candidate = PathBuf::from(dir).join("claude");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    crate::which("claude")
 }
 
 /// Verify that every file under each bind mount source is owned by the

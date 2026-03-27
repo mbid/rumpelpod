@@ -1,20 +1,18 @@
-//! Host-side `rumpel codex` command.
+//! Host-side `rumpel codex` command and daemon-managed WebSocket proxy.
 //!
-//! Launches a pod, forwards OpenAI credentials into it, starts a local
-//! WebSocket proxy, and spawns the codex TUI connected to the proxy.
-//! The proxy forwards frames to the pod server's `/codex` endpoint,
-//! which in turn proxies to the codex app-server inside the container.
-
-use std::path::Path;
+//! Launches a pod, forwards codex credentials into it, asks the daemon
+//! to start a WebSocket proxy, and spawns the codex TUI pointing at it.
+//! The daemon keeps the proxy alive across TUI restarts so the codex
+//! app-server session inside the pod survives disconnects.
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use log::trace;
 use tokio_tungstenite::tungstenite;
 use url::Url;
 
-use crate::async_runtime::block_on;
 use crate::cli::CodexCommand;
+use crate::daemon;
+use crate::daemon::protocol::{Daemon, DaemonClient, PodName, StartCodexProxyRequest};
 use crate::enter::{launch_pod, load_and_resolve};
 use crate::git::get_repo_root;
 use crate::pod::types::{base64_encode, HomeFileEntry};
@@ -27,34 +25,36 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
 
     let result = launch_pod(&cmd.name, host_override)?;
 
-    // Write OpenAI credentials into the container so the codex
-    // app-server can authenticate with the OpenAI API.
     let pod = crate::pod::PodClient::connect(&result.container_url, &result.container_token)?;
     write_codex_credentials(&pod)?;
 
     let codex_bin = find_host_codex_cli()?;
 
-    block_on(async {
-        let port =
-            start_local_proxy(result.container_url.clone(), result.container_token.clone()).await?;
+    let socket_path = daemon::socket_path()?;
+    let client = DaemonClient::new_unix(&socket_path);
+    let port = client.start_codex_proxy(StartCodexProxyRequest {
+        pod_name: PodName(cmd.name.clone()),
+        repo_path: repo_root,
+        container_url: result.container_url,
+        container_token: result.container_token,
+    })?;
 
-        let remote_url = format!("ws://127.0.0.1:{port}");
-        let mut child_cmd = std::process::Command::new(&codex_bin);
-        child_cmd.args(["--remote", &remote_url]);
-        child_cmd.args(&cmd.args);
+    let remote_url = format!("ws://127.0.0.1:{port}");
+    let mut child_cmd = std::process::Command::new(&codex_bin);
+    child_cmd.args(["--remote", &remote_url]);
+    child_cmd.args(&cmd.args);
 
-        let status = child_cmd
-            .status()
-            .with_context(|| format!("spawning codex TUI from {}", codex_bin.display()))?;
+    let status = child_cmd
+        .status()
+        .with_context(|| format!("spawning codex TUI from {}", codex_bin.display()))?;
 
-        if !status.success() {
-            if let Some(code) = status.code() {
-                std::process::exit(code);
-            }
+    if !status.success() {
+        if let Some(code) = status.code() {
+            std::process::exit(code);
         }
+    }
 
-        Ok(())
-    })
+    Ok(())
 }
 
 /// Copy the host's codex credentials into the pod.
@@ -83,54 +83,72 @@ fn write_codex_credentials(pod: &crate::pod::PodClient) -> Result<()> {
     }
 }
 
-/// Start a local TCP WebSocket proxy that forwards to the pod server's
-/// /codex endpoint. Returns the port the proxy is listening on.
-async fn start_local_proxy(container_url: String, container_token: String) -> Result<u16> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .context("binding local proxy listener")?;
-    let port = listener.local_addr()?.port();
-    trace!("codex: local proxy listening on 127.0.0.1:{port}");
-
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    eprintln!("codex proxy: accept error: {e}");
-                    continue;
-                }
-            };
-            let url = container_url.clone();
-            let token = container_token.clone();
-            tokio::spawn(async move {
-                if let Err(e) = proxy_connection(stream, &url, &token).await {
-                    eprintln!("codex proxy: connection error: {e:#}");
-                }
-            });
-        }
-    });
-
-    Ok(port)
+fn find_host_codex_cli() -> Result<std::path::PathBuf> {
+    crate::which("codex").ok_or_else(|| {
+        anyhow::anyhow!(
+            "codex CLI not found in PATH. Install it from https://github.com/openai/codex"
+        )
+    })
 }
 
-/// Proxy a single incoming TCP connection (from the codex TUI) to the
-/// pod server's /codex WebSocket endpoint.
+// ---------------------------------------------------------------------------
+// WebSocket proxy (runs inside the daemon process)
+// ---------------------------------------------------------------------------
+
+/// Accept loop for the daemon-managed codex WebSocket proxy.
+///
+/// Each incoming connection from the local codex TUI is forwarded to
+/// the pod server's `/codex` endpoint.
+pub async fn run_codex_proxy(
+    listener: tokio::net::TcpListener,
+    container_url: String,
+    container_token: String,
+) {
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                eprintln!("codex proxy: accept error: {e}");
+                continue;
+            }
+        };
+        let url = container_url.clone();
+        let token = container_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = proxy_connection(stream, &url, &token).await {
+                eprintln!("codex proxy: connection error: {e:#}");
+            }
+        });
+    }
+}
+
 async fn proxy_connection(
     stream: tokio::net::TcpStream,
     container_url: &str,
     container_token: &str,
 ) -> Result<()> {
-    // Accept the incoming WebSocket upgrade from the codex TUI.
     let client_ws = tokio_tungstenite::accept_async(stream)
         .await
         .context("accepting WebSocket from codex TUI")?;
 
-    // Connect to the pod server's /codex endpoint.
-    let request = build_pod_ws_request(container_url, container_token)?;
-    let (server_ws, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .context("connecting to pod server /codex")?;
+    // The pod server may not be ready yet (e.g. container-serve is
+    // still starting). Retry the upstream connection briefly so a
+    // slow container start does not cause a permanent failure.
+    let mut server_ws = None;
+    for _ in 0..50 {
+        let request = build_pod_ws_request(container_url, container_token)?;
+        match tokio_tungstenite::connect_async(request).await {
+            Ok((ws, _)) => {
+                server_ws = Some(ws);
+                break;
+            }
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+    let server_ws = server_ws
+        .ok_or_else(|| anyhow::anyhow!("could not connect to pod server /codex after retries"))?;
 
     let (mut client_write, mut client_read) = client_ws.split();
     let (mut server_write, mut server_read) = server_ws.split();
@@ -163,7 +181,6 @@ async fn proxy_connection(
     Ok(())
 }
 
-/// Build a WebSocket request to the pod server's /codex endpoint.
 fn build_pod_ws_request(
     container_url: &str,
     token: &str,
@@ -196,18 +213,4 @@ fn build_pod_ws_request(
         )
         .body(())
         .context("building WebSocket request for pod server")
-}
-
-/// Find the codex binary on the host's PATH.
-fn find_host_codex_cli() -> Result<std::path::PathBuf> {
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    for dir in path_var.split(':') {
-        let candidate = Path::new(dir).join("codex");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    Err(anyhow::anyhow!(
-        "codex CLI not found in PATH. Install it from https://github.com/openai/codex"
-    ))
 }
