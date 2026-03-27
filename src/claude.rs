@@ -63,7 +63,6 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             docker_socket: result.docker_socket.clone(),
             container_url: result.container_url.clone(),
             container_token: result.container_token.clone(),
-            auto_approve_hook: skip_permissions_hook,
         });
         let elapsed = tc.elapsed();
         trace!("ensure_claude_config: {elapsed:?}");

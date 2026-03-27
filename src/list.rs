@@ -7,6 +7,17 @@ use comfy_table::Table;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, PodStatus};
 use crate::git::get_repo_root;
+use crate::pod::types::ClaudeState;
+
+fn claude_state_str(state: Option<ClaudeState>) -> &'static str {
+    match state {
+        Some(ClaudeState::Processing) => "processing",
+        Some(ClaudeState::WaitingForInput) => "idle",
+        Some(ClaudeState::AuthError) => "auth error",
+        Some(ClaudeState::Stopped) => "stopped",
+        None => "",
+    }
+}
 
 pub fn list() -> Result<()> {
     let repo_path = get_repo_root()?;
@@ -23,15 +34,30 @@ pub fn list() -> Result<()> {
         )
     });
 
+    let show_claude = pods.iter().any(|pod| pod.claude_state.is_some());
+
     let mut table = Table::new();
-    table.load_preset(NOTHING).set_header(vec![
-        "NAME",
-        "GIT",
-        "STATUS",
-        "CREATED",
-        "HOST",
-        "CONTAINER ID",
-    ]);
+    table.load_preset(NOTHING);
+    if show_claude {
+        table.set_header(vec![
+            "NAME",
+            "CLAUDE",
+            "GIT",
+            "STATUS",
+            "CREATED",
+            "HOST",
+            "CONTAINER ID",
+        ]);
+    } else {
+        table.set_header(vec![
+            "NAME",
+            "GIT",
+            "STATUS",
+            "CREATED",
+            "HOST",
+            "CONTAINER ID",
+        ]);
+    }
 
     for pod in pods {
         let status_str = match pod.status {
@@ -48,14 +74,26 @@ pub fn list() -> Result<()> {
         let container_id = pod.container_id.as_deref().unwrap_or("");
         let container_id = &container_id[..container_id.len().min(header.len())];
 
-        table.add_row(vec![
-            pod.name,
-            repo_state.to_string(),
-            status_str.to_string(),
-            pod.created,
-            pod.host,
-            container_id.to_string(),
-        ]);
+        if show_claude {
+            table.add_row(vec![
+                pod.name,
+                claude_state_str(pod.claude_state).to_string(),
+                repo_state.to_string(),
+                status_str.to_string(),
+                pod.created,
+                pod.host,
+                container_id.to_string(),
+            ]);
+        } else {
+            table.add_row(vec![
+                pod.name,
+                repo_state.to_string(),
+                status_str.to_string(),
+                pod.created,
+                pod.host,
+                container_id.to_string(),
+            ]);
+        }
     }
 
     println!("{table}");

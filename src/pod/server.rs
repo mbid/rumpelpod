@@ -46,6 +46,8 @@ pub struct PodServerState {
     pub repo_path: std::sync::Arc<tokio::sync::Mutex<Option<PathBuf>>>,
     /// Codex app-server child process, started on first /codex connection.
     pub codex_app_server: super::codex::CodexAppServer,
+    /// Current Claude Code session state, updated by hooks.
+    pub claude_state: tokio::sync::watch::Sender<Option<super::types::ClaudeState>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,12 +73,14 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         std::env::set_var("LOGNAME", &user.name);
     }
 
+    let (claude_state_tx, _) = tokio::sync::watch::channel(None);
     let state = PodServerState {
         pty_sessions: super::pty::PtySessions::new(),
         token: token.clone(),
         ssh_relay: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         repo_path: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         codex_app_server: super::codex::new_codex_app_server(),
+        claude_state: claude_state_tx,
     };
 
     // POST routes require bearer token authentication
@@ -92,6 +96,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/init-mounts", post(init_mounts_handler))
         .route("/run", post(run_handler))
         .route("/events", get(events_handler))
+        .route("/claude-state", post(claude_state_handler))
         .route("/claude", any(super::pty::claude_session_handler))
         .route("/codex", any(super::codex::codex_ws_handler))
         .with_state(state)
@@ -178,8 +183,8 @@ fn sse_event(event_type: &str, data: &str) -> String {
 /// On each new connection the pod pushes all local branches to the
 /// gateway -- recovering any pushes that failed while the daemon was
 /// disconnected.  After the initial push a `state` event is sent
-/// (currently empty; will carry pod state in the future), followed by
-/// periodic keepalives.
+/// carrying the current claude session state, followed by periodic
+/// keepalives and claude_state change events.
 async fn events_handler(State(state): State<PodServerState>) -> Response {
     let repo_path = match state.repo_path.lock().await.clone() {
         Some(p) => p,
@@ -199,6 +204,13 @@ async fn events_handler(State(state): State<PodServerState>) -> Response {
 
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
 
+    // Snapshot the current claude state for the greeting, then
+    // subscribe so we can forward changes.
+    let current_claude = *state.claude_state.borrow();
+    let mut claude_rx = state.claude_state.subscribe();
+
+    // Git push + greeting + keepalives run on a blocking thread.
+    let tx_keepalive = tx.clone();
     tokio::task::spawn_blocking(move || {
         // Push all local branches to the gateway.  Best-effort: the
         // tunnel may not be fully up yet on the very first connection.
@@ -222,13 +234,31 @@ async fn events_handler(State(state): State<PodServerState>) -> Response {
             Ok(_) => {}
         }
 
-        if tx.blocking_send(sse_event("state", "{}")).is_err() {
+        let greeting_data = greeting_json(current_claude);
+        if tx_keepalive
+            .blocking_send(sse_event("state", &greeting_data))
+            .is_err()
+        {
             return;
         }
 
         loop {
             std::thread::sleep(Duration::from_secs(30));
-            if tx.blocking_send(sse_event("keepalive", "{}")).is_err() {
+            if tx_keepalive
+                .blocking_send(sse_event("keepalive", "{}"))
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+
+    // Forward claude state changes as SSE events.
+    tokio::spawn(async move {
+        while claude_rx.changed().await.is_ok() {
+            let val = *claude_rx.borrow_and_update();
+            let data = serde_json::to_string(&val).expect("Option<ClaudeState> is serializable");
+            if tx.send(sse_event("claude_state", &data)).await.is_err() {
                 return;
             }
         }
@@ -241,6 +271,21 @@ async fn events_handler(State(state): State<PodServerState>) -> Response {
         .header("content-type", "text/event-stream")
         .body(Body::from_stream(stream))
         .expect("building response never fails")
+}
+
+fn greeting_json(claude_state: Option<super::types::ClaudeState>) -> String {
+    let cs = serde_json::to_value(claude_state).expect("ClaudeState is serializable");
+    serde_json::to_string(&serde_json::json!({ "claude_state": cs }))
+        .expect("greeting json is serializable")
+}
+
+/// Accept claude session state updates from hooks inside the container.
+async fn claude_state_handler(
+    State(state): State<PodServerState>,
+    Json(req): Json<super::types::NotifyClaudeStateRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    state.claude_state.send_replace(Some(req.state));
+    ok_json(serde_json::json!({}))
 }
 
 // ---------------------------------------------------------------------------

@@ -686,6 +686,8 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         write_system_prompt(cmd.description_file.as_deref())?;
     }
 
+    write_managed_settings()?;
+
     // Let the container user write to /opt/rumpelpod (e.g. the server token
     // file).  The binary keeps its 755 permissions regardless of owner.
     let status = Command::new("chown")
@@ -737,6 +739,49 @@ fn write_system_prompt(description_file: Option<&str>) -> Result<()> {
         .context("writing /etc/claude-code/CLAUDE.md")
 }
 
+/// Write /etc/claude-code/managed-settings.json with Claude Code hooks:
+///   - PermissionRequest: auto-approve permission dialogs (pods are isolated)
+///   - UserPromptSubmit / Stop / StopFailure / SessionEnd: track session state
+fn write_managed_settings() -> Result<()> {
+    let bin = crate::daemon::RUMPEL_CONTAINER_BIN;
+    let settings = serde_json::json!({
+        "hooks": {
+            "PermissionRequest": [{
+                "matcher": "",
+                "hooks": [{ "type": "command", "command":
+                    format!("{bin} claude-hook permission-request") }]
+            }],
+            "UserPromptSubmit": [{
+                "matcher": "",
+                "hooks": [{ "type": "command", "command":
+                    format!("{bin} claude-hook notify-state processing") }]
+            }],
+            "Stop": [{
+                "matcher": "",
+                "hooks": [{ "type": "command", "command":
+                    format!("{bin} claude-hook notify-state waiting_for_input") }]
+            }],
+            "StopFailure": [{
+                "matcher": "authentication_failed",
+                "hooks": [{ "type": "command", "command":
+                    format!("{bin} claude-hook notify-state auth_error") }]
+            }],
+            "SessionEnd": [{
+                "matcher": "",
+                "hooks": [{ "type": "command", "command":
+                    format!("{bin} claude-hook notify-state stopped") }]
+            }]
+        }
+    });
+
+    let dir = Path::new("/etc/claude-code");
+    fs::create_dir_all(dir).context("creating /etc/claude-code")?;
+    let json = serde_json::to_vec_pretty(&settings).expect("settings are serializable");
+    fs::write(dir.join("managed-settings.json"), json)
+        .context("writing /etc/claude-code/managed-settings.json")
+}
+
+/// Write /etc/claude-code/managed-settings.json with Claude Code hooks:
 /// Parse "NAME=URL" remote specs and add/update them in the repo.
 ///
 /// Also removes any pre-existing remotes (from the base image) that
