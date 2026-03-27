@@ -1,0 +1,8 @@
+Route LLM API proxy through pod server and exec tunnel
+
+The old approach ran a standalone HTTP proxy on the Docker bridge,
+which only works when containers have direct network access to the
+host.  Moving the caching proxy into the git HTTP server (host side)
+and adding a forwarding route in the pod server means API requests
+travel through the existing exec tunnel.  This works for local
+Docker, remote Docker, and Kubernetes alike.
