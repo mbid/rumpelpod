@@ -1,0 +1,25 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"4000000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T19:49:50Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T19:49:50Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T19:49:50Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4800000","anthropic-ratelimit-tokens-reset":"2026-03-27T19:49:50Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e30ebaf08c071c5-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 19:49:51 GMT","request-id":"req_011CZUAYVLPrdsuJtP3AdaLA","server":"cloudflare","server-timing":"x-originResponse;dur=639","set-cookie":"_cfuvid=2uERecehmUUcBMqTulaYk9CT3lEJM6WC.RZwFsq8aOQ-1774640990.5726426-1.0.1.1-8viYK_N1l1k7ti0ObUda4FfaUWrmYNFPpckH1UX68yc; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"636","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01CbCZLcCerneeQ6tfy8YxEg","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":348,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":1,"service_tier":"standard","inference_geo":"not_available"}}               }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}           }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"{\""}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"title\": \"Read hello.txt file contents\"}"}            }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0            }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":348,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":14},"context_management":{"applied_edits":[]}     }
+
+event: message_stop
+data: {"type":"message_stop"               }
+

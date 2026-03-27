@@ -13,7 +13,7 @@ use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::ExecutorResources;
 
 /// Pinned Claude Code version for deterministic tests.
-const CLAUDE_CODE_VERSION: &str = "2.1.63";
+const CLAUDE_CODE_VERSION: &str = "2.1.85";
 
 /// Fixed date injected via a Node.js Date override (see write_claude_test_devcontainer).
 /// Ensures prompts that include the current date produce stable cache keys.
