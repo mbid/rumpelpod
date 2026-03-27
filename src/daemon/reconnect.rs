@@ -22,7 +22,9 @@ use crate::config::Host;
 use crate::daemon::ssh_forward::SshForwardManager;
 
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
-const MAX_DELAY: Duration = Duration::from_secs(60);
+/// Cap retry backoff low so the user's terminal reconnects promptly once
+/// the host is reachable again.
+const MAX_DELAY: Duration = Duration::from_secs(5);
 
 /// Events streamed to clients waiting for a pod reconnection.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -610,12 +610,7 @@ fn ssh_reconnect_events() {
 
     // -- Phase 3: bring host back, expect Connected ----------------------
 
-    Command::new("docker")
-        .args(["start", remote.container_id()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("docker start failed");
+    // restart() handles stopped containers (docker restart = stop + start).
     remote.restart(Some(home.path()));
 
     // The phase 2 subscriber is still connected; drain until Connected.
