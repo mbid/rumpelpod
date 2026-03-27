@@ -106,7 +106,7 @@ async fn wait_for_healthy() -> Result<()> {
         .build()
         .context("building HTTP client")?;
 
-    for _ in 0..50 {
+    for _ in 0..300 {
         match client.get(&url).send().await {
             Ok(resp) if resp.status().is_success() => return Ok(()),
             _ => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -114,7 +114,7 @@ async fn wait_for_healthy() -> Result<()> {
     }
 
     Err(anyhow::anyhow!(
-        "codex app-server did not become healthy within 5 seconds"
+        "codex app-server did not become healthy within 30 seconds"
     ))
 }
 

@@ -105,13 +105,15 @@ fn find_rumpel_binaries() -> Result<Vec<(String, PathBuf)>> {
 /// Compute a deterministic tag for the prepared image.
 ///
 /// Inputs hashed: base image tag, rumpel version, container repo path,
-/// user, Claude CLI version (if available), user-configured remotes,
-/// schema version.
+/// user, Claude CLI version (if available), codex install flag,
+/// user-configured remotes, schema version.
+#[allow(clippy::too_many_arguments)]
 fn compute_prepared_tag(
     base_image: &str,
     container_repo_path: &Path,
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
+    install_codex: bool,
     host_remotes: &[GitRemote],
     inject_system_prompt: bool,
     description_file: Option<&str>,
@@ -124,6 +126,7 @@ fn compute_prepared_tag(
     if let Some(info) = claude_info {
         hasher.update(info.version.as_bytes());
     }
+    hasher.update([u8::from(install_codex)]);
     for remote in host_remotes {
         if MANAGED_REMOTES.contains(&remote.name.as_str()) {
             continue;
@@ -412,6 +415,7 @@ pub fn build_prepared_image(
         container_repo_path,
         user,
         claude_info.as_ref(),
+        install_codex,
         host_remotes,
         inject_system_prompt,
         description_file,
