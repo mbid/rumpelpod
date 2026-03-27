@@ -722,7 +722,8 @@ pub fn system_prompt(description_file: Option<&str>) -> String {
     if let Some(path) = description_file {
         prompt.push_str(&formatdoc! {"
 
-            When your work is ready to merge, write the merge commit message to `{path}` at the repo root.
+            Keep a `{path}` file at the repo root that describes your branch for the merge commit message.
+            Create it with your first commit and update it as your work evolves.
             The host will use its contents as the merge commit message and remove the file after merging.
         "});
     }
