@@ -33,7 +33,7 @@ fn list_empty_returns_header_only() {
     assert!(stdout.contains("GIT"));
     assert!(stdout.contains("STATUS"));
     assert!(stdout.contains("CREATED"));
-    assert!(stdout.contains("HOST"));
+    assert!(!stdout.contains("HOST"));
     assert!(stdout.contains("CONTAINER ID"));
 }
 
@@ -524,10 +524,10 @@ fn ssh_remote_pod_list() {
         stdout,
         stderr
     );
-    // The remote host should be shown as "testuser@<ip>"
+    // With a single host, the HOST column is hidden.
     assert!(
-        stdout.contains(&format!("{}@", super::ssh::SSH_USER)),
-        "rumpel list should show the remote host: stdout={}, stderr={}",
+        !stdout.contains("HOST"),
+        "HOST column should be hidden with a single host: stdout={}, stderr={}",
         stdout,
         stderr
     );
