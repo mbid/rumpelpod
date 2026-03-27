@@ -11,6 +11,7 @@ use tokio_tungstenite::tungstenite;
 use url::Url;
 
 use crate::cli::CodexCommand;
+use crate::config::load_toml_config;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, PodName, StartCodexProxyRequest};
 use crate::enter::{launch_pod, load_and_resolve};
@@ -20,6 +21,7 @@ use crate::pod::types::{base64_encode, HomeFileEntry};
 pub fn codex(cmd: &CodexCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
     let host_override = cmd.host_args.resolve()?;
+    let toml_config = load_toml_config(&repo_root)?;
     let (_devcontainer, _docker_host, _default_image_dir) =
         load_and_resolve(&repo_root, host_override.clone())?;
 
@@ -42,6 +44,14 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
     let remote_url = format!("ws://127.0.0.1:{port}");
     let mut child_cmd = std::process::Command::new(&codex_bin);
     child_cmd.args(["--remote", &remote_url]);
+
+    // CLI --no-dangerously-bypass-approvals-and-sandbox wins over the toml setting.
+    let bypass = !cmd.no_dangerously_bypass_approvals_and_sandbox
+        && toml_config.codex.dangerously_bypass_approvals_and_sandbox;
+    if bypass {
+        child_cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+    }
+
     child_cmd.args(&cmd.args);
 
     let status = child_cmd

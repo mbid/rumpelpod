@@ -315,6 +315,9 @@ pub struct TomlConfig {
     pub claude: ClaudeConfig,
 
     #[serde(default)]
+    pub codex: CodexConfig,
+
+    #[serde(default)]
     pub merge: MergeConfig,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
@@ -399,6 +402,25 @@ impl Default for ClaudeConfig {
         Self {
             dangerously_skip_permissions_hook: false,
             inject_system_prompt: true,
+        }
+    }
+}
+
+/// Configuration for `rumpel codex`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct CodexConfig {
+    /// Pass --dangerously-bypass-approvals-and-sandbox to the codex TUI.
+    /// The pod provides the sandbox so codex does not need its own.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub dangerously_bypass_approvals_and_sandbox: bool,
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self {
+            dangerously_bypass_approvals_and_sandbox: true,
         }
     }
 }
