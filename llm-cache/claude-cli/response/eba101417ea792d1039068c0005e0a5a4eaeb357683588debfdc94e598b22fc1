@@ -1,0 +1,43 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3988000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T12:50:10Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T12:50:10Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T12:50:10Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4788000","anthropic-ratelimit-tokens-reset":"2026-03-27T12:50:10Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e2e84ec1a765d4e-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 12:50:10 GMT","request-id":"req_011CZTcYKKR4x5Kz1h8Guv5V","server":"cloudflare","server-timing":"x-originResponse;dur=643","set-cookie":"_cfuvid=cETm4nLR60uGJ.mt9v7w_rqJbAdQz6K5JChIdIlMJ.s-1774615809.9366243-1.0.1.1-kZIOEJMkgrCHgNElB0kk4ZaSBjACD7vNKtzSPQeAGm8; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"641","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01J6ALvFx268PJWmZMP11zNw","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":20362,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":20362,"ephemeral_1h_input_tokens":0},"output_tokens":5,"service_tier":"standard","inference_geo":"not_available"}} }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}   }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking which"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" file I should put the merge commit message in, and they want only one word as the answer.\n\nLooking at the CLAUDE.md instructions:\n\n\"When"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" your work is ready to merge, write the merge commit message to `DESCRIPTION` at the repo root.\nThe host will use its contents as the merge commit message and remove the file after merging.\"\n\nSo the file is `"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"DESCRIPTION`.\n\nThe user wants one word only, so I should just answer: `DESCRIPTION`"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EooFCmMIDBgCKkDBCzq70lu8zun5GZfr0vbi+4S31QhE/p5xpwpKl95WqQFCcBqQG+a75WksWC/l68wCUBxMPHAgLzQaTzShnNwQMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDNrMaIk3OlVO+V+CvBoMm5OrMcENkmOmPfd9IjCxqIlNtLEx7ZzfCFPQ+A/LvX4juBLtOMvGVmcqUHOXDXUw+1xSGkbdl7yXJaMRTkYq1AOX/pF8F2nmB2qBJiKd3/Olxio/kB51rMiiVec65EAMQfh+qnMDJPjrkTnXnRUiH/5Qn27rt6cZ22JW8EAHnscxgb+jzsuPj1Hj+iju8fZtSt7pZFlw9+5iZG5wdwKucvJpvYm4ZmJL2D0r/m8ygU/8gRVQi98laPlEe5JTIJkktH3t3+uRNTT33oIgLohLRyONJTxWmhJdVcHA5pUTIv29fXvd7lyJbfzcTdq+Hn4cwpyBc+0SwUgU7eUSe2umMdH/O1idPMFueZzucuexSU8f45mQDXyMPcmdov7UwkxUONe8HMziKiu16bIpC6Kr8Hs9SfI8feP4vf/ZOFyXkOzCTxM+wWW+LVlIfGlk1Ci943oWBkhUptL1YuLze5VbhyFEcx2P6c9LzOWXrBcGVG4ACZKeGCU9MOp+9EUu3VFJNLPhCINpDi6bs2DS8Pl6VCUn6EmCwXjhFLAMnjOyQCebUF1R3vo6yCaaN8AIYXR5e3Iq1Y/i/sIEK1U+WFCThCRxMMSh8Kw2yGYx4ZRRrlBGqR5rHiTW1TPZWMfL6EqV8vg6zzkezvQASG9wFX0yIRAmAo1aW1dJvi8DavBhZSnFc6oycqjC3ao7bm+7C/NbFncxm6IYAQ=="}     }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0  }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"DESCRIPTION"}          }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1         }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":20362,"cache_read_input_tokens":0,"output_tokens":120}       }
+
+event: message_stop
+data: {"type":"message_stop"   }
+

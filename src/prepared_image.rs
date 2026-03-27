@@ -686,6 +686,7 @@ pub fn system_prompt(description_file: Option<&str>) -> String {
         `host/` has branches from the host repo.
         `rumpelpod/` has branches from other pods on the same repo.
 
+        Always commit your changes. The user interacts with your work via git, not by looking at the working tree.
         Committing automatically pushes to a gateway repo reachable from the host.
         Fetching from these remotes is not automatic; run `git fetch` explicitly when you need updates.
     "}

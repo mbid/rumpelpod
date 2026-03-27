@@ -1,0 +1,61 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3988000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T12:50:40Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T12:50:40Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T12:50:40Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4788000","anthropic-ratelimit-tokens-reset":"2026-03-27T12:50:40Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e2e85a5fbd1d24a-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 12:50:40 GMT","request-id":"req_011CZTcaWUvxKD8dSdoYtLDU","server":"cloudflare","server-timing":"x-originResponse;dur=944","set-cookie":"_cfuvid=_jPbkBbmYIqVMK.F0zx3D59WTlkg1QIfegqpnuG7LSA-1774615839.6771734-1.0.1.1-zwtPS_nurnZMMphSbC7RdtFJ4I1XnOi3WIiuAC9xn.0; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"943","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_0172hCcGQiiiS1Lh5y3PYhnw","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":302,"cache_creation_input_tokens":186,"cache_read_input_tokens":20368,"cache_creation":{"ephemeral_5m_input_tokens":186,"ephemeral_1h_input_tokens":0},"output_tokens":1,"service_tier":"standard","inference_geo":"not_available"}}       }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}  }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" user asked me to read hello.txt and reply with only the file contents. I did that - I showed"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" them the file contains \"rumpelpod-test-content-42\".\n\nNow they're asking me to suggest"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" what they might naturally type next.\n\nLooking at the context:\n1. They asked me to read"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" a file\n2. I read it and showed them the contents\n3. That task is complete\n\nWhat"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" would they naturally do next? Some possibilities:\n- They might ask what to do with this"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" content\n- They might ask me to create a file with different content\n- They might ask me to edit it\n- They might ask about what \""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"rumpelpod-test-content-42\" means\n- They might move on to a different task entirely\n\nBut based on the prompt \"Read"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" hello.txt. Reply with only the file contents.\" - it was a very simple,"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" direct task. It's now complete. There's no obvious natural"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" follow-up that they would have been \"about to type.\"\n\nThe instructions say \"Stay"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" silent if the next step isn't obvious from what the user said.\"\n\nI don't have a clear signal about what they"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"'d naturally type next. The task was straightforward and complete. I should stay silent."}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EoUKCmMIDBgCKkDFuCFvb6BXiWvbOdWrk5ywh43/PQpTHmR9P9ZXajGTRd1LOGpQRyiPK2HLbs64KZq2/MBVBnDTIbTzEp4UOwboMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDH7rgn3Vb+j4krtjMhoMllHNPzbisPTcwBbXIjAav49JWLJ+zfef1h9d/E9yCaC0qHQFE7o80/f9+PzDQq+gtGmFIKYY8VELuZdSmjMqzwhUEfVfxXd9En6dzSsN6LV5meoeFBi0LVy+1qvkjgpY5hvSTu9lzEVlYC/kgKzEE4xtViQc7+YuhRx1HW4nR/rCuZnEa1zCmhhPo1K2tzd7tuhVIyO1W+EH7y/6cByPUu9T84DmTTfmNRo5AEH+pYBGbzcmB8khFVgvK1lYa3lBjnNaOCBN5eSO38Pe24tI66TxkSUfoW1C1VABUhG5Kz2i6aVsVr+Navg2ar/uASSXDb8bbh7IXpDlKhC4IjBopmWdNFyzo6KH2LkXqPl5Vor1ZX2xDc2jxbM3HD0Fmas3UJb4Js2HRrg+l3sYy8Rg2r205tx4tGZR5lG6lJHwcp8TwFJ6VrEDtB2NEz+CBjmUImM9qhtZyV3jFyW3h2A2ai0XXhBjo+VZiribhY5GGM6YPTaEKMyS1dqTvSryhgidAh829tRJ5mnuND0XAgUeRvH4jEV7OTnSp7ge6ngIt19IIInei0R7dJJ2g2/8kf0ffeCmvBsV0mt0G4eQ0ScLHEyXxEUNKRQ6svvItsbIqkafSJNVhAhPvNlO+6nqtARICRJZFaFBgOrmZfWu5a/9wFjyyMdbZK/EdAz1f7EeRp9pJXlAJ4dWAi7LLYH4taS3sOXmiGLMt3pTlHoLNEncGnBU0XTX//uev+7rz35FzNnwpiykOUB6sCCTZJS0axlIRzC4NPNzYb9z8oMwkasKWHvZXv+EaJeqeB/ZdcasyMz3AATO1Kd+3sk0T+pZX3VwykX7OvfUsf7F947BOcbLBvohH51Bglwppj0SlWgFaRdRondj9mhcRDy3GbjBQI2r1d8wQGRS+Bas9Nqow0uI3E7UmOHbvnsX5PH+oiz3dwVQ7Oa6RHOcKAZXknFeMF/mXuNL+PeO31O9BVuhPlIZNE5lFZQadd/5Md7RtyxafxETBHmZoGK8mbR6m8hOjgy16sxSDxG65u/mLy6Hji75vHcl+GYgSxrdvOKRWr8hmXHe6YteFaGz42U1yOwxOTQ5E0pLh5/K+7WJTNJ3+11Fqe7RjzShAda7UtmeeSYlJn9ztY54tgOMXKp71IaCi/QJeHRHfirb13WXiUc5gI5pr2xLQUF8pnfG3J/1QwCJcHRQ1quGbJNGTWan6vkciLzNutMjc8O1pAG/+Jrrfy9rQHO3Nxzq0/zjVXxHCE9P9SHWOOwtpTlDR9JhP1GrmlUwJqR+/rluejIr9ybrgzy7IPJRNpMCIeK+XNKpNIMXp59fS1RD5hsBw7/H5JrRvMNF1smhBlPaoKMZXw6BsYnkOp1Th+nTce1Ku+fKX6dFnehfoQQ7cM6zchO5Xlu2b19eURpnPa6i25WkIYNBA7G2PcDTXxz0l+tR3ESBK3fHiPsVmF3PUDY1Y412LDhbUgDskXG826SDSAoAcShAoiNWJ3y8AQoBLQdeQp5xxyD1pKOGOd3R1Q0LpZ1CMwvL3dpdaB0RFHXrz+zdT3k2WyQyixgB"}               }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0            }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":302,"cache_creation_input_tokens":186,"cache_read_input_tokens":20368,"output_tokens":274}}
+
+event: message_stop
+data: {"type":"message_stop"            }
+

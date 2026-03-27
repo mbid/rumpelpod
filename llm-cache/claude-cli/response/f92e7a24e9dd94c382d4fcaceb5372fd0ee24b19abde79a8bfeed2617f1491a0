@@ -1,0 +1,55 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3988000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T12:50:22Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T12:50:21Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T12:50:21Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4788000","anthropic-ratelimit-tokens-reset":"2026-03-27T12:50:21Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e2e8536af30d2a8-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 12:50:23 GMT","request-id":"req_011CZTcZCJWrRiQXpvdnHfKs","server":"cloudflare","server-timing":"x-originResponse;dur=1983","set-cookie":"_cfuvid=rs3QhbSbiGSkS_JHG1O5vDLjZ_Y4ZlBDHxEqkBOSDbM-1774615821.8663633-1.0.1.1-z4n__8WdDu0oQt0JDdkMWuL.pdzrN6TzpOFFCx_Qy0g; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"1981","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01JzAZrc3RRK23z4qrGKGqHR","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":302,"cache_creation_input_tokens":7,"cache_read_input_tokens":20358,"cache_creation":{"ephemeral_5m_input_tokens":7,"ephemeral_1h_input_tokens":0},"output_tokens":3,"service_tier":"standard","inference_geo":"not_available"}}    }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}  }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user asked"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" a simple factual question: \"What git remote has other pods? One word only.\"\n\nI answered:"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" \"rumpelpod\"\n\nThis was a straightforward information request that has been answered. There's no obvious natural"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" follow-up that the user would type. They were just asking for clarification about the git rem"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"otes mentioned in the CLAUDE.md file.\n\nWhat might they naturally type next?\n- They could"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" fetch from that remote\n- They could ask about the \"host/\" remote\n- They could ask how to use"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" these remotes\n- They could move on to actual work\n\nBut none of these are particularly obvious natural continu"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ations. The user asked a specific question, got an"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" answer, and we're waiting to see what they actually want to do next. There"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"'s no clear \"what would they naturally type\" here.\n\nI should stay silent according"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to the instructions: \"Stay silent if the next step isn't obvious from what the user said.\""}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EscICmMIDBgCKkD3n4LxmtUIkbRH3tX28buV4sMfPdUVoGPj7q9l/lXabx8WY2vDtdpx2oj1C+4N6ljZP+TjD+bqLO5/8kCaYGw2MhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDL/n7mMf1RwF3RoFbBoMPci7LIRkg6J/lsosIjCqzS5scCnIgJCTmg7TyDzi9hrxL0UYL/dbjvrHZ0n7Wqh/9xH732LDytLoUvU0GC4qkQfEC9fMvgVRSarv7zSZUh/2FggagXtKJE/pTxd/Gwob99I0WS42rcL3Dw4lTDObcNLSaaep+y/754fQ/pmrdYVrJeEMFWQ1xvG1THPVI6qEKvO0QMCUsF8+QrB4N5Dn3knudgbN4pzTE2/RGb3dkNVUPvsU/VZBPVTh76/qQtMYPOh7XljJ/BZdD1+YelyieUBeyvzLfRZY6EWEzy0bYruJaTWusvJR9Qv+xLTE2Ynk4QpPme0UWtg6BueSjjNZgGYhaR0ccG6or7oXQYkUlBP2Z487y0ZqsfcHg23LaCWgaYYFQDAwqLN0CIlGnYU/dABI5MGedOwrqge88W3hIjp0xCyw3up2NG6VSgasOiywzZIA6lsq7BjmWAzuAnIuFNcgx39bHq+RC5BbR5OGunrBP0NSmh4RDyAMpeDOraRq5xmTqGKZry/9WAJKVuxd3GQf/IxCRVD8L0mkrBL8cV2oyqiM2ei9E3yUYwWqn/c1mVYtTz6Hrm6kdi2GlFon6O2gOI9IwyxMGXTx6h02oHbvS+hzSTUv/vKKcR649lkqRdf37u7J0+E8MLgt15lMVv+C/CnhEZJjDky7J+3ao95uNorzeJCzm0N6oXIU1EZR1tAz6400eFiPTzW6Lan2HGSEIrLYX65c0T+2HG8PHQzj5X5UkMAi+ztWS2G3oa3jOFW46ijzoqQ6o51OI2s+CxcJRSv+ZbH3Ju1N9Oz/rVIreC8k6ROORqvNORsrYrGzc7XPPzHYrCaNs+zkBeI5b4MPXJcaMUjB2Yk7T+s0ebIPpNtzhvl61g2uzareCuK7IG9UwQg4x3NAUehRkKtPYr4ghNo15e0JDAYxPh7tcYYyaM/6/YRRLyKVP3XalKpnqmLYhz4Uj5PYvDm5Q7lFz8Ka5GqzUasv4NLDKxzauvLAmpLy8SeIJZBBdT9fCc41FHfwg89BDXFEaWgtmA4g/ET6g/dCPRkjdl/pTaDSv4I3ricJ29dlUcSZdoCWKU7PHsmPceAfYbpiTHquVMOgT7KRryj5/x6mTI5/ROTlMxTA2t8bP4P9l0As85ZiUjgTht2/N9WzxCgluq8fERxvAEpHeBRhnVrgvqPKTHfLJkTpxvd+hXVrp/T+azJ4JtrTkdhiqoyCfWcydxWqlhdj8kjSmah1fy+0/FFVz+xU/1WLfaPsyrmbQLaQeRRTYGptLuPp+6yEMDNjt5G2wg99nuXeGAE="}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0 }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":302,"cache_creation_input_tokens":7,"cache_read_input_tokens":20358,"output_tokens":212}              }
+
+event: message_stop
+data: {"type":"message_stop"          }
+
