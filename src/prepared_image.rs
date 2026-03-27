@@ -656,25 +656,27 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
     Ok(())
 }
 
-/// Write /etc/claude-code/CLAUDE.md with a terse description of the
-/// rumpelpod environment so Claude understands the container layout
-/// and git remote conventions.
-fn write_system_prompt() -> Result<()> {
-    let content = indoc! {"
-        You are running inside a rumpelpod -- an isolated devcontainer.
+/// Generate the system prompt describing the rumpelpod environment.
+pub fn system_prompt() -> String {
+    indoc! {"
+        You are running inside a rumpelpod, an isolated devcontainer.
 
         Git remotes:
-        - `host/` -- branches from the host repo.
-        - `rumpelpod/` -- branches from other pods on the same repo.
+        `host/` has branches from the host repo.
+        `rumpelpod/` has branches from other pods on the same repo.
 
-        Committing automatically pushes to a gateway repo reachable from the
-        host. Fetching from these remotes is not automatic; run `git fetch`
-        explicitly when you need updates.
-    "};
+        Committing automatically pushes to a gateway repo reachable from the host.
+        Fetching from these remotes is not automatic; run `git fetch` explicitly when you need updates.
+    "}
+    .to_string()
+}
 
+/// Write /etc/claude-code/CLAUDE.md so Claude understands the container
+/// layout and git remote conventions.
+fn write_system_prompt() -> Result<()> {
     let dir = Path::new("/etc/claude-code");
     fs::create_dir_all(dir).context("creating /etc/claude-code")?;
-    fs::write(dir.join("CLAUDE.md"), content).context("writing /etc/claude-code/CLAUDE.md")
+    fs::write(dir.join("CLAUDE.md"), system_prompt()).context("writing /etc/claude-code/CLAUDE.md")
 }
 
 /// Parse "NAME=URL" remote specs and add/update them in the repo.
