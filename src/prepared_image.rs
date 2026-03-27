@@ -761,7 +761,8 @@ fn write_codex_system_prompt(description_file: Option<&str>) -> Result<()> {
     let prompt = system_prompt(description_file);
     // Separate from any existing content with a blank line.
     if path.metadata().is_ok_and(|m| m.len() > 0) {
-        file.write_all(b"\n").context("writing separator to /AGENTS.md")?;
+        file.write_all(b"\n")
+            .context("writing separator to /AGENTS.md")?;
     }
     file.write_all(prompt.as_bytes())
         .context("writing rumpelpod prompt to /AGENTS.md")
