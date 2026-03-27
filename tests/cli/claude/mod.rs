@@ -11,4 +11,5 @@ mod detach;
 mod install;
 mod reauth;
 mod smoke;
+mod system_prompt;
 mod tool_use;

@@ -64,6 +64,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
             container_url: result.container_url.clone(),
             container_token: result.container_token.clone(),
             auto_approve_hook: skip_permissions_hook,
+            system_prompt: toml_config.claude.system_prompt,
         });
         let elapsed = tc.elapsed();
         trace!("ensure_claude_config: {elapsed:?}");

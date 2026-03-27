@@ -299,6 +299,8 @@ pub struct EnsureClaudeConfigRequest {
     pub container_token: String,
     /// Install a Claude PermissionRequest hook that auto-approves all tool use.
     pub auto_approve_hook: bool,
+    /// Write a rumpelpod environment description to /etc/claude-code/CLAUDE.md.
+    pub system_prompt: bool,
 }
 
 /// Request body for the host reconnect-events SSE endpoint.

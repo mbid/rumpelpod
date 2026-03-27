@@ -1,0 +1,82 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3988000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T07:04:58Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T07:04:58Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T07:04:58Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4788000","anthropic-ratelimit-tokens-reset":"2026-03-27T07:04:58Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e2c8b457836d398-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 07:04:59 GMT","request-id":"req_011CZTADauimf6TkphQgUvzP","server":"cloudflare","server-timing":"x-originResponse;dur=862","set-cookie":"_cfuvid=qrh3LXCgWT8v9QtAR.GDEoZRdpsDVuJHjC0j5rEcW2I-1774595098.475092-1.0.1.1-gYmAdbwvcopBl.RPtB4RfXMTyLR.473GIhV876IioZI; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"854","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01EhxHVEptx82w7sFHLYmtMt","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":20149,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":20149,"ephemeral_1h_input_tokens":0},"output_tokens":7,"service_tier":"standard","inference_geo":"not_available"}}        }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""} }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking about git rem"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"otes that have \"other pods\". They want a one-word answer.\n\nLet me check the git rem"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"otes configured in this repository. I'll use bash to check the git remote"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" configuration."}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EpEDCmMIDBgCKkBFdBpr2hTKfly+pNvJzO+9XuIja2EPFkFWGl5QRsJVybrDoVY7PA4y5Sz4uAFemN68X716NkjJzqZZfp4Zzf7LMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDH1/YVArh3PO/HNfSRoMTfSKSs6G0eFsVVv6IjDIxurGKTMmGvzOTVeSTQ0x44XXb4SR6ESjlSOu0G9PUb5r40NtFrD9QCLWYMJfYoEq2wEAHcHxlgk1jccCrOT7hJjPfeaCVxNJGqTo2p7OQsjF36E+QPrmdnxeCd68IOaps55Du+wXUinGGJ4NjbTBqogm/Go30wGEX6NwPDbUO61jy0IqpMdPM3LeVNHMGjgj4QNN+Udqnn473B55JEXQ/KkQNVwXH1qsS0WzcS/sxRGI5ZSxHkbIymewEx7ZsnXUGIh+u1oEP27BmGFsuODh7szROS3RfQYi2Q+IaktztPsm7mzzPucXrTEnLZFK/9rjZAOGe1lPMfKuuY/kFXm+KqCNO+BJ2XshE2BQJWQYAQ=="}               }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0        }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01NW8riedenLzzJAzexr86SR","name":"Bash","input":{},"caller":{"type":"direct"}}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\""}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":": \"g"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"it remote -"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"v\""}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":", \"descr"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ip"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"tio"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"n\": \"S"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"how all g"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"it remotes a"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"nd th"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"eir "}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"URLs\"}"}               }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1  }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":20149,"cache_read_input_tokens":0,"output_tokens":133}}
+
+event: message_stop
+data: {"type":"message_stop"      }
+

@@ -385,6 +385,17 @@ pub struct ClaudeConfig {
     /// Use a PermissionRequest hook instead of --dangerously-skip-permissions.
     #[serde(default)]
     pub dangerously_skip_permissions_hook: bool,
+
+    /// Install a system prompt describing the rumpelpod environment
+    /// (devcontainer layout, git remotes, push/fetch behavior) into
+    /// /etc/claude-code/CLAUDE.md inside the container.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub system_prompt: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Whether the merge description file feature is enabled, and if so, which
