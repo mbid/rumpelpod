@@ -2013,6 +2013,8 @@ impl DaemonServer {
         )?;
         let image = &prepared.image.0;
 
+        gateway::install_host_hooks(repo_path)?;
+
         // Check DB for existing pod; if the k8s pod is still Running, reconnect
         {
             let conn = self.db.lock().unwrap();
@@ -2666,6 +2668,9 @@ impl DaemonServer {
         // Check for existing container before building images -- no point
         // rebuilding when we are just going to restart the same container.
         if let Some(state) = inspect_container(&docker, &name)? {
+            // Host hooks must be present before re-entering an existing pod,
+            // since the hook syncs host changes to the gateway for the pod to fetch.
+            gateway::install_host_hooks(&repo_path)?;
             let user = match devcontainer.user() {
                 Some(u) => u.to_string(),
                 None => state.user.clone(),
@@ -2934,6 +2939,8 @@ impl DaemonServer {
             Some(&docker_socket),
         )?;
         let image = prepared.image;
+
+        gateway::install_host_hooks(&repo_path)?;
 
         // Register pod with the git HTTP server
         let agent_sock = ssh_agent_dir(&repo_path, &PodName(pod_name.0.clone())).join("agent.sock");

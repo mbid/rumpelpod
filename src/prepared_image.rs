@@ -24,7 +24,7 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 
 /// Bump this when the Dockerfile template changes in a way that
 /// invalidates previously built prepared images.
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 /// Where the gateway bare repo is bind-mounted during `docker build`.
 /// Must match the `--mount` target in `generate_dockerfile`.
@@ -771,10 +771,23 @@ fn remove_host_hooks(repo_path: &Path) -> Result<()> {
         if cleaned == content {
             continue;
         }
-        fs::write(&path, cleaned).with_context(|| {
-            let path = path.display();
-            format!("rewriting hook {path}")
-        })?;
+        // If the file is now just a shebang (no real code), remove it
+        // entirely so the pod server knows this is a first entry and
+        // can sanitize malformed checkouts.
+        let has_code = cleaned
+            .lines()
+            .any(|l| !l.is_empty() && !l.starts_with("#!"));
+        if has_code {
+            fs::write(&path, cleaned).with_context(|| {
+                let path = path.display();
+                format!("rewriting hook {path}")
+            })?;
+        } else {
+            fs::remove_file(&path).with_context(|| {
+                let path = path.display();
+                format!("removing empty hook {path}")
+            })?;
+        }
     }
 
     Ok(())

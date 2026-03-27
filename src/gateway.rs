@@ -95,13 +95,16 @@ const RUMPELPOD_REMOTE: &str = "rumpelpod";
 /// Name of the remote added to the gateway pointing to the host repo.
 const HOST_REMOTE: &str = "host";
 
+/// Comment line identifying a gateway hook block.
+const GATEWAY_HOOK_COMMENT: &str = "# Installed by rumpelpod (gateway)";
+
 /// Generate a shim script that delegates to `rumpel git-hook <subcommand>`.
 /// The rumpel binary path is resolved at install time and embedded in the shim.
-fn hook_shim(rumpel_path: &str, signature: &str, subcommand: &str, use_exec: bool) -> String {
+fn hook_shim(rumpel_path: &str, subcommand: &str, use_exec: bool) -> String {
     let invoke = if use_exec { "exec " } else { "" };
     formatdoc! {"
         #!/bin/sh
-        # {signature}
+        {GATEWAY_HOOK_COMMENT}
         {invoke}{rumpel_path} git-hook {subcommand} \"$@\"
     "}
 }
@@ -257,11 +260,13 @@ fn resolve_git_dir(path: &Path) -> Result<PathBuf> {
 /// Install the reference-transaction hook in an explicit git directory.
 /// Like `install_reference_transaction_hook` but targets a specific git dir
 /// rather than assuming `<path>/.git/hooks`.
-fn install_reference_transaction_hook_in_git_dir(git_dir: &Path) -> Result<()> {
+fn install_reference_transaction_hook_in_git_dir(git_dir: &Path, rumpel_exe: &str) -> Result<()> {
+    let block = host_ref_tx_hook(rumpel_exe);
     install_host_hook(
         &git_dir.join("hooks"),
         "reference-transaction",
-        HOST_REF_TX_HOOK,
+        HOST_REF_TX_HOOK_COMMENT,
+        &block,
     )?;
 
     Ok(())
@@ -341,17 +346,12 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     install_gateway_pre_receive_hook(&gateway, &rumpel_exe)?;
     install_gateway_post_receive_hook(&gateway, &rumpel_exe)?;
 
-    // Install hook to sync branch updates from host to gateway.
-    install_reference_transaction_hook(repo_path)?;
-
-    // Older git versions (notably Apple Git 2.39) don't fire the
-    // reference-transaction hook when HEAD changes via checkout/switch.
-    // Install a post-checkout hook as fallback for those versions.
-    if !git_supports_symref_in_ref_transaction(repo_path) {
-        install_post_checkout_hook(repo_path)?;
-    }
-
-    // Push all existing branches to the gateway
+    // Push all existing branches to the gateway.
+    // Host-repo hooks are NOT installed yet -- they must be deferred
+    // until after the devcontainer image build, because the image's
+    // COPY step would include the hook file, and any RUN git operation
+    // in the user's Dockerfile would trigger the hook and fail (the
+    // rumpel binary does not exist inside the build).
     push_all_branches(repo_path)?;
 
     // Ensure nested submodules are checked out before enumerating them.
@@ -364,6 +364,30 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     // Set up gateways for each submodule
     for sub in detect_submodules(repo_path) {
         setup_submodule_gateway(repo_path, &sub, &rumpel_exe)?;
+    }
+
+    Ok(())
+}
+
+/// Install host-repo hooks that sync branch/HEAD updates to the gateway.
+///
+/// Must be called AFTER the devcontainer image is built so the hooks
+/// are not baked into the image via COPY (they reference a host-side
+/// binary that does not exist inside the container).
+pub fn install_host_hooks(repo_path: &Path) -> Result<()> {
+    if !is_git_repo(repo_path) {
+        return Ok(());
+    }
+
+    let rumpel_exe = std::env::current_exe()
+        .context("resolving rumpel binary path")?
+        .to_string_lossy()
+        .to_string();
+
+    install_reference_transaction_hook(repo_path, &rumpel_exe)?;
+
+    if !git_supports_symref_in_ref_transaction(repo_path) {
+        install_post_checkout_hook(repo_path, &rumpel_exe)?;
     }
 
     Ok(())
@@ -414,7 +438,7 @@ fn setup_submodule_gateway(
     install_gateway_post_receive_hook(&gateway, rumpel_exe)?;
 
     // Install reference-transaction hook in the submodule's actual git dir
-    install_reference_transaction_hook_in_git_dir(&sub_git_dir)?;
+    install_reference_transaction_hook_in_git_dir(&sub_git_dir, rumpel_exe)?;
 
     // Push submodule branches/HEAD to its gateway
     push_all_branches(&sub_workdir)?;
@@ -460,24 +484,14 @@ fn ensure_remote(repo_path: &Path, remote_name: &str, remote_url: &Path) -> Resu
 
 /// Install the pre-receive hook in the gateway repository for access control.
 fn install_gateway_pre_receive_hook(gateway_path: &Path, rumpel_exe: &str) -> Result<()> {
-    let content = hook_shim(
-        rumpel_exe,
-        "Gateway access control: pods can only write to their own namespace.",
-        "gateway-pre-receive",
-        true,
-    );
+    let content = hook_shim(rumpel_exe, "gateway-pre-receive", true);
     install_gateway_hook(gateway_path, "pre-receive", &content)
 }
 
 /// Install the post-receive hook in the gateway repository.
 /// This hook syncs pod refs to the host repo as remote-tracking refs.
 fn install_gateway_post_receive_hook(gateway_path: &Path, rumpel_exe: &str) -> Result<()> {
-    let content = hook_shim(
-        rumpel_exe,
-        "Sync pod refs from gateway to host repo.",
-        "gateway-post-receive",
-        true,
-    );
+    let content = hook_shim(rumpel_exe, "gateway-post-receive", true);
     install_gateway_hook(gateway_path, "post-receive", &content)
 }
 
@@ -510,38 +524,64 @@ fn install_gateway_hook(gateway_path: &Path, hook_name: &str, hook_content: &str
 ///
 /// If a reference-transaction hook already exists and wasn't installed by us, we append
 /// our hook invocation to it.
-fn install_reference_transaction_hook(repo_path: &Path) -> Result<()> {
+fn install_reference_transaction_hook(repo_path: &Path, rumpel_exe: &str) -> Result<()> {
+    let block = host_ref_tx_hook(rumpel_exe);
     install_host_hook(
         &repo_path.join(".git").join("hooks"),
         "reference-transaction",
-        HOST_REF_TX_HOOK,
+        HOST_REF_TX_HOOK_COMMENT,
+        &block,
     )
 }
 
+/// Comment line identifying a host-side reference-transaction hook block.
+const HOST_REF_TX_HOOK_COMMENT: &str = "# Installed by rumpelpod (host ref-tx)";
+
+/// Comment line identifying a host-side post-checkout hook block.
+const HOST_POST_CHECKOUT_HOOK_COMMENT: &str = "# Installed by rumpelpod (host post-checkout)";
+
 /// Two-line block appended to the host repo's reference-transaction hook.
-/// Uses bare `rumpel` (found via PATH) so the string is a fixed constant
-/// that can be matched and stripped inside containers.
-pub const HOST_REF_TX_HOOK: &str = "\
-# Installed by rumpelpod (host)\n\
-rumpel git-hook host-reference-transaction \"$@\"\n";
+fn host_ref_tx_hook(rumpel_exe: &str) -> String {
+    format!("{HOST_REF_TX_HOOK_COMMENT}\n{rumpel_exe} git-hook host-reference-transaction \"$@\"\n")
+}
 
 /// Two-line block appended to the host repo's post-checkout hook.
-pub const HOST_POST_CHECKOUT_HOOK: &str = "\
-# Installed by rumpelpod (host)\n\
-rumpel git-hook host-post-checkout \"$@\"\n";
+fn host_post_checkout_hook(rumpel_exe: &str) -> String {
+    format!("{HOST_POST_CHECKOUT_HOOK_COMMENT}\n{rumpel_exe} git-hook host-post-checkout \"$@\"\n")
+}
 
-/// Remove the exact host hook blocks from a hook file's content,
-/// preserving any other code (e.g. user hooks).
+/// All comment lines that identify host-side hook blocks.
+/// Prefix shared by all host hook comment lines, regardless of variant.
+const HOST_HOOK_COMMENT_PREFIX: &str = "# Installed by rumpelpod (host";
+
+/// Remove host hook blocks from a hook file's content, preserving any
+/// other code (e.g. user hooks).  Each host block is identified by its
+/// comment line (prefixed with HOST_HOOK_COMMENT_PREFIX); the comment
+/// and the following invocation line are both removed.
 pub fn strip_host_hooks(content: &str) -> String {
-    content
-        .replace(HOST_REF_TX_HOOK, "")
-        .replace(HOST_POST_CHECKOUT_HOOK, "")
+    let mut result = Vec::new();
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        if line.trim().starts_with(HOST_HOOK_COMMENT_PREFIX) {
+            // Skip the invocation line that follows the comment.
+            lines.next();
+        } else {
+            result.push(line);
+        }
+    }
+    let mut out = result.join("\n");
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 /// Install a host-repo hook by appending the given block to the hook
 /// file.  If the hook file does not exist, creates it with a shebang.
-/// If the block is already present, does nothing.
-fn install_host_hook(hooks_dir: &Path, hook_name: &str, block: &str) -> Result<()> {
+/// If a block with the same comment line is already present, does nothing.
+/// Strips any previously installed host hook block for this hook name
+/// (identified by HOST_HOOK_COMMENT_PREFIX) before appending the new one.
+fn install_host_hook(hooks_dir: &Path, hook_name: &str, comment: &str, block: &str) -> Result<()> {
     fs::create_dir_all(hooks_dir).with_context(|| {
         let hooks_dir = hooks_dir.display();
         format!("Failed to create hooks directory: {hooks_dir}")
@@ -550,11 +590,11 @@ fn install_host_hook(hooks_dir: &Path, hook_name: &str, block: &str) -> Result<(
     let hook_path = hooks_dir.join(hook_name);
 
     if let Ok(existing) = fs::read_to_string(&hook_path) {
-        if existing.contains(block.trim()) {
+        if existing.contains(comment) {
             return Ok(());
         }
-        let existing = existing.trim_end();
-        let combined = format!("{existing}\n\n{block}");
+        let cleaned = strip_host_hooks(&existing);
+        let combined = format!("{}\n\n{block}", cleaned.trim_end());
         fs::write(&hook_path, combined).with_context(|| {
             let hook_path = hook_path.display();
             format!("Failed to update hook: {hook_path}")
@@ -604,11 +644,13 @@ fn git_supports_symref_in_ref_transaction(repo_path: &Path) -> bool {
 }
 
 /// Install the post-checkout hook in the host repository.
-fn install_post_checkout_hook(repo_path: &Path) -> Result<()> {
+fn install_post_checkout_hook(repo_path: &Path, rumpel_exe: &str) -> Result<()> {
+    let block = host_post_checkout_hook(rumpel_exe);
     install_host_hook(
         &repo_path.join(".git").join("hooks"),
         "post-checkout",
-        HOST_POST_CHECKOUT_HOOK,
+        HOST_POST_CHECKOUT_HOOK_COMMENT,
+        &block,
     )
 }
 
