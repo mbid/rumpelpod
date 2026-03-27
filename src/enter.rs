@@ -189,11 +189,26 @@ pub fn load_and_resolve(
         None
     };
 
-    // Resolve ${localEnv:...} before sending to the daemon, since the daemon
-    // does not have access to the calling user's environment variables.
+    // Resolve ${localEnv:...} and ${localWorkspaceFolder} before sending to
+    // the daemon, since the daemon does not have access to the calling user's
+    // environment variables or original filesystem paths.
+    let local_ws = repo_root
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let local_ws_basename = repo_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
     devcontainer = devcontainer.substitute(&SubstitutionContext {
         resolve_local_env: true,
-        ..Default::default()
+        local_workspace_folder: Some(local_ws),
+        local_workspace_folder_basename: Some(local_ws_basename),
+        // Container-side vars and devcontainerId are not yet known;
+        // the daemon resolves them in a second pass.
+        container_workspace_folder: None,
+        container_workspace_folder_basename: None,
+        devcontainer_id: None,
     });
 
     // Read --env-file entries from runArgs on the client side and merge them

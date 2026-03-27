@@ -706,9 +706,14 @@ impl DevContainer {
         } = self;
 
         let build = build.map(|b| {
+            // build.args only gets ${localEnv:...} per spec.
             let restricted = SubstitutionContext {
                 resolve_local_env: ctx.resolve_local_env,
-                ..Default::default()
+                local_workspace_folder: None,
+                local_workspace_folder_basename: None,
+                container_workspace_folder: None,
+                container_workspace_folder_basename: None,
+                devcontainer_id: None,
             };
             BuildOptions {
                 args: b.args.map(|m| {
@@ -967,7 +972,10 @@ fn substitute_lifecycle_command(
 /// access to different variables. When a field is absent, references to
 /// that variable type are left as literal text so a later call can resolve
 /// them.
-#[derive(Default)]
+///
+/// Does not derive Default so that every construction site is forced to
+/// name all fields -- adding a new variable causes compile errors at every
+/// call site, preventing the caller from silently leaving it unset.
 pub struct SubstitutionContext {
     /// When true, `${localEnv:VAR}` is resolved via `std::env::var`.
     pub resolve_local_env: bool,
@@ -1079,7 +1087,11 @@ pub fn compute_devcontainer_id(repo_path: &Path, pod_name: &str) -> String {
 pub fn resolve_local_env_vars(value: &str) -> String {
     let ctx = SubstitutionContext {
         resolve_local_env: true,
-        ..Default::default()
+        local_workspace_folder: None,
+        local_workspace_folder_basename: None,
+        container_workspace_folder: None,
+        container_workspace_folder_basename: None,
+        devcontainer_id: None,
     };
     substitute_vars(value, &ctx)
 }
@@ -1100,13 +1112,32 @@ mod tests {
         }
     }
 
+    fn local_env_only_ctx() -> SubstitutionContext {
+        SubstitutionContext {
+            resolve_local_env: true,
+            local_workspace_folder: None,
+            local_workspace_folder_basename: None,
+            container_workspace_folder: None,
+            container_workspace_folder_basename: None,
+            devcontainer_id: None,
+        }
+    }
+
+    fn empty_ctx() -> SubstitutionContext {
+        SubstitutionContext {
+            resolve_local_env: false,
+            local_workspace_folder: None,
+            local_workspace_folder_basename: None,
+            container_workspace_folder: None,
+            container_workspace_folder_basename: None,
+            devcontainer_id: None,
+        }
+    }
+
     #[test]
     fn substitute_local_env_from_real_env() {
         // PATH is always set in any reasonable environment
-        let ctx = SubstitutionContext {
-            resolve_local_env: true,
-            ..Default::default()
-        };
+        let ctx = local_env_only_ctx();
         let result = substitute_vars("${localEnv:PATH}", &ctx);
         assert!(!result.contains("${"), "should have resolved PATH");
         assert!(!result.is_empty());
@@ -1114,10 +1145,7 @@ mod tests {
 
     #[test]
     fn substitute_local_env_missing_uses_empty() {
-        let ctx = SubstitutionContext {
-            resolve_local_env: true,
-            ..Default::default()
-        };
+        let ctx = local_env_only_ctx();
         assert_eq!(
             substitute_vars(
                 "pre-${localEnv:RUMPELPOD_TEST_DEFINITELY_UNSET_12345}-post",
@@ -1129,10 +1157,7 @@ mod tests {
 
     #[test]
     fn substitute_local_env_with_default() {
-        let ctx = SubstitutionContext {
-            resolve_local_env: true,
-            ..Default::default()
-        };
+        let ctx = local_env_only_ctx();
         assert_eq!(
             substitute_vars(
                 "${localEnv:RUMPELPOD_TEST_DEFINITELY_UNSET_12345:fallback}",
@@ -1145,10 +1170,7 @@ mod tests {
     #[test]
     fn substitute_local_env_set_ignores_default() {
         // PATH is always set
-        let ctx = SubstitutionContext {
-            resolve_local_env: true,
-            ..Default::default()
-        };
+        let ctx = local_env_only_ctx();
         let result = substitute_vars("${localEnv:PATH:fallback}", &ctx);
         assert_ne!(result, "fallback");
         assert!(!result.contains("${"));
@@ -1186,7 +1208,7 @@ mod tests {
 
     #[test]
     fn substitute_leaves_unknown_vars_intact() {
-        let ctx = SubstitutionContext::default();
+        let ctx = empty_ctx();
         let input = "${unknownVar}";
         assert_eq!(substitute_vars(input, &ctx), input);
     }
@@ -1196,7 +1218,7 @@ mod tests {
         // resolve_local_env is false, so ${localEnv:...} should be preserved
         let ctx = SubstitutionContext {
             devcontainer_id: Some("id123".to_string()),
-            ..Default::default()
+            ..empty_ctx()
         };
         assert_eq!(
             substitute_vars("${localEnv:FOO}-${devcontainerId}", &ctx),
@@ -1260,7 +1282,7 @@ mod tests {
     fn substitute_method_covers_all_fields() {
         let ctx = SubstitutionContext {
             local_workspace_folder: Some("/host/project".to_string()),
-            ..Default::default()
+            ..empty_ctx()
         };
         let dc = DevContainer {
             name: Some("${localWorkspaceFolder}".to_string()),
@@ -1291,7 +1313,7 @@ mod tests {
         let ctx = SubstitutionContext {
             resolve_local_env: true,
             devcontainer_id: Some("id123".to_string()),
-            ..Default::default()
+            ..empty_ctx()
         };
         let dc = DevContainer {
             build: Some(BuildOptions {
