@@ -1,0 +1,43 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3985000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T19:47:12Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T19:47:12Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T19:47:12Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4785000","anthropic-ratelimit-tokens-reset":"2026-03-27T19:47:12Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e30e7d23f400054-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 19:47:13 GMT","request-id":"req_011CZUALptJ8HpHJuRM8LNXH","server":"cloudflare","server-timing":"x-originResponse;dur=538","set-cookie":"_cfuvid=NS3XUEdfLglemsCmtdOYUrgGnk7xRO0a1dRuCTMDlEQ-1774640832.359503-1.0.1.1-u5h4NHfx4hbmwAu.mrzr_ooyk1mLxarPRlSH3fklZlo; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"534","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_014c1jtYjAYJ2frpL8kJCo2s","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":17197,"cache_read_input_tokens":8074,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":17197},"output_tokens":5,"service_tier":"standard","inference_geo":"not_available"}}  }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}      }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking a"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" simple general knowledge question: \"What is the capital of France?\" and they want me to reply with just the city name, nothing else.\n\nThis"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is a straightforward factual question that doesn't require any tools. The capital of France is Paris.\n\nSince they"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" want just the city name and nothing else, I should provide only that."}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"Ep0ECmMIDBgCKkBsHhpv3LG/FS+8Qat+7SNO4iCRRnkzEP17z4CeOGkTs9nJXTZSgOV/gJXnqkEFl8Ez7a2K96jDV8cUimGVTw+TMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDPJy6a6P1AB8OxQ4vBoMZ+lwAYs6JAQWtlu5IjDhTo/dgYx6EfRMReuef3pSsgigxw1Flks/GC5IzMx9I6hnpzlFtUXIyFQLawgVJbAq5wKkG67ce3v5XA6fQ7WKxXNvEdmmRc7PbAnf1r7cvmGkteYnC2aJ9kXBdHds1oM3ioj9l/GEn76coPxKvfzcm0DR6SUX6lJ+HCVk5VnfI0vuTPoG+WDFsN26eXhNmBqEfFOVQQ8fDZEGf48klGlWDZLr0UstMsc8C7a7F9NOEA1FWgYRg28y/Bl6KYkpXpnCivQnmbx89jAb41mWl0oKifzTlssGoJTG6CnAL/ZbeFSJFV3yk82uybOHPfKNkwcJET2n/OVEuMs4kW2AtW+JvRdDeVRikJekL59onde8eWvsiG89kCSn57dnovGu3GnlkGFq7cn+dnYspPABzJoJe/O1RaLCg8yy7c9WZtHSAQTwhuhmJKrkUnjogb8wqbLPyN0zbp1rnRX8TG1CzlctxS4nLOmrF8124y6HSOsYPVb3jvTBu/F7UPqrPS/rS7QgZULwApyKoyT4Nr/R6x8F7iJl6fUm38nl/RgB"}     }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0         }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Paris"}       }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1    }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":17197,"cache_read_input_tokens":8074,"output_tokens":86},"context_management":{"applied_edits":[]}}
+
+event: message_stop
+data: {"type":"message_stop"      }
+
