@@ -1,0 +1,13 @@
+Fix codex_smoke flake under parallel load
+
+Two fixes:
+
+1. Increase codex app-server health check timeout from 5s to 30s.
+   Under parallel test load, the app-server needs more time to start.
+   The 5s timeout caused ensure_app_server_running to fail, which sent
+   a WebSocket Close frame back through the proxy chain, and the host
+   codex CLI reported "failed to connect to remote app server".
+
+2. Include install_codex in the prepared image tag hash.
+   Without this, a prepared image built without codex could be reused
+   by a pod that needs it (or vice versa) if all other tag inputs match.
