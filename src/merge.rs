@@ -253,6 +253,14 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
 
     if !merge_status.success() {
         let code = merge_status.code().unwrap_or(-1);
+        // Abort the merge so the working tree is not left in a conflicted state.
+        let abort_status = Command::new("git")
+            .args(["merge", "--abort"])
+            .current_dir(&repo_root)
+            .status();
+        if let Err(e) = abort_status {
+            eprintln!("warning: failed to abort merge: {e}");
+        }
         return Err(anyhow::anyhow!("git merge exited with status {code}"));
     }
 
