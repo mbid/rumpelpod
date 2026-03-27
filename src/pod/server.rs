@@ -44,6 +44,8 @@ pub struct PodServerState {
     pub ssh_relay: std::sync::Arc<tokio::sync::Mutex<Option<SshRelayConfig>>>,
     /// Repository path inside the container, set after the first /enter call.
     pub repo_path: std::sync::Arc<tokio::sync::Mutex<Option<PathBuf>>>,
+    /// Codex app-server child process, started on first /codex connection.
+    pub codex_app_server: super::codex::CodexAppServer,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,6 +76,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         token: token.clone(),
         ssh_relay: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         repo_path: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        codex_app_server: super::codex::new_codex_app_server(),
     };
 
     // POST routes require bearer token authentication
@@ -90,6 +93,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/run", post(run_handler))
         .route("/events", get(events_handler))
         .route("/claude", any(super::pty::claude_session_handler))
+        .route("/codex", any(super::codex::codex_ws_handler))
         .with_state(state)
         .layer(axum::middleware::from_fn_with_state(
             token.clone(),

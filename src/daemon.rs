@@ -1720,6 +1720,7 @@ fn inject_statusline(data: &[u8], pod_name: &str) -> Vec<u8> {
 
 pub(crate) const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
 pub(crate) const CLAUDE_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/claude";
+pub(crate) const CODEX_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/codex";
 
 /// Inject a PermissionRequest hook that auto-approves all permission
 /// dialogs via the rumpel binary inside the container.

@@ -228,6 +228,19 @@ Examples:
     )]
     Claude(ClaudeCommand),
 
+    /// Run OpenAI Codex inside a pod
+    #[command(long_about = "Run OpenAI Codex inside a pod.
+
+The Codex App Server runs inside the container, while the Codex TUI runs locally. Communication is proxied through the pod server over WebSocket.
+
+On first run, copies OpenAI credentials from the host into the container. Subsequent runs reuse the existing App Server session, allowing disconnect and reconnect.
+
+Examples:
+  rumpel codex dev                       # Launch Codex in 'dev' pod
+  rumpel codex dev -- --model o3         # Pass args to codex TUI
+")]
+    Codex(CodexCommand),
+
     /// Manage SSH keys available to a pod
     #[command(
         long_about = "Manage SSH private keys available to a pod via ssh-agent.
@@ -488,6 +501,20 @@ pub struct ClaudeCommand {
     pub dangerously_skip_permissions_hook: bool,
 
     /// Arguments forwarded to `claude` CLI
+    #[arg(last = true, value_name = "ARGS")]
+    pub args: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct CodexCommand {
+    /// Name for this pod instance
+    #[arg(help = "Name for this pod instance (e.g., 'dev', 'test')", value_parser = validate_pod_name)]
+    pub name: String,
+
+    #[command(flatten)]
+    pub host_args: HostArgs,
+
+    /// Arguments forwarded to `codex` TUI on the host (e.g. --model)
     #[arg(last = true, value_name = "ARGS")]
     pub args: Vec<String>,
 }

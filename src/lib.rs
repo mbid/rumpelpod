@@ -3,6 +3,7 @@ mod agent;
 mod async_runtime;
 mod claude;
 mod cli;
+mod codex;
 mod command_ext;
 pub mod config;
 mod cp;
@@ -131,6 +132,9 @@ pub fn run() -> Result<()> {
                 claude::claude(cmd)?;
             }
         },
+        Command::Codex(ref cmd) => {
+            codex::codex(cmd)?;
+        }
         Command::Ssh(ref cmd) => {
             ssh::ssh(cmd)?;
         }

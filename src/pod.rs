@@ -1,4 +1,5 @@
 pub mod client;
+pub mod codex;
 pub mod pty;
 pub mod server;
 pub mod types;
