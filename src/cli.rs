@@ -512,6 +512,10 @@ pub struct CodexCommand {
     #[command(flatten)]
     pub host_args: HostArgs,
 
+    /// Disable --dangerously-bypass-approvals-and-sandbox (which is on by default)
+    #[arg(long)]
+    pub no_dangerously_bypass_approvals_and_sandbox: bool,
+
     /// Arguments forwarded to `codex` TUI on the host (e.g. --model)
     #[arg(last = true, value_name = "ARGS")]
     pub args: Vec<String>,
