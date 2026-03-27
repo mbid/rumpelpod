@@ -4,6 +4,7 @@
 //! time a container is created.
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -688,6 +689,9 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
 
     if cmd.inject_system_prompt {
         write_system_prompt(cmd.description_file.as_deref())?;
+        if cmd.install_codex {
+            write_codex_system_prompt(cmd.description_file.as_deref())?;
+        }
     }
 
     write_managed_settings()?;
@@ -742,6 +746,26 @@ fn write_system_prompt(description_file: Option<&str>) -> Result<()> {
     fs::create_dir_all(dir).context("creating /etc/claude-code")?;
     fs::write(dir.join("CLAUDE.md"), system_prompt(description_file))
         .context("writing /etc/claude-code/CLAUDE.md")
+}
+
+/// Append the rumpelpod system prompt to /AGENTS.md so Codex understands the
+/// container layout and git remote conventions.  Appends rather than
+/// overwrites so a base image's existing AGENTS.md is preserved.
+fn write_codex_system_prompt(description_file: Option<&str>) -> Result<()> {
+    let path = Path::new("/AGENTS.md");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .context("opening /AGENTS.md for append")?;
+    let prompt = system_prompt(description_file);
+    // Separate from any existing content with a blank line.
+    if path.metadata().is_ok_and(|m| m.len() > 0) {
+        file.write_all(b"\n")
+            .context("writing separator to /AGENTS.md")?;
+    }
+    file.write_all(prompt.as_bytes())
+        .context("writing rumpelpod prompt to /AGENTS.md")
 }
 
 /// Write /etc/claude-code/managed-settings.json with Claude Code hooks:

@@ -2,3 +2,4 @@
 
 mod common;
 mod smoke;
+mod system_prompt;
