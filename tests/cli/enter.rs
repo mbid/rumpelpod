@@ -584,8 +584,12 @@ fn enter_skips_image_build_when_container_exists() {
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home, "enter-skip-build");
     let daemon = TestDaemon::start(&home);
-    // Use a unique Dockerfile so the image is not shared with other tests.
-    write_test_devcontainer(&repo, "RUN echo skip-build-marker", "");
+    // Include the temp dir name so the Dockerfile content (and thus the
+    // devcontainer image tag) is unique across runs, preventing a cached
+    // image from suppressing the build output we assert on below.
+    let repo_dir = repo.path().file_name().unwrap().to_str().unwrap();
+    let extra = format!("RUN echo skip-build-marker-{repo_dir}");
+    write_test_devcontainer(&repo, &extra, "");
     fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
 
     // First enter -- must build the image.
@@ -604,7 +608,7 @@ fn enter_skips_image_build_when_container_exists() {
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(
-        first_combined.contains("skip-build-marker"),
+        first_combined.contains("skip-build-marker-"),
         "first enter should contain docker build output, got:\n{first_combined}",
     );
 
