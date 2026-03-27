@@ -323,10 +323,14 @@ fn resolve_daemon_vars(dc: DevContainer, repo_path: &Path, pod_name: &str) -> De
         substitute_vars(
             wf,
             &SubstitutionContext {
+                resolve_local_env: false,
                 local_workspace_folder: Some(local_ws.clone()),
                 local_workspace_folder_basename: Some(local_ws_basename.clone()),
+                // containerWorkspaceFolder is derived from workspace_folder,
+                // so it cannot be resolved yet.
+                container_workspace_folder: None,
+                container_workspace_folder_basename: None,
                 devcontainer_id: Some(devcontainer_id.clone()),
-                ..Default::default()
             },
         )
     });
@@ -343,12 +347,13 @@ fn resolve_daemon_vars(dc: DevContainer, repo_path: &Path, pod_name: &str) -> De
         .unwrap_or_else(|| "workspace".to_string());
 
     dc.substitute(&SubstitutionContext {
+        // localEnv was already resolved by the client.
+        resolve_local_env: false,
         local_workspace_folder: Some(local_ws),
         local_workspace_folder_basename: Some(local_ws_basename),
         container_workspace_folder: Some(container_ws_str),
         container_workspace_folder_basename: Some(container_ws_basename),
         devcontainer_id: Some(devcontainer_id),
-        ..Default::default()
     })
 }
 

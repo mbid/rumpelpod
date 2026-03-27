@@ -204,7 +204,11 @@ pub fn load_and_resolve(
         resolve_local_env: true,
         local_workspace_folder: Some(local_ws),
         local_workspace_folder_basename: Some(local_ws_basename),
-        ..Default::default()
+        // Container-side vars and devcontainerId are not yet known;
+        // the daemon resolves them in a second pass.
+        container_workspace_folder: None,
+        container_workspace_folder_basename: None,
+        devcontainer_id: None,
     });
 
     // Read --env-file entries from runArgs on the client side and merge them

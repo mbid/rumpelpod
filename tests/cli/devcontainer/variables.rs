@@ -365,6 +365,43 @@ fn variables_in_run_args() {
     );
 }
 
+/// ${localWorkspaceFolder} in bind mount sources should be resolved so
+/// that mounts like "source=${localWorkspaceFolder}/subdir" work.
+#[test]
+fn local_workspace_folder_in_bind_mount() {
+    let repo = TestRepo::new();
+
+    // Create a directory with a marker file to mount into the container.
+    let mount_src = repo.path().join("cloud");
+    fs::create_dir_all(&mount_src).expect("Failed to create cloud directory");
+    fs::write(mount_src.join("marker.txt"), "cloud-content").expect("Failed to write marker file");
+
+    write_devcontainer_json(
+        &repo,
+        &formatdoc! {r#"
+            "mounts": [
+                {{
+                    "source": "${{localWorkspaceFolder}}/cloud",
+                    "target": "/cloud",
+                    "type": "bind"
+                }}
+            ]
+        "#},
+    );
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "var-lwf-mnt");
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "lwf-mnt", "--", "cat", "/cloud/marker.txt"])
+        .success()
+        .expect("rumpel enter with localWorkspaceFolder bind mount failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(stdout.trim(), "cloud-content");
+}
+
 /// ${devcontainerId} in mount sources should be resolved, allowing
 /// per-pod named volumes.
 #[test]
