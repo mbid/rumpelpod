@@ -148,6 +148,10 @@ impl TestDaemon {
     pub fn kill(&mut self) {
         self.process.kill().expect("failed to kill daemon");
         self.process.wait().expect("failed to wait for daemon");
+        // Remove the socket so that a subsequent start() on the same home
+        // directory does not see a stale file and return before the new
+        // daemon is ready.
+        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
