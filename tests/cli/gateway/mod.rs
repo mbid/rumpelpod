@@ -79,6 +79,20 @@ pub(super) fn get_branch_commit(repo_path: &Path, branch: &str) -> Option<String
         .map(|b| String::try_from(b).unwrap().trim().to_string())
 }
 
+/// Poll until a gateway branch reaches the expected commit.  The push
+/// from the container is asynchronous, so it may not have landed by the
+/// time the triggering command returns.  No timeout here -- the test
+/// harness kills us if we hang.
+fn wait_for_branch_commit(repo_path: &Path, branch: &str, expected: &str) {
+    loop {
+        if get_branch_commit(repo_path, branch).as_deref() == Some(expected) {
+            return;
+        }
+        eprintln!("waiting for {branch} to reach {expected}...");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
 /// Create a new branch in the repo.
 fn create_branch(repo_path: &Path, name: &str) {
     Command::new("git")
@@ -611,18 +625,11 @@ fn gateway_pod_commit_triggers_push() {
         .trim()
         .to_string();
 
-    // Check that the gateway has the branch rumpelpod/<pod_name>@<pod_name>
-    // (pod is on a branch named after itself, not "master")
+    // The push from the reference-transaction hook is asynchronous, so
+    // poll until the gateway has the commit.
     let gateway = get_gateway_path(repo.path()).expect("Gateway should be configured");
     let expected_branch = format!("rumpelpod/{}@{}", pod_name, pod_name);
-    let gateway_commit = get_branch_commit(&gateway, &expected_branch);
-
-    assert_eq!(
-        gateway_commit,
-        Some(pod_commit),
-        "Gateway should have branch '{}' with pod's commit",
-        expected_branch
-    );
+    wait_for_branch_commit(&gateway, &expected_branch, &pod_commit);
 }
 
 #[test]
@@ -3099,11 +3106,6 @@ fn gateway_reconnect_push() {
         .success()
         .expect("re-enter after restart failed");
 
-    // The gateway should now have the offline commit.
-    let gateway_commit_after = get_branch_commit(&gateway, &expected_branch);
-    assert_eq!(
-        gateway_commit_after.as_deref(),
-        Some(offline_commit.as_str()),
-        "gateway should have the offline commit after reconnect"
-    );
+    // The reconnect push is asynchronous, so poll until it lands.
+    wait_for_branch_commit(&gateway, &expected_branch, &offline_commit);
 }
