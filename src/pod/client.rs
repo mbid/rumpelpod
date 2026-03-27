@@ -8,6 +8,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use flate2::read::GzEncoder;
+use flate2::Compression;
 use serde::{Deserialize, Serialize};
 
 use super::types::*;
@@ -250,9 +252,6 @@ impl PodClient {
         path: &Path,
         reader: impl std::io::Read + Send + 'static,
     ) -> Result<()> {
-        use flate2::read::GzEncoder;
-        use flate2::Compression;
-
         let gz_reader = GzEncoder::new(reader, Compression::fast());
         let body = reqwest::blocking::Body::new(gz_reader);
 
@@ -280,6 +279,37 @@ impl PodClient {
             });
             let err = &error.error;
             Err(anyhow::anyhow!("POST /cp: {err}"))
+        }
+    }
+
+    /// Populate bind mount targets inside the container from a single tar
+    /// archive whose entries use absolute destination paths (leading slash
+    /// stripped).  The reader is gzip-compressed on-the-fly and streamed.
+    pub fn init_mounts(&self, reader: impl std::io::Read + Send + 'static) -> Result<()> {
+        let gz_reader = GzEncoder::new(reader, Compression::fast());
+        let body = reqwest::blocking::Body::new(gz_reader);
+
+        let base = &self.url;
+        let token = &self.token;
+        let url = format!("{base}/init-mounts");
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Content-Type", "application/x-tar")
+            .header("Content-Encoding", "gzip")
+            .body(body)
+            .send()
+            .with_context(|| format!("sending request to {url}"))?;
+
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "unknown error".to_string(),
+            });
+            let err = &error.error;
+            Err(anyhow::anyhow!("POST /init-mounts: {err}"))
         }
     }
 

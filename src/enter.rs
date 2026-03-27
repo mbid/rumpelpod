@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use log::{info, trace};
+use nix::unistd::getuid;
 
 use crate::cli::EnterCommand;
 use crate::config::{load_toml_config, Host};
@@ -232,6 +234,49 @@ pub fn find_host_claude_cli() -> Option<PathBuf> {
     None
 }
 
+/// Verify that every file under each bind mount source is owned by the
+/// current user.  The daemon will tar these directories and upload them
+/// into the container via the pod server, which runs as a regular user
+/// and cannot chown arbitrary files.
+fn validate_bind_mount_ownership(devcontainer: &DevContainer) -> Result<()> {
+    let my_uid = getuid().as_raw();
+    for m in devcontainer.resolved_mounts()? {
+        if m.mount_type != MountType::Bind {
+            continue;
+        }
+        let source = match &m.source {
+            Some(s) => PathBuf::from(s),
+            None => continue,
+        };
+        if !source.exists() {
+            let source = source.display();
+            return Err(anyhow::anyhow!(
+                "bind mount source '{source}' does not exist"
+            ));
+        }
+        for entry in walkdir::WalkDir::new(&source) {
+            let entry = entry.with_context(|| {
+                let source = source.display();
+                format!("walking bind mount source '{source}'")
+            })?;
+            let meta = entry.metadata().with_context(|| {
+                let path = entry.path().display();
+                format!("stat '{path}'")
+            })?;
+            if meta.uid() != my_uid {
+                let path = entry.path().display();
+                let owner = meta.uid();
+                return Err(anyhow::anyhow!(
+                    "bind mount source contains file '{path}' owned by uid {owner}, \
+                     not the current user (uid {my_uid}). \
+                     All files must be owned by the current user for remote bind mounts."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Launch a pod and return the container ID and user.
 /// This is shared logic between `enter` and `agent` commands.
 pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
@@ -242,18 +287,12 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let elapsed = t.elapsed();
     trace!("launch_pod config: {elapsed:?}");
 
-    // Reject bind mounts early for remote Docker
+    // Validate bind mount ownership for remote hosts.  Bind mounts will be
+    // converted to volumes and populated via tar upload by the daemon, but the
+    // container-serve process runs as a regular user so every file in the
+    // source tree must be owned by the current user.
     if docker_host.is_remote() {
-        for m in devcontainer.resolved_mounts()? {
-            if m.mount_type == MountType::Bind {
-                let source = m.source.as_deref().unwrap_or("<none>");
-                return Err(anyhow::anyhow!(
-                    "bind mounts are not supported with remote Docker hosts. \
-                     The source path '{source}' would reference the remote filesystem, \
-                     not your local machine. Use volume or tmpfs mounts instead."
-                ));
-            }
-        }
+        validate_bind_mount_ownership(&devcontainer)?;
     }
 
     let host_branch = get_current_branch(&repo_root);

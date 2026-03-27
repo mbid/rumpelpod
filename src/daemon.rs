@@ -4,6 +4,7 @@ pub mod reconnect;
 pub mod ssh_forward;
 
 use std::collections::{BTreeMap, HashMap};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -23,6 +24,8 @@ use rand::distr::Alphanumeric;
 use rand::RngExt;
 use rusqlite::Connection;
 use tokio::net::UnixListener;
+
+use sha2::{Digest, Sha256};
 
 use crate::async_runtime::block_on;
 use crate::config::{is_deterministic_test_mode, Host};
@@ -138,8 +141,6 @@ pub fn socket_path() -> Result<PathBuf> {
 /// name is a short hash to stay within the Unix socket path length limit
 /// (108 bytes on Linux).
 fn ssh_agent_dir(repo_path: &Path, pod_name: &PodName) -> PathBuf {
-    use sha2::{Digest, Sha256};
-
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
@@ -278,8 +279,6 @@ fn sanitize_hostname(s: &str) -> String {
 /// Format: "<repo_dir>-<pod_name>-<hash_prefix>"
 /// where hash is sha256(repo_path + pod_name) truncated to 12 hex chars.
 fn docker_name(repo_path: &Path, pod_name: &PodName) -> String {
-    use sha2::{Digest, Sha256};
-
     let repo_dir = repo_path
         .file_name()
         .and_then(|n| n.to_str())
@@ -606,6 +605,150 @@ fn parse_device_mapping(spec: &str) -> DeviceMapping {
         path_in_container: Some(container.to_string()),
         cgroup_permissions: Some(perms.to_string()),
     }
+}
+
+/// A bind mount source + container target pair, kept around so the daemon
+/// can populate the mount after the container starts.
+struct BindSource {
+    /// Host-side path to the directory.
+    source: PathBuf,
+    /// Absolute path inside the container.
+    target: String,
+}
+
+/// On remote hosts, convert bind mounts to named volumes so the container
+/// can be created without referencing the developer's filesystem.  Returns
+/// the (possibly converted) mount list and the original bind source/target
+/// pairs that still need to be uploaded.
+fn split_bind_mounts(
+    mounts: Vec<devcontainer::MountObject>,
+    host: &Host,
+    pod_name: &str,
+) -> (Vec<devcontainer::MountObject>, Vec<BindSource>) {
+    if !host.is_remote() {
+        return (mounts, Vec::new());
+    }
+
+    let mut converted = Vec::with_capacity(mounts.len());
+    let mut bind_sources = Vec::new();
+
+    for m in mounts {
+        if m.mount_type != devcontainer::MountType::Bind {
+            converted.push(m);
+            continue;
+        }
+
+        let source_path = m.source.as_deref().unwrap_or("");
+        bind_sources.push(BindSource {
+            source: PathBuf::from(source_path),
+            target: m.target.clone(),
+        });
+
+        // Deterministic volume name so re-creation reuses the same volume.
+        let hash_input = format!("{pod_name}\0{}", m.target);
+        let hash = Sha256::digest(hash_input.as_bytes());
+        let short_hash = hex::encode(&hash[..6]);
+        let volume_name = format!("rumpelpod-bind-{short_hash}");
+
+        converted.push(devcontainer::MountObject {
+            mount_type: devcontainer::MountType::Volume,
+            source: Some(volume_name),
+            target: m.target,
+            // Writable so we can copy data in; original read_only is not
+            // preserved (documented limitation for now).
+            read_only: None,
+        });
+    }
+
+    (converted, bind_sources)
+}
+
+/// Build a single tar of all bind mount sources (entries at absolute
+/// container paths) and stream it to the pod server in one request.
+fn upload_bind_mounts(pod: &PodClient, binds: &[BindSource]) -> Result<()> {
+    if binds.is_empty() {
+        return Ok(());
+    }
+
+    let (read_end, write_end) = std::io::pipe().context("creating pipe for bind mount tar")?;
+
+    let binds_owned: Vec<(PathBuf, String)> = binds
+        .iter()
+        .map(|b| (b.source.clone(), b.target.clone()))
+        .collect();
+
+    let writer_thread = std::thread::spawn(move || -> Result<()> {
+        let mut archive = tar::Builder::new(write_end);
+        archive.follow_symlinks(true);
+        for (source, target) in &binds_owned {
+            // target is absolute, e.g. "/mnt/data".  Strip the leading
+            // slash so tar entries are "mnt/data/...".
+            let target_stripped = target.strip_prefix('/').unwrap_or(target);
+
+            if source.is_dir() {
+                for entry in walkdir::WalkDir::new(source) {
+                    let entry = entry.with_context(|| {
+                        let source = source.display();
+                        format!("walking bind source '{source}'")
+                    })?;
+                    let rel = entry
+                        .path()
+                        .strip_prefix(source)
+                        .expect("walkdir entry must be under source");
+                    let tar_path = Path::new(target_stripped).join(rel);
+                    let meta = entry.metadata().with_context(|| {
+                        let path = entry.path().display();
+                        format!("stat '{path}'")
+                    })?;
+                    if meta.is_dir() {
+                        let mut header = tar::Header::new_gnu();
+                        header.set_entry_type(tar::EntryType::Directory);
+                        header.set_size(0);
+                        header.set_mode(meta.permissions().mode());
+                        header.set_cksum();
+                        archive
+                            .append_data(&mut header, &tar_path, std::io::empty())
+                            .with_context(|| {
+                                let tar_path = tar_path.display();
+                                format!("adding directory '{tar_path}' to tar")
+                            })?;
+                    } else if meta.is_file() {
+                        archive
+                            .append_path_with_name(entry.path(), &tar_path)
+                            .with_context(|| {
+                                let tar_path = tar_path.display();
+                                format!("adding file '{tar_path}' to tar")
+                            })?;
+                    }
+                    // Skip symlinks, sockets, etc. for now.
+                }
+            } else {
+                // Single file bind mount.
+                let file_name = source
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let tar_path = Path::new(target_stripped).join(&file_name);
+                archive
+                    .append_path_with_name(source, &tar_path)
+                    .with_context(|| {
+                        let source = source.display();
+                        format!("adding file '{source}' to tar")
+                    })?;
+            }
+        }
+        archive.into_inner().context("finalizing bind mount tar")?;
+        Ok(())
+    });
+
+    pod.init_mounts(read_end)
+        .context("uploading bind mount data to container")?;
+
+    writer_thread
+        .join()
+        .expect("bind mount tar writer panicked")?;
+
+    Ok(())
 }
 
 /// Create a new container using the bollard Docker API.
@@ -2226,35 +2369,40 @@ impl DaemonServer {
         let annotations = crate::k8s::K8sClient::pod_annotations();
 
         // Build K8sPodOptions from devcontainer config
-        let mounts = devcontainer.resolved_mounts()?;
+        let all_mounts = devcontainer.resolved_mounts()?;
         let run_args = devcontainer.run_args.as_deref().unwrap_or(&[]);
         let run_args_config = parse_run_args_for_docker(run_args);
 
-        // Convert mounts to k8s volume mounts (bind mounts already rejected
-        // by the is_remote() check in launch_pod before dispatching here)
-        let k8s_volumes: Vec<crate::k8s::K8sVolumeMount> = mounts
+        // Separate bind mounts for later upload.
+        let mut bind_sources = Vec::new();
+        let k8s_volumes: Vec<crate::k8s::K8sVolumeMount> = all_mounts
             .iter()
             .enumerate()
-            .filter_map(|(i, m)| {
-                match m.mount_type {
-                    devcontainer::MountType::Volume => Some(crate::k8s::K8sVolumeMount {
+            .map(|(i, m)| match m.mount_type {
+                devcontainer::MountType::Volume => crate::k8s::K8sVolumeMount {
+                    name: format!("vol-{i}"),
+                    mount_path: m.target.clone(),
+                    read_only: m.read_only.unwrap_or(false),
+                    medium: None,
+                },
+                devcontainer::MountType::Tmpfs => crate::k8s::K8sVolumeMount {
+                    name: format!("vol-{i}"),
+                    mount_path: m.target.clone(),
+                    read_only: m.read_only.unwrap_or(false),
+                    medium: Some("Memory".to_string()),
+                },
+                devcontainer::MountType::Bind => {
+                    bind_sources.push(BindSource {
+                        source: PathBuf::from(m.source.as_deref().unwrap_or("")),
+                        target: m.target.clone(),
+                    });
+                    // Disk-backed emptyDir; populated via tar upload
+                    // after the pod starts.
+                    crate::k8s::K8sVolumeMount {
                         name: format!("vol-{i}"),
                         mount_path: m.target.clone(),
-                        read_only: m.read_only.unwrap_or(false),
+                        read_only: false,
                         medium: None,
-                    }),
-                    devcontainer::MountType::Tmpfs => Some(crate::k8s::K8sVolumeMount {
-                        name: format!("vol-{i}"),
-                        mount_path: m.target.clone(),
-                        read_only: m.read_only.unwrap_or(false),
-                        medium: Some("Memory".to_string()),
-                    }),
-                    devcontainer::MountType::Bind => {
-                        // Should not reach here due to is_remote() check, but
-                        // be explicit rather than silently dropping.
-                        let target = &m.target;
-                        log::warn!("bind mount '{target}' ignored on Kubernetes");
-                        None
                     }
                 }
             })
@@ -2358,6 +2506,10 @@ impl DaemonServer {
         // PodClient::new polls /health until the server is ready.
         let pod = PodClient::new(&container_url, &token, RetryPolicy::UserBlocking)
             .map_err(mark_error)?;
+
+        // Populate bind mount volumes with data from the host.
+        upload_bind_mounts(&pod, &bind_sources)
+            .map_err(|e| mark_error(e.context("populating bind mount volumes")))?;
 
         let tunnel = client
             .start_tunnel(
@@ -2558,21 +2710,11 @@ impl DaemonServer {
             }) as crate::image::BuildOutputFn)
         };
 
-        // Reject bind mounts on remote Docker hosts -- the source paths would
-        // reference the remote filesystem, not the developer's machine.
-        let mounts = devcontainer.resolved_mounts()?;
-        if docker_host.is_remote() {
-            for m in &mounts {
-                if m.mount_type == devcontainer::MountType::Bind {
-                    return Err(anyhow::anyhow!(
-                        "bind mounts are not supported with remote Docker hosts. \
-                         The source path '{}' would reference the remote filesystem, \
-                         not your local machine. Use volume or tmpfs mounts instead.",
-                        m.source.as_deref().unwrap_or("<none>")
-                    ));
-                }
-            }
-        }
+        // On remote hosts, bind mounts are converted to named volumes and
+        // populated via tar upload after the container starts.  Split them
+        // out so create_container gets only volume/tmpfs mounts.
+        let all_mounts = devcontainer.resolved_mounts()?;
+        let (mounts, bind_sources) = split_bind_mounts(all_mounts, &docker_host, &pod_name.0);
 
         // Get the host specification string for the database
         let host_spec = serde_json::to_string(&docker_host)?;
@@ -3045,6 +3187,10 @@ impl DaemonServer {
                 )
                 .context("chown mount targets for container user")?;
             }
+
+            // Populate bind mount volumes with data from the host.
+            upload_bind_mounts(&pod_inner, &bind_sources)
+                .context("populating bind mount volumes")?;
 
             // Start exec tunnel so the container can reach the git HTTP
             // server on a loopback port.

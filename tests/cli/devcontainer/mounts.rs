@@ -199,21 +199,25 @@ fn mount_persists_across_restarts() {
     assert_eq!(stdout.trim(), "persisted");
 }
 
-/// Bind mounts should be rejected when using a remote Docker host because
-/// the source path would reference the remote filesystem, not the developer's
-/// machine — almost certainly not the intended behavior.
+/// Bind mounts on remote Docker hosts are converted to volumes and
+/// populated via tar upload.  The source directory contents should
+/// appear at the target path inside the container.
 #[test]
-fn mount_bind_blocked_remote() {
+fn mount_bind_remote_copies_content() {
     let repo = TestRepo::new();
 
+    // Create a source directory with test content on the host.
+    let bind_src = repo.path().join("bind-src");
+    fs::create_dir_all(bind_src.join("sub")).unwrap();
+    fs::write(bind_src.join("hello.txt"), "from-host\n").unwrap();
+    fs::write(bind_src.join("sub/nested.txt"), "nested\n").unwrap();
+
+    let bind_src_str = bind_src.to_string_lossy();
     write_devcontainer_with_mounts(
         &repo,
-        r#"[{"type": "bind", "source": "/tmp/hostdir", "target": "/mnt/hostdir"}]"#,
+        &format!(r#"[{{"type": "bind", "source": "{bind_src_str}", "target": "/mnt/data"}}]"#,),
     );
 
-    // Point .rumpelpod.toml at a remote Docker host so the daemon tunnels
-    // over SSH.  The devcontainer.json is still used for image build and
-    // mounts config.
     let home = TestHome::new();
     let remote = SshRemoteHost::start();
     write_ssh_config(&home, &[&remote]);
@@ -221,28 +225,60 @@ fn mount_bind_blocked_remote() {
 
     let config = formatdoc! {r#"
         host = "{remote_spec}"
-
-        [agent]
-        model = "claude-sonnet-4-5"
     "#, remote_spec = remote.ssh_spec()};
-    fs::write(repo.path().join(".rumpelpod.toml"), config)
-        .expect("Failed to write .rumpelpod.toml");
+    fs::write(repo.path().join(".rumpelpod.toml"), config).unwrap();
 
-    // The command should fail with a clear error about bind mounts not
-    // being supported on remote Docker.
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "mnt-bind-remote",
+            "--",
+            "sh",
+            "-c",
+            "cat /mnt/data/hello.txt && cat /mnt/data/sub/nested.txt",
+        ])
+        .success()
+        .expect("rumpel enter failed");
+
+    let stdout = String::from_utf8_lossy(&stdout);
+    assert_eq!(stdout.trim(), "from-host\nnested");
+}
+
+/// Bind mount sources containing files not owned by the current user
+/// should be rejected early, before the pod is created.
+#[test]
+fn mount_bind_remote_rejects_foreign_owned_files() {
+    let repo = TestRepo::new();
+
+    // Use a system path that definitely has root-owned files.
+    write_devcontainer_with_mounts(
+        &repo,
+        r#"[{"type": "bind", "source": "/etc", "target": "/mnt/etc"}]"#,
+    );
+
+    let home = TestHome::new();
+    let remote = SshRemoteHost::start();
+    write_ssh_config(&home, &[&remote]);
+    let daemon = TestDaemon::start(&home);
+
+    let config = formatdoc! {r#"
+        host = "{remote_spec}"
+    "#, remote_spec = remote.ssh_spec()};
+    fs::write(repo.path().join(".rumpelpod.toml"), config).unwrap();
+
     let output = pod_command(&repo, &daemon)
-        .args(["enter", "mnt-bind-remote", "--", "true"])
+        .args(["enter", "mnt-bind-foreign", "--", "true"])
         .output()
         .expect("failed to execute rumpel enter");
 
     assert!(
         !output.status.success(),
-        "rumpel enter should have rejected bind mount on remote Docker"
+        "rumpel enter should reject bind mount with foreign-owned files"
     );
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("bind") && stderr.to_lowercase().contains("remote"),
-        "error should mention bind mounts and remote Docker, got: {stderr}"
+        stderr.contains("owned by uid"),
+        "error should mention ownership, got: {stderr}"
     );
 }

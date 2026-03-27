@@ -86,6 +86,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         .route("/git/snapshot", post(git_snapshot_handler))
         .route("/git/apply-patch", post(git_apply_patch_handler))
         .route("/cp", get(cp_download_handler).post(cp_upload_handler))
+        .route("/init-mounts", post(init_mounts_handler))
         .route("/run", post(run_handler))
         .route("/events", get(events_handler))
         .route("/claude", any(super::pty::claude_session_handler))
@@ -1198,6 +1199,59 @@ fn cp_upload_impl(path: &Path, reader: impl std::io::Read) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Populate bind mount targets from a single tar archive.
+///
+/// Entries use absolute destination paths (leading slash stripped in the
+/// tar, restored during extraction).  The daemon builds one tar covering
+/// all bind mounts so this is a single-request operation.
+async fn init_mounts_handler(
+    body: axum::body::Body,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    use tokio_stream::StreamExt;
+    let stream = body
+        .into_data_stream()
+        .map(|result| result.map_err(std::io::Error::other));
+    let async_reader = tokio_util::io::StreamReader::new(stream);
+    let sync_reader = tokio_util::io::SyncIoBridge::new(async_reader);
+
+    let result = tokio::task::spawn_blocking(move || init_mounts_impl(sync_reader))
+        .await
+        .expect("init_mounts_impl panicked");
+    result.map_err(err_json)?;
+    ok_json(serde_json::json!({}))
+}
+
+fn init_mounts_impl(reader: impl std::io::Read) -> Result<()> {
+    let mut archive = tar::Archive::new(reader);
+    for entry in archive.entries().context("reading tar entries")? {
+        let mut entry = entry.context("reading tar entry")?;
+        let entry_path = entry.path().context("reading entry path")?.into_owned();
+
+        // Entries are stored without a leading slash; restore it to get the
+        // absolute container path.
+        let target = Path::new("/").join(&entry_path);
+
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&target).with_context(|| {
+                let target = target.display();
+                format!("creating directory {target}")
+            })?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).with_context(|| {
+                    let parent = parent.display();
+                    format!("creating parent directory {parent}")
+                })?;
+            }
+            entry.unpack(&target).with_context(|| {
+                let target = target.display();
+                format!("extracting to {target}")
+            })?;
+        }
+    }
     Ok(())
 }
 
