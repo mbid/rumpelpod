@@ -43,6 +43,14 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
         child_cmd.args(["--remote", &remote_url]);
         child_cmd.args(&cmd.args);
 
+        // The host-side codex TUI also checks for auth before
+        // connecting. Pass the API key so it skips the login flow.
+        if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            child_cmd.env("CODEX_API_KEY", &key);
+        } else if let Ok(key) = std::env::var("CODEX_API_KEY") {
+            child_cmd.env("CODEX_API_KEY", &key);
+        }
+
         let status = child_cmd
             .status()
             .with_context(|| format!("spawning codex TUI from {}", codex_bin.display()))?;
@@ -66,7 +74,7 @@ fn write_codex_credentials(pod: &crate::pod::PodClient) -> Result<()> {
     // Prefer OPENAI_API_KEY env var (simple API key auth).
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
         let auth_json = serde_json::json!({
-            "auth_mode": "api_key",
+            "auth_mode": "apikey",
             "OPENAI_API_KEY": api_key,
         });
         let data = serde_json::to_vec_pretty(&auth_json).context("serializing auth.json")?;

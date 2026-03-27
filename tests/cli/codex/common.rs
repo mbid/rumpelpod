@@ -28,7 +28,8 @@ fn write_codex_test_devcontainer(repo: &TestRepo) {
                 *) echo "unsupported arch: $ARCH" && exit 1 ;; \
             esac && \
             curl -fsSL "https://github.com/openai/codex/releases/latest/download/codex-$CODEX_ARCH.tar.gz" \
-            | tar xz -C /usr/local/bin
+            | tar xz -C /usr/local/bin && \
+            mv "/usr/local/bin/codex-$CODEX_ARCH" /usr/local/bin/codex
     "#};
 
     write_test_devcontainer(repo, &extra_dockerfile, "");
@@ -45,7 +46,7 @@ fn setup_controlled_home(home: &TestHome) {
     std::fs::create_dir_all(&codex_dir).expect("create .codex dir");
     std::fs::write(
         codex_dir.join("auth.json"),
-        format!(r#"{{"auth_mode":"api_key","OPENAI_API_KEY":"{api_key}"}}"#),
+        format!(r#"{{"auth_mode":"apikey","OPENAI_API_KEY":"{api_key}"}}"#),
     )
     .expect("write auth.json");
 }
@@ -203,6 +204,31 @@ impl CodexSession {
             "[wait_for {:?}] alt_screen={} cursor=({},{}) screen:\n{}",
             waiting_for, alt, cur_row, cur_col, trimmed
         );
+    }
+
+    /// Dismiss startup dialogs by pressing Enter until we reach the
+    /// main input prompt (not on the alternate screen).
+    pub fn dismiss_dialogs(&mut self) {
+        loop {
+            // Wait for the TUI to show the prompt character.
+            self.wait_for("\u{203a}");
+
+            // Drain buffered output so the screen state is current.
+            while let Ok(bytes) = self.rx.try_recv() {
+                self.raw_log.extend_from_slice(&bytes);
+                self.parser.process(&bytes);
+            }
+
+            // If we are on the main screen (not alternate), the input
+            // prompt is ready and there are no more dialogs.
+            if !self.parser.screen().alternate_screen() {
+                break;
+            }
+
+            // Still on a dialog -- press Enter to dismiss it.
+            self.writer.write_all(b"\r").expect("write Enter");
+            self.writer.flush().expect("flush");
+        }
     }
 
     /// Type text into the prompt and press Enter.

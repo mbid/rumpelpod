@@ -12,12 +12,14 @@ use super::common::{setup_codex_test_repo, CodexSession};
 fn codex_smoke() {
     let (_home, repo, _executor, daemon) = setup_codex_test_repo("codex-smoke");
 
-    let mut session = CodexSession::spawn(&repo, &daemon, _home.path(), &[]);
+    // Pass --full-auto to avoid sandbox permission prompts, and
+    // an explicit --model to avoid the model upgrade selection dialog.
+    let mut session =
+        CodexSession::spawn(&repo, &daemon, _home.path(), &["--full-auto", "-m", "o3"]);
 
-    // Wait for the codex TUI to finish loading and show a prompt.
-    // The exact ready indicator depends on the codex TUI; adjust
-    // once we see what it actually renders.
-    session.wait_for(">");
+    // Dismiss any startup dialogs (model selection, announcements)
+    // by pressing Enter whenever the TUI is waiting.
+    session.dismiss_dialogs();
 
     session.send("What is the capital of France? Reply with just the city name, nothing else.");
     session.wait_for("Paris");
