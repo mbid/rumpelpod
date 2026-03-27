@@ -1,0 +1,9 @@
+Pass --dangerously-bypass-approvals-and-sandbox to codex by default
+
+The pod provides the sandbox, so codex does not need its own approval
+gates or sandbox restrictions. This mirrors how claude gets
+--dangerously-skip-permissions by default in rumpelpod.
+
+Disable with --no-dangerously-bypass-approvals-and-sandbox on the CLI
+or dangerously-bypass-approvals-and-sandbox = false in [codex] section
+of .rumpelpod.toml.
