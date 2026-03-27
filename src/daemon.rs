@@ -1394,7 +1394,6 @@ fn copy_claude_config_via_pod(
     repo_path: &Path,
     container_repo_path: &Path,
     pod_name: &str,
-    auto_approve_hook: bool,
 ) -> Result<()> {
     let host_home = dirs::home_dir().context("Could not determine home directory")?;
     let claude_dir = host_home.join(".claude");
@@ -1429,18 +1428,13 @@ fn copy_claude_config_via_pod(
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
     }
 
-    // .claude/settings.json -- user preferences + statusline + hooks
+    // .claude/settings.json -- user preferences + statusline
     let base_data = match std::fs::read(claude_dir.join("settings.json")) {
         Ok(data) => data,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => b"{}".to_vec(),
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/settings.json")),
     };
     let data = inject_statusline(&base_data, pod_name);
-    let data = if auto_approve_hook {
-        inject_hooks(&data)
-    } else {
-        data
-    };
     files.push(HomeFileEntry {
         path: ".claude/settings.json".to_string(),
         content: base64_encode(&data),
@@ -1727,82 +1721,6 @@ fn inject_statusline(data: &[u8], pod_name: &str) -> Vec<u8> {
 pub(crate) const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
 pub(crate) const CLAUDE_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/claude";
 pub(crate) const CODEX_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/codex";
-
-/// Inject Claude Code hooks into settings.json:
-///   - PermissionRequest: auto-approve permission dialogs
-///   - UserPromptSubmit / Stop / StopFailure / SessionEnd: track session state
-fn inject_hooks(data: &[u8]) -> Vec<u8> {
-    let Ok(mut obj) = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(data)
-    else {
-        return data.to_vec();
-    };
-
-    let hooks_obj = obj
-        .entry("hooks")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    let serde_json::Value::Object(hooks_map) = hooks_obj else {
-        return data.to_vec();
-    };
-
-    add_hook_entry(
-        hooks_map,
-        "PermissionRequest",
-        "",
-        &format!("{RUMPEL_CONTAINER_BIN} claude-hook permission-request"),
-    );
-    add_hook_entry(
-        hooks_map,
-        "UserPromptSubmit",
-        "",
-        &format!("{RUMPEL_CONTAINER_BIN} claude-hook notify-state processing"),
-    );
-    add_hook_entry(
-        hooks_map,
-        "Stop",
-        "",
-        &format!("{RUMPEL_CONTAINER_BIN} claude-hook notify-state waiting_for_input"),
-    );
-    add_hook_entry(
-        hooks_map,
-        "StopFailure",
-        "authentication_failed",
-        &format!("{RUMPEL_CONTAINER_BIN} claude-hook notify-state auth_error"),
-    );
-    add_hook_entry(
-        hooks_map,
-        "SessionEnd",
-        "",
-        &format!("{RUMPEL_CONTAINER_BIN} claude-hook notify-state stopped"),
-    );
-
-    serde_json::to_vec_pretty(&obj).unwrap_or_else(|_| data.to_vec())
-}
-
-/// Insert a hook entry into the hooks map if an identical one is not already
-/// present.
-fn add_hook_entry(
-    hooks_map: &mut serde_json::Map<String, serde_json::Value>,
-    event_name: &str,
-    matcher: &str,
-    command: &str,
-) {
-    let hook_entry = serde_json::json!({
-        "matcher": matcher,
-        "hooks": [
-            { "type": "command", "command": command }
-        ]
-    });
-
-    let arr = hooks_map
-        .entry(event_name)
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-    if let serde_json::Value::Array(vec) = arr {
-        let already_present = vec.iter().any(|v| v == &hook_entry);
-        if !already_present {
-            vec.push(hook_entry);
-        }
-    }
-}
 
 /// Pick the right rumpel binary for the container architecture.
 ///
@@ -4078,7 +3996,6 @@ impl Daemon for DaemonServer {
             &request.repo_path,
             &request.container_repo_path,
             &request.pod_name.0,
-            request.auto_approve_hook,
         )?;
 
         // Mark as copied only after the full copy succeeds.
@@ -4349,88 +4266,22 @@ pub fn run_daemon() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn assert_hook_count(obj: &serde_json::Value, event: &str, expected: usize) {
-        let arr = obj["hooks"][event].as_array().unwrap_or_else(|| {
-            panic!("expected hooks[{event}] to be an array");
-        });
-        assert_eq!(
-            arr.len(),
-            expected,
-            "hooks[{event}] should have {expected} entries, got {}",
-            arr.len()
-        );
+    #[test]
+    fn inject_statusline_empty_settings() {
+        let data = inject_statusline(b"{}", "dev");
+        let obj: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(obj["statusLine"]["type"], "command");
+        assert!(obj["statusLine"]["command"]
+            .as_str()
+            .unwrap()
+            .contains("dev"));
     }
 
     #[test]
-    fn inject_hooks_empty_settings() {
-        let input = b"{}";
-        let result = inject_hooks(input);
-        let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
-
-        // All five hook types should be present.
-        assert_hook_count(&obj, "PermissionRequest", 1);
-        assert_hook_count(&obj, "UserPromptSubmit", 1);
-        assert_hook_count(&obj, "Stop", 1);
-        assert_hook_count(&obj, "StopFailure", 1);
-        assert_hook_count(&obj, "SessionEnd", 1);
-
-        // Verify PermissionRequest command.
-        let inner = obj["hooks"]["PermissionRequest"][0]["hooks"]
-            .as_array()
-            .unwrap();
-        assert_eq!(
-            inner[0]["command"],
-            format!("{RUMPEL_CONTAINER_BIN} claude-hook permission-request")
-        );
-
-        // StopFailure should only match authentication failures.
-        assert_eq!(obj["hooks"]["StopFailure"][0]["matcher"], "authentication_failed");
-    }
-
-    #[test]
-    fn inject_hooks_preserves_existing_fields() {
+    fn inject_statusline_preserves_existing() {
         let input = br#"{"statusLine":{"type":"command","command":"echo hi"}}"#;
-        let result = inject_hooks(input);
-        let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        let data = inject_statusline(input, "dev");
+        let obj: serde_json::Value = serde_json::from_slice(&data).unwrap();
         assert_eq!(obj["statusLine"]["command"], "echo hi");
-        assert_hook_count(&obj, "PermissionRequest", 1);
-        assert_hook_count(&obj, "UserPromptSubmit", 1);
-    }
-
-    #[test]
-    fn inject_hooks_preserves_existing_hooks() {
-        let input = br#"{"hooks":{"PreToolUse":[{"type":"command","command":"other"}]}}"#;
-        let result = inject_hooks(input);
-        let obj: serde_json::Value = serde_json::from_slice(&result).unwrap();
-        // Existing PreToolUse entry is untouched
-        let pre = obj["hooks"]["PreToolUse"].as_array().unwrap();
-        assert_eq!(pre.len(), 1);
-        assert_eq!(pre[0]["command"], "other");
-        // All new hooks were added
-        assert_hook_count(&obj, "PermissionRequest", 1);
-        assert_hook_count(&obj, "UserPromptSubmit", 1);
-        assert_hook_count(&obj, "Stop", 1);
-        assert_hook_count(&obj, "StopFailure", 1);
-        assert_hook_count(&obj, "SessionEnd", 1);
-    }
-
-    #[test]
-    fn inject_hooks_idempotent() {
-        let input = b"{}";
-        let once = inject_hooks(input);
-        let twice = inject_hooks(&once);
-        let obj: serde_json::Value = serde_json::from_slice(&twice).unwrap();
-        assert_hook_count(&obj, "PermissionRequest", 1);
-        assert_hook_count(&obj, "UserPromptSubmit", 1);
-        assert_hook_count(&obj, "Stop", 1);
-        assert_hook_count(&obj, "StopFailure", 1);
-        assert_hook_count(&obj, "SessionEnd", 1);
-    }
-
-    #[test]
-    fn inject_hooks_invalid_json_returns_input() {
-        let input = b"not json";
-        let result = inject_hooks(input);
-        assert_eq!(result, input);
     }
 }

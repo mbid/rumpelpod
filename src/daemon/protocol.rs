@@ -306,8 +306,6 @@ pub struct EnsureClaudeConfigRequest {
     pub docker_socket: Option<PathBuf>,
     pub container_url: String,
     pub container_token: String,
-    /// Install a Claude PermissionRequest hook that auto-approves all tool use.
-    pub auto_approve_hook: bool,
 }
 
 /// Request body for start_codex_proxy endpoint.

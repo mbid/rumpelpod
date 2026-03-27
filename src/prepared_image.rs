@@ -781,6 +781,7 @@ fn write_managed_settings() -> Result<()> {
         .context("writing /etc/claude-code/managed-settings.json")
 }
 
+/// Write /etc/claude-code/managed-settings.json with Claude Code hooks:
 /// Parse "NAME=URL" remote specs and add/update them in the repo.
 ///
 /// Also removes any pre-existing remotes (from the base image) that
