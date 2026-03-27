@@ -69,11 +69,7 @@ pub fn list() -> Result<()> {
         if show_claude {
             row.push(claude_state_str(pod.claude_state).to_string());
         }
-        row.extend([
-            repo_state.to_string(),
-            status_str.to_string(),
-            pod.created,
-        ]);
+        row.extend([repo_state.to_string(), status_str.to_string(), pod.created]);
         if show_host {
             row.push(pod.host);
         }
