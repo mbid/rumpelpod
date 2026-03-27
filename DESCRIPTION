@@ -1,0 +1,11 @@
+Resolve ${localWorkspaceFolder} in client-side substitution pass
+
+The client resolved ${localEnv:...} before sending the devcontainer
+config to the daemon, but left workspace folder variables for the
+daemon's second pass. This caused resolved_mounts() to reject
+${localWorkspaceFolder} in bind mount sources when called from
+validate_bind_mount_ownership() on the client side.
+
+Also remove #[derive(Default)] from SubstitutionContext so that
+adding a new variable causes compile errors at every construction
+site, preventing silent omissions like this one.
