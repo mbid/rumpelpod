@@ -123,6 +123,8 @@ RUN dpkg_arch=$(dpkg --print-architecture) && \
 
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
+USER root
+
 # Install Codex CLI from GitHub releases.
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
@@ -134,7 +136,6 @@ RUN ARCH=$(uname -m) && \
     mv "/tmp/codex-$CODEX_ARCH" /usr/local/bin/codex && \
     chmod +x /usr/local/bin/codex
 
-USER root
 RUN mkdir /workspaces && chown -R ${USER}:${USER} /workspaces
 USER ${USER}
 
