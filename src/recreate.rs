@@ -30,7 +30,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         devcontainer,
         git_identity: Some(git_identity),
         claude_cli_path,
-        system_prompt: toml_config.claude.system_prompt,
+        inject_system_prompt: toml_config.claude.inject_system_prompt,
     })?;
     for line in &mut progress {
         match line {

@@ -108,7 +108,7 @@ fn compute_prepared_tag(
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
-    system_prompt: bool,
+    inject_system_prompt: bool,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_image.as_bytes());
@@ -128,7 +128,7 @@ fn compute_prepared_tag(
         hasher.update(b"\0");
     }
     hasher.update(SCHEMA_VERSION.to_le_bytes());
-    hasher.update([u8::from(system_prompt)]);
+    hasher.update([u8::from(inject_system_prompt)]);
     let hash = hex::encode(&hasher.finalize()[..8]);
     format!("rumpelpod-prepared-{hash}")
 }
@@ -206,7 +206,7 @@ fn generate_dockerfile(
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
-    system_prompt: bool,
+    inject_system_prompt: bool,
 ) -> String {
     let repo_path = container_repo_path.display();
     let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
@@ -222,8 +222,8 @@ fn generate_dockerfile(
         .map(|r| format!(" \\\n      --remote '{}={}'", r.name, r.url))
         .collect();
 
-    let system_prompt_flag = if system_prompt {
-        " \\\n      --system-prompt"
+    let system_prompt_flag = if inject_system_prompt {
+        " \\\n      --inject-system-prompt"
     } else {
         ""
     };
@@ -257,7 +257,7 @@ fn assemble_build_context(
     user: &str,
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
-    system_prompt: bool,
+    inject_system_prompt: bool,
 ) -> Result<tempfile::TempDir> {
     let dockerfile = generate_dockerfile(
         base_image,
@@ -265,7 +265,7 @@ fn assemble_build_context(
         user,
         claude_info,
         host_remotes,
-        system_prompt,
+        inject_system_prompt,
     );
     let binaries = find_rumpel_binaries()?;
 
@@ -373,7 +373,7 @@ pub fn build_prepared_image(
     host_remotes: &[GitRemote],
     claude_cli_path: Option<&Path>,
     docker_socket: Option<&Path>,
-    system_prompt: bool,
+    inject_system_prompt: bool,
 ) -> Result<BuildResult> {
     let claude_info = detect_host_claude(claude_cli_path);
 
@@ -383,7 +383,7 @@ pub fn build_prepared_image(
         user,
         claude_info.as_ref(),
         host_remotes,
-        system_prompt,
+        inject_system_prompt,
     );
 
     // Check local cache first.
@@ -414,7 +414,7 @@ pub fn build_prepared_image(
                 builder,
                 push_reg,
                 registry,
-                system_prompt,
+                inject_system_prompt,
             );
         }
     }
@@ -430,7 +430,7 @@ pub fn build_prepared_image(
         user,
         claude_info.as_ref(),
         host_remotes,
-        system_prompt,
+        inject_system_prompt,
     )?;
 
     run_docker_build(
@@ -483,7 +483,7 @@ fn build_prepared_image_via_buildx(
     builder: &str,
     push_registry: &str,
     pull_registry: &str,
-    system_prompt: bool,
+    inject_system_prompt: bool,
 ) -> Result<BuildResult> {
     let push_tag = format!("{push_registry}:{tag}");
     let pull_tag = format!("{pull_registry}:{tag}");
@@ -511,7 +511,7 @@ fn build_prepared_image_via_buildx(
         &base_user,
         claude_info,
         host_remotes,
-        system_prompt,
+        inject_system_prompt,
     )?;
 
     // Symlink the gateway to a name without `.git` so buildx treats it
@@ -639,7 +639,7 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         install_claude_cli(version)?;
     }
 
-    if cmd.system_prompt {
+    if cmd.inject_system_prompt {
         write_system_prompt()?;
     }
 

@@ -137,7 +137,7 @@ pub struct PodLaunchParams {
     pub claude_cli_path: Option<PathBuf>,
     /// Write /etc/claude-code/CLAUDE.md with a rumpelpod environment description
     /// into the prepared image.
-    pub system_prompt: bool,
+    pub inject_system_prompt: bool,
 }
 
 /// Response body for launch/recreate pod endpoints.

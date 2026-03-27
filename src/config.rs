@@ -386,12 +386,12 @@ pub struct ClaudeConfig {
     #[serde(default)]
     pub dangerously_skip_permissions_hook: bool,
 
-    /// Install a system prompt describing the rumpelpod environment
+    /// Inject a system prompt describing the rumpelpod environment
     /// (devcontainer layout, git remotes, push/fetch behavior) into
     /// /etc/claude-code/CLAUDE.md inside the container.
     /// Defaults to true.
     #[serde(default = "default_true")]
-    pub system_prompt: bool,
+    pub inject_system_prompt: bool,
 }
 
 fn default_true() -> bool {
