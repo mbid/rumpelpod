@@ -638,6 +638,41 @@ fn enter_skips_image_build_when_container_exists() {
 }
 
 #[test]
+fn re_enter_with_different_host_config() {
+    // Changing .rumpelpod.toml host between entries should not prevent
+    // re-entry.  The daemon reconnects to the existing pod on whatever
+    // host it was originally created on.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home, "enter-diff-host");
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.toml"), &executor.toml).unwrap();
+
+    // First enter creates the pod on the executor's host.
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "host-test", "--", "echo", "first"])
+        .success()
+        .expect("first enter failed");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "first");
+
+    // Point the config at a different host.  The daemon should ignore
+    // the new host and reconnect to the pod where it was created.
+    fs::write(
+        repo.path().join(".rumpelpod.toml"),
+        "host = \"ssh://bogus@192.0.2.1\"\n",
+    )
+    .unwrap();
+
+    // Re-enter -- should reconnect to the original pod.
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "host-test", "--", "echo", "second"])
+        .success()
+        .expect("re-enter with different host config failed");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "second");
+}
+
+#[test]
 fn enter_updates_git_identity_on_reentry() {
     let repo = TestRepo::new();
     let home = TestHome::new();

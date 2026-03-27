@@ -2718,34 +2718,31 @@ impl DaemonServer {
             }) as crate::image::BuildOutputFn)
         };
 
+        // When re-entering an existing pod, use the host it was created on
+        // rather than whatever the current config resolves to.  The pod is
+        // already running somewhere; reconnect to it there.
+        let mut docker_host = docker_host;
+        {
+            let conn = self.db.lock().unwrap();
+            if let Some(existing) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
+                let host_spec = serde_json::to_string(&docker_host)?;
+                if existing.host != host_spec {
+                    let existing_host: Host = serde_json::from_str(&existing.host)
+                        .context("parsing stored host for existing pod")?;
+                    eprintln!(
+                        "Pod '{}' exists on {}, reconnecting there.",
+                        pod_name.0, existing_host,
+                    );
+                    docker_host = existing_host;
+                }
+            }
+        }
+
         // On remote hosts, bind mounts are converted to named volumes and
         // populated via tar upload after the container starts.  Split them
         // out so create_container gets only volume/tmpfs mounts.
         let all_mounts = devcontainer.resolved_mounts()?;
         let (mounts, bind_sources) = split_bind_mounts(all_mounts, &docker_host, &pod_name.0);
-
-        // Get the host specification string for the database
-        let host_spec = serde_json::to_string(&docker_host)?;
-
-        // Check for name conflicts between local and remote pods
-        {
-            let conn = self.db.lock().unwrap();
-            if let Some(existing) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
-                // A pod with this name exists - check if the host matches
-                if existing.host != host_spec {
-                    let existing_host: Host =
-                        serde_json::from_str(&existing.host).unwrap_or(docker_host.clone());
-                    return Err(anyhow::anyhow!(
-                        "Pod '{}' already exists on {} but was requested on {}.\n\
-                         Delete the existing pod first with 'rumpel delete {}'.",
-                        pod_name.0,
-                        existing_host,
-                        docker_host,
-                        pod_name.0
-                    ));
-                }
-            }
-        }
 
         if matches!(docker_host, Host::Kubernetes { .. }) {
             let build_result = crate::image::resolve_image(
