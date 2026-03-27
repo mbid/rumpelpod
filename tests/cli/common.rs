@@ -117,6 +117,12 @@ impl TestDaemon {
             cmd.env("RUMPELPOD_TEST_DETERMINISTIC_IDS", "1");
         }
 
+        // Enable the LLM cache proxy on the git HTTP server so
+        // containers can route API requests through the tunnel.
+        if std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").is_err() {
+            cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
+        }
+
         let process = cmd
             .arg("daemon")
             .stdin(Stdio::null())

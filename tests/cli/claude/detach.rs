@@ -3,26 +3,18 @@
 //! Also tests that the client exits cleanly when the remote session ends.
 
 use super::common::{setup_claude_test_repo, ClaudeSession};
-use super::proxy::claude_proxy;
 
 /// Ctrl-a (0x01) followed by 'd' triggers detach.
 const CTRL_A: u8 = 0x01;
 
 #[test]
 fn claude_detach_reattach() {
-    let proxy = claude_proxy();
-    let (fake_home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-detach");
+    let (fake_home, repo, _executor, daemon) = setup_claude_test_repo("claude-detach");
 
     // -- First session: start Claude, then detach ---------------------
 
-    let mut session = ClaudeSession::spawn(
-        &repo,
-        &daemon,
-        proxy,
-        fake_home.path(),
-        "claude-haiku-4-5",
-        &[],
-    );
+    let mut session =
+        ClaudeSession::spawn(&repo, &daemon, fake_home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
 
@@ -38,14 +30,8 @@ fn claude_detach_reattach() {
     // and replays the screen contents on attach, so the client sees the
     // full TUI immediately without the app needing to re-render.
 
-    let mut session2 = ClaudeSession::spawn(
-        &repo,
-        &daemon,
-        proxy,
-        fake_home.path(),
-        "claude-haiku-4-5",
-        &[],
-    );
+    let mut session2 =
+        ClaudeSession::spawn(&repo, &daemon, fake_home.path(), "claude-haiku-4-5", &[]);
 
     // The screen replay should restore the prompt without any user input.
     session2.wait_for("~/workspace");
@@ -56,17 +42,10 @@ fn claude_detach_reattach() {
 /// and the detach message visible with nothing below it.
 #[test]
 fn claude_detach_restores_terminal() {
-    let proxy = claude_proxy();
-    let (fake_home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-detach-term");
+    let (fake_home, repo, _executor, daemon) = setup_claude_test_repo("claude-detach-term");
 
-    let mut session = ClaudeSession::spawn(
-        &repo,
-        &daemon,
-        proxy,
-        fake_home.path(),
-        "claude-haiku-4-5",
-        &[],
-    );
+    let mut session =
+        ClaudeSession::spawn(&repo, &daemon, fake_home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
 
@@ -116,11 +95,9 @@ fn claude_detach_restores_terminal() {
 /// launch a fresh session, not try to reattach to the dead one.
 #[test]
 fn claude_session_exit() {
-    let proxy = claude_proxy();
-    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-exit");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo("claude-exit");
 
-    let mut session =
-        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
+    let mut session = ClaudeSession::spawn(&repo, &daemon, home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
 
@@ -137,8 +114,7 @@ fn claude_session_exit() {
 
     // Restarting must launch a fresh Claude session rather than
     // reattaching to the now-dead one.
-    let mut session2 =
-        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
+    let mut session2 = ClaudeSession::spawn(&repo, &daemon, home.path(), "claude-haiku-4-5", &[]);
 
     session2.wait_for("~/workspace");
 }
