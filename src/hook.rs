@@ -32,8 +32,7 @@ pub fn claude_notify_state(state_str: &str) -> Result<()> {
         other => return Err(anyhow::anyhow!("unknown claude state: {other}")),
     };
 
-    let token =
-        std::fs::read_to_string(TOKEN_FILE).context("reading pod server token")?;
+    let token = std::fs::read_to_string(TOKEN_FILE).context("reading pod server token")?;
 
     let url = format!("http://127.0.0.1:{DEFAULT_PORT}/claude-state");
     let client = reqwest::blocking::Client::new();
