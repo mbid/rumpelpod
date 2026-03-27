@@ -2,17 +2,14 @@
 //! and visible to the Claude CLI.
 
 use super::common::{setup_claude_test_repo, ClaudeSession};
-use super::proxy::claude_proxy;
 
 #[test]
 fn claude_system_prompt_describes_remotes() {
-    let proxy = claude_proxy();
-    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-sysprompt");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo("claude-sysprompt");
 
     let mut session = ClaudeSession::spawn(
         &repo,
         &daemon,
-        proxy,
         home.path(),
         "claude-haiku-4-5",
         &["--allowedTools", ""],
@@ -26,13 +23,11 @@ fn claude_system_prompt_describes_remotes() {
 
 #[test]
 fn claude_system_prompt_describes_description_file() {
-    let proxy = claude_proxy();
-    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-sysprompt-desc");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo("claude-sysprompt-desc");
 
     let mut session = ClaudeSession::spawn(
         &repo,
         &daemon,
-        proxy,
         home.path(),
         "claude-haiku-4-5",
         &["--allowedTools", ""],

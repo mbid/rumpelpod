@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,21 @@ pub fn run_container_server(port: u16, token: String) -> ! {
         claude_state: claude_state_tx,
     };
 
+    // Unauthenticated LLM cache proxy: forwards API requests to the
+    // git HTTP server on the host via the existing exec tunnel.  In
+    // test mode the daemon mounts the corresponding cache handler;
+    // in production this is a harmless no-op (the daemon returns 404).
+    let proxy_routes = Router::new()
+        .route(
+            "/llm-cache-proxy/{provider}/{*rest}",
+            any(llm_cache_proxy_forward),
+        )
+        .with_state(state.clone());
+
+    let app = Router::new()
+        .route("/health", get(health_handler))
+        .merge(proxy_routes);
+
     // POST routes require bearer token authentication
     let authenticated_routes = Router::new()
         .route("/enter", post(enter_handler))
@@ -105,8 +120,7 @@ pub fn run_container_server(port: u16, token: String) -> ! {
             require_bearer_token,
         ));
 
-    let app = Router::new()
-        .route("/health", get(health_handler))
+    let app = app
         .merge(authenticated_routes)
         .layer(tower_http::compression::CompressionLayer::new())
         .layer(tower_http::decompression::RequestDecompressionLayer::new());
@@ -167,6 +181,102 @@ async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// LLM cache proxy forwarding (test-only, unauthenticated)
+// ---------------------------------------------------------------------------
+
+/// Forward LLM API requests to the git HTTP server on the host, which
+/// handles caching.  The ssh_relay config (set during /enter) provides
+/// the tunnel URL and bearer token.
+async fn llm_cache_proxy_forward(
+    State(state): State<PodServerState>,
+    axum::extract::Path((provider, rest)): axum::extract::Path<(String, String)>,
+    req: axum::extract::Request,
+) -> Response {
+    let relay = state.ssh_relay.lock().await;
+    let config = match relay.as_ref() {
+        Some(c) => c.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LLM cache proxy not ready (pod not entered yet)",
+            )
+                .into_response();
+        }
+    };
+    drop(relay);
+
+    let method = req.method().clone();
+
+    // Preserve the query string if present.
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let target_url = format!("{}/llm-cache-proxy/{provider}/{rest}{query}", config.url);
+
+    // Collect headers, replacing auth with the gateway bearer token.
+    let headers: Vec<(String, String)> = req
+        .headers()
+        .iter()
+        .filter(|(name, _)| {
+            let n = name.as_str();
+            n != "host" && n != "connection" && n != "transfer-encoding" && n != "authorization"
+        })
+        .map(|(name, value)| (name.to_string(), value.to_str().unwrap_or("").to_string()))
+        .collect();
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("llm-cache-proxy forward: failed to read body: {e}");
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+
+    let auth_header = format!("Bearer {}", config.token);
+    tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("build llm-cache-proxy forwarding client");
+
+        let mut request =
+            client.request(method.as_str().parse().expect("parse method"), &target_url);
+        request = request.header("authorization", &auth_header);
+        for (name, value) in &headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        request = request.body(body_bytes.to_vec());
+
+        match request.send() {
+            Ok(resp) => {
+                let status = StatusCode::from_u16(resp.status().as_u16())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                let mut builder = Response::builder().status(status);
+                for (name, value) in resp.headers() {
+                    let n = name.as_str();
+                    if n == "connection" || n == "transfer-encoding" {
+                        continue;
+                    }
+                    if let Ok(v) = value.to_str() {
+                        builder = builder.header(n, v);
+                    }
+                }
+                let body = resp.bytes().unwrap_or_default();
+                builder.body(Body::from(body.to_vec())).unwrap()
+            }
+            Err(e) => {
+                eprintln!("llm-cache-proxy forward: request failed: {e}");
+                StatusCode::BAD_GATEWAY.into_response()
+            }
+        }
+    })
+    .await
+    .expect("llm-cache-proxy forwarding task panicked")
 }
 
 // ---------------------------------------------------------------------------

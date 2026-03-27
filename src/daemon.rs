@@ -4207,10 +4207,25 @@ pub fn run_daemon() -> Result<()> {
     // Create shared state for the git HTTP server
     let git_server_state = SharedGitServerState::new();
 
+    // When RUMPELPOD_TEST_LLM_OFFLINE is set (to any value), enable
+    // the LLM cache proxy on the git HTTP server so containers can
+    // route API requests through the tunnel for deterministic caching.
+    let llm_cache_proxy = std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").ok().map(|_| {
+        let cache_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("llm-cache/claude-cli");
+        std::fs::create_dir_all(cache_dir.join("response")).expect("create llm-cache response dir");
+        std::fs::create_dir_all(cache_dir.join("request")).expect("create llm-cache request dir");
+        crate::llm::cache_proxy::LlmCacheProxyState {
+            git_state: git_server_state.clone(),
+            cache_dir,
+        }
+    });
+
     // Git HTTP server on localhost, used as the tunnel target.
     // Containers reach it via the exec tunnel, not directly.
-    let localhost_server = GitHttpServer::start("127.0.0.1", 0, git_server_state.clone())
-        .context("starting git HTTP server on localhost")?;
+    let localhost_server =
+        GitHttpServer::start("127.0.0.1", 0, git_server_state.clone(), llm_cache_proxy)
+            .context("starting git HTTP server on localhost")?;
 
     let mut listenfd = ListenFd::from_env();
     let listener = if let Some(listener) = listenfd

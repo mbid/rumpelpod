@@ -12,8 +12,6 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::ExecutorResources;
 
-use super::proxy::ClaudeTestProxy;
-
 /// Pinned Claude Code version for deterministic tests.
 const CLAUDE_CODE_VERSION: &str = "2.1.85";
 
@@ -77,9 +75,12 @@ fn write_claude_test_devcontainer(repo: &TestRepo) {
         ENV NODE_OPTIONS="--require /opt/faketime.js"
     "#};
 
+    // ANTHROPIC_BASE_URL points at the pod server's LLM cache proxy
+    // route, which forwards to the git HTTP server on the host via
+    // the existing exec tunnel.
     let extra_json = r#",
         "remoteEnv": {
-            "ANTHROPIC_BASE_URL": "${localEnv:ANTHROPIC_BASE_URL}"
+            "ANTHROPIC_BASE_URL": "http://127.0.0.1:7890/llm-cache-proxy/anthropic"
         }"#;
 
     write_test_devcontainer(repo, &extra_dockerfile, extra_json);
@@ -108,8 +109,8 @@ pub(super) fn setup_controlled_home(home: &TestHome) {
     // The Claude CLI refuses to make API calls unless it sees OAuth
     // credentials (it shows "Not logged in" otherwise).  Provide fake
     // tokens with a far-future expiry so the CLI skips token refresh.
-    // The proxy replaces the auth header before forwarding to the real
-    // API, so these dummy values never reach Anthropic.
+    // The LLM cache proxy replaces the auth header before forwarding
+    // to the real API, so these dummy values never reach Anthropic.
     std::fs::write(
         claude_dir.join(".credentials.json"),
         r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-fake-test-token-AAAAAAAAAAAAAAAAAA-BBBBBBBBBBBBBBBBBBB-CCCCCCCCCCCCCCCCCCCCCCCC","refreshToken":"sk-ant-ort01-fake-test-token-AAAAAAAAAAAAAAAAAA-BBBBBBBBBBBBBBBBBBB-CCCCCCCCCCCCCCCCCCCCCCCC","expiresAt":4102444800000,"scopes":["user:inference"],"subscriptionType":"max","rateLimitTier":"default_claude_max_5x"}}"#,
@@ -137,10 +138,8 @@ pub(super) fn setup_controlled_home(home: &TestHome) {
 /// must destructure in the right order (Rust drops in reverse
 /// declaration order).
 pub fn setup_claude_test_repo(
-    proxy: &ClaudeTestProxy,
     test_name: &str,
 ) -> (TestHome, TestRepo, ExecutorResources, TestDaemon) {
-    let _ = proxy; // used only to ensure the proxy is started first
     let repo = TestRepo::new();
     write_claude_test_devcontainer(&repo);
 
@@ -187,7 +186,6 @@ impl ClaudeSession {
     pub fn spawn(
         repo: &TestRepo,
         daemon: &TestDaemon,
-        proxy: &ClaudeTestProxy,
         home: &Path,
         model: &str,
         claude_args: &[&str],
@@ -215,12 +213,6 @@ impl ClaudeSession {
         cmd.env(
             "RUMPELPOD_DAEMON_SOCKET",
             daemon.socket_path.to_str().unwrap(),
-        );
-        // Forwarded into the container via ${localEnv:ANTHROPIC_BASE_URL}
-        // in devcontainer.json.
-        cmd.env(
-            "ANTHROPIC_BASE_URL",
-            format!("http://{}:{}", proxy.addr, proxy.port),
         );
 
         cmd.env(

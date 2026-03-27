@@ -1,11 +1,11 @@
 //! Integration tests for the `rumpel claude` subcommand.
 //!
 //! Tests verify that the claude CLI running inside a container can
-//! communicate with the host via a caching HTTP proxy, producing
-//! deterministic, offline-reproducible results.
+//! communicate with the host via the LLM cache proxy routed through
+//! the pod server and git HTTP server tunnel, producing deterministic,
+//! offline-reproducible results.
 
 pub(super) mod common;
-pub(super) mod proxy;
 
 mod detach;
 mod install;

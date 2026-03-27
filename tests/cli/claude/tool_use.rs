@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use rumpelpod::CommandExt;
 
 use super::common::{setup_claude_test_repo, ClaudeSession};
-use super::proxy::claude_proxy;
 use crate::common::{create_commit, pod_command};
 
 /// Prompts must fit on a single 80-column terminal line (including ~4
@@ -17,8 +16,7 @@ use crate::common::{create_commit, pod_command};
 
 #[test]
 fn claude_read_file() {
-    let proxy = claude_proxy();
-    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-read");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo("claude-read");
 
     // Commit a file so the gateway syncs it into the container.
     std::fs::write(repo.path().join("hello.txt"), "rumpelpod-test-content-42\n")
@@ -30,8 +28,7 @@ fn claude_read_file() {
         .expect("git add hello.txt");
     create_commit(repo.path(), "Add hello.txt");
 
-    let mut session =
-        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
+    let mut session = ClaudeSession::spawn(&repo, &daemon, home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
     session.send("Read hello.txt. Reply with only the file contents.");
@@ -43,11 +40,9 @@ fn claude_read_file() {
 
 #[test]
 fn claude_write_file() {
-    let proxy = claude_proxy();
-    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-write");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo("claude-write");
 
-    let mut session =
-        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
+    let mut session = ClaudeSession::spawn(&repo, &daemon, home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
     session.send("Write 'rumpelpod-write-ok' to output.txt");
@@ -79,11 +74,9 @@ fn claude_write_file() {
 
 #[test]
 fn claude_run_command() {
-    let proxy = claude_proxy();
-    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-run-cmd");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo("claude-run-cmd");
 
-    let mut session =
-        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
+    let mut session = ClaudeSession::spawn(&repo, &daemon, home.path(), "claude-haiku-4-5", &[]);
 
     session.wait_for("~/workspace");
 

@@ -2,15 +2,12 @@
 //! container and produces a visible response via the caching proxy.
 
 use super::common::{setup_claude_test_repo, ClaudeSession};
-use super::proxy::claude_proxy;
 
 #[test]
 fn claude_smoke() {
-    let proxy = claude_proxy();
-    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-smoke");
+    let (home, repo, _executor, daemon) = setup_claude_test_repo("claude-smoke");
 
-    let mut session =
-        ClaudeSession::spawn(&repo, &daemon, proxy, home.path(), "claude-haiku-4-5", &[]);
+    let mut session = ClaudeSession::spawn(&repo, &daemon, home.path(), "claude-haiku-4-5", &[]);
 
     // Wait for the TUI to finish loading.  "~/workspace" appears in the
     // status line once the CLI is ready for input.

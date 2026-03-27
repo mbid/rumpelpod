@@ -124,8 +124,13 @@ impl SharedGitServerState {
     }
 
     /// Look up pod info by token.
-    fn get(&self, token: &str) -> Option<PodInfo> {
+    fn get_pod_info(&self, token: &str) -> Option<PodInfo> {
         self.inner.lock().unwrap().get(token).cloned()
+    }
+
+    /// Check whether a bearer token is registered (for auth in other subsystems).
+    pub fn has_token(&self, token: &str) -> bool {
+        self.inner.lock().unwrap().contains_key(token)
     }
 }
 
@@ -143,7 +148,12 @@ impl GitHttpServer {
     ///
     /// The server binds to the specified address. If port is 0, a random port is assigned.
     /// Returns the server instance.
-    pub fn start(bind_address: &str, port: u16, state: SharedGitServerState) -> Result<Self> {
+    pub fn start(
+        bind_address: &str,
+        port: u16,
+        state: SharedGitServerState,
+        llm_cache_proxy: Option<crate::llm::cache_proxy::LlmCacheProxyState>,
+    ) -> Result<Self> {
         let addr: SocketAddr = format!("{bind_address}:{port}")
             .parse()
             .context("parsing bind address")?;
@@ -185,7 +195,7 @@ impl GitHttpServer {
             .context("converting to tokio listener")?;
 
         // Build router with explicit LFS routes before the CGI fallback
-        let app = build_router(state);
+        let app = build_router(state, llm_cache_proxy);
 
         // Spawn the server in the background
         let task_handle = RUNTIME.spawn(async move {
@@ -213,8 +223,11 @@ impl Drop for GitHttpServer {
 }
 
 /// Build the axum router with LFS routes and the git-http-backend fallback.
-fn build_router(state: SharedGitServerState) -> Router {
-    Router::new()
+fn build_router(
+    state: SharedGitServerState,
+    llm_cache_proxy: Option<crate::llm::cache_proxy::LlmCacheProxyState>,
+) -> Router {
+    let mut router = Router::new()
         .route(
             "/gateway.git/info/lfs/objects/batch",
             post(lfs_batch_handler),
@@ -225,7 +238,22 @@ fn build_router(state: SharedGitServerState) -> Router {
         )
         .route("/ssh-agent", get(ssh_agent_handler))
         .fallback(handle_request)
-        .with_state(state)
+        .with_state(state);
+
+    if let Some(proxy_state) = llm_cache_proxy {
+        use axum::routing::any;
+        // Merge the cache proxy routes before the git fallback so they
+        // take priority over the CGI catch-all.
+        let proxy_router = Router::new()
+            .route(
+                "/llm-cache-proxy/{provider}/{*rest}",
+                any(crate::llm::cache_proxy::handle_llm_cache_proxy),
+            )
+            .with_state(proxy_state);
+        router = proxy_router.merge(router);
+    }
+
+    router
 }
 
 // -- LFS JSON types -----------------------------------------------------------
@@ -289,7 +317,7 @@ fn authenticate(
         _ => return Err(Box::new(StatusCode::UNAUTHORIZED.into_response())),
     };
 
-    match state.get(token) {
+    match state.get_pod_info(token) {
         Some(info) => Ok((info, token.to_string())),
         None => Err(Box::new(StatusCode::UNAUTHORIZED.into_response())),
     }
@@ -545,7 +573,7 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
     };
 
     // Look up pod info
-    let info = match state.get(token) {
+    let info = match state.get_pod_info(token) {
         Some(info) => info,
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
@@ -592,7 +620,7 @@ async fn ssh_agent_handler(
         Some(h) if h.starts_with("Bearer ") => &h[7..],
         _ => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    let info = match state.get(token) {
+    let info = match state.get_pod_info(token) {
         Some(i) => i,
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
