@@ -138,6 +138,9 @@ pub struct PodLaunchParams {
     /// Write /etc/claude-code/CLAUDE.md with a rumpelpod environment description
     /// into the prepared image.
     pub inject_system_prompt: bool,
+    /// Path of the description file for merge commit messages (None = disabled).
+    /// Included in the system prompt so the agent knows where to write it.
+    pub description_file: Option<String>,
 }
 
 /// Response body for launch/recreate pod endpoints.

@@ -379,7 +379,7 @@ pub struct AgentConfig {
 }
 
 /// Configuration for `rumpel claude`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ClaudeConfig {
     /// Use a PermissionRequest hook instead of --dangerously-skip-permissions.
@@ -392,6 +392,15 @@ pub struct ClaudeConfig {
     /// Defaults to true.
     #[serde(default = "default_true")]
     pub inject_system_prompt: bool,
+}
+
+impl Default for ClaudeConfig {
+    fn default() -> Self {
+        Self {
+            dangerously_skip_permissions_hook: false,
+            inject_system_prompt: true,
+        }
+    }
 }
 
 fn default_true() -> bool {

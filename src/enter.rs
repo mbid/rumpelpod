@@ -10,7 +10,7 @@ use log::{info, trace};
 use nix::unistd::getuid;
 
 use crate::cli::EnterCommand;
-use crate::config::{load_toml_config, Host};
+use crate::config::{load_toml_config, DescriptionFileSetting, Host};
 use crate::daemon;
 use crate::daemon::protocol::{
     Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
@@ -304,6 +304,10 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let client = DaemonClient::new_unix(&socket_path);
 
     let t = Instant::now();
+    let description_file = match &toml_config.merge.description_file {
+        DescriptionFileSetting::Path(p) => Some(p.clone()),
+        DescriptionFileSetting::Disabled => None,
+    };
     let mut progress = client.launch_pod(PodLaunchParams {
         pod_name: PodName(pod_name.to_string()),
         repo_path: repo_root,
@@ -313,6 +317,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
         git_identity: Some(git_identity),
         claude_cli_path,
         inject_system_prompt: toml_config.claude.inject_system_prompt,
+        description_file,
     })?;
     for line in &mut progress {
         match line {

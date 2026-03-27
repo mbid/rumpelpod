@@ -1,0 +1,43 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3988000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T12:00:25Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T12:00:25Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T12:00:25Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4788000","anthropic-ratelimit-tokens-reset":"2026-03-27T12:00:25Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e2e3c0dce97d38e-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 12:00:25 GMT","request-id":"req_011CZTYkJTwMrr4wFGWNPmGh","server":"cloudflare","server-timing":"x-originResponse;dur=411","set-cookie":"_cfuvid=PD36fFYYUvrIoY2CFAGpAjiKaKP4PkOq_hT4q0h515Y-1774612825.2475083-1.0.1.1-.Q.VQZ65XOOSWEdZ2QNs3msKEwmDZxEBj.VA0kaI2IQ; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"409","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01XUsHEjkJw8psF4GTTfrbdh","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":13,"cache_creation_input_tokens":227,"cache_read_input_tokens":20344,"cache_creation":{"ephemeral_5m_input_tokens":227,"ephemeral_1h_input_tokens":0},"output_tokens":3,"service_tier":"standard","inference_geo":"not_available"}}             }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}     }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The file contains"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":":\n```\nrumpelpod-test-content-42\n\n```\n\nThe user asked"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" me to reply with only the file contents, so I should just output what's in the file."}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EuACCmMIDBgCKkAI8L6k4F8mwopjf4+/AJX5d3E2FQ/6S6Z5zXofn5b59SZdwNW7nKPs35feZNSNO0xwAVGah2wYycfWDjYQJO6GMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDHUIKyhtHmVyZoyzKxoMvIoaT+yQrAOyUbM0IjCR3LvZmzKKFUeuPYcedWBXo5M3Ns0dAMHc8Qx3p3jLeXLO5dmNEIW7Bq2ZzrioBaQqqgEtUwSebiGt9VwKzGI/Vtxxi8C2LSqZcRF1s+4qjgqhJz1I1fLl+XH+FbtVryYiMLhFGVspVBZLlIunPC/kAl54IVsxtAXoyK68tKiEJopIR/+LG2iZEmqLdHsk+eC/PcsrExi1WIchJNGODQ0po3a1ka27AHvjFz4liWAluQMHZN2Lsd7wvF4f0jAACM1z5OmlqfmFIK3Zhz77DEBLap8lV7T0GWQh500CdxgB"}       }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0      }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"rumpelpod-test-content-"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"42"}           }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":13,"cache_creation_input_tokens":227,"cache_read_input_tokens":20344,"output_tokens":64}   }
+
+event: message_stop
+data: {"type":"message_stop"   }
+

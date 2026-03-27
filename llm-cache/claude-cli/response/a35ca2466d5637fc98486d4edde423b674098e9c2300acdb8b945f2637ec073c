@@ -1,0 +1,55 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3988000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T12:00:10Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T12:00:10Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T12:00:10Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4788000","anthropic-ratelimit-tokens-reset":"2026-03-27T12:00:10Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e2e3bb15d6e37f5-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 12:00:12 GMT","request-id":"req_011CZTYjDE8ozxwf1ExmoRtY","server":"cloudflare","server-timing":"x-originResponse;dur=1591","set-cookie":"_cfuvid=y3zuEQUhI9piNjIrhAlSfkiWg.8QnnMk8DBUEoK9.fM-1774612810.4578831-1.0.1.1-4MqBVGPiT.C9TMQMeclNUbvWwAd5rpdi6hMpnZlCTa8; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"1587","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_013xBChHepFVnoHCMDGpc6u3","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":302,"cache_creation_input_tokens":20344,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":20344,"ephemeral_1h_input_tokens":0},"output_tokens":3,"service_tier":"standard","inference_geo":"not_available"}}     }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}               }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user asked"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" \"What is the capital of France?\" and I answered \"Paris\". \n\nNow they're asking me to suggest what they might naturally type next.\n\nLooking at this interaction"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":":\n1. They asked a simple factual question\n2. I gave a direct answer\n3. They specified \"Reply with just the city name, nothing else"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\" - which I did\n\nThis seems like a test or a casual"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" question. The user hasn't indicated any follow-up task or work they"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" want to do. There's no obvious natural next step. They might:\n- Ask another"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" geography question\n- Move on to actual work\n- Test something else\n\nBut"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" none of these are \"obvious\" follow-ups that the user would naturally be thinking"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" \"I was just about to type that.\"\n\nAccording to the instructions, I should \"Stay silent if the next step isn't obvious from what the user said.\"\n\nThis"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" seems like the case here. There's no obvious natural next step from asking a"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" geography trivia question."}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"Es0ICmMIDBgCKkD8rjo8YoBKfln5PDoPCrY5QhVyKq08ruSYCeL0JQow3Q7hqmWzxvGJTDVAhcP3jm1x94eNAdXQ/q00b4EWwzqyMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDCMR0y1LS7OeEaKm1xoMkR5f+jNi++0PDZYUIjCj2z37lZUL788zE9zTUhIv6lDsurh2ES/n94lyvpfYxFvFOxpi9oNG6ccaJy9pdqUqlwczQY4DrsVGfHMNeKvc0fP382k9ka3SIBpJ8+wx6r1IG4O4PafJUGOnYdhc8YZiVqCkgACdwDPQCXTTI8rfJ7vfhPJ84Z8xwV+WAFMoA8IyWLOfKSrMqyyMrGsaVzWTtgyN5M0doArtUARWr5OMzE4jFWiJ8pu+11VydIFzUglqJ0D1cxxAyXtXrBXJQ34gLQO8lVy4BcJWZkAPSQhi/XSROfi9ew2j/1p6tXtPs11XyG/KqNPitkRRzucQ20vaMja7yXa0h2rVlKpwkn/DVBdLr5ZNRF0oulP+zr331+Q4zgxQxDvWRYnu2itqE0MQavQaQtZxgKeRrtlTltqvFsvFu7vQLNincZd03UruYDlf2dhIEgtUO+x+BC9D3PzkmhWqd7c7evfNdtjuWbIdspEL7kU57dv1oU0HXmTgSkPE83SHvQ3dcmsL5JtkRX74+4cZJv63D+mhJcUr7dGwP1Tvz9g8XE1VdXmVz7a0AKLhAxU3vZWBucHNZEYmr5Qw1JG3Di7sZLnMWhrYiZY2HrAGsU2d/0E3VzMNzwE3Kioe9FvhuJxW6HaNfPRj+qFyhC4jYB3HbyQJzIQV6A7RlMRLcEzjfpsgMuLa+qvCnlQblBe6IB4N7LeGBgPhSzY1rSN9sI3h0FRqhOoKs5WqAt60PcOqMuztbwjdBS8b7eu+6fEPJgsJkqjp0i+8CPZ/V2Rg6vIRN+YkqGhJ9HvjGxKGxhAOOT3MKdhCsQuaQMMa6bdBjEQ7WvqG9WCjjbJDwK2wfrL1cC48HqjSO1MUvGx4oN/FYUckoapedJxmzpgE5SmsRS3Y0OFSJIE0G1IMSLQiSwshdo4U7ET6Bgp0zb7kuy3htX+kmCmuxdDc61iYk0c6n25QSLuNjQPptBsDKvhartsyAfXGjMxX0Uld05mel6VGwvjSamLLOt4cEkOcGGjalikWob9phcHvNFTALeck2YQkc237KrTksGfijj/8u50jbwuw9D1FIzr9iZaEytvH9tUHtS+A1IDhgcrSVbP8xi9/we3m+WrhXKdOYt1mrcWwGeK3TYMVKVmPqmT5bwESHoXk2NOotDmQmoXie8YSOYhddnA4x9aXz0vqu1B5eE1iVvI4QBS6Zf99CNtfdgdxkSfRiGLPGkI17FahPHV75cXkNe5Oya3VTHdTxnC5cyvnmcrQpDO6WTTUKhZ74n5MwLCsREaQs8HDH7UijxzfUVRCQKuKGAE="}  }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0             }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":302,"cache_creation_input_tokens":20344,"cache_read_input_tokens":0,"output_tokens":219}             }
+
+event: message_stop
+data: {"type":"message_stop"            }
+

@@ -23,3 +23,23 @@ fn claude_system_prompt_describes_remotes() {
 
     session.wait_for("rumpelpod");
 }
+
+#[test]
+fn claude_system_prompt_describes_description_file() {
+    let proxy = claude_proxy();
+    let (home, repo, _executor, daemon) = setup_claude_test_repo(proxy, "claude-sysprompt-desc");
+
+    let mut session = ClaudeSession::spawn(
+        &repo,
+        &daemon,
+        proxy,
+        home.path(),
+        "claude-haiku-4-5",
+        &["--allowedTools", ""],
+    );
+
+    session.wait_for("~/workspace");
+    session.send("In which file should you put the merge commit message? One word only.");
+
+    session.wait_for("DESCRIPTION");
+}

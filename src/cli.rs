@@ -535,6 +535,10 @@ pub struct PrepareImageCommand {
     /// Write /etc/claude-code/CLAUDE.md with a rumpelpod environment description
     #[arg(long)]
     pub inject_system_prompt: bool,
+
+    /// Include DESCRIPTION file instructions in the system prompt
+    #[arg(long)]
+    pub description_file: Option<String>,
 }
 
 #[derive(Subcommand)]

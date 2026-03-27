@@ -109,6 +109,7 @@ fn compute_prepared_tag(
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
     inject_system_prompt: bool,
+    description_file: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_image.as_bytes());
@@ -129,6 +130,9 @@ fn compute_prepared_tag(
     }
     hasher.update(SCHEMA_VERSION.to_le_bytes());
     hasher.update([u8::from(inject_system_prompt)]);
+    if let Some(path) = description_file {
+        hasher.update(path.as_bytes());
+    }
     let hash = hex::encode(&hasher.finalize()[..8]);
     format!("rumpelpod-prepared-{hash}")
 }
@@ -207,6 +211,7 @@ fn generate_dockerfile(
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
     inject_system_prompt: bool,
+    description_file: Option<&str>,
 ) -> String {
     let repo_path = container_repo_path.display();
     let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
@@ -228,6 +233,11 @@ fn generate_dockerfile(
         ""
     };
 
+    let description_flag = match description_file {
+        Some(path) => format!(" \\\n      --description-file '{path}'"),
+        None => String::new(),
+    };
+
     formatdoc! {r#"
         FROM {base_image}
 
@@ -240,7 +250,7 @@ fn generate_dockerfile(
         RUN --mount=type=bind,from=gateway,target={BUILD_GATEWAY_PATH} \
             {rumpel} prepare-image \
               --repo-path '{repo_path}' \
-              --user '{user}'{claude_flag}{remote_flags}{system_prompt_flag}
+              --user '{user}'{claude_flag}{remote_flags}{system_prompt_flag}{description_flag}
 
         USER ${{BASE_USER}}
     "#}
@@ -258,6 +268,7 @@ fn assemble_build_context(
     claude_info: Option<&HostClaudeInfo>,
     host_remotes: &[GitRemote],
     inject_system_prompt: bool,
+    description_file: Option<&str>,
 ) -> Result<tempfile::TempDir> {
     let dockerfile = generate_dockerfile(
         base_image,
@@ -266,6 +277,7 @@ fn assemble_build_context(
         claude_info,
         host_remotes,
         inject_system_prompt,
+        description_file,
     );
     let binaries = find_rumpel_binaries()?;
 
@@ -374,6 +386,7 @@ pub fn build_prepared_image(
     claude_cli_path: Option<&Path>,
     docker_socket: Option<&Path>,
     inject_system_prompt: bool,
+    description_file: Option<&str>,
 ) -> Result<BuildResult> {
     let claude_info = detect_host_claude(claude_cli_path);
 
@@ -384,6 +397,7 @@ pub fn build_prepared_image(
         claude_info.as_ref(),
         host_remotes,
         inject_system_prompt,
+        description_file,
     );
 
     // Check local cache first.
@@ -415,6 +429,7 @@ pub fn build_prepared_image(
                 push_reg,
                 registry,
                 inject_system_prompt,
+                description_file,
             );
         }
     }
@@ -431,6 +446,7 @@ pub fn build_prepared_image(
         claude_info.as_ref(),
         host_remotes,
         inject_system_prompt,
+        description_file,
     )?;
 
     run_docker_build(
@@ -484,6 +500,7 @@ fn build_prepared_image_via_buildx(
     push_registry: &str,
     pull_registry: &str,
     inject_system_prompt: bool,
+    description_file: Option<&str>,
 ) -> Result<BuildResult> {
     let push_tag = format!("{push_registry}:{tag}");
     let pull_tag = format!("{pull_registry}:{tag}");
@@ -512,6 +529,7 @@ fn build_prepared_image_via_buildx(
         claude_info,
         host_remotes,
         inject_system_prompt,
+        description_file,
     )?;
 
     // Symlink the gateway to a name without `.git` so buildx treats it
@@ -640,7 +658,7 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
     }
 
     if cmd.inject_system_prompt {
-        write_system_prompt()?;
+        write_system_prompt(cmd.description_file.as_deref())?;
     }
 
     // Let the container user write to /opt/rumpelpod (e.g. the server token
@@ -657,8 +675,11 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
 }
 
 /// Generate the system prompt describing the rumpelpod environment.
-pub fn system_prompt() -> String {
-    indoc! {"
+///
+/// When `description_file` is Some, includes instructions telling the
+/// agent to write the merge commit message into that file.
+pub fn system_prompt(description_file: Option<&str>) -> String {
+    let mut prompt = indoc! {"
         You are running inside a rumpelpod, an isolated devcontainer.
 
         Git remotes:
@@ -668,15 +689,26 @@ pub fn system_prompt() -> String {
         Committing automatically pushes to a gateway repo reachable from the host.
         Fetching from these remotes is not automatic; run `git fetch` explicitly when you need updates.
     "}
-    .to_string()
+    .to_string();
+
+    if let Some(path) = description_file {
+        prompt.push_str(&formatdoc! {"
+
+            When your work is ready to merge, write the merge commit message to `{path}` at the repo root.
+            The host will use its contents as the merge commit message and remove the file after merging.
+        "});
+    }
+
+    prompt
 }
 
 /// Write /etc/claude-code/CLAUDE.md so Claude understands the container
 /// layout and git remote conventions.
-fn write_system_prompt() -> Result<()> {
+fn write_system_prompt(description_file: Option<&str>) -> Result<()> {
     let dir = Path::new("/etc/claude-code");
     fs::create_dir_all(dir).context("creating /etc/claude-code")?;
-    fs::write(dir.join("CLAUDE.md"), system_prompt()).context("writing /etc/claude-code/CLAUDE.md")
+    fs::write(dir.join("CLAUDE.md"), system_prompt(description_file))
+        .context("writing /etc/claude-code/CLAUDE.md")
 }
 
 /// Parse "NAME=URL" remote specs and add/update them in the repo.

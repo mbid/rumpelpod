@@ -1,0 +1,85 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3988000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T12:00:18Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T12:00:18Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T12:00:18Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4788000","anthropic-ratelimit-tokens-reset":"2026-03-27T12:00:18Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e2e3bdf8f631e6e-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 12:00:18 GMT","request-id":"req_011CZTYjkxcEi43qsNjot4gi","server":"cloudflare","server-timing":"x-originResponse;dur=488","set-cookie":"_cfuvid=7kx9dDU379fT1LK2gwtVyKvbh9jJ0Q21jjmhy5PJdl0-1774612817.8449473-1.0.1.1-YR9Csf16UvMCUSwJwDthhO.IAPRq3vqL1f_4ZRLSJtM; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"486","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_019BFV6U8KSX35hbfuxbfoLT","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":839,"cache_read_input_tokens":19500,"cache_creation":{"ephemeral_5m_input_tokens":839,"ephemeral_1h_input_tokens":0},"output_tokens":7,"service_tier":"standard","inference_geo":"not_available"}}              }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}   }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking me to write"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the text 'rumpelpod-write-ok' to a file called output.txt. This is a straight"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"forward task. I should use the Write tool to create or overwrite the output.txt file with the specified content"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":".\n\nI don't need to read the file first since the user is explicitly asking me to write this"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" specific content to output.txt. The Write tool will create the file if it doesn't exist or overwrite it if it does."}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EvAECmMIDBgCKkCzItWKmnwmN8unpVcP+IZ802e+J2EFf4/6qr6ZYZqoPk81LFDT4GicA2+8vJlWZW7f4uKAojS7AZk1qP3/hnoPMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDOv1p4zmBoC7A1MgrhoMchLPGunXHm4rl+VgIjAA1wIr0gSMjFxOvd4fsIjwe5Ij44tfTAGnxZQsfK6KIUj71bQIkMpbv9wGTiJHspcqugOVPZJRuwEjeE0Z00bdHhGB31E5V1aUrzvxHsQGHUyq3ZLLCbs0I/HRVK+l/KOQonoQZt2QqS+Bv3ohG1EW8uoxKX8djwA76RlGicSrxvqEXfB96qEFevJHe4WeEBcIE+THEHnJe3ZBUhAKKsgXARrclC+OaJv9JvNaAZ6Z8eq+mtU9lSKmAb4sQKiJPON/og1gyZ0i9x08FmHnidKnBQXyzhgMZvWvzmDs721dGBtKV5PuVEbErI0qh/0U3S+/DugBH5z/zhrEcKrED0wcYvNb06CEfnmB/JcxhiT3NMnrorvk61XUv5g/lVRFflHrDdD0kR6nZWw8Aew9HQhtt9Dbk00Axr0R0YN+3SRjMvSt/zwjH8Hx0A151WpoGlM1Pn/GQAf9+SA12//mRoa+oXdcaC7UEBhLALF9+ZtBuU4so+jBe3aDQAFumQicJCnYtyM4aWHXj2M9wGYL9YzScu4WWtED2GjOYE185Yq1LS9uLWgJDTEwrgGZOu4/SQxEqE6EoaSd8JuEploX/mzbeAyQT/mzZO4yQ/kY34nPgaMFYLB8KOxg1oB/pFzepN4BWPoEfgT0gDTaL9bAGAE="}               }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0               }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01BnTcbhQhM4xRYmpAynJtMg","name":"Write","input":{},"caller":{"type":"direct"}}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_pat"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"h\": \"/home/t"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"estuser/"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"worksp"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ace/ou"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"tput.tx"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"t\""}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":", \"content\":"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" \""}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ru"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"mp"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"elpod-write"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"-ok\"}"}              }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1        }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":839,"cache_read_input_tokens":19500,"output_tokens":198}   }
+
+event: message_stop
+data: {"type":"message_stop"         }
+
