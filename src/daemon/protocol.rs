@@ -31,6 +31,7 @@ use crate::daemon::reconnect::ReconnectEvent;
 use crate::devcontainer::DevContainer;
 use crate::git::GitIdentity;
 use crate::image::OutputLine;
+use crate::pod::types::ClaudeState;
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +103,8 @@ pub struct PodInfo {
     pub container_id: Option<String>,
     /// Committer timestamp (unix seconds) of the tip of the pod's primary branch on the host.
     pub last_commit_time: Option<i64>,
+    /// Current Claude Code session state, if known.
+    pub claude_state: Option<ClaudeState>,
 }
 
 /// Information about a forwarded port.

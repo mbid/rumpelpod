@@ -175,6 +175,9 @@ pub fn run() -> Result<()> {
             ClaudeHookSubcommand::PermissionRequest => {
                 hook::claude_permission_request()?;
             }
+            ClaudeHookSubcommand::NotifyState(ref args) => {
+                hook::claude_notify_state(&args.state)?;
+            }
         },
     }
 

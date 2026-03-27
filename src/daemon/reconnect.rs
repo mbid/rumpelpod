@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Host;
 use crate::daemon::ssh_forward::SshForwardManager;
+use crate::pod::types::ClaudeState;
 
 const INITIAL_DELAY: Duration = Duration::from_secs(1);
 /// Cap retry backoff low so the user's terminal reconnects promptly once
@@ -40,6 +41,7 @@ pub enum ReconnectEvent {
 struct PodState {
     tx: broadcast::Sender<ReconnectEvent>,
     stop: Arc<AtomicBool>,
+    claude_state: Arc<Mutex<Option<ClaudeState>>>,
     _thread: std::thread::JoinHandle<()>,
 }
 
@@ -79,15 +81,25 @@ impl PodEventManager {
 
         let (tx, _) = broadcast::channel(64);
         let stop = Arc::new(AtomicBool::new(false));
+        let claude_state = Arc::new(Mutex::new(None));
 
         let thread = {
             let tx = tx.clone();
             let stop = stop.clone();
+            let claude_state = claude_state.clone();
             let ssh_forward = self.ssh_forward.clone();
             std::thread::Builder::new()
                 .name(format!("pod-events-{pod_name}"))
                 .spawn(move || {
-                    pod_event_loop(ssh_forward, host, container_url, container_token, stop, tx);
+                    pod_event_loop(
+                        ssh_forward,
+                        host,
+                        container_url,
+                        container_token,
+                        stop,
+                        tx,
+                        claude_state,
+                    );
                 })
                 .expect("failed to spawn pod event listener thread")
         };
@@ -97,6 +109,7 @@ impl PodEventManager {
             PodState {
                 tx,
                 stop,
+                claude_state,
                 _thread: thread,
             },
         );
@@ -126,14 +139,23 @@ impl PodEventManager {
         let pods = self.pods.lock().unwrap();
         pods.get(&key).map(|state| state.tx.subscribe())
     }
+
+    /// Read the last known Claude Code session state for a pod.
+    pub fn claude_state(&self, repo_path: &Path, pod_name: &str) -> Option<ClaudeState> {
+        let key = (repo_path.to_path_buf(), pod_name.to_string());
+        let pods = self.pods.lock().unwrap();
+        pods.get(&key)
+            .and_then(|state| *state.claude_state.lock().unwrap())
+    }
 }
 
 /// Try to connect to the pod's /events endpoint and read the initial
-/// `state` event.  Returns Ok(response) positioned after the state event.
+/// `state` event.  Returns the reader positioned after the greeting
+/// together with the claude session state from the greeting payload.
 fn connect_pod_events(
     url: &str,
     token: &str,
-) -> Result<BufReader<reqwest::blocking::Response>, anyhow::Error> {
+) -> Result<(BufReader<reqwest::blocking::Response>, Option<ClaudeState>), anyhow::Error> {
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(None)
@@ -170,12 +192,27 @@ fn connect_pod_events(
             reader.read_line(&mut data_line).ok();
             let mut blank = String::new();
             reader.read_line(&mut blank).ok();
-            return Ok(reader);
+
+            let claude_state = parse_greeting_claude_state(&data_line);
+            return Ok((reader, claude_state));
         }
     }
 }
 
+/// Extract `claude_state` from the greeting data line (e.g.
+/// `data: {"claude_state":"processing"}`).
+fn parse_greeting_claude_state(data_line: &str) -> Option<ClaudeState> {
+    let json_str = data_line.trim().strip_prefix("data: ")?;
+    let obj: serde_json::Value = serde_json::from_str(json_str).ok()?;
+    let cs_val = obj.get("claude_state")?;
+    serde_json::from_value(cs_val.clone()).ok()?
+}
+
 /// Background loop that maintains the SSE connection to a pod.
+///
+/// Reads the greeting (with claude_state) and then continues reading
+/// events.  `event: claude_state` payloads update the shared state so
+/// the daemon can report it in list_pods.
 fn pod_event_loop(
     ssh_forward: Arc<SshForwardManager>,
     host: Host,
@@ -183,10 +220,14 @@ fn pod_event_loop(
     container_token: String,
     stop: Arc<AtomicBool>,
     tx: broadcast::Sender<ReconnectEvent>,
+    claude_state: Arc<Mutex<Option<ClaudeState>>>,
 ) {
     // Initial connection -- no reconnect signalling needed.
     let mut reader = match connect_pod_events(&container_url, &container_token) {
-        Ok(r) => r,
+        Ok((r, cs)) => {
+            *claude_state.lock().unwrap() = cs;
+            r
+        }
         Err(e) => {
             debug!("initial pod event connection failed: {e:#}");
             let mut backoff = INITIAL_DELAY;
@@ -197,7 +238,10 @@ fn pod_event_loop(
                 std::thread::sleep(jitter(backoff));
                 backoff = std::cmp::min(backoff.saturating_mul(2), MAX_DELAY);
                 match connect_pod_events(&container_url, &container_token) {
-                    Ok(r) => break r,
+                    Ok((r, cs)) => {
+                        *claude_state.lock().unwrap() = cs;
+                        break r;
+                    }
                     Err(e) => {
                         debug!("pod event reconnect failed: {e:#}");
                     }
@@ -206,7 +250,9 @@ fn pod_event_loop(
         }
     };
 
-    // Read events until the connection drops.
+    // Read events until the connection drops.  Parse `event: claude_state`
+    // lines so we can track the current session state.
+    let mut pending_event: Option<String> = None;
     loop {
         if stop.load(Ordering::SeqCst) {
             return;
@@ -216,7 +262,22 @@ fn pod_event_loop(
             Ok(0) | Err(_) => {
                 // Connection lost -- enter reconnect loop.
             }
-            Ok(_) => continue,
+            Ok(_) => {
+                let trimmed = line.trim();
+                if let Some(event_type) = trimmed.strip_prefix("event: ") {
+                    pending_event = Some(event_type.to_string());
+                } else if let Some(data) = trimmed.strip_prefix("data: ") {
+                    if pending_event.as_deref() == Some("claude_state") {
+                        if let Ok(cs) = serde_json::from_str::<Option<ClaudeState>>(data) {
+                            *claude_state.lock().unwrap() = cs;
+                        }
+                    }
+                    pending_event = None;
+                } else if trimmed.is_empty() {
+                    pending_event = None;
+                }
+                continue;
+            }
         }
 
         // Reconnect loop.
@@ -246,7 +307,8 @@ fn pod_event_loop(
 
             // Try to connect to the pod's event endpoint.
             match connect_pod_events(&container_url, &container_token) {
-                Ok(new_reader) => {
+                Ok((new_reader, cs)) => {
+                    *claude_state.lock().unwrap() = cs;
                     let _ = tx.send(ReconnectEvent::Connected);
                     reader = new_reader;
                     break;

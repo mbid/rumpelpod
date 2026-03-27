@@ -229,6 +229,30 @@ pub struct HealthResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Claude Code session state
+// ---------------------------------------------------------------------------
+
+/// Observable state of a Claude Code session inside the pod.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeState {
+    /// Claude is actively generating a response.
+    Processing,
+    /// Claude finished its turn and is waiting for user input.
+    WaitingForInput,
+    /// An API authentication error occurred.
+    AuthError,
+    /// The session has ended.
+    Stopped,
+}
+
+/// Hook -> pod server: report a state change.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NotifyClaudeStateRequest {
+    pub state: ClaudeState,
+}
+
+// ---------------------------------------------------------------------------
 // Base64 helpers
 // ---------------------------------------------------------------------------
 

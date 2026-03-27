@@ -7,6 +7,7 @@ use comfy_table::Table;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, PodStatus};
 use crate::git::get_repo_root;
+use crate::pod::types::ClaudeState;
 
 pub fn list() -> Result<()> {
     let repo_path = get_repo_root()?;
@@ -28,6 +29,7 @@ pub fn list() -> Result<()> {
         "NAME",
         "GIT",
         "STATUS",
+        "CLAUDE",
         "CREATED",
         "HOST",
         "CONTAINER ID",
@@ -43,6 +45,13 @@ pub fn list() -> Result<()> {
             PodStatus::Deleting => "deleting",
             PodStatus::Broken => "broken",
         };
+        let claude_str = match pod.claude_state {
+            Some(ClaudeState::Processing) => "processing",
+            Some(ClaudeState::WaitingForInput) => "idle",
+            Some(ClaudeState::AuthError) => "auth error",
+            Some(ClaudeState::Stopped) => "stopped",
+            None => "",
+        };
         let repo_state = pod.repo_state.as_deref().unwrap_or("");
         let header = "CONTAINER ID";
         let container_id = pod.container_id.as_deref().unwrap_or("");
@@ -52,6 +61,7 @@ pub fn list() -> Result<()> {
             pod.name,
             repo_state.to_string(),
             status_str.to_string(),
+            claude_str.to_string(),
             pod.created,
             pod.host,
             container_id.to_string(),

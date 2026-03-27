@@ -1,9 +1,11 @@
 use std::io::BufRead;
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::cli::{PostCheckoutCommand, ReferenceTransactionCommand};
+use crate::pod::server::{DEFAULT_PORT, TOKEN_FILE};
+use crate::pod::types::{ClaudeState, NotifyClaudeStateRequest};
 use crate::CommandExt;
 
 // -- Claude Code hooks -------------------------------------------------------
@@ -14,6 +16,39 @@ pub fn claude_permission_request() -> Result<()> {
     println!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{{"behavior":"allow"}}}}}}"#
     );
+    Ok(())
+}
+
+/// Report Claude Code session state to the in-container pod server.
+///
+/// Invoked by Claude Code hooks (UserPromptSubmit, Stop, StopFailure,
+/// SessionEnd) so the daemon can track what Claude is doing.
+pub fn claude_notify_state(state_str: &str) -> Result<()> {
+    let state = match state_str {
+        "processing" => ClaudeState::Processing,
+        "waiting_for_input" => ClaudeState::WaitingForInput,
+        "auth_error" => ClaudeState::AuthError,
+        "stopped" => ClaudeState::Stopped,
+        other => return Err(anyhow::anyhow!("unknown claude state: {other}")),
+    };
+
+    let token =
+        std::fs::read_to_string(TOKEN_FILE).context("reading pod server token")?;
+
+    let url = format!("http://127.0.0.1:{DEFAULT_PORT}/claude-state");
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&NotifyClaudeStateRequest { state })
+        .send()
+        .context("posting claude state to pod server")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        return Err(anyhow::anyhow!("pod server returned {status}"));
+    }
+
     Ok(())
 }
 
