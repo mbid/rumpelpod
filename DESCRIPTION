@@ -1,0 +1,6 @@
+Bump pinned Claude Code from 2.1.63 to 2.1.85
+
+The StopFailure hook (added in managed-settings.json by the "Track
+Claude Code session state via hooks" merge) requires Claude Code
+>= 2.1.78.  The old pinned version rejected the unknown key with a
+"Settings Error" dialog that blocked startup, hanging all claude tests.
