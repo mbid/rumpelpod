@@ -1,0 +1,22 @@
+{
+    "build": {
+        "dockerfile": "Dockerfile",
+        "args": {
+            "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}",
+            "REPO_URL": "${localEnv:REPO_URL}"
+        },
+        "options": ["--ssh", "default"]
+    },
+    "runArgs": [
+        "--runtime=sysbox-runc",
+        "--env-file", ".env"
+    ],
+    "containerUser": "user",
+    "mounts": [
+        {
+            "type": "bind",
+            "source": "${localWorkspaceFolder}/cloud",
+            "target": "${containerWorkspaceFolder}/cloud"
+        }
+    ]
+}

@@ -1,0 +1,76 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3985000","anthropic-ratelimit-input-tokens-reset":"2026-03-27T19:49:45Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-27T19:49:45Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-27T19:49:45Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4785000","anthropic-ratelimit-tokens-reset":"2026-03-27T19:49:45Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e30eb905a635778-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Fri, 27 Mar 2026 19:49:46 GMT","request-id":"req_011CZUAY8JbunTZYpQevDZfP","server":"cloudflare","server-timing":"x-originResponse;dur=378","set-cookie":"_cfuvid=tOqsjPdJrjmqm5WiDgsYEYkljNcxRswitl6pDChzliU-1774640985.658274-1.0.1.1-gikUu099Jm8.dy5875R1ht4oM4PkpODpXBQwhJ6.XHQ; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"376","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01JaLDXTDhigkpfRmxkyGPxT","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":1232,"cache_read_input_tokens":24038,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":1232},"output_tokens":7,"service_tier":"standard","inference_geo":"not_available"}}         }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}              }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking me to write"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the string 'rumpelpod-write-ok' to a file called output.txt. This is a simple task - I just need to use the Write"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" tool to create/write to the output.txt file in the current working directory (/home/test"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"user/workspace).\n\nLet me use the Write tool to do this."} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EuYDCmMIDBgCKkC0PL4/C+Irdn+87NAC07ieT8Y1DB5Czy17do8St6aD+d5rD+HNGorIjVY4Kb5mqLgLK4e6rqZmrW8fNy1I/YHvMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDMJGKZ2aKtJUGs+L1BoMBBnVBrrb3DzIhXCEIjB7NCGFiyB3dlkA+EJD9hkVEGfH4xGwadVHJH7G+C/mj8QT9REmn3yRYyV+vmM6OncqsAL0a+KCprWTIsdei651D3V2cspZ/up4EMv5qaf2f3amgkhfGiPwx8Lwi9sZeSuDbP6iyn0NmMpYa0P9yDwjcD7MWgCSM9DLKbFrbxQ1EfKky1KCrE9m0saia4IRAmt4PSHHJG4HZgf7O1F6UD+ppdILGQJsnGfKAb68YqGuKAPoxxg9f0F7VPv4Qy0mziw+RA6mESf8uGyArzrnvShC4cVo2UMN9O7sPRapzIWQ2THyQjD1aG70HMIAv6VXIuLMskzJJTPUZnDZnV6Phfj0qpRcyNC4s9XA+ZiqsZE6NMmKbZRkamKdbHZl08cqDWT/Cfn8anSUFauKkKEdoRHfLQ6F8grjWBIbJBswM7aSpWHNazUeopHVN2huQW8gulTLh4E2TPAr+0Mga+pqZAhTXq4NGAE="}        }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0            }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01LBoYd9eZ6kZuV74Wc4eCnA","name":"Write","input":{},"caller":{"type":"direct"}}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"fi"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"le_pat"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"h\": \"/home/t"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"estus"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"er/"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"workspace/o"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"utput.txt\""}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":", \"c"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ontent\": \"r"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"umpelpod-wr"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ite-ok\"}"}    }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1           }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":1232,"cache_read_input_tokens":24038,"output_tokens":172},"context_management":{"applied_edits":[]}              }
+
+event: message_stop
+data: {"type":"message_stop" }
+

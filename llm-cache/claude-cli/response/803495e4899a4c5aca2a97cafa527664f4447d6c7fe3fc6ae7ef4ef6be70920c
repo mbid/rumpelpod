@@ -1,0 +1,67 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3939000","anthropic-ratelimit-input-tokens-reset":"2026-04-19T15:27:32Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-04-19T15:27:31Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-04-19T15:27:31Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4739000","anthropic-ratelimit-tokens-reset":"2026-04-19T15:27:31Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9eecef0a4dc27641-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Sun, 19 Apr 2026 15:27:31 GMT","request-id":"req_011CaDN9KZC8WRrd3A5PYZrq","server":"cloudflare","server-timing":"x-originResponse;dur=917","set-cookie":"_cfuvid=IGSwY0NFtByw6F6of3ZVnSwsH_Z8w1_QHXLDGbs9zN8-1776612450.9280698-1.0.1.1-hoFLV7dOdnOKPsh0U9IaI7qtLxmy._GNeQVl.Qd50UU; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"915","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01HYZxzJa3WFj5VYH2ZKQyiR","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":25475,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":25475,"ephemeral_1h_input_tokens":0},"output_tokens":3,"service_tier":"standard","inference_geo":"not_available"}}               }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}             }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user wants"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" me to read hello.txt and reply with only the file contents. I should use the Read tool to read the file from"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" the current working directory.\n\nThe working directory is /home/testuser/workspace,"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" so I need to read /home/testuser/workspace/hello.txt"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EskDCmMIDBgCKkA6Aw2mOdX7mVnaBMtbXStP8eB4Uc+vpFRuPSt3PqhUcv6B03Zyqgir77/s+Iemw8VXRV966tMPE2IENaZVNkUEMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDNRndJ1RUNcsgUmt9RoMhiH7pSh9UN0NX1IzIjAFy0uCb7h4g0/xL2DDyZiVockhmZLdDrMoYf3+APyHgKCByPRqDi3VUbwm4dHrGsAqkwJkmhaOBm2gBiluu/TpcDNT+ydiuqqabdY19xZQtXJWHHnikWLv/GK0pJeY3UWaTabifN+l6i4TFiA8RVczLkd2tEaT6Mj0lJdwKNqt3u71mAd9Dfs1JqRp08oHEf9LLpBoUz0P8WqzCbkJBsWLzobvsE3S3UpIwKLEKzOM2fbn9aZdSbRkZVmy+DHMBLVmNE2k4nPDeF4WgiobxPaO1SEdT7aUs7/VrUIFa6vScdrqghHXyRIZ08BH06kpzeDd4jGp+8UteUv5oOZXUhZmCpXmwb8deYzvmvijKdthgD8HiSnaiRMj5nqDCj8Msgas88sDCN9pqY4yiuvsn1eRKLZrZ67srCs/aKrHmtSMVoML4o8zYBgB"}              }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0         }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01Rn74yaWipST3peZxJHjUQx","name":"Read","input":{},"caller":{"type":"direct"}}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"fil"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"e_path\": "}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"/home/"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"testuser/w"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"orkspac"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"e/hel"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"lo.txt"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"}"}      }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1         }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":25475,"cache_read_input_tokens":0,"output_tokens":133},"context_management":{"applied_edits":[]}   }
+
+event: message_stop
+data: {"type":"message_stop"  }
+

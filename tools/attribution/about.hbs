@@ -1,0 +1,22 @@
+THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
+
+This product includes third-party software components. The following
+notices and licenses are provided in compliance with the terms of the
+respective licenses.
+
+To regenerate: cargo about generate -c tools/attribution/about.toml tools/attribution/about.hbs -o THIRD-PARTY-NOTICES
+
+================================================================================
+Rust Dependencies
+================================================================================
+
+{{#each licenses}}================================================================================
+License: {{id}}
+--------------------------------------------------------------------------------
+
+Used by:
+{{#each used_by}}
+  - {{crate.name}} {{crate.version}}{{#if crate.repository}}  ({{crate.repository}}){{/if}}
+{{/each}}
+{{{text}}}
+{{/each}}

@@ -1,0 +1,46 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3985000","anthropic-ratelimit-input-tokens-reset":"2026-04-12T18:11:08Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-04-12T18:11:08Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-04-12T18:11:08Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4785000","anthropic-ratelimit-tokens-reset":"2026-04-12T18:11:08Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9eb4311a0f6f903c-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Sun, 12 Apr 2026 18:11:09 GMT","request-id":"req_011CZzKxbeyoSCwcTxygt3mC","server":"cloudflare","server-timing":"x-originResponse;dur=892","set-cookie":"_cfuvid=wbGc2ssChAmQjmMYjnwQpQVVyNgu7pAipX._xyw1880-1776017468.4843159-1.0.1.1-rfvqsNtR5._v8tUaozSODW9ev4yNly215bE9MkEf5FA; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","x-envoy-upstream-service-time":"889","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_017WvLVLFnYw7o5FyrkyiNRx","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":25456,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":25456,"ephemeral_1h_input_tokens":0},"output_tokens":5,"service_tier":"standard","inference_geo":"not_available"}}    }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}        }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking which"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" git remote has branches from other pods on the same repo. Looking at the CLAUDE.md file provided in the system"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" reminder:\n\n```\nGit remotes:\n`host/` has branches from the host repo.\n`rumpelpod/` has branches from other pods on the same repo.\n```\n\nSo the answer is `r"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"umpelpod/`. The user asks for one word only, so I should just say: `rumpelpod`"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"ErUECmMIDBgCKkDAj+GuD7dlpqOPlo/fP/JP2jCbTyCNu4oQjdUxkgvp1Q3ETAJKreDJ5sI7SnJ3wso4/C7BuGqGYswDRgqVm+IlMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDDslfEfu/AgjSyo/ZBoM8vkH9ZZFAhIeMIY+IjCgsauHkQklEVZtbHk16LV+Uo08OOMHXYnN+YiWvSQFnK6FNPUgeryJqK1kFgGcq7cq/wLRZicCF/KrD7MCp/wG3hd3qNg2voZFjUYEnV4eBCcCoRpYxrb3BcPksNKl3JXO/JaRQ+PtJ5YWqRtf3UczrtaRcciXholdpageBDDom0AfafA/UXLwemEfkRkGRWZDa6yY6i6wTGZFDUl1qt8k/PSf6MUkcCaJvDhQxYMJQruN8ukouK9dOs+7+cBj+kzdr8M5KraK/oF/XSOycOq0FWMK/L737sfnpWeBKMyHWRn6mz9Sfv+SsgwIB3CaeNZLLmt825zGYGm10H4mPQyMf9tEQevHjUZ2utEcwoIiNp/dXhN8jlUvzc2Sn6NvCs6Q8NHlOxO+xSbvkSEtaTUAa7vp85wuAMlpKdcMzOn7S1mqvWofcivnvJoUaWMpZm/ISHGq2CUrn8jXPuRw6XOecnRg1vB+Y5DEaqcOBgjhgo+Fou2bHwF7e3QZstf+kluI/+x4CIjBULdLoyfPuMAUnQULH9FLo5wBGG1JV3IYyQc4FAVXaxVTL2bplBdv00wcNRgB"}        }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0   }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"r"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"umpelpod"}      }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":25456,"cache_read_input_tokens":0,"output_tokens":117},"context_management":{"applied_edits":[]}   }
+
+event: message_stop
+data: {"type":"message_stop"       }
+

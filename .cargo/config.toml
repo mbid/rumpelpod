@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[alias]
+xtest = "run -p tools --bin xtest --"
+pipeline = "run -p tools --bin pipeline --"
+release = "run -p tools --bin release --"
+eks = "run -p tools --bin eks --"
+provision-hetzner-k3s = "run -p tools --bin provision-hetzner-k3s --"
+provision-mac-scaleway = "run -p tools --bin provision-mac-scaleway --"
+
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"
+# Since Rust 1.59, musl targets default to static-pie, but musl-gcc wrappers
+# don't support it: Scrt1.o runs dynamic-linker relocation code that segfaults.
+# See https://github.com/rust-lang/rust/issues/95926
+rustflags = ["-C", "relocation-model=static"]
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+rustflags = ["-C", "relocation-model=static"]
+
+[env]
+CC_x86_64_unknown_linux_musl = "x86_64-linux-musl-gcc"
+CC_aarch64_unknown_linux_musl = "aarch64-linux-musl-gcc"

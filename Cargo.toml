@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "2"
+members = ["rumpelpod", "tools"]
+
+[profile.dev]
+opt-level = "z"
+debug = 0
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"

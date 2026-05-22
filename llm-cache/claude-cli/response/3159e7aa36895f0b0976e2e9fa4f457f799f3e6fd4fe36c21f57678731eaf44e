@@ -1,0 +1,55 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3964000","anthropic-ratelimit-input-tokens-reset":"2026-04-19T15:27:31Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-04-19T15:27:31Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-04-19T15:27:31Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4764000","anthropic-ratelimit-tokens-reset":"2026-04-19T15:27:31Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9eecef0a8bd443d2-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Sun, 19 Apr 2026 15:27:31 GMT","request-id":"req_011CaDN9KJ4zB5GGR2fpWxnb","server":"cloudflare","server-timing":"x-originResponse;dur=878","set-cookie":"_cfuvid=vTCSTnZ01MUH9G01UvIFib7NVpTuQLyFaf8Qh9cDnkM-1776612450.9629912-1.0.1.1-C5grlbDfo6qi5i7wEguwJ2F9gjW2HYTR1Lc0Fq8QHtU; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","x-envoy-upstream-service-time":"875","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01Qf6B2JG96Y4dSqKNKfYcTg","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":25471,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":25471,"ephemeral_1h_input_tokens":0},"output_tokens":6,"service_tier":"standard","inference_geo":"not_available"}}         }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}        }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking me \""}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"What is the capital of France?\" and wants me to reply with just the city name, nothing else.\n\nThis is a straightforward general"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" knowledge question that has nothing to do with the software engineering tasks I'm supposed to help with. The capital of France is Paris.\n\nHowever, I should"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" consider the context I've been given. I'm Claude Code, designed"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to help with software engineering tasks. The user is asking me a general knowledge question that's completely unrelated to coding, software development, or the"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" workspace I'm in.\n\nThat said, the user has explicitly asked me to answer with"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" just the city name and nothing else. This is a simple, direct request. I should answer it."}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\nThe answer is: Paris"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EpUHCmMIDBgCKkAK4OYZvXgAiN8Xsh4z8ghYCTmGqBYDNc2//8DG0R0+pFDfl/fIDUV6TDyewvg3nf1WDGqKK0M+WfaLgEAn89ysMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDGS15Q5Wf2Ht4ig12BoMMU1t6eusGbY6qIFFIjByqrDqZ51EDDqoU2+d4Rn6KZon2TI7tNtHxfxyFQnyTK4B3uwxUGw3XzbLlSYiK/4q3wV49q+FnAinKznld4DaQqLQalX6z7ks4oYhxLlsBltiPlzUSJV6Fqr5ed+VPDr2QN5p2WYQZJgRORYye606B5AILoKTchRVfC64RYwiaf+xN9GFhpAMsoJRMQL6cGdiWFLqz2G1XHxdmsX0S4uQGhIYOYZm29gZDHX8HAaYn1RZLHJd5Dxs8pU1ZNhzv2OFK6dbEx/hENw9mgfuLBQfnnFf2JjPOt8Vl7aZw5LTm/BYxr5nvR/8q2bYOuR//SwdMftyXGs9gXiraMg1d54P6REUAkCaKJ755uLq80xiqeJRPuAUZQKMRfjKpNmy+kv/h3plX8j7LHWb/PKmsSwFYzBSzxvRUJ3ne1Z4P0hoZfp20dzfJgAhNbEp0gHcOonuhXb73Z4S1ig1mO6NCDiUsPrNI0fPCPXhNKkthW9Xv+BygoYJOK2qN1vyj2By3wTAs0YMObvFuSCrdqnOhVA5qF86VoqurEs1Ad9cu/5p/5frrSuNgZkqwEjehARTLzW61VWja4MzhPvnB1TAS/VBumPMx+nEUjGtxRJM8zB30DUBuedyqMC3oiOR57obHtmk6oswuH3/P85gQ68fmTOwGTz3dTQ53fA71BiggFhUi1SYxZeIRO2hJvRpR5z0VYopfSeA1NDcL7S0AUk4YxybBj0iGbnWqM/PJjSj1FGhHiMJSErAhuDcN2GFyPR61wQCRN1yC5qguIY6AoYQh+2qgXxGwHGlOEoeWX2p8l/R1D+sQfehhpiew/sbOjC6tlT8v8tTF6j592cFsKfoT9k394WarYHmtk8Z8PasZTeoR/jcMDMLMX02M0nzgbKOpg/vR78bOZtGqXyfofFQxBH/H58Q8yjIUbjGBdr6MFuPkBb0JA8qJb78dXhf7vbwwzzVnHA7F4IV6uepgUtfToz60rqWKJp/cLkGRz5J7OjuMK5HCaIGE8oFxABCA0WXEQr1dlx7yW6/b5xkuj7XzKBoDcIYAQ=="}          }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0             }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Paris"}            }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1            }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":25471,"cache_read_input_tokens":0,"output_tokens":165},"context_management":{"applied_edits":[]}}
+
+event: message_stop
+data: {"type":"message_stop"    }
+

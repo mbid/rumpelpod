@@ -1,0 +1,646 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Generic screen-style PTY session manager.
+//!
+//! Holds child PTY sessions open across client disconnections so a
+//! WebSocket client can detach and reattach.  A virtual terminal buffer
+//! (vt100) tracks the screen state so the full TUI is replayed
+//! immediately on reattach, like screen/tmux.
+//!
+//! Used both by the pod server (for the in-container `claude` session)
+//! and by the host-side daemon (for the host-side `codex` TUI).  The
+//! generic bridge does not resolve cmd[0]; a per-use-case
+//! `cmd_transform` callback can rewrite the first SessionParams before
+//! the child is spawned -- the pod side uses this to substitute the
+//! container's claude binary path.
+
+use std::collections::HashMap;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use axum::extract::ws::{Message, WebSocket};
+use nix::pty::{forkpty, ForkptyResult, Winsize};
+use nix::sys::signal::{kill, Signal};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+use nix::unistd::Pid;
+use serde::{Deserialize, Serialize};
+use tokio::io::unix::AsyncFd;
+use tokio::sync::Mutex;
+
+// ---------------------------------------------------------------------------
+// Session types
+// ---------------------------------------------------------------------------
+
+struct PtySession {
+    master_fd: OwnedFd,
+    child_pid: Pid,
+    /// Virtual terminal buffer tracking the screen state for replay
+    /// on reattach, like screen/tmux.
+    screen: Arc<Mutex<vt100::Parser>>,
+    /// Broadcast channel carrying raw PTY output bytes.  Connected
+    /// clients subscribe; the persistent reader task is the sole sender.
+    output_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+}
+
+#[derive(Clone)]
+pub struct PtySessions {
+    inner: Arc<Mutex<HashMap<String, PtySession>>>,
+}
+
+impl Default for PtySessions {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl PtySessions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Spawn a new session or reuse an existing one.  Returns a dup'd
+    /// write fd, the screen buffer for replay, and a broadcast receiver.
+    /// Returns `Ok(None)` when `create` is false and the session does
+    /// not exist (used by reconnecting clients to avoid spawning a
+    /// fresh session after the original child exited).
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_or_attach(
+        &self,
+        name: String,
+        cmd: Vec<String>,
+        workdir: Option<PathBuf>,
+        env: Vec<String>,
+        cols: u16,
+        rows: u16,
+        create: bool,
+    ) -> Result<
+        Option<(
+            OwnedFd,
+            Arc<Mutex<vt100::Parser>>,
+            tokio::sync::broadcast::Receiver<Vec<u8>>,
+        )>,
+    > {
+        let mut sessions = self.inner.lock().await;
+
+        // Reap dead sessions so we start fresh if the child exited.
+        if let Some(s) = sessions.get(&name) {
+            if !child_is_alive(s.child_pid) {
+                sessions.remove(&name);
+            }
+        }
+
+        if !sessions.contains_key(&name) {
+            if !create {
+                return Ok(None);
+            }
+            let session = spawn_session(&name, &cmd, workdir, &env, cols, rows, self)?;
+            sessions.insert(name.clone(), session);
+        }
+
+        let session = sessions.get(&name).unwrap();
+
+        // Resize to match the attaching client's terminal, so
+        // reattaching after a window resize (or reconnection) shows
+        // the right dimensions.
+        set_winsize(session.master_fd.as_raw_fd(), cols, rows)?;
+        session
+            .screen
+            .lock()
+            .await
+            .screen_mut()
+            .set_size(rows, cols);
+
+        let duped = nix::unistd::dup(&session.master_fd).context("dup master fd")?;
+        let rx = session.output_tx.subscribe();
+        Ok(Some((duped, Arc::clone(&session.screen), rx)))
+    }
+
+    async fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
+        let sessions = self.inner.lock().await;
+        let session = sessions
+            .get(name)
+            .with_context(|| format!("no such pty session: {name}"))?;
+        set_winsize(session.master_fd.as_raw_fd(), cols, rows)?;
+        session
+            .screen
+            .lock()
+            .await
+            .screen_mut()
+            .set_size(rows, cols);
+        Ok(())
+    }
+
+    /// Remove a session from the registry unconditionally.
+    async fn remove_session(&self, name: &str) {
+        self.inner.lock().await.remove(name);
+    }
+
+    /// Pod lifecycle cleanup calls this because a detached TUI keeps
+    /// its original `--remote` URL even after the pod behind it is gone.
+    pub async fn terminate(&self, name: &str) -> Result<()> {
+        let session = self.inner.lock().await.remove(name);
+        let Some(session) = session else {
+            return Ok(());
+        };
+
+        match kill(session.child_pid, Signal::SIGTERM) {
+            Ok(()) => Ok(()),
+            Err(nix::errno::Errno::ESRCH) => Ok(()),
+            Err(e) => Err(anyhow::anyhow!("terminating pty session '{name}': {e}")),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Session spawning
+// ---------------------------------------------------------------------------
+
+fn spawn_session(
+    name: &str,
+    cmd: &[String],
+    workdir: Option<PathBuf>,
+    env: &[String],
+    cols: u16,
+    rows: u16,
+    sessions: &PtySessions,
+) -> Result<PtySession> {
+    let winsize = Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    if cmd.is_empty() {
+        return Err(anyhow::anyhow!("empty command"));
+    }
+
+    // Safety: we only call async-signal-safe functions (chdir, execvp)
+    // in the child before exec. The mutex is held in the parent, so
+    // the child (which has its own address space after fork) never
+    // touches it.
+    let result = unsafe { forkpty(&winsize, None) }.context("forkpty")?;
+
+    match result {
+        ForkptyResult::Child => {
+            // -- child process --
+            // These calls do not return on success (exec replaces the process).
+
+            if let Some(ref dir) = workdir {
+                if let Err(e) = std::env::set_current_dir(dir) {
+                    let dir = dir.display();
+                    eprintln!("pty: chdir to {dir} failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+
+            for entry in env {
+                if let Some((key, value)) = entry.split_once('=') {
+                    std::env::set_var(key, value);
+                }
+            }
+
+            crate::ensure_tui_terminal_env();
+
+            let err = std::process::Command::new(&cmd[0]).args(&cmd[1..]).exec();
+            eprintln!("pty: exec failed: {err}");
+            std::process::exit(1);
+        }
+        ForkptyResult::Parent { child, master } => {
+            // Set master fd to non-blocking for async I/O
+            let flags = nix::fcntl::fcntl(&master, nix::fcntl::FcntlArg::F_GETFL)
+                .context("fcntl F_GETFL")?;
+            let mut oflags = nix::fcntl::OFlag::from_bits_truncate(flags);
+            oflags.insert(nix::fcntl::OFlag::O_NONBLOCK);
+            nix::fcntl::fcntl(&master, nix::fcntl::FcntlArg::F_SETFL(oflags))
+                .context("fcntl F_SETFL O_NONBLOCK")?;
+
+            let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
+            let (output_tx, _) = tokio::sync::broadcast::channel(256);
+
+            // Spawn persistent reader: continuously drains PTY output,
+            // updates the screen buffer, and broadcasts to clients.
+            // Runs even when no client is attached so the child never
+            // blocks on write() and the screen buffer stays current.
+            let reader_fd = nix::unistd::dup(&master).context("dup master for reader")?;
+            spawn_persistent_reader(
+                reader_fd,
+                Arc::clone(&screen),
+                output_tx.clone(),
+                sessions.clone(),
+                name.to_string(),
+            );
+
+            Ok(PtySession {
+                master_fd: master,
+                child_pid: child,
+                screen,
+                output_tx,
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent PTY reader
+// ---------------------------------------------------------------------------
+
+/// Background task that continuously reads PTY output, updates the
+/// screen buffer, and broadcasts to any connected WebSocket clients.
+fn spawn_persistent_reader(
+    fd: OwnedFd,
+    screen: Arc<Mutex<vt100::Parser>>,
+    tx: tokio::sync::broadcast::Sender<Vec<u8>>,
+    sessions: PtySessions,
+    name: String,
+) {
+    tokio::spawn(async move {
+        let async_fd = match AsyncFd::new(fd) {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("pty: persistent reader AsyncFd::new failed: {e}");
+                return;
+            }
+        };
+
+        let mut buf = vec![0u8; 4096];
+        loop {
+            let mut ready = match async_fd.readable().await {
+                Ok(r) => r,
+                Err(_) => break,
+            };
+
+            match ready.try_io(|inner| {
+                nix::unistd::read(inner, &mut buf)
+                    .map_err(std::io::Error::from)
+                    .and_then(|n| {
+                        if n == 0 {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "pty eof",
+                            ))
+                        } else {
+                            Ok(n)
+                        }
+                    })
+            }) {
+                Ok(Ok(n)) => {
+                    let data = &buf[..n];
+                    screen.lock().await.process(data);
+                    // Send returns Err only when there are no receivers,
+                    // which is normal when no client is attached.
+                    let _ = tx.send(data.to_vec());
+                }
+                // EOF (read returned 0) or EIO (PTY slave closed on
+                // Linux) -- the session is over.
+                Ok(Err(_)) => {
+                    sessions.remove_session(&name).await;
+                    break;
+                }
+                // WouldBlock -- AsyncFd will re-poll
+                Err(_) => continue,
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn child_is_alive(pid: Pid) -> bool {
+    match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+        Ok(WaitStatus::StillAlive) => true,
+        // Any terminal status means the child is gone
+        Ok(_) => false,
+        // ECHILD means the child was already reaped
+        Err(nix::errno::Errno::ECHILD) => false,
+        // Other errors are unexpected; treat as dead to avoid leaking
+        Err(_) => false,
+    }
+}
+
+/// Build the escape sequence stream that reconstructs the full terminal
+/// state for a new client: alternate screen mode, screen contents with
+/// formatting, input modes, cursor position, and cursor visibility.
+fn build_screen_replay(screen: &vt100::Screen) -> Vec<u8> {
+    let mut out = Vec::new();
+
+    // Switch to alternate screen first so the content lands in the
+    // right buffer (TUI apps like ink use alternate screen).
+    if screen.alternate_screen() {
+        out.extend_from_slice(b"\x1b[?1049h");
+    }
+
+    // state_formatted() = contents (clear + cells with colors) + input
+    // modes (application keypad/cursor, bracketed paste, mouse protocol).
+    out.extend_from_slice(&screen.state_formatted());
+
+    // cursor_state_formatted() = cursor visibility + cursor position.
+    out.extend_from_slice(&screen.cursor_state_formatted());
+
+    out
+}
+
+fn set_winsize(fd: RawFd, cols: u16, rows: u16) -> Result<()> {
+    let ws = Winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCSWINSZ is a well-defined ioctl for setting terminal
+    // window size, and ws is a valid Winsize struct on the stack.
+    let ret = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &ws as *const Winsize) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error()).context("ioctl TIOCSWINSZ");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Wire protocol
+// ---------------------------------------------------------------------------
+
+/// Text messages carry JSON control messages. Binary messages carry
+/// raw PTY data (no prefix, no framing beyond WebSocket itself).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PtyControl {
+    /// Client-owned session: client tells the server everything about
+    /// the child process to spawn.  Used by pod-side claude, where the
+    /// in-container handler runs whatever cmd the host sent (subject
+    /// to a server-side cmd transform that resolves the binary path).
+    Session {
+        name: String,
+        cmd: Vec<String>,
+        workdir: Option<PathBuf>,
+        env: Vec<String>,
+        cols: u16,
+        rows: u16,
+        /// When false, the server will not spawn a new session if the
+        /// named one does not exist (used for reconnection).
+        create: bool,
+    },
+    /// Server-owned session: the server already knows what to spawn
+    /// (name, cmd, workdir, env), and the client only contributes
+    /// terminal dimensions, the create flag, and any user-supplied
+    /// extra args that should be appended to the server-controlled
+    /// cmd.  Used by daemon-side codex, where the daemon owns the
+    /// codex binary path and the proxy URL.
+    Attach {
+        cols: u16,
+        rows: u16,
+        create: bool,
+        extra_args: Vec<String>,
+    },
+    /// Terminal resize (client -> server).
+    Resize { cols: u16, rows: u16 },
+    /// Sent by the server when the PTY child process has exited.
+    SessionEnded,
+}
+
+// ---------------------------------------------------------------------------
+// Generic WebSocket <-> PTY bridge
+// ---------------------------------------------------------------------------
+
+/// Optional callback to rewrite the cmd before spawning the child.
+/// Used by the pod side to substitute the in-container claude binary
+/// path; the daemon side does not need this and passes `None`.
+pub type CmdTransform = Box<dyn FnOnce(&mut Vec<String>) -> Result<()> + Send>;
+
+/// Server-controlled session shape (name + cmd + workdir + env).
+/// Used by `serve_ws_session_with_params` callers (currently the
+/// daemon's codex handler) to fully own the child process spec.
+pub struct SessionSpec {
+    pub name: String,
+    pub cmd: Vec<String>,
+    pub workdir: Option<PathBuf>,
+    pub env: Vec<String>,
+}
+
+/// Client-owned entry point: read `PtyControl::Session` from the wire,
+/// optionally rewrite the cmd via `cmd_transform`, then drive the
+/// bridge.  Used by the pod's `/claude` route.
+pub async fn serve_ws_session(
+    mut socket: WebSocket,
+    sessions: PtySessions,
+    cmd_transform: Option<CmdTransform>,
+) {
+    let (name, mut cmd, workdir, env, cols, rows, create) = match socket.recv().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
+            Ok(PtyControl::Session {
+                name,
+                cmd,
+                workdir,
+                env,
+                cols,
+                rows,
+                create,
+            }) => (name, cmd, workdir, env, cols, rows, create),
+            Ok(other) => {
+                eprintln!("pty: expected session message, got {other:?}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("pty: invalid session request: {e}");
+                return;
+            }
+        },
+        Some(Ok(_)) => {
+            eprintln!("pty: expected text message with session params, got binary");
+            return;
+        }
+        Some(Err(e)) => {
+            eprintln!("pty: WebSocket error reading session request: {e}");
+            return;
+        }
+        None => return,
+    };
+
+    // Skipped on reattach: the existing session's cmd is reused.
+    if create {
+        if let Some(transform) = cmd_transform {
+            if let Err(e) = transform(&mut cmd) {
+                eprintln!("pty: cmd transform failed: {e:#}");
+                return;
+            }
+        }
+    }
+
+    run_bridge(
+        socket,
+        sessions,
+        SessionSpec {
+            name,
+            cmd,
+            workdir,
+            env,
+        },
+        cols,
+        rows,
+        create,
+    )
+    .await
+}
+
+/// Server-owned entry point: read `PtyControl::Attach` from the wire,
+/// append `extra_args` to the server-supplied `spec.cmd`, then drive
+/// the bridge.  Used by the daemon's `/pod/codex/{name}` route.
+pub async fn serve_ws_session_with_params(
+    mut socket: WebSocket,
+    sessions: PtySessions,
+    mut spec: SessionSpec,
+) {
+    let (cols, rows, create, extra_args) = match socket.recv().await {
+        Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
+            Ok(PtyControl::Attach {
+                cols,
+                rows,
+                create,
+                extra_args,
+            }) => (cols, rows, create, extra_args),
+            Ok(other) => {
+                eprintln!("pty: expected attach message, got {other:?}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("pty: invalid attach request: {e}");
+                return;
+            }
+        },
+        Some(Ok(_)) => {
+            eprintln!("pty: expected text message with attach params, got binary");
+            return;
+        }
+        Some(Err(e)) => {
+            eprintln!("pty: WebSocket error reading attach request: {e}");
+            return;
+        }
+        None => return,
+    };
+
+    if create {
+        spec.cmd.extend(extra_args);
+    }
+
+    run_bridge(socket, sessions, spec, cols, rows, create).await
+}
+
+/// Spawn or attach the screen session, replay its current screen state
+/// to the new client, then bridge stdin/stdout until the client
+/// disconnects or the session ends.
+async fn run_bridge(
+    mut socket: WebSocket,
+    sessions: PtySessions,
+    spec: SessionSpec,
+    cols: u16,
+    rows: u16,
+    create: bool,
+) {
+    let SessionSpec {
+        name,
+        cmd,
+        workdir,
+        env,
+    } = spec;
+
+    let (write_fd, screen, mut output_rx) = match sessions
+        .spawn_or_attach(name.clone(), cmd, workdir, env, cols, rows, create)
+        .await
+    {
+        Ok(Some(tuple)) => tuple,
+        Ok(None) => {
+            // Session does not exist and create=false (reconnection
+            // to a session that already exited).
+            let msg = serde_json::to_string(&PtyControl::SessionEnded)
+                .expect("SessionEnded is always serializable");
+            let _ = socket.send(Message::Text(msg.into())).await;
+            return;
+        }
+        Err(e) => {
+            eprintln!("pty session failed for '{name}': {e:#}");
+            return;
+        }
+    };
+
+    // Replay the current screen state so the client sees the full TUI
+    // immediately, like screen/tmux do on reattach.
+    {
+        let parser = screen.lock().await;
+        let replay = build_screen_replay(parser.screen());
+        if !replay.is_empty() && socket.send(Message::Binary(replay.into())).await.is_err() {
+            return;
+        }
+    }
+
+    // Main loop: multiplex between broadcast output and WebSocket input.
+    loop {
+        tokio::select! {
+            // Persistent reader produced output -> forward as binary
+            output = output_rx.recv() => {
+                match output {
+                    Ok(data) => {
+                        if socket.send(Message::Binary(data.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Lagged: we missed some output, not fatal for a terminal
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    // Sender dropped: child exited.  Tell the client
+                    // so it can distinguish this from a network error.
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        let msg = serde_json::to_string(&PtyControl::SessionEnded)
+                            .expect("SessionEnded is always serializable");
+                        let _ = socket.send(Message::Text(msg.into())).await;
+                        break;
+                    }
+                }
+            }
+
+            // WebSocket received a message -> handle it
+            ws_msg = socket.recv() => {
+                match ws_msg {
+                    // Binary = raw PTY input from client
+                    Some(Ok(Message::Binary(data))) => {
+                        if !data.is_empty()
+                            && nix::unistd::write(&write_fd, &data).is_err()
+                        {
+                            break;
+                        }
+                    }
+                    // Text = JSON control message
+                    Some(Ok(Message::Text(text))) => {
+                        match serde_json::from_str::<PtyControl>(&text) {
+                            Ok(PtyControl::Resize { cols, rows }) => {
+                                let _ = sessions.resize(&name, cols, rows).await;
+                            }
+                            Ok(PtyControl::Session { .. }) | Ok(PtyControl::Attach { .. }) => {
+                                // Handshake messages after handshake are nonsensical
+                            }
+                            Ok(PtyControl::SessionEnded) => {
+                                // Server-to-client only, ignore if received
+                            }
+                            Err(e) => {
+                                eprintln!("pty: invalid control message: {e}");
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) => break,
+                    Some(Ok(_)) => continue,
+                    Some(Err(_)) => break,
+                    None => break,
+                }
+            }
+        }
+    }
+
+    // The dup'd write_fd is dropped here; the session's master_fd and
+    // the persistent reader's fd keep the PTY alive for future reattach.
+}

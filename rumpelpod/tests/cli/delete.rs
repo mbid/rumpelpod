@@ -1,0 +1,439 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Integration tests for the `rumpel delete` subcommand.
+
+use std::fs;
+
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::executor::ExecutorResources;
+
+#[test]
+fn delete_smoke_test() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    // First create a pod by entering it
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "test-delete", "--", "echo", "created"])
+        .output()
+        .expect("Failed to run rumpel enter command");
+
+    assert!(
+        output.status.success(),
+        "rumpel enter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Now delete the pod
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "test-delete"])
+        .output()
+        .expect("Failed to run rumpel delete command");
+
+    assert!(
+        output.status.success(),
+        "rumpel delete failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn delete_unknown_pod_fails() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "nonexistent"])
+        .output()
+        .expect("Failed to run rumpel delete command");
+
+    assert!(
+        !output.status.success(),
+        "rumpel delete of unknown pod should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "Expected 'not found' in stderr: {}",
+        stderr
+    );
+}
+
+/// Helper: create a pod and make a commit inside it so it becomes "ahead 1".
+fn create_ahead_pod(repo: &TestRepo, daemon: &TestDaemon, name: &str) {
+    let output = pod_command(repo, daemon)
+        .args(["enter", "--create", name, "--", "touch", "newfile"])
+        .output()
+        .expect("Failed to touch file");
+    assert!(output.status.success(), "touch failed");
+
+    let output = pod_command(repo, daemon)
+        .args(["enter", "--create", name, "--", "git", "add", "newfile"])
+        .output()
+        .expect("Failed to git add");
+    assert!(output.status.success(), "git add failed");
+
+    let output = pod_command(repo, daemon)
+        .args([
+            "enter",
+            "--create",
+            name,
+            "--",
+            "git",
+            "commit",
+            "--no-verify",
+            "-m",
+            "new file",
+        ])
+        .output()
+        .expect("Failed to git commit");
+    assert!(output.status.success(), "git commit failed");
+}
+
+#[test]
+fn delete_unmerged_pod_fails_without_tty() {
+    // In non-tty mode (piped output), deleting an unmerged pod should fail
+    // with a helpful error message.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    create_ahead_pod(&repo, &daemon, "unmerged");
+
+    // pod_command pipes stdout/stderr, so this is non-tty
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "unmerged"])
+        .output()
+        .expect("Failed to run rumpel delete command");
+
+    assert!(
+        !output.status.success(),
+        "delete of unmerged pod should fail without --force"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unmerged commits") && stderr.contains("--force"),
+        "Expected 'unmerged commits' and '--force' hint in stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn delete_unmerged_pod_succeeds_with_force() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    create_ahead_pod(&repo, &daemon, "force-del");
+
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "--force", "force-del"])
+        .output()
+        .expect("Failed to run rumpel delete command");
+
+    assert!(
+        output.status.success(),
+        "delete with --force should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify pod is gone
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("force-del"),
+        "pod should be gone after forced delete: {}",
+        stdout
+    );
+}
+
+#[test]
+fn delete_then_recreate_same_name() {
+    // After deleting a pod, we should be able to create a new one with the same name.
+    // This verifies that all resources (container, network) are properly cleaned up.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    // Create pod
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "recyclable", "--", "echo", "first"])
+        .output()
+        .expect("Failed to run rumpel enter command");
+    assert!(
+        output.status.success(),
+        "first rumpel enter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Delete pod (--wait so the container is fully gone before re-entering)
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "recyclable"])
+        .output()
+        .expect("Failed to run rumpel delete command");
+    assert!(
+        output.status.success(),
+        "rumpel delete failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Create pod with the same name again
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "recyclable", "--", "echo", "second"])
+        .output()
+        .expect("Failed to run rumpel enter command");
+    assert!(
+        output.status.success(),
+        "second rumpel enter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn delete_multiple_pods() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    // Create three pods
+    for name in ["multi-a", "multi-b", "multi-c"] {
+        let output = pod_command(&repo, &daemon)
+            .args(["enter", "--create", name, "--", "true"])
+            .output()
+            .expect("Failed to run rumpel enter");
+        assert!(
+            output.status.success(),
+            "creating pod '{}' failed: {}",
+            name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Delete all three in one command
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "multi-a", "multi-b", "multi-c"])
+        .output()
+        .expect("Failed to run rumpel delete");
+    assert!(
+        output.status.success(),
+        "multi-delete failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify all are gone
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for name in ["multi-a", "multi-b", "multi-c"] {
+        assert!(
+            !stdout.contains(name),
+            "pod '{}' should be gone after multi-delete: {}",
+            name,
+            stdout
+        );
+    }
+}
+
+#[test]
+fn delete_multiple_continues_past_missing() {
+    // When one pod in a multi-delete does not exist, the others should
+    // still be deleted and the command should report the failure.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    // Create two pods, leave a gap for a nonexistent one
+    for name in ["surv-a", "surv-c"] {
+        let output = pod_command(&repo, &daemon)
+            .args(["enter", "--create", name, "--", "true"])
+            .output()
+            .expect("Failed to run rumpel enter");
+        assert!(output.status.success());
+    }
+
+    // Delete with a nonexistent pod in the middle
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "surv-a", "no-such-pod", "surv-c"])
+        .output()
+        .expect("Failed to run rumpel delete");
+
+    // Command should fail overall because one pod was missing
+    assert!(
+        !output.status.success(),
+        "should fail when a pod is missing"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not found"),
+        "should mention the missing pod: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("1 pod(s) could not be deleted"),
+        "should report failure count: {}",
+        stderr
+    );
+
+    // The other two should still have been deleted
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("surv-a") && !stdout.contains("surv-c"),
+        "existing pods should be deleted despite the missing one: {}",
+        stdout
+    );
+}
+
+#[test]
+fn delete_multiple_skips_unmerged_without_tty() {
+    // In non-tty mode, unmerged pods are skipped with an error but
+    // the remaining pods are still deleted.
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    // Create a clean pod and an ahead pod
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "clean-pod", "--", "true"])
+        .output()
+        .expect("Failed to run rumpel enter");
+    assert!(output.status.success());
+
+    create_ahead_pod(&repo, &daemon, "ahead-pod");
+
+    // Try to delete both (non-tty, no --force)
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "clean-pod", "ahead-pod"])
+        .output()
+        .expect("Failed to run rumpel delete");
+
+    // Should fail overall because the ahead pod could not be deleted
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unmerged commits"),
+        "should warn about unmerged pod: {}",
+        stderr
+    );
+
+    // The clean pod should be deleted, the ahead pod should remain
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("clean-pod"),
+        "clean pod should be deleted: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("ahead-pod"),
+        "ahead pod should remain: {}",
+        stdout
+    );
+}
+
+#[test]
+fn ssh_remote_pod_delete() {
+    if !matches!(
+        crate::executor::executor_mode(),
+        crate::executor::ExecutorMode::Docker
+    ) {
+        crate::executor::skip_test();
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::ssh(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    // Create a pod on the remote
+    let pod_name = "delete-test-remote";
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "true"])
+        .output()
+        .expect("rumpel enter failed to execute");
+    assert!(
+        output.status.success(),
+        "rumpel enter failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify it exists in list
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("rumpel list failed to execute");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(pod_name),
+        "pod should exist before delete"
+    );
+
+    // Delete the pod (--wait so it's fully gone before checking list)
+    let output = pod_command(&repo, &daemon)
+        .args(["delete", "--wait", pod_name])
+        .output()
+        .expect("rumpel delete failed to execute");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "rumpel delete failed: stdout={}, stderr={}",
+        stdout,
+        stderr
+    );
+
+    // Verify it is gone from list
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("rumpel list failed to execute");
+
+    let stdout_list = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout_list.contains(pod_name),
+        "pod should not exist after delete in list output: {}",
+        stdout_list
+    );
+}

@@ -1,0 +1,106 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3973000","anthropic-ratelimit-input-tokens-reset":"2026-03-31T21:07:55Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-31T21:07:55Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-31T21:07:55Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4773000","anthropic-ratelimit-tokens-reset":"2026-03-31T21:07:55Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e52538d3f72d9d8-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Tue, 31 Mar 2026 21:07:55 GMT","request-id":"req_011CZbqjTzezKcbgoVtiDX2t","server":"cloudflare","server-timing":"x-originResponse;dur=435","set-cookie":"_cfuvid=VgQurVuo6fusOflTUdLKFaYswc4.gixGxv08b7gg34A-1774991275.0718517-1.0.1.1-VPm8NvaxH.vZyHfbEQX4uFm3ipQX0dzsjxbPGHacCJE; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"432","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01W6xXbjnYLFY1MLaFJo1hmi","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":1221,"cache_read_input_tokens":24038,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":1221},"output_tokens":1,"service_tier":"standard","inference_geo":"not_available"}}   }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}             }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" user is asking which"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" git remote has other pods,"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" and they want a one-word answer"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":".\n\nLooking at the"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" CLAUDE"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":".md file provided"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":":"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n```\nGit"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" remotes:\n`host/`"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" has branches from the host repo."}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n`rumpelpod/` has"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" branches from other pods on the same repo"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":".\n```\n\nSo"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" `r"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"umpelpod/` has branches from"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" other pods."}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\nThe user wants"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" one"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" word"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" only."}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" The"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" answer"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is `rumpelpod`."}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EqIECmMIDBgCKkCNOf7n39nFCEpPxZIeZTtoce8Ln+dY6HrPNXiKqzI7Er7OvOewLnSB2vIHwSP2ZelwKIma78gcpbpRMxkMf6iyMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDLUFW2KkjDE7hKfUVBoMYoKQ9FGAMp/zcaZZIjBb35v45Yp2e+MyLFSXTINCrOrA9e8rpDLLnPSWaBS69kU3qeWGa4Ttp50EkZePaqMq7AIWBKK1U78vzDl/Q5gmVPucngv5MBcDt9NDTKNQ2U0zOHj8gXDGuy+g5hAveHHtjlfrV+N0dtKFJiARGO+OrpCoZIsGw8IPlxS9EAVTTdOARLPKX49QUbrBiYepprYx9xuODi8Q6MbcXwWIU87B+QtPciDm1OinZcCx8ZAaZeyfPDuwMjK1iAWi8FFpo5KpcKVVwZNY6rzSHQahFeV0Is4yGf0X28UQl9OBVzwsK2APw5b3I72Q8uiCAkxo004VA3m0MNV4nwRAObPB3TckiB585LmrGF7+rPfUmaMG7nF54lPlSJC6y63mhG0lVSCcMHRLCKv/ziIUzlxTrY+t9k6LL5ph80t9SPPLFYVPgJkDRaNxmzwvhb5nAw2M7Zje+K2sRgzE7OryCVVH4M8Lkh0P5zZfjBP2MwF8djZDnHUG8VZM13X10bVVn6HBaOsfzyPQHbMLrp8T4eQ3DI3WHU686gwZPkcsriBvtcnSGAE="}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0           }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"rumpelpod"}             }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1          }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":1221,"cache_read_input_tokens":24038,"output_tokens":117},"context_management":{"applied_edits":[]}               }
+
+event: message_stop
+data: {"type":"message_stop"      }
+

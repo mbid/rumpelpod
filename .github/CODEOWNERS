@@ -1,0 +1,6 @@
+# This file defines code ownership rules for the repository.
+# Code owners are automatically requested for review on pull requests
+# that touch the matching paths.
+
+# Default ownership.
+* @bidlingmaier

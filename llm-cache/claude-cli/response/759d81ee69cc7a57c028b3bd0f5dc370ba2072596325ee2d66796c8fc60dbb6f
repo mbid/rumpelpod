@@ -1,0 +1,94 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3985000","anthropic-ratelimit-input-tokens-reset":"2026-04-12T17:35:56Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-04-12T17:35:56Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-04-12T17:35:56Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4785000","anthropic-ratelimit-tokens-reset":"2026-04-12T17:35:56Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9eb3fd87c9494d61-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Sun, 12 Apr 2026 17:35:56 GMT","request-id":"req_011CZzHGtPD8CX1dfWG9T8ku","server":"cloudflare","server-timing":"x-originResponse;dur=720","set-cookie":"_cfuvid=9tNouvoj1uC6YpP8lO5YS6v5up0rZ2KpJM2cTSSitlI-1776015356.1293738-1.0.1.1-UjR4UcrExlSmJ_Q2wQd9cgOaaBM_wOZdazeE8oGIijw; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"717","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_011zZVVJdQ4k8PigoJCJsFCc","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":25463,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":25463,"ephemeral_1h_input_tokens":0},"output_tokens":3,"service_tier":"standard","inference_geo":"not_available"}}  }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}            }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user wants"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" me to run a command: `echo 'rumpelpod cmd ok' | tr ' ' '-'`\n\nThis is a straightforward shell command that:\n1. Echoes the text"}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" \"rumpelpod cmd ok\"\n2. Pipes it to `tr` which translates spaces to hyphens\n3. Should output"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":": \"rumpelpod-cmd-ok\"\n\nI should use the Bash tool"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to run this command."}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EvIDCmMIDBgCKkA4gZrLazchG37K4DXaIIPPV49owhWVo3jXQM1Zr5+mB86BBkW2k7keGoXrDoxMZmsQdRCeAV6ulNIb/EU6YzSEMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDEw3ExujafGOluB0ZxoMMde8HlZhfYnUd1elIjCeQjAYAGtngIPb/l/Uc9qy7hH9CiTpWzFStL3MIDDk/nKwBSQbJz3mTqRCWvQDnsUqvAJTCwTU/rnNRCl6CYxCpiR8V1Znifj6BuinHumJDIOUnOtQhQdJAMpcpwCznYmrL7leSFFZeGHC8kmKk9HP1uZKXsI4kBBTLRi+lcxV+LJTx+Gycz1VHBKuTxF+m6uhtRBtFJ4h0NxnbrigdyScyO8mh8ywJu0N6R82Ah5q+YFlFBAAutTtoJPV8Q6Bhl16dWXFwBPk9CH+7LcaXCGT8QgMPw18vRNa7IYE4CnbsAfULQEEgca6w16lKYa3po8B88gfcmyVOrLv6IwVOK26Twx7LR7yO9ckbLCYBSIT0kh6pNLKTvl/hKWLp0LvOdOfPcTcrsdyR3jIaF/FXVJO7v19iVVGUBRu5xvUKaaH9EiB3MbiLyX10yErGckG9h9FON7lP/73rZCuoda7MwHSrzq0EYBlRMgTKZY2eMfiGAE="}            }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0           }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01UFiVdFe21kP3KU5ZxjqbTs","name":"Bash","input":{},"caller":{"type":"direct"}}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":""}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" \"ec"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ho 'ru"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"mpelpod cmd "}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ok' | tr ' "}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"' '-'\""}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":", "}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"de"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"scription\":"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":" \"Run ech"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"o with tr t"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"o rep"}        }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"lace spaces "}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"with hy"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"phe"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"ns\"}"}        }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1       }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":25463,"cache_read_input_tokens":0,"output_tokens":202},"context_management":{"applied_edits":[]}    }
+
+event: message_stop
+data: {"type":"message_stop"            }
+

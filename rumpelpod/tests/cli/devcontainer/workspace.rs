@@ -1,0 +1,150 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Integration tests for workspaceFolder handling in devcontainer.json.
+//!
+//! Tests cover the default workspace path, custom paths, repo initialization
+//! via git-http bridge, and incremental sync on rumpel enter.
+
+use indoc::formatdoc;
+use rumpelpod::CommandExt;
+use std::fs;
+
+use crate::common::{pod_command, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER};
+use crate::executor::ExecutorResources;
+
+/// Write a devcontainer.json with a Dockerfile that installs git and creates
+/// the test user.  `extra_config` is spliced into the JSON object so callers
+/// can set (or omit) `workspaceFolder` and other properties.
+fn write_devcontainer(repo: &TestRepo, extra_config: &str) {
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    fs::create_dir_all(&devcontainer_dir).expect("Failed to create .devcontainer directory");
+
+    let dockerfile = formatdoc! {r#"
+        FROM cgr.dev/chainguard/wolfi-base
+        RUN apk add --no-cache git shadow
+        RUN useradd -m -u 1000 {TEST_USER}
+        USER {TEST_USER}
+    "#};
+    fs::write(devcontainer_dir.join("Dockerfile"), dockerfile).expect("Failed to write Dockerfile");
+
+    // Build from Dockerfile; caller controls workspaceFolder via extra_config
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "build": {{
+                "dockerfile": "Dockerfile",
+                "context": ".."
+            }},
+            "containerUser": "{TEST_USER}"{extra_config}
+        }}
+    "#};
+
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("Failed to write devcontainer.json");
+}
+
+/// Without an explicit workspaceFolder the spec default is
+/// `/workspaces/<basename>`.  Verify the container's working directory
+/// matches that convention.
+#[test]
+fn workspace_folder_default() {
+    let repo = TestRepo::new();
+
+    // No workspaceFolder in config -- should fall back to /workspaces/<basename>
+    write_devcontainer(&repo, "");
+
+    let home = TestHome::new();
+
+    let executor = ExecutorResources::setup(&home);
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "ws-default", "--", "pwd"])
+        .success()
+        .expect("rumpel enter should succeed with default workspaceFolder");
+
+    let cwd = String::from_utf8_lossy(&stdout).trim().to_string();
+    let basename = repo.path().file_name().unwrap().to_str().unwrap();
+    let expected = format!("/workspaces/{basename}");
+    assert_eq!(
+        cwd, expected,
+        "default workspaceFolder should be /workspaces/<basename>"
+    );
+}
+
+/// When `workspaceFolder` is set to a custom path the container's working
+/// directory should be that path.
+#[test]
+fn workspace_folder_custom() {
+    let repo = TestRepo::new();
+
+    write_devcontainer(
+        &repo,
+        r#",
+            "workspaceFolder": "/custom/path""#,
+    );
+
+    let home = TestHome::new();
+
+    let executor = ExecutorResources::setup(&home);
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "ws-custom", "--", "pwd"])
+        .success()
+        .expect("rumpel enter should succeed with custom workspaceFolder");
+
+    let cwd = String::from_utf8_lossy(&stdout).trim().to_string();
+    assert_eq!(
+        cwd, "/custom/path",
+        "workspaceFolder should be the custom path"
+    );
+}
+
+/// The host repository should be cloned into `workspaceFolder` so that
+/// `.git` exists and contains commits from the host repo.
+#[test]
+fn workspace_folder_repo_initialized() {
+    let repo = TestRepo::new();
+
+    write_devcontainer(
+        &repo,
+        &formatdoc! {r#",
+        "workspaceFolder": "{TEST_REPO_PATH}""#},
+    );
+
+    let home = TestHome::new();
+
+    let executor = ExecutorResources::setup(&home);
+
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "ws-repo-init",
+            "--",
+            "git",
+            "-C",
+            TEST_REPO_PATH,
+            "log",
+            "--oneline",
+        ])
+        .success()
+        .expect("rumpel enter should succeed and repo should be initialized");
+
+    let log = String::from_utf8_lossy(&stdout).trim().to_string();
+    assert!(
+        log.contains("Initial commit"),
+        "repo in container should contain the host's initial commit, got: {log}"
+    );
+}

@@ -1,0 +1,40 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3985000","anthropic-ratelimit-input-tokens-reset":"2026-04-12T18:02:25Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-04-12T18:02:24Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-04-12T18:02:24Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4785000","anthropic-ratelimit-tokens-reset":"2026-04-12T18:02:24Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9eb424507da40d39-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Sun, 12 Apr 2026 18:02:25 GMT","request-id":"req_011CZzKHzGBbaEDxFNNiHbsj","server":"cloudflare","server-timing":"x-originResponse;dur=480","set-cookie":"_cfuvid=QOPi9gABj1whWG47dmp8H5LAmNb5q7.d5M9VTxV4nd4-1776016944.7145982-1.0.1.1-9bgSIpLxi4sSOG9o9dQxkoR64H5gMt119V9HEKtp0c8; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"478","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01E74V9e274RtZsyazSi1q4k","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":8,"cache_creation_input_tokens":251,"cache_read_input_tokens":25466,"cache_creation":{"ephemeral_5m_input_tokens":251,"ephemeral_1h_input_tokens":0},"output_tokens":2,"service_tier":"standard","inference_geo":"not_available"}}        }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}          }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" asked me to reply with only the file contents. The file contains:\n```\nrumpelpod-test-content-42"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n```\n\nSo I should just output that."}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EtACCmMIDBgCKkAEBX0z3M/XHAC8Ag/7jVLmvrFEpVTQG+yXVEV5xKBG3kojMUauNJkDu5gVkvGariII8qQEEHZ1603Dois146ClMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDOwP/C3/osImVrT9aRoMVQ4qSQ9xmMe0IwFLIjBOV+8gtOIEgDCXC9/kjma83vrqLJ2OtDIZBwBz9P3//6EW19skX5Vw2ff7iM1QrzMqmgHzXCdWOjunT+c+jOYUrTrjOSkuRbuVatUifoIe98cTWvEHpAPZuQQ5GioWfmu/Us8HC1rMo08FFEbOQ6LLgEs7D5X3UAVhpYIqqbULvJSgQcY1J0AGylnH2GL2PCLOvuN+EmsokeYRnuKylqISO+I3BRA9nWGSZAWzEaaTDN0HN0r9lK8WszhT1Hie9tJvg0CHA5o1bYBiPu0HGAE="} }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0     }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"rumpelpod-test-content-42"}            }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1           }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null},"usage":{"input_tokens":8,"cache_creation_input_tokens":251,"cache_read_input_tokens":25466,"output_tokens":60},"context_management":{"applied_edits":[]}            }
+
+event: message_stop
+data: {"type":"message_stop"              }
+

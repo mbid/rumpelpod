@@ -1,0 +1,109 @@
+{"status":200,"path":"/v1/messages?beta=true","headers":{"anthropic-organization-id":"3fd0c5c4-8e2b-46b5-bc86-860fcbb2881e","anthropic-ratelimit-input-tokens-limit":"4000000","anthropic-ratelimit-input-tokens-remaining":"3985000","anthropic-ratelimit-input-tokens-reset":"2026-03-31T21:07:55Z","anthropic-ratelimit-output-tokens-limit":"800000","anthropic-ratelimit-output-tokens-remaining":"800000","anthropic-ratelimit-output-tokens-reset":"2026-03-31T21:07:55Z","anthropic-ratelimit-requests-limit":"4000","anthropic-ratelimit-requests-remaining":"3999","anthropic-ratelimit-requests-reset":"2026-03-31T21:07:55Z","anthropic-ratelimit-tokens-limit":"4800000","anthropic-ratelimit-tokens-remaining":"4785000","anthropic-ratelimit-tokens-reset":"2026-03-31T21:07:55Z","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"9e52538cff56d272-FRA","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"text/event-stream; charset=utf-8","date":"Tue, 31 Mar 2026 21:07:55 GMT","request-id":"req_011CZbqjTpz9BQpaNtvTaoH1","server":"cloudflare","server-timing":"x-originResponse;dur=389","set-cookie":"_cfuvid=KS.a6TuVu_c0BqJhE6R81o43WuJw7QTGSt28wRVt_XM-1774991275.0333211-1.0.1.1-GCEz2K0nyJbz9LnRj_J0dAJKc.F8Xaoq34MV07b4iAw; HttpOnly; SameSite=None; Secure; Path=/; Domain=api.anthropic.com","strict-transport-security":"max-age=31536000; includeSubDomains; preload","vary":"Accept-Encoding","x-envoy-upstream-service-time":"386","x-robots-tag":"none"}}
+event: message_start
+data: {"type":"message_start","message":{"model":"claude-haiku-4-5-20251001","id":"msg_01Hw8GYkwTZqQHCNF389V71t","type":"message","role":"assistant","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"cache_creation_input_tokens":1225,"cache_read_input_tokens":24038,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":1225},"output_tokens":5,"service_tier":"standard","inference_geo":"not_available"}}     }
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}  }
+
+event: ping
+data: {"type": "ping"}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"The user is asking where"}              }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to put the merge commit message based"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" on the"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" CLAUDE"}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":".md instructions"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" they"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" provided"}         }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"."}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\nLooking at the relevant"}   }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" section"} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":":"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\"Keep"}      }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" a `DESCRIPTION` file at the"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" repo root that describes your branch for the"}       }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" merge commit message.\nCreate it with"}               }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" your first commit and update it as your"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" work evolves.\nThe host will"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" use its contents as the merge commit message"}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" and remove the file after merging.\""}    }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\nSo the"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" answer"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is:"}          }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" DESCRIPTION\n\nThe user"}            }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" wants one"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" word only."} }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":""}     }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"EpUFCmMIDBgCKkBc/dBf4nzancTWTwlze6sUADyjcf0fziqS5w5PkhMKvq03GAHXdMcZHLfN7cpk/XBYrV39tOfUqtlRYFIdL0dPMhljbGF1ZGUtaGFpa3UtNC01LTIwMjUxMDAxOAASDNCkGVKrXxXmvGnDdRoMhXibriWL/hZi2Ng2IjBE2p4gP8Z6vrZfMISrYM8AFSIFk+pOJB4StncVqEYpjkx/jhnr/O6PgnZg2hncndQq3wOgUiWTC1CI4pGzjXQX6R0oNR4xptQw3jEbpWQeR0f1MFRsZUoVtRe2zxo7ytnnHIoAM4Czp9MfKETnYY5nfONLeKot1b7jLCtRaP1EaWf1jOVCVT9BI6LEDBIfLzy171kydMMKczuzfaCq10dQBppl7pVz03WO6rhCHQ7/TJpsjlBXtho7ubNm5bfKychRuqhkVbMseq5Ib/6NYbK/AfQaouvFLPorDoeEEYO40DqwrHHyv8WhNMSMrku0g++kOHpwFYt5UWRLgjDjbsRon8pjGVlNrDr7kX47rNuFdOr+JbRjJYULAmj1fwDroLOObFksE/9pmQPLTqw7PTSJinreWCS6+8flbeCI0AKImNN93zXVK7lu0wuLT3wpNF/eJKP0whVPdtrbJUFdnuthLc1gVzEGPHWZhnVwUB1fCXxD85WK+5hdIJ73t61aOa7Kg0xAdxbDUCSYdaNjoy6oz7fUiOCilFSB2tv/x8hdb5I6iXHxUv3Br8Ek/7sgr3rXS6ZzlzqvHVwzfTEwf7fEBRtdPfTcNXNkzdZV2IWTIWzCUK5Ncr32JeuNkOgaQeJF5gZX7YhgJyUMXUaqGK4maIDdrmuiOe9DfudPAcydQCdzTx4GiuJH7IvozrE1Iwk/sBgB"}            }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0      }
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}             }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"DESCRIPTION"} }
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1         }
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":10,"cache_creation_input_tokens":1225,"cache_read_input_tokens":24038,"output_tokens":117},"context_management":{"applied_edits":[]}   }
+
+event: message_stop
+data: {"type":"message_stop"  }
+

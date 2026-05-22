@@ -1,0 +1,11 @@
+Rumpelpod
+Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Licensed under the Apache License, Version 2.0. See LICENSE for the full
+license text.
+
+For bundled Rust dependencies and their licenses, see THIRD-PARTY-NOTICES.
+
+This project will download and install additional third-party open source
+software projects. Review the license terms of these open source projects
+before use.
