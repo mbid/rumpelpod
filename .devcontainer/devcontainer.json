@@ -3,8 +3,7 @@
         "dockerfile": "Dockerfile",
         "args": {
             "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}"
-        },
-        "options": ["--ssh", "default"]
+        }
     },
     "runArgs": [
         "--runtime=sysbox-runc",
