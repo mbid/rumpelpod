@@ -2,10 +2,8 @@
     "build": {
         "dockerfile": "Dockerfile",
         "args": {
-            "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}",
-            "REPO_URL": "${localEnv:REPO_URL}"
-        },
-        "options": ["--ssh", "default"]
+            "BASE_IMAGE": "${localEnv:BASE_IMAGE:debian:trixie}"
+        }
     },
     "runArgs": [
         "--runtime=sysbox-runc",
