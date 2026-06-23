@@ -1,0 +1,7 @@
+Install cargo-about cli feature in devcontainer
+
+The attribution integration test (third_party_notices_is_up_to_date)
+shells out to `cargo about`. Newer cargo-about gates its binary behind
+the non-default `cli` feature, so the plain `cargo install cargo-about`
+in the devcontainer image succeeded without installing any executable,
+leaving the test unable to find the command. Add `--features cli`.
