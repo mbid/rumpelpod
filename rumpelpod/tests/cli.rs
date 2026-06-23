@@ -37,6 +37,8 @@ mod list;
 mod merge;
 #[path = "cli/network.rs"]
 mod network;
+#[path = "cli/pi/mod.rs"]
+mod pi;
 #[path = "cli/prune.rs"]
 mod prune;
 #[path = "cli/recreate.rs"]

@@ -119,6 +119,7 @@ const SCHEMA_SQL: &str = indoc! {"
         on_create_ran INTEGER NOT NULL DEFAULT 0,
         post_create_ran INTEGER NOT NULL DEFAULT 0,
         claude_config_copied INTEGER NOT NULL DEFAULT 0,
+        pi_config_copied INTEGER NOT NULL DEFAULT 0,
         token TEXT NOT NULL,
         image TEXT NOT NULL,
         devcontainer_json TEXT NOT NULL,
@@ -480,6 +481,28 @@ pub fn mark_claude_config_copied(conn: &Connection, id: PodId) -> Result<()> {
         rusqlite::params![i64::from(id)],
     )
     .context("Failed to mark claude_config_copied")?;
+    Ok(())
+}
+
+/// Check whether pi config files have been copied into this pod.
+pub fn has_pi_config_copied(conn: &Connection, id: PodId) -> Result<bool> {
+    let copied: bool = conn
+        .query_row(
+            "SELECT pi_config_copied FROM pods WHERE id = ?",
+            rusqlite::params![i64::from(id)],
+            |row| row.get(0),
+        )
+        .context("Failed to query pi_config_copied")?;
+    Ok(copied)
+}
+
+/// Mark pi config files as having been copied into this pod.
+pub fn mark_pi_config_copied(conn: &Connection, id: PodId) -> Result<()> {
+    conn.execute(
+        "UPDATE pods SET pi_config_copied = 1 WHERE id = ?",
+        rusqlite::params![i64::from(id)],
+    )
+    .context("Failed to mark pi_config_copied")?;
     Ok(())
 }
 

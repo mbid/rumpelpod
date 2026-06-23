@@ -33,8 +33,8 @@ use crate::gateway;
 use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use host_connection::{HostConnectionEvent, HostConnectionEventRx, HostConnectionRegistry};
 use protocol::{
-    AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, ForkPodRequest, Image,
-    LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
+    AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, EnsurePiConfigRequest,
+    ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
 };
 use reconnect::PodEventManager;
 
@@ -232,7 +232,7 @@ fn rewrite_upstream(
 /// Agents whose home-relative state is transferred between pods.
 /// Mirrors the registry in `pod::server::agent_paths`; kept here as a
 /// flat list because recreate / fork iterate over it.
-pub(crate) const AGENT_NAMES: &[&str] = &["claude", "codex"];
+pub(crate) const AGENT_NAMES: &[&str] = &["claude", "codex", "pi"];
 
 /// Buffer the tar body from GET /agent-files/<agent> into memory.
 /// Returns None if the agent has no state to transfer.  Used by
@@ -1547,6 +1547,82 @@ fn copy_claude_config_via_pod(
     Ok(())
 }
 
+/// Copy the local machine's pi auth/config into the pod via
+/// /agent-files/pi.
+///
+/// Streams ~/.pi/agent/{auth.json,settings.json,models.json} (each only
+/// if present).  When `trust_workspace` is set, `defaultProjectTrust`
+/// is forced to "always" in the copied settings.json so pi's in-pod TUI
+/// never blocks on the project-trust prompt -- the pod is the sandbox.
+fn copy_pi_config_via_pod(pod: &PodClient, trust_workspace: bool) -> Result<()> {
+    let local_home = dirs::home_dir().context("Could not determine home directory")?;
+    let agent_dir = local_home.join(".pi/agent");
+
+    // Materialize all pieces up-front so the pipe-thread sees owned data
+    // and host I/O errors surface synchronously here.
+    let auth = read_optional(&agent_dir.join("auth.json"), "~/.pi/agent/auth.json")?;
+    let models = read_optional(&agent_dir.join("models.json"), "~/.pi/agent/models.json")?;
+    let settings = {
+        let raw = read_optional(
+            &agent_dir.join("settings.json"),
+            "~/.pi/agent/settings.json",
+        )?;
+        if trust_workspace {
+            Some(force_pi_trust(raw.as_deref())?)
+        } else {
+            raw
+        }
+    };
+
+    let (read_end, write_end) = std::io::pipe().context("creating pipe for pi tar")?;
+    let handle = std::thread::spawn(move || -> Result<()> {
+        let mut archive = tar::Builder::new(write_end);
+        if let Some(data) = auth {
+            append_bytes(&mut archive, ".pi/agent/auth.json", &data)?;
+        }
+        if let Some(data) = settings {
+            append_bytes(&mut archive, ".pi/agent/settings.json", &data)?;
+        }
+        if let Some(data) = models {
+            append_bytes(&mut archive, ".pi/agent/models.json", &data)?;
+        }
+        archive.into_inner().context("finalizing pi tar")?;
+        Ok(())
+    });
+
+    pod.put_agent_files("pi", read_end, None)
+        .context("uploading pi config")?;
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("pi tar thread panicked"))??;
+
+    Ok(())
+}
+
+/// Read a file, mapping a missing file to None.  Any other I/O error is
+/// surfaced with the human-readable `label` for context.
+fn read_optional(path: &Path, label: &str) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(data) => Ok(Some(data)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("reading {label}"))),
+    }
+}
+
+/// Force `defaultProjectTrust: "always"` into pi's settings.json,
+/// starting from an empty object when the host has no settings file.
+fn force_pi_trust(raw: Option<&[u8]>) -> Result<Vec<u8>> {
+    let mut obj: serde_json::Map<String, serde_json::Value> = match raw {
+        Some(data) => serde_json::from_slice(data).context("parsing ~/.pi/agent/settings.json")?,
+        None => serde_json::Map::new(),
+    };
+    obj.insert(
+        "defaultProjectTrust".to_string(),
+        serde_json::Value::String("always".to_string()),
+    );
+    serde_json::to_vec_pretty(&obj).context("serializing pi settings.json")
+}
+
 /// Append a byte slice as a regular file entry.  The tar crate's
 /// `append_data` API needs an owned-style mutable header, so wrap the
 /// bytes once here rather than at every call site.
@@ -1715,6 +1791,7 @@ fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) 
 pub(crate) const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
 pub(crate) const CLAUDE_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/claude";
 pub(crate) const CODEX_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/codex";
+pub(crate) const PI_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/pi";
 
 struct CodexProxyHandle {
     port: u16,
@@ -2657,6 +2734,7 @@ impl DaemonServer {
             git_identity,
             claude_cli_path,
             codex_cli_path,
+            pi_cli_path,
             inject_system_prompt,
             description_file,
             local_env_vars,
@@ -2802,6 +2880,7 @@ impl DaemonServer {
             &mount_targets,
             claude_cli_path.as_deref(),
             codex_cli_path.as_deref(),
+            pi_cli_path.as_deref(),
             docker_socket.as_deref(),
             inject_system_prompt,
             description_file.as_deref(),
@@ -4254,6 +4333,32 @@ impl Daemon for DaemonServer {
         // which is fine -- overwriting complete files is idempotent.
         let conn = self.db.lock().unwrap();
         db::mark_claude_config_copied(&conn, pod_id)?;
+
+        Ok(())
+    }
+
+    fn ensure_pi_config(&self, request: EnsurePiConfigRequest) -> Result<()> {
+        let pod_id = {
+            let conn = self.db.lock().unwrap();
+            let pod_rec = db::get_pod(&conn, &request.repo_path, &request.pod_name.0)?
+                .context("Pod not found")?;
+            if db::has_pi_config_copied(&conn, pod_rec.id)? {
+                return Ok(());
+            }
+            pod_rec.id
+        };
+
+        let pod = PodClient::new(
+            &request.container_url,
+            &request.container_token,
+            RetryPolicy::UserBlocking,
+        )?;
+
+        copy_pi_config_via_pod(&pod, request.trust_workspace)?;
+
+        // Mark as copied only after the full copy succeeds.
+        let conn = self.db.lock().unwrap();
+        db::mark_pi_config_copied(&conn, pod_id)?;
 
         Ok(())
     }

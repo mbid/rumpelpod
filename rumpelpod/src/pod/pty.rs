@@ -56,3 +56,39 @@ pub async fn claude_session_handler(
         serve_ws_session(socket, state.pty_sessions, Some(transform))
     })
 }
+
+// ---------------------------------------------------------------------------
+// Pi CLI resolution
+// ---------------------------------------------------------------------------
+
+/// Return the path to the pi CLI binary, which must be pre-installed in
+/// the container image (baked in by the prepared image build).
+fn find_pi_cli() -> Result<PathBuf> {
+    let bin_path = Path::new(crate::daemon::PI_CONTAINER_BIN);
+    if bin_path.exists() {
+        return Ok(bin_path.to_path_buf());
+    }
+
+    if let Some(found) = crate::which("pi") {
+        return Ok(found);
+    }
+
+    Err(anyhow::anyhow!(
+        "pi CLI not found at {} or in PATH",
+        crate::daemon::PI_CONTAINER_BIN
+    ))
+}
+
+pub async fn pi_session_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<super::server::PodServerState>,
+) -> Response {
+    ws.on_upgrade(move |socket| {
+        let transform: CmdTransform = Box::new(|cmd: &mut Vec<String>| {
+            let pi_bin = find_pi_cli()?;
+            cmd[0] = pi_bin.to_string_lossy().into_owned();
+            Ok(())
+        });
+        serve_ws_session(socket, state.pty_sessions, Some(transform))
+    })
+}

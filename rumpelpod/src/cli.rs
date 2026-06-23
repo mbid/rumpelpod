@@ -256,6 +256,14 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Codex(CodexCommand),
 
+    /// Run the pi coding agent inside a pod.
+    ///
+    /// Examples:
+    ///   rumpel pi dev                          # Launch pi in 'dev' pod
+    ///   rumpel pi dev -- --model anthropic/claude-opus-4-7
+    #[command(verbatim_doc_comment)]
+    Pi(PiCommand),
+
     /// Run ssh-add against a pod's ssh-agent.
     ///
     /// An ssh-agent runs on your local machine for each pod. The agent
@@ -650,6 +658,24 @@ pub struct CodexCommand {
 }
 
 #[derive(Args)]
+pub struct PiCommand {
+    /// Name for this pod instance (e.g., 'dev', 'test')
+    #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
+    pub name: String,
+
+    #[command(flatten)]
+    pub host_args: HostArgs,
+
+    /// Create the pod without prompting if it doesn't exist
+    #[arg(long)]
+    pub create: bool,
+
+    /// Arguments forwarded to the `pi` CLI inside the pod (e.g. --model)
+    #[arg(last = true, value_name = "ARGS")]
+    pub args: Vec<String>,
+}
+
+#[derive(Args)]
 pub struct CpCommand {
     #[command(flatten)]
     pub host_args: HostArgs,
@@ -684,6 +710,10 @@ pub struct PrepareImageCommand {
     /// Claude CLI version to install (skip if not provided)
     #[arg(long)]
     pub claude_version: Option<String>,
+
+    /// pi CLI version to install (skip if not provided)
+    #[arg(long)]
+    pub pi_version: Option<String>,
 
     /// Install the Codex CLI into the prepared image
     #[arg(long)]

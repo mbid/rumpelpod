@@ -218,6 +218,7 @@ pub fn run_container_server(
         .route("/claude-state", post(claude_state_handler))
         .route("/codex-state", post(codex_state_handler))
         .route("/claude", any(super::pty::claude_session_handler))
+        .route("/pi", any(super::pty::pi_session_handler))
         .route("/codex", any(super::codex::codex_ws_handler))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
@@ -1593,6 +1594,7 @@ fn agent_paths(agent: &str) -> Option<&'static [&'static str]> {
     match agent {
         "claude" => Some(&[".claude.json", ".claude"]),
         "codex" => Some(&[".codex"]),
+        "pi" => Some(&[".pi"]),
         _ => None,
     }
 }
@@ -1793,6 +1795,7 @@ fn agent_files_put_impl(
     match agent {
         "claude" => rewrite_claude_settings(&home, pod_name, permission_hook)?,
         "codex" => {}
+        "pi" => {}
         // agent_paths() already validated the name; this is unreachable.
         _ => return Err(anyhow::anyhow!("unknown agent: {agent}")),
     }
