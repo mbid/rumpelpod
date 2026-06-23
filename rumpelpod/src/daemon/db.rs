@@ -193,11 +193,11 @@ pub fn open_db(path: &Path) -> Result<Connection> {
             if hash != current_hash {
                 let path = path.display();
                 return Err(anyhow::anyhow!(
-                    "Database schema mismatch.\n\
-                    Expected hash: {current_hash}\n\
-                    Found hash:    {hash}\n\
+                    "database schema mismatch\n\
+                    expected hash: {current_hash}\n\
+                    found hash:    {hash}\n\
                     \n\
-                    Please delete the database file to start over:\n\
+                    delete the database file to start over:\n\
                     rm {path}"
                 ));
             }
@@ -839,7 +839,7 @@ mod tests {
         let result = open_db(&db_path);
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.to_string().contains("Database schema mismatch"));
+        assert!(err.to_string().contains("database schema mismatch"));
         assert!(err.to_string().contains("rm "));
     }
 }

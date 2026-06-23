@@ -1,0 +1,13 @@
+Drop AI-slop phrasing from user-facing messages
+
+Rewrite CLI errors, warnings, and prompts that read like generated
+prose rather than tool output: dash- and semicolon-joined clauses,
+"successfully" and "Please" filler, redundant hand-holding sentences,
+and a "Configuration error:" preamble that anyhow already frames.
+
+Also replace the forbidden unicode ellipses in the kubernetes exec
+error messages and the adjacent comment with ASCII.
+
+The aim is terse, docker/git-style output. Behaviour is unchanged;
+only the text differs. Tests that asserted on the reworded strings
+are updated.

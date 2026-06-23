@@ -101,10 +101,10 @@ fn check_host_requirements(requirements: &HostRequirements, docker_host: &Host) 
     // type.
     match docker_host {
         Host::Localhost | Host::Ssh { .. } => {
-            info!("Running on local/remote Docker -- hostRequirements are advisory only");
+            info!("Running on local/remote Docker, hostRequirements are advisory only");
         }
         Host::Kubernetes { .. } => {
-            info!("Running on Kubernetes -- hostRequirements set as pod resource requests");
+            info!("Running on Kubernetes, hostRequirements set as pod resource requests");
         }
     }
 }

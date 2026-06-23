@@ -66,7 +66,7 @@ pub fn prune(cmd: &PruneCommand) -> Result<()> {
                 }
             } else {
                 let name = &pod.name;
-                eprintln!("pod '{name}' has unmerged commits ({state}); use --force to delete");
+                eprintln!("pod '{name}' has unmerged commits ({state}), use --force to delete");
                 failed += 1;
                 continue;
             }

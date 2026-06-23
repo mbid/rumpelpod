@@ -67,7 +67,7 @@ impl Host {
     /// - `"localhost"` means local Docker.
     /// - `"ssh://user@host"` means remote Docker via SSH.
     ///
-    /// Bare hostnames like `"dev"` are rejected -- use `"ssh://dev"` instead.
+    /// Bare hostnames like `"dev"` are rejected, use `"ssh://dev"` instead.
     /// Kubernetes hosts are configured via `--kubernetes-context` / `kubernetes` instead.
     pub fn parse(s: &str) -> Result<Self> {
         if s == "localhost" {
@@ -246,7 +246,7 @@ pub fn load_json_config(repo_root: &Path) -> Result<JsonConfig> {
 
         if config.host.is_some() && config.kubernetes.is_some() {
             return Err(anyhow::anyhow!(
-                "Configuration error: 'host' and 'kubernetes' are mutually exclusive in {config_path_display}."
+                "'host' and 'kubernetes' are mutually exclusive in {config_path_display}"
             ));
         }
 

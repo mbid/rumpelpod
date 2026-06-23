@@ -218,8 +218,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
 
     if !ref_check.status.success() {
         return Err(anyhow::anyhow!(
-            "Pod ref '{pod_ref}' not found in host repository.\n\
-             Make sure the pod has made at least one commit."
+            "pod ref '{pod_ref}' not found in host repository (pod has no commits yet)"
         ));
     }
 
@@ -235,7 +234,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
 
     if ancestor_check.success() {
         let name = &cmd.name;
-        eprintln!("warning: nothing to merge -- host is already up to date with pod '{name}'");
+        eprintln!("warning: nothing to merge, host is up to date with pod '{name}'");
         let pod_name = PodName::new(cmd.name.clone()).map_err(|e| anyhow::anyhow!(e))?;
         client.stop_pod(pod_name, repo_root, false)?;
         return Ok(());
@@ -260,7 +259,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
 
     if !merge_tree.status.success() {
         return Err(anyhow::anyhow!(
-            "merge would produce conflicts -- aborting without changing the working tree"
+            "merge would produce conflicts, aborting without changing the working tree"
         ));
     }
 

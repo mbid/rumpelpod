@@ -3223,7 +3223,7 @@ impl DaemonServer {
         }
         if source_record.status != db::PodStatus::Ready {
             return Err(anyhow::anyhow!(
-                "source pod '{source}' is not running (status: {:?}); start it first",
+                "source pod '{source}' is not running (status: {:?}), start it first",
                 source_record.status
             ));
         }

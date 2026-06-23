@@ -324,8 +324,7 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
     if !ref_check.status.success() {
         return Err(anyhow::anyhow!(
-            "Pod ref '{pod_ref}' not found in host repository.\n\
-             Make sure the pod has made at least one commit."
+            "pod ref '{pod_ref}' not found in host repository (pod has no commits yet)"
         ));
     }
 
@@ -373,21 +372,20 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
             (tool, cmd_template, tool_path)
         }
         None => {
-            // No difftool configured -- fall back to VS Code if available,
+            // No difftool configured, fall back to VS Code if available,
             // otherwise fail rather than silently doing nothing.
             let code_path = crate::which("code").ok_or_else(|| {
                 anyhow::anyhow!(indoc::indoc! {"
-                    No difftool configured and 'code' (VS Code CLI) is not on PATH.
-                    Either install VS Code and ensure 'code' is on PATH, or configure
-                    a difftool in your git config, e.g.:
+                    no difftool configured and 'code' (VS Code CLI) not on PATH
+                    install VS Code, or set a difftool in git config:
                         git config --global diff.tool vscode
                 "})
             })?;
             eprintln!(
                 "{}",
                 indoc::indoc! {r#"
-                    warning: no difftool configured; defaulting to VS Code.
-                    To silence this warning, add to your ~/.gitconfig:
+                    warning: no difftool configured, using VS Code
+                    set one in ~/.gitconfig to silence this:
 
                         [diff]
                             tool = vscode
