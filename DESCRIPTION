@@ -1,0 +1,5 @@
+Copy the fullscreen-renderer popup state into pods
+
+Add `fullscreenUpsellSeenCount` to the `~/.claude.json` allowlist in
+`strip_claude_json` so the "Try the new fullscreen renderer?" popup,
+once dismissed on the host, does not reappear in every fresh pod.
