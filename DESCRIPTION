@@ -1,0 +1,22 @@
+Regenerate Codex cache without drift workarounds
+
+Codex 0.142.0 drifted away from the committed cache: it defaults to
+gpt-5.5, prefers a WebSocket transport, and reads AGENTS.md from
+within the project tree (and the global ~/.codex/AGENTS.md) rather
+than the filesystem-root /AGENTS.md the prepared image wrote.  The
+stale cache was kept alive by a hard-coded legacy-key alias table
+and a synthesized WebSocket upgrade probe.
+
+Remove both workarounds and fix the root causes instead:
+
+- Drop `model` from the OpenAI cache key and strip the injected
+  <environment_context> turn (cwd, workspace root, timezone, date)
+  so the key depends only on the prompt and survives Codex upgrades
+  and different checkout paths.
+- Inject the rumpelpod system prompt into ~/.codex/AGENTS.md, which
+  Codex loads globally, so it reaches the model in a single turn.
+- Point the codex tests at a custom model provider with
+  supports_websockets = false so Codex uses the HTTPS transport the
+  cache proxy speaks, and drop the `-m o3` model override.
+
+Regenerate the llm-cache/codex responses against Codex 0.142.0.
