@@ -212,6 +212,13 @@ pub fn find_local_codex_cli() -> Option<PathBuf> {
     crate::which("codex")
 }
 
+/// Resolve the absolute path to the `grok` CLI binary on the local
+/// machine.  See `find_local_claude_cli` for why the client resolves
+/// this rather than the daemon.
+pub fn find_local_grok_cli() -> Option<PathBuf> {
+    crate::which("grok")
+}
+
 /// Check whether a pod needs to be created and handle confirmation.
 ///
 /// If the pod already exists, returns Ok immediately.
@@ -261,6 +268,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let git_identity = get_git_user_config(&repo_root);
     let claude_cli_path = find_local_claude_cli();
     let codex_cli_path = find_local_codex_cli();
+    let grok_cli_path = find_local_grok_cli();
     let json_config = load_json_config(&repo_root)?;
 
     let socket_path = daemon::socket_path()?;
@@ -281,6 +289,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
         git_identity: Some(git_identity),
         claude_cli_path,
         codex_cli_path,
+        grok_cli_path,
         inject_system_prompt: json_config.claude.inject_system_prompt,
         description_file,
         local_env_vars,

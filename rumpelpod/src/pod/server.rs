@@ -218,6 +218,7 @@ pub fn run_container_server(
         .route("/claude-state", post(claude_state_handler))
         .route("/codex-state", post(codex_state_handler))
         .route("/claude", any(super::pty::claude_session_handler))
+        .route("/grok", any(super::pty::grok_session_handler))
         .route("/codex", any(super::codex::codex_ws_handler))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(
@@ -1094,12 +1095,14 @@ fn build_state_response(repo_path: &Path) -> Result<StateResponse> {
         .unwrap_or_else(|| PathBuf::from("/root"));
     let has_claude_state = home.join(".claude").exists() || home.join(".claude.json").exists();
     let has_codex_state = home.join(".codex").exists();
+    let has_grok_state = home.join(".grok").exists();
 
     Ok(StateResponse {
         branches,
         primary,
         has_claude_state,
         has_codex_state,
+        has_grok_state,
         dirty,
     })
 }
@@ -1593,6 +1596,7 @@ fn agent_paths(agent: &str) -> Option<&'static [&'static str]> {
     match agent {
         "claude" => Some(&[".claude.json", ".claude"]),
         "codex" => Some(&[".codex"]),
+        "grok" => Some(&[".grok"]),
         _ => None,
     }
 }
@@ -1691,7 +1695,7 @@ struct AgentFilesPutQuery {
 /// PermissionRequest hook is left as-is unless `?permission_hook=` is
 /// set.
 ///
-/// For `codex`, no post-extraction work.
+/// For `codex` and `grok`, no post-extraction work.
 async fn agent_files_put_handler(
     State(state): State<PodServerState>,
     axum::extract::Path(agent): axum::extract::Path<String>,
@@ -1793,6 +1797,9 @@ fn agent_files_put_impl(
     match agent {
         "claude" => rewrite_claude_settings(&home, pod_name, permission_hook)?,
         "codex" => {}
+        // Grok needs no post-extraction work: its notify-state hooks are
+        // not wired up, so there is no settings file to rewrite.
+        "grok" => {}
         // agent_paths() already validated the name; this is unreachable.
         _ => return Err(anyhow::anyhow!("unknown agent: {agent}")),
     }
