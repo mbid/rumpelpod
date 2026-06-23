@@ -1,0 +1,10 @@
+Fix devcontainer login shell; use debian:testing
+
+`rumpel enter` execs the container user's passwd login shell.  The
+.devcontainer user was created without an explicit `-s`, so on Debian
+it defaulted to /bin/sh (dash), dropping the user onto a bare `$`
+prompt instead of bash.  Set the user's shell to /bin/bash via usermod
+so it is normalized whether the user is freshly created or inherited
+from the base image.
+
+Also bump the default base image from debian:trixie to debian:testing.
