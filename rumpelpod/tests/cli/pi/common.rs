@@ -14,35 +14,63 @@ use std::time::{Duration, Instant};
 use indoc::formatdoc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::common::{TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER, TEST_USER_UID};
 use crate::executor::ExecutorResources;
 
 /// Pinned pi version for deterministic tests.
 const PI_VERSION: &str = "0.79.10";
 
+/// npm package implementing the pi coding agent CLI.
+const PI_NPM_PACKAGE: &str = "@earendil-works/pi-coding-agent";
+
 /// Write a devcontainer that installs Node.js and the pinned pi CLI.
 ///
-/// pi is a Node.js program, so the image needs a node runtime.  We
-/// install it plus the pinned npm package directly in the Docker build
-/// (rather than via the daemon's host-version detection) so the test
-/// does not depend on a `pi` binary being present on the test host.
+/// pi is a Node.js program, so the image needs a node runtime.  Pinning
+/// the version in the Dockerfile (rather than via the daemon's
+/// host-version detection) keeps the test independent of a `pi` binary
+/// on the test host.
+///
+/// The node + `npm install` steps run *before* the repo `COPY` so the
+/// slow install lands in a Docker layer keyed only on the pinned
+/// version -- shared across every pi test via the layer cache instead
+/// of rebuilt whenever the copied repo differs.  This mirrors the
+/// prologue of `write_test_devcontainer`; the duplication buys the
+/// cache-friendly ordering, which that shared helper cannot provide
+/// (its `extra_dockerfile` runs after the COPY).
 fn write_pi_test_devcontainer(repo: &TestRepo) {
-    let extra_dockerfile = formatdoc! {r#"
-        RUN apk add --no-cache nodejs npm
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer dir");
+
+    let dockerfile = formatdoc! {r#"
+        FROM cgr.dev/chainguard/wolfi-base
+        RUN apk add --no-cache git bash shadow coreutils openssh-client nodejs npm
         RUN npm install -g --ignore-scripts {PI_NPM_PACKAGE}@{PI_VERSION}
-    "#, PI_NPM_PACKAGE = "@earendil-works/pi-coding-agent"};
+        RUN useradd -m -u {TEST_USER_UID} -s /bin/bash {TEST_USER}
+        COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
+        RUN git config --global --add safe.directory {TEST_REPO_PATH}
+        USER {TEST_USER}
+    "#};
+    std::fs::write(devcontainer_dir.join("Dockerfile"), dockerfile).expect("write Dockerfile");
 
     // pi reads the Anthropic key from $ANTHROPIC_API_KEY (referenced by
     // models.json below).  The value is irrelevant: the LLM cache proxy
     // replaces the auth header before forwarding to the real API.
     // PI_OFFLINE suppresses pi's startup update/telemetry network calls.
-    let extra_json = r#",
-        "remoteEnv": {
-            "ANTHROPIC_API_KEY": "sk-ant-fake-test-key-for-llm-cache-proxy-00000000",
-            "PI_OFFLINE": "1"
-        }"#;
-
-    write_test_devcontainer(repo, &extra_dockerfile, extra_json);
+    let devcontainer_json = formatdoc! {r#"
+        {{
+            "build": {{ "dockerfile": "Dockerfile", "context": ".." }},
+            "workspaceFolder": "{TEST_REPO_PATH}",
+            "remoteEnv": {{
+                "ANTHROPIC_API_KEY": "sk-ant-fake-test-key-for-llm-cache-proxy-00000000",
+                "PI_OFFLINE": "1"
+            }}
+        }}
+    "#};
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        devcontainer_json,
+    )
+    .expect("write devcontainer.json");
 }
 
 /// Write the minimal pi config into the test home directory.
