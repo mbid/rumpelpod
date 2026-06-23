@@ -1,0 +1,6 @@
+Refresh deps and regenerate third-party notices
+
+Update Cargo.lock to the latest versions allowed by the manifests and
+adapt the code to the bollard 0.21 and git2 0.21 API changes that the
+refresh pulls in. Regenerate THIRD-PARTY-NOTICES so the attribution test
+passes against the new dependency set.
