@@ -1,0 +1,12 @@
+Add tests for rumpel merge --signoff
+
+`rumpel merge <pod> --signoff` passes --signoff straight through to
+git merge.  git only writes the Signed-off-by footer into a commit it
+actually creates, so the footer lands on the merge commit whenever one
+is produced: the description-file path already forces --no-ff, and the
+no-description path needs an explicit --no-ff.  A fast-forward signs
+nothing, matching git's own behavior.
+
+Add integration tests covering the sign-off footer in both the
+description-on and description-off cases.  No functional change to
+rumpel.
