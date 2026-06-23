@@ -232,7 +232,7 @@ fn rewrite_upstream(
 /// Agents whose home-relative state is transferred between pods.
 /// Mirrors the registry in `pod::server::agent_paths`; kept here as a
 /// flat list because recreate / fork iterate over it.
-pub(crate) const AGENT_NAMES: &[&str] = &["claude", "codex"];
+pub(crate) const AGENT_NAMES: &[&str] = &["claude", "codex", "grok"];
 
 /// Buffer the tar body from GET /agent-files/<agent> into memory.
 /// Returns None if the agent has no state to transfer.  Used by
@@ -1715,6 +1715,7 @@ fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) 
 pub(crate) const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
 pub(crate) const CLAUDE_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/claude";
 pub(crate) const CODEX_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/codex";
+pub(crate) const GROK_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/grok";
 
 struct CodexProxyHandle {
     port: u16,
@@ -2657,6 +2658,7 @@ impl DaemonServer {
             git_identity,
             claude_cli_path,
             codex_cli_path,
+            grok_cli_path,
             inject_system_prompt,
             description_file,
             local_env_vars,
@@ -2802,6 +2804,7 @@ impl DaemonServer {
             &mount_targets,
             claude_cli_path.as_deref(),
             codex_cli_path.as_deref(),
+            grok_cli_path.as_deref(),
             docker_socket.as_deref(),
             inject_system_prompt,
             description_file.as_deref(),
@@ -3311,6 +3314,13 @@ impl DaemonServer {
                 .context("downloading codex state from source")?
             {
                 agent_buffers.push(("codex", buf));
+            }
+        }
+        if state.has_grok_state {
+            if let Some(buf) = snapshot_agent_files(&source_pod, "grok")
+                .context("downloading grok state from source")?
+            {
+                agent_buffers.push(("grok", buf));
             }
         }
 
@@ -4372,7 +4382,7 @@ pub fn run_daemon() -> Result<()> {
     let llm_cache_proxy = std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").ok().map(|_| {
         let cache_base_dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../llm-cache");
-        for subdir in ["claude-cli", "codex"] {
+        for subdir in ["claude-cli", "codex", "grok"] {
             let dir = cache_base_dir.join(subdir);
             std::fs::create_dir_all(dir.join("response")).expect("create llm-cache response dir");
             std::fs::create_dir_all(dir.join("request")).expect("create llm-cache request dir");

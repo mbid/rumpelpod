@@ -75,6 +75,16 @@ fn provider_config(provider: &str) -> Option<(ProviderConfig, AuthStyle)> {
             },
             AuthStyle::BearerToken,
         )),
+        // xAI's API is OpenAI-compatible (chat completions, Bearer auth).
+        "xai" => Some((
+            ProviderConfig {
+                cache_subdir: "grok",
+                upstream_base: "https://api.x.ai",
+                api_key_env: "XAI_API_KEY",
+                cache_fields: &["model", "messages", "input", "stream"],
+            },
+            AuthStyle::BearerToken,
+        )),
         _ => None,
     }
 }

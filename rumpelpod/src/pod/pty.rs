@@ -3,9 +3,9 @@
 
 //! Pod-side adapter for the generic PTY screen-session machinery.
 //!
-//! Wires the `/claude` WebSocket route to the shared `pty_session`
-//! bridge, with a cmd-transform that resolves the in-container Claude
-//! CLI binary path before the first spawn.
+//! Wires the `/claude` and `/grok` WebSocket routes to the shared
+//! `pty_session` bridge, with a cmd-transform that resolves the
+//! in-container agent CLI binary path before the first spawn.
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +39,24 @@ fn find_claude_cli() -> Result<PathBuf> {
     ))
 }
 
+/// Return the path to the Grok CLI binary, which must be pre-installed
+/// in the container image (baked in by the prepared image build).
+fn find_grok_cli() -> Result<PathBuf> {
+    let bin_path = Path::new(crate::daemon::GROK_CONTAINER_BIN);
+    if bin_path.exists() {
+        return Ok(bin_path.to_path_buf());
+    }
+
+    if let Some(found) = crate::which("grok") {
+        return Ok(found);
+    }
+
+    Err(anyhow::anyhow!(
+        "Grok CLI not found at {} or in PATH",
+        crate::daemon::GROK_CONTAINER_BIN
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // HTTP handler
 // ---------------------------------------------------------------------------
@@ -51,6 +69,20 @@ pub async fn claude_session_handler(
         let transform: CmdTransform = Box::new(|cmd: &mut Vec<String>| {
             let claude_bin = find_claude_cli()?;
             cmd[0] = claude_bin.to_string_lossy().into_owned();
+            Ok(())
+        });
+        serve_ws_session(socket, state.pty_sessions, Some(transform))
+    })
+}
+
+pub async fn grok_session_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<super::server::PodServerState>,
+) -> Response {
+    ws.on_upgrade(move |socket| {
+        let transform: CmdTransform = Box::new(|cmd: &mut Vec<String>| {
+            let grok_bin = find_grok_cli()?;
+            cmd[0] = grok_bin.to_string_lossy().into_owned();
             Ok(())
         });
         serve_ws_session(socket, state.pty_sessions, Some(transform))

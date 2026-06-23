@@ -225,6 +225,9 @@ pub struct JsonConfig {
     pub codex: CodexConfig,
 
     #[serde(default)]
+    pub grok: GrokConfig,
+
+    #[serde(default)]
     pub merge: MergeConfig,
 
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
@@ -323,6 +326,25 @@ impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             dangerously_bypass_approvals_and_sandbox: true,
+        }
+    }
+}
+
+/// Configuration for `rumpel grok`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct GrokConfig {
+    /// Pass --always-approve to the grok CLI so it auto-approves tool
+    /// executions.  The pod provides the sandbox so grok does not need
+    /// its own approval prompts.  Defaults to true.
+    #[serde(default = "default_true")]
+    pub always_approve: bool,
+}
+
+impl Default for GrokConfig {
+    fn default() -> Self {
+        Self {
+            always_approve: true,
         }
     }
 }
