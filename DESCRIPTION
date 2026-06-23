@@ -1,0 +1,20 @@
+Fold build context path into the image tag
+
+The devcontainer image tag hashed the Dockerfile and tracked context
+content but deliberately ignored both `.git` and the context's
+filesystem path.  In tests every repo produces byte-identical tracked
+content, so they all collapsed onto one cached image tag; whichever
+test built first won the cache, and a stray local branch baked into
+that image (via `COPY . `, since `.git` is excluded from the hash but
+not from the build) leaked into every pod that reused it, breaking
+isolation.
+
+Thread a `ContextPathTagging` choice through `resolve_image` and fold
+the context path into the tag for every real context (the repo root,
+stable across runs).  Distinct repos now get distinct images, so test
+pods can no longer share one.  The built-in default image keeps the
+old path-agnostic tag because it is staged into a tempdir that moves
+on every invocation; including its path would defeat the cache.
+
+This also isolates the prepared image, whose tag derives from the base
+image tag, so no per-test normalization of the baked `.git` is needed.

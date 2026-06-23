@@ -2778,11 +2778,21 @@ impl DaemonServer {
         build_tx
             .send(OutputLine::Stderr("Resolving image...".into()))
             .ok();
+        // The default image is staged into a moving tempdir, so its tag
+        // must ignore the context path; every real context is at the
+        // stable repo root and folds its path into the tag so distinct
+        // repos do not collide on one cached image.
+        let path_tagging = if used_default_image {
+            crate::image::ContextPathTagging::Ignore
+        } else {
+            crate::image::ContextPathTagging::Include
+        };
         let build_result = crate::image::resolve_image(
             &devcontainer,
             &docker_host,
             &repo_path,
             &crate::image::BuildFlags::default(),
+            path_tagging,
             make_build_output(&build_tx),
             docker_socket.as_deref(),
             ssh_auth_sock.as_deref(),
