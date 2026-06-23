@@ -1,0 +1,15 @@
+Host-gated pod reconnection and lean pod pushes
+
+Maintain one reconnection loop per host instead of one per pod, and
+push from pods only when local refs show the gateway is behind.
+
+Host connections now publish liveness on a watch channel and own a
+single background monitor (SSH gains one, matching Kubernetes). Pod
+event loops wait on that watch before touching the pod endpoint rather
+than each probing the host, so N pods on one host share one retry loop
+and a pod connection is always gated on host reachability.
+
+The pod /events handler no longer force-pushes on every connection. It
+compares each branch to its rumpelpod remote-tracking ref and pushes,
+asynchronously, only when the gateway is behind, so enter and claude do
+no unnecessary git work on connect.
