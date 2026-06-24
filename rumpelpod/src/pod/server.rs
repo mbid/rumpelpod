@@ -391,7 +391,7 @@ fn run_setup(
     };
 
     // -- Resolve environment --
-    progress("Resolving environment...");
+    progress("resolving environment...");
     let (resolved_env, lifecycle_config) = resolve_pod_env(repo_path, pod_name, local_env);
 
     for (key, value) in &resolved_env {
@@ -411,7 +411,7 @@ fn run_setup(
                 // Clean baked checkouts can carry warm build caches whose mtimes
                 // are part of cache validity.
                 if git_setup::needs_sanitize_impl(repo_path).expect("sanitize check failed") {
-                    progress("Sanitizing repository...");
+                    progress("sanitizing repository...");
                     git_setup::sanitize_impl(repo_path).expect("sanitize failed");
                 }
             }
@@ -421,10 +421,10 @@ fn run_setup(
             }
         }
 
-        progress("Setting up git remotes...");
+        progress("setting up git remotes...");
         {
             let _slow = crate::slow_guard::SlowGuard::new(
-                "Still fetching from host (git setup)...",
+                "still fetching from host (git setup)...",
                 slow_tx.clone(),
             );
             git_setup::setup_git_impl(&GitSetupRequest {
@@ -440,10 +440,10 @@ fn run_setup(
             .expect("git setup failed");
         }
 
-        progress("Setting up submodules...");
+        progress("setting up submodules...");
         {
             let _slow = crate::slow_guard::SlowGuard::new(
-                "Still setting up submodules...",
+                "still setting up submodules...",
                 slow_tx.clone(),
             );
             git_setup::setup_submodules_impl(&GitSetupSubmodulesRequest {
@@ -458,9 +458,9 @@ fn run_setup(
     }
 
     // -- Run lifecycle commands --
-    progress("Running lifecycle commands...");
+    progress("running lifecycle commands...");
     let _slow =
-        crate::slow_guard::SlowGuard::new("Still running lifecycle commands...", slow_tx.clone());
+        crate::slow_guard::SlowGuard::new("still running lifecycle commands...", slow_tx.clone());
     let resp = super::lifecycle::run(&lifecycle_config, &resolved_env, post_start_ran, repo_path)
         .expect("lifecycle command execution failed");
     drop(_slow);
@@ -476,7 +476,7 @@ fn run_setup(
         }
     }
 
-    progress("Setup complete.");
+    progress("setup complete.");
     let _ = done_tx.send(true);
 }
 
