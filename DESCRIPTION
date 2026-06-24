@@ -1,18 +1,4 @@
-Add support for the pi coding agent
+Revert pi test Node install cache
 
-Integrate the pi coding agent (https://pi.dev) alongside claude and
-codex.  Like `rumpel claude`, `rumpel pi` installs the host's pinned pi
-version into the pod, copies the local pi auth/config in, and runs pi's
-TUI in-pod over a `/pi` PTY WebSocket.
-
-Because pi is an npm package (not a self-contained binary), the prepared
-image provisions a Node.js runtime: it reuses an already-new-enough
-node, else installs one via the base image's package manager (apt/apk),
-falling back to a standalone Node v22.x download, then `npm install -g`s
-the pinned package.
-
-pi auth/config (~/.pi/agent/{auth,settings,models}.json) is copied into
-the pod via a new `ensure_pi_config` daemon RPC, and the workspace is
-pre-trusted so the TUI runs unattended.  Integration tests exercise the
-in-pod pi against the Anthropic API through the existing LLM cache
-proxy.
+Docker already deduplicates concurrent builds of the same Dockerfile, so
+the extra cache layer around the pi test Node install is unnecessary.
