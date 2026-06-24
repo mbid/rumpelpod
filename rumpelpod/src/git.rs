@@ -24,7 +24,7 @@ pub struct GitIdentity {
 /// Returns the absolute path to the repository root (the directory containing `.git`).
 /// Returns an error if the current directory is not inside a git repository.
 pub fn get_repo_root() -> Result<PathBuf> {
-    let cwd = std::env::current_dir().context("Failed to get current directory")?;
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
     let repo = Repository::discover(&cwd)
         .with_context(|| format!("not inside a git repository: {}", cwd.display()))?;
 

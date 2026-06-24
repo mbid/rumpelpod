@@ -77,11 +77,11 @@ impl Host {
         let url = Url::parse(s).with_context(|| {
             if !s.contains("://") {
                 format!(
-                    "Invalid host '{s}'. Use 'localhost' for local Docker \
+                    "invalid host '{s}'. Use 'localhost' for local Docker \
                      or 'ssh://host' for remote Docker."
                 )
             } else {
-                format!("Invalid URL: {s}")
+                format!("invalid URL: {s}")
             }
         })?;
 
@@ -108,7 +108,7 @@ impl Host {
                 Ok(Host::Ssh { ssh_destination })
             }
             other => Err(anyhow::anyhow!(
-                "Unsupported scheme '{other}' in host '{s}'. \
+                "unsupported scheme '{other}' in host '{s}'. \
                      Use 'ssh://' for remote Docker, or \
                      '--kubernetes-context' / 'kubernetes' for Kubernetes."
             )),
@@ -240,9 +240,9 @@ pub fn load_json_config(repo_root: &Path) -> Result<JsonConfig> {
     if config_path.exists() {
         let config_path_display = config_path.display();
         let contents = std::fs::read_to_string(&config_path)
-            .with_context(|| format!("Failed to read {config_path_display}"))?;
+            .with_context(|| format!("failed to read {config_path_display}"))?;
         let config: JsonConfig = json5::from_str(&contents)
-            .with_context(|| format!("Failed to parse {config_path_display}"))?;
+            .with_context(|| format!("failed to parse {config_path_display}"))?;
 
         if config.host.is_some() && config.kubernetes.is_some() {
             return Err(anyhow::anyhow!(
@@ -482,7 +482,7 @@ mod tests {
         let err = Host::parse("http://dev").unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("Unsupported scheme"),
+            msg.contains("unsupported scheme"),
             "unexpected error: {msg}"
         );
     }

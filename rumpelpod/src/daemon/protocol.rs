@@ -500,7 +500,7 @@ impl DaemonClient {
             .unix_socket(socket_path)
             .timeout(timeout)
             .build()
-            .expect("Failed to build reqwest client");
+            .expect("failed to build reqwest client");
         // URL host is ignored for Unix sockets, but we need a valid URL
         let url = Url::parse("http://localhost").unwrap();
         Self { client, url }
@@ -535,7 +535,7 @@ impl Iterator for ClientLaunchProgress {
             let line = match self.lines.next()? {
                 Ok(l) => l,
                 Err(e) => {
-                    self.result = Some(Err(anyhow::anyhow!("Failed to read response stream: {e}")));
+                    self.result = Some(Err(anyhow::anyhow!("failed to read response stream: {e}")));
                     return None;
                 }
             };
@@ -554,12 +554,12 @@ impl Iterator for ClientLaunchProgress {
             let data_line = match self.lines.next() {
                 Some(Ok(l)) => l,
                 Some(Err(e)) => {
-                    self.result = Some(Err(anyhow::anyhow!("Failed to read data line: {e}")));
+                    self.result = Some(Err(anyhow::anyhow!("failed to read data line: {e}")));
                     return None;
                 }
                 None => {
                     self.result = Some(Err(anyhow::anyhow!(
-                        "Stream ended mid-event (no data line)"
+                        "stream ended mid-event (no data line)"
                     )));
                     return None;
                 }
@@ -569,7 +569,7 @@ impl Iterator for ClientLaunchProgress {
                 Some(d) => d,
                 None => {
                     self.result = Some(Err(anyhow::anyhow!(
-                        "Expected 'data: ' line, got: {data_line}"
+                        "expected 'data: ' line, got: {data_line}"
                     )));
                     return None;
                 }
@@ -588,7 +588,7 @@ impl Iterator for ClientLaunchProgress {
                         }
                         Err(e) => {
                             self.result = Some(Err(anyhow::anyhow!(
-                                "Failed to parse build output data: {e}"
+                                "failed to parse build output data: {e}"
                             )));
                             return None;
                         }
@@ -609,7 +609,7 @@ impl Iterator for ClientLaunchProgress {
                         }
                         Err(e) => {
                             self.result =
-                                Some(Err(anyhow::anyhow!("Failed to parse result data: {e}")));
+                                Some(Err(anyhow::anyhow!("failed to parse result data: {e}")));
                         }
                     }
                     return None;
@@ -618,17 +618,17 @@ impl Iterator for ClientLaunchProgress {
                     match serde_json::from_str::<ErrorResponse>(data) {
                         Ok(err) => {
                             let msg = &err.error;
-                            self.result = Some(Err(anyhow::anyhow!("Server error: {msg}")));
+                            self.result = Some(Err(anyhow::anyhow!("server error: {msg}")));
                         }
                         Err(e) => {
                             self.result =
-                                Some(Err(anyhow::anyhow!("Failed to parse error data: {e}")));
+                                Some(Err(anyhow::anyhow!("failed to parse error data: {e}")));
                         }
                     }
                     return None;
                 }
                 other => {
-                    self.result = Some(Err(anyhow::anyhow!("Unknown SSE event type: {other}")));
+                    self.result = Some(Err(anyhow::anyhow!("unknown SSE event type: {other}")));
                     return None;
                 }
             }
@@ -643,7 +643,7 @@ impl LaunchProgress for ClientLaunchProgress {
 
         self.result.unwrap_or_else(|| {
             Err(anyhow::anyhow!(
-                "Server closed stream without sending a result"
+                "server closed stream without sending a result"
             ))
         })
     }
@@ -660,7 +660,7 @@ impl Daemon for DaemonClient {
             .put(url)
             .json(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         Ok(ClientLaunchProgress::new(response))
     }
@@ -673,7 +673,7 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&params)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         Ok(ClientLaunchProgress::new(response))
     }
@@ -686,7 +686,7 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         Ok(ClientLaunchProgress::new(response))
     }
@@ -705,7 +705,7 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         let _: StopPodResponse = read_sse_result(response, &description)?;
         Ok(())
@@ -725,7 +725,7 @@ impl Daemon for DaemonClient {
             .delete(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         let _: DeletePodResponse = read_sse_result(response, &description)?;
         Ok(())
@@ -740,7 +740,7 @@ impl Daemon for DaemonClient {
             .get(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         let body: ListPodsResponse = read_sse_result(response, "listing pods")?;
         Ok(body.pods)
@@ -753,7 +753,7 @@ impl Daemon for DaemonClient {
             .client
             .post(url)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         let body: DeleteAllPodsResponse = read_sse_result(response, "deleting all pods")?;
         Ok(body.deleted)
@@ -771,19 +771,19 @@ impl Daemon for DaemonClient {
             .get(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         if response.status().is_success() {
             let body: ListPortsResponse = response
                 .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
             Ok(body.ports)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
+                error: "unknown error".to_string(),
             });
             let msg = &error.error;
-            Err(anyhow::anyhow!("Server error: {msg}"))
+            Err(anyhow::anyhow!("server error: {msg}"))
         }
     }
 
@@ -795,15 +795,15 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         if response.status().is_success() {
             response
                 .json::<PortInfo>()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))
+                .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
+                error: "unknown error".to_string(),
             });
             Err(anyhow::anyhow!("{}", error.error))
         }
@@ -817,7 +817,7 @@ impl Daemon for DaemonClient {
             .put(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         let _: serde_json::Value = read_sse_result(response, "configuring Claude Code")?;
         Ok(())
@@ -835,19 +835,19 @@ impl Daemon for DaemonClient {
             .post(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         if response.status().is_success() {
             let body: EnsureSshAgentResponse = response
                 .json()
-                .map_err(|e| anyhow::anyhow!("Failed to parse response: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
             Ok(body.socket_path)
         } else {
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
+                error: "unknown error".to_string(),
             });
             let msg = &error.error;
-            Err(anyhow::anyhow!("Server error: {msg}"))
+            Err(anyhow::anyhow!("server error: {msg}"))
         }
     }
 }
@@ -870,12 +870,12 @@ impl DaemonClient {
             .post(url)
             .json(&request)
             .send()
-            .map_err(|e| anyhow::anyhow!("Failed to send request: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "Unknown error".to_string(),
+                error: "unknown error".to_string(),
             });
             let msg = &error.error;
             return Err(anyhow::anyhow!(
@@ -907,7 +907,7 @@ impl Iterator for ReconnectStream {
         loop {
             let line = match self.lines.next()? {
                 Ok(l) => l,
-                Err(e) => return Some(Err(anyhow::anyhow!("Failed to read event stream: {e}"))),
+                Err(e) => return Some(Err(anyhow::anyhow!("failed to read event stream: {e}"))),
             };
 
             if line.is_empty() {
@@ -921,10 +921,10 @@ impl Iterator for ReconnectStream {
 
             let data_line = match self.lines.next() {
                 Some(Ok(l)) => l,
-                Some(Err(e)) => return Some(Err(anyhow::anyhow!("Failed to read data line: {e}"))),
+                Some(Err(e)) => return Some(Err(anyhow::anyhow!("failed to read data line: {e}"))),
                 None => {
                     return Some(Err(anyhow::anyhow!(
-                        "Stream ended mid-event (no data line)"
+                        "stream ended mid-event (no data line)"
                     )))
                 }
             };
@@ -933,7 +933,7 @@ impl Iterator for ReconnectStream {
                 Some(d) => d,
                 None => {
                     return Some(Err(anyhow::anyhow!(
-                        "Expected 'data: ' line, got: {data_line}"
+                        "expected 'data: ' line, got: {data_line}"
                     )))
                 }
             };
@@ -952,12 +952,12 @@ impl Iterator for ReconnectStream {
                         Ok(f) => return Some(Ok(ReconnectEvent::Failed { error: f.error })),
                         Err(e) => {
                             return Some(Err(anyhow::anyhow!(
-                                "Failed to parse failed event data: {e}"
+                                "failed to parse failed event data: {e}"
                             )))
                         }
                     }
                 }
-                other => return Some(Err(anyhow::anyhow!("Unknown SSE event type: {other}"))),
+                other => return Some(Err(anyhow::anyhow!("unknown SSE event type: {other}"))),
             }
         }
     }
@@ -1147,7 +1147,7 @@ fn read_sse_result<T: serde::de::DeserializeOwned + Send + 'static>(
             Ok(Ok(SseItem::Error(msg))) => return Err(anyhow::anyhow!("{msg}")),
             Ok(Err(e)) => return Err(e),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!("Still waiting: {description}");
+                eprintln!("still waiting: {description}");
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err(anyhow::anyhow!("SSE stream closed without result"));
@@ -1183,7 +1183,7 @@ fn streaming_launch_response<D: Daemon, P: Send + 'static>(
     });
 
     tokio::task::spawn_blocking(move || {
-        let _guard = crate::slow_guard::SlowGuard::new("Launching pod...", guard_tx);
+        let _guard = crate::slow_guard::SlowGuard::new("launching pod...", guard_tx);
 
         let mut progress = match op(&daemon, params) {
             Ok(p) => p,
@@ -1285,7 +1285,7 @@ async fn stop_pod_handler<D: Daemon>(
     Json(request): Json<StopPodRequest>,
 ) -> Response {
     let name = request.pod_name.0.clone();
-    streaming_result_response(format!("Stopping pod '{name}'..."), move || {
+    streaming_result_response(format!("stopping pod '{name}'..."), move || {
         daemon.stop_pod(request.pod_name, request.repo_path, request.wait)?;
         Ok(StopPodResponse { stopped: true })
     })
@@ -1297,7 +1297,7 @@ async fn delete_pod_handler<D: Daemon>(
     Json(request): Json<DeletePodRequest>,
 ) -> Response {
     let name = request.pod_name.0.clone();
-    streaming_result_response(format!("Deleting pod '{name}'..."), move || {
+    streaming_result_response(format!("deleting pod '{name}'..."), move || {
         daemon.delete_pod(request.pod_name, request.repo_path, request.wait)?;
         Ok(DeletePodResponse { deleted: true })
     })
@@ -1305,7 +1305,7 @@ async fn delete_pod_handler<D: Daemon>(
 
 /// Handler for POST /pods/delete-all endpoint.
 async fn delete_all_pods_handler<D: Daemon>(State(daemon): State<Arc<D>>) -> Response {
-    streaming_result_response("Deleting all pods...".into(), move || {
+    streaming_result_response("deleting all pods...".into(), move || {
         let deleted = daemon.delete_all_pods()?;
         Ok(DeleteAllPodsResponse { deleted })
     })
@@ -1316,7 +1316,7 @@ async fn list_pods_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<ListPodsRequest>,
 ) -> Response {
-    streaming_result_response("Listing pods...".into(), move || {
+    streaming_result_response("listing pods...".into(), move || {
         let pods = daemon.list_pods(request.repo_path)?;
         Ok(ListPodsResponse { pods })
     })
@@ -1363,7 +1363,7 @@ async fn ensure_claude_config_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<EnsureClaudeConfigRequest>,
 ) -> Response {
-    streaming_result_response("Configuring Claude Code...".into(), move || {
+    streaming_result_response("configuring Claude Code...".into(), move || {
         daemon.ensure_claude_config(request)?;
         Ok(serde_json::Value::Null)
     })

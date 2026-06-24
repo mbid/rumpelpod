@@ -1,13 +1,17 @@
-Drop AI-slop phrasing from user-facing messages
+Make user-facing messages read like tool output
 
-Rewrite CLI errors, warnings, and prompts that read like generated
-prose rather than tool output: dash- and semicolon-joined clauses,
-"successfully" and "Please" filler, redundant hand-holding sentences,
-and a "Configuration error:" preamble that anyhow already frames.
+First pass: rewrite CLI errors, warnings, and prompts that read like
+generated prose: dash- and semicolon-joined clauses, "successfully" and
+"Please" filler, redundant hand-holding sentences, and a "Configuration
+error:" preamble that anyhow already frames. Replace forbidden unicode
+ellipses in the kubernetes exec errors and an adjacent comment.
 
-Also replace the forbidden unicode ellipses in the kubernetes exec
-error messages and the adjacent comment with ASCII.
+Second pass: normalize casing. The codebase mixed capitalized and
+lowercase messages; lowercase already dominated, so lowercase the
+leading word of the remaining capitalized errors and progress lines.
+Proper nouns and acronyms (Docker, Kubernetes, Claude, SSH, URL, HTTP
+methods, DNS-1123, ...), table headers, and git's difftool-mimic prompts
+keep their case.
 
-The aim is terse, docker/git-style output. Behaviour is unchanged;
-only the text differs. Tests that asserted on the reworded strings
-are updated.
+Behaviour is unchanged. Tests that matched the reworded or recased
+strings are updated.
