@@ -237,13 +237,11 @@ pub(crate) const AGENT_NAMES: &[&str] = &["claude", "codex", "grok", "pi"];
 #[derive(Clone, Copy, Debug, Default)]
 struct CopiedAgentConfigs {
     claude: bool,
-    pi: bool,
 }
 
 fn copied_agent_configs(conn: &Connection, pod_id: db::PodId) -> Result<CopiedAgentConfigs> {
     Ok(CopiedAgentConfigs {
         claude: db::has_claude_config_copied(conn, pod_id)?,
-        pi: db::has_pi_config_copied(conn, pod_id)?,
     })
 }
 
@@ -255,9 +253,6 @@ fn mark_restored_agent_configs(
 ) -> Result<()> {
     if copied.claude && restored_agent_names.contains(&"claude") {
         db::mark_claude_config_copied(conn, pod_id)?;
-    }
-    if copied.pi && restored_agent_names.contains(&"pi") {
-        db::mark_pi_config_copied(conn, pod_id)?;
     }
     Ok(())
 }
@@ -1614,6 +1609,7 @@ fn copy_pi_config_via_pod(pod: &PodClient, trust_workspace: bool) -> Result<()> 
         if let Some(data) = models {
             append_bytes(&mut archive, ".pi/agent/models.json", &data)?;
         }
+        append_bytes(&mut archive, PI_CONFIG_COPIED_SENTINEL, b"1\n")?;
         archive.into_inner().context("finalizing pi tar")?;
         Ok(())
     });
@@ -1821,6 +1817,7 @@ pub(crate) const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
 pub(crate) const CLAUDE_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/claude";
 pub(crate) const CODEX_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/codex";
 pub(crate) const PI_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/pi";
+pub(crate) const PI_CONFIG_COPIED_SENTINEL: &str = ".pi/agent/.rumpelpod-config-copied";
 pub(crate) const GROK_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/grok";
 
 struct CodexProxyHandle {
@@ -4441,14 +4438,10 @@ impl Daemon for DaemonServer {
     }
 
     fn ensure_pi_config(&self, request: EnsurePiConfigRequest) -> Result<()> {
-        let pod_id = {
+        {
             let conn = self.db.lock().unwrap();
-            let pod_rec = db::get_pod(&conn, &request.repo_path, &request.pod_name.0)?
+            db::get_pod(&conn, &request.repo_path, &request.pod_name.0)?
                 .context("Pod not found")?;
-            if db::has_pi_config_copied(&conn, pod_rec.id)? {
-                return Ok(());
-            }
-            pod_rec.id
         };
 
         let pod = PodClient::new(
@@ -4457,11 +4450,15 @@ impl Daemon for DaemonServer {
             RetryPolicy::UserBlocking,
         )?;
 
-        copy_pi_config_via_pod(&pod, request.trust_workspace)?;
+        if pod
+            .get_state()
+            .context("checking existing pi state")?
+            .has_pi_config
+        {
+            return Ok(());
+        }
 
-        // Mark as copied only after the full copy succeeds.
-        let conn = self.db.lock().unwrap();
-        db::mark_pi_config_copied(&conn, pod_id)?;
+        copy_pi_config_via_pod(&pod, request.trust_workspace)?;
 
         Ok(())
     }

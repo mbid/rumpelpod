@@ -1223,6 +1223,7 @@ fn build_state_response(repo_path: &Path) -> Result<StateResponse> {
     let has_claude_state = home.join(".claude").exists() || home.join(".claude.json").exists();
     let has_codex_state = home.join(".codex").exists();
     let has_pi_state = home.join(".pi").exists();
+    let has_pi_config = home.join(crate::daemon::PI_CONFIG_COPIED_SENTINEL).exists();
     let has_grok_state = home.join(".grok").exists();
 
     Ok(StateResponse {
@@ -1231,6 +1232,7 @@ fn build_state_response(repo_path: &Path) -> Result<StateResponse> {
         has_claude_state,
         has_codex_state,
         has_pi_state,
+        has_pi_config,
         has_grok_state,
         dirty,
     })
