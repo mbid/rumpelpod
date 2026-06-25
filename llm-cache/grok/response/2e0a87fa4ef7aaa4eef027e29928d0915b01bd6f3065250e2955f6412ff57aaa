@@ -1,6 +1,0 @@
-{"status":200,"path":"/v1/chat/completions","headers":{"cache-control":"no-cache","content-type":"text/event-stream"}}
-data: {"id":"cached-grok-smoke","object":"chat.completion.chunk","created":1782239504,"model":"grok-4.20-0309-non-reasoning","choices":[{"index":0,"delta":{"role":"assistant","content":"Paris"},"finish_reason":null}],"system_fingerprint":"cached","service_tier":"default"}
-
-data: {"id":"cached-grok-smoke","object":"chat.completion.chunk","created":1782239504,"model":"grok-4.20-0309-non-reasoning","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"system_fingerprint":"cached","service_tier":"default"}
-
-data: [DONE]

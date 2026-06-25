@@ -131,11 +131,11 @@ fn is_environment_context(item: &serde_json::Value) -> bool {
     })
 }
 
-/// Drop everything but the real user turns from a chat-completions
-/// `messages` array. Grok injects volatile system and user-info
-/// context (working directory, date, available tools) that would
-/// otherwise make the cache key unique per run.
-fn strip_grok_non_query_messages(value: &mut serde_json::Value) {
+/// Drop everything but the user turns from a chat-completions `messages`
+/// array.  grok injects a volatile system prompt (working directory,
+/// date, available tools) that would otherwise make the cache key unique
+/// per run; keying on the user turns alone keeps it stable.
+fn strip_non_user_messages(value: &mut serde_json::Value) {
     let Some(messages) = value
         .get_mut("messages")
         .and_then(serde_json::Value::as_array_mut)
@@ -143,16 +143,7 @@ fn strip_grok_non_query_messages(value: &mut serde_json::Value) {
         return;
     };
 
-    messages.retain(|item| {
-        item.get("role").and_then(serde_json::Value::as_str) == Some("user")
-            && is_grok_user_query(item)
-    });
-}
-
-fn is_grok_user_query(item: &serde_json::Value) -> bool {
-    item.get("content")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|content| content.trim_start().starts_with("<user_query>"))
+    messages.retain(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("user"));
 }
 
 /// Extract only the fields that determine API response semantics.
@@ -175,23 +166,21 @@ fn extract_cache_fields(provider: &str, body: &[u8], fields: &[&str]) -> Vec<u8>
         strip_openai_non_user_input(&mut key_value);
     }
     if provider == "xai" {
-        strip_grok_non_query_messages(&mut key_value);
+        strip_non_user_messages(&mut key_value);
     }
 
     serde_json::to_vec(&key_value).unwrap_or_else(|_| body.to_vec())
 }
 
 /// Replace volatile date fragments in the serialized cache fields so
-/// the hash stays stable across runs.  Two providers inject the
-/// current date into request bodies: Codex wraps it as
-/// `<current_date>YYYY-MM-DD</current_date>`, and the Claude CLI
-/// injects a `Today's date is YYYY-MM-DD.` line into the
-/// system-reminder context.  Both binaries get the real date from
-/// the OS clock, which would otherwise drift the cache key day to
-/// day.
+/// the hash stays stable across runs.  Codex, Claude, and Grok each
+/// inject the current date into request bodies using different text
+/// forms; all of them get the real date from the OS clock, which would
+/// otherwise drift the cache key day to day.
 fn normalize_cache_fields(data: Vec<u8>) -> Vec<u8> {
     let data = replace_dates_between(data, b"<current_date>", b"</current_date>");
-    replace_dates_between(data, b"Today's date is ", b".")
+    let data = replace_dates_between(data, b"Today's date is ", b".");
+    replace_dates_between(data, b"Today's date: ", b"\\n")
 }
 
 /// Replace every `YYYY-MM-DD` that sits between `prefix` and `suffix`
@@ -518,4 +507,21 @@ pub async fn handle_llm_cache_proxy(
     })
     .await
     .expect("API forwarding task panicked")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_cache_fields;
+
+    #[test]
+    fn normalizes_grok_user_info_date() {
+        let normalized = normalize_cache_fields(
+            br#"{"content":"<user_info>\nToday's date: 2026-06-24\n</user_info>"}"#.to_vec(),
+        );
+
+        assert_eq!(
+            normalized,
+            br#"{"content":"<user_info>\nToday's date: 0000-00-00\n</user_info>"}"#
+        );
+    }
 }

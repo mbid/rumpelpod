@@ -1,8 +1,2 @@
-{"status":200,"path":"/v1/chat/completions","headers":{"cache-control":"no-cache","content-type":"text/event-stream"}}
-data: {"id":"cached-grok-title","object":"chat.completion.chunk","created":1782239504,"model":"grok-build","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"id":"call-cached-session-title","function":{"name":"session_title","arguments":"{\"session_title\":\"France Capital Answer\"}"},"index":0,"type":"function"}]},"finish_reason":null}],"system_fingerprint":"cached","service_tier":"default"}
-
-data: {"id":"cached-grok-title","object":"chat.completion.chunk","created":1782239504,"model":"grok-build","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"system_fingerprint":"cached","service_tier":"default"}
-
-data: {"id":"cached-grok-title","object":"chat.completion.chunk","created":1782239504,"model":"grok-build","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},"system_fingerprint":"cached","service_tier":"default"}
-
-data: [DONE]
+{"status":404,"path":"/v1/chat/completions","headers":{"access-control-allow-origin":"*","access-control-expose-headers":"*","cf-cache-status":"DYNAMIC","cf-ray":"a10592411ec0c9ce-CDG","content-type":"application/json","date":"Tue, 23 Jun 2026 18:31:43 GMT","server":"cloudflare","set-cookie":"__cf_bm=EL9fxAMqUH_TVRogfzMlA.vxCn1Hec2kFeXUb.EjqrQ-1782239503.5408483-1.0.1.1-hztg5SBYFX43_K8VKAktfhUuVbl9uADk1BtJDdICLu7gJdqNP2Ba3YcSizA8iANkbsevVmIdoeW5f0i8nLPQ.x0.ldF4072aXxz3AkHBBmM8tRf8c2XgmbNvnQ6Cvmox; HttpOnly; SameSite=None; Secure; Path=/; Domain=x.ai; Expires=Tue, 23 Jun 2026 19:01:43 GMT","strict-transport-security":"max-age=31536000","vary":"origin, access-control-request-method, access-control-request-headers"}}
+{"code":"not-found","error":"The model grok-build does not exist or your team 66c70ee7-a5d0-474b-a1c7-b1f7dcec765a does not have access to it. If you believe this is a mistake, please contact support and quote your team ID and the model name."}
