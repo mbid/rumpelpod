@@ -1,0 +1,8 @@
+Remove bollard from the Docker executor
+
+Route Docker executor operations through the Docker CLI so the
+runtime path uses the same required Docker dependency as image builds
+and interactive exec. Keep Kubernetes on kube-rs for now.
+
+Refresh the Grok cache fixture normalization and third-party notices so
+the test suite stays deterministic after the dependency removal.

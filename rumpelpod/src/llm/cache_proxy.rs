@@ -131,11 +131,11 @@ fn is_environment_context(item: &serde_json::Value) -> bool {
     })
 }
 
-/// Drop everything but the user turns from a chat-completions `messages`
-/// array.  grok injects a volatile system prompt (working directory,
-/// date, available tools) that would otherwise make the cache key unique
-/// per run; keying on the user turns alone keeps it stable.
-fn strip_non_user_messages(value: &mut serde_json::Value) {
+/// Drop everything but the real user turns from a chat-completions
+/// `messages` array. Grok injects volatile system and user-info
+/// context (working directory, date, available tools) that would
+/// otherwise make the cache key unique per run.
+fn strip_grok_non_query_messages(value: &mut serde_json::Value) {
     let Some(messages) = value
         .get_mut("messages")
         .and_then(serde_json::Value::as_array_mut)
@@ -143,7 +143,16 @@ fn strip_non_user_messages(value: &mut serde_json::Value) {
         return;
     };
 
-    messages.retain(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("user"));
+    messages.retain(|item| {
+        item.get("role").and_then(serde_json::Value::as_str) == Some("user")
+            && is_grok_user_query(item)
+    });
+}
+
+fn is_grok_user_query(item: &serde_json::Value) -> bool {
+    item.get("content")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|content| content.trim_start().starts_with("<user_query>"))
 }
 
 /// Extract only the fields that determine API response semantics.
@@ -166,7 +175,7 @@ fn extract_cache_fields(provider: &str, body: &[u8], fields: &[&str]) -> Vec<u8>
         strip_openai_non_user_input(&mut key_value);
     }
     if provider == "xai" {
-        strip_non_user_messages(&mut key_value);
+        strip_grok_non_query_messages(&mut key_value);
     }
 
     serde_json::to_vec(&key_value).unwrap_or_else(|_| body.to_vec())

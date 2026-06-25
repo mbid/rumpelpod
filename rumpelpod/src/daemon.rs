@@ -683,7 +683,7 @@ fn cleanup_pod_refs(repo_path: &Path, pod_name: &PodName) {
 
 /// Parsed docker run arguments extracted from devcontainer.json `runArgs`.
 ///
-/// These are mapped to the corresponding bollard `HostConfig` fields when
+/// These are mapped to the corresponding docker create flags when
 /// creating the container.  Values we don't recognise are silently ignored
 /// (they likely belong to newer Docker versions or are unsupported).
 struct DockerRunArgs {
@@ -697,7 +697,7 @@ struct DockerRunArgs {
     init: bool,
 }
 
-/// Map devcontainer.json `runArgs` strings to bollard `HostConfig` fields.
+/// Map devcontainer.json `runArgs` strings to docker create fields.
 ///
 /// Handles `--key=value` and `--key value` forms for all recognised flags.
 fn parse_run_args_for_docker(args: &[String]) -> DockerRunArgs {
