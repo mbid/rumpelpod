@@ -1,0 +1,10 @@
+Refactor daemon pod connection ownership
+
+Move pod runtime handles behind a PodConnection registry so the daemon
+no longer owns separate per-pod proxy, tunnel, forwarding, and agent
+maps.
+The connection tracks host-gated reconnect state, SSE events, agent
+session state, and local Codex and ssh-agent resources together.
+
+This keeps host disconnect notifications and per-pod runtime ownership
+in one place while preserving the existing daemon protocol behavior.
