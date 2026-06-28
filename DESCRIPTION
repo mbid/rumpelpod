@@ -4,6 +4,9 @@ Expose `rumpel pi` as a first-class pod agent, including CLI
 forwarding, prepared-image installation, system-prompt injection, and
 state transfer.
 
+Install the pi CLI in the project devcontainer so dogfooding uses the
+same host-side version detection path as the other bundled agents.
+
 Docker already deduplicates concurrent builds of the same Dockerfile, so
 the extra cache layer around the pi test Node install is unnecessary.
 
