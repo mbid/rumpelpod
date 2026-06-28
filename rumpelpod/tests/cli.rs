@@ -41,6 +41,8 @@ mod merge;
 mod network;
 #[path = "cli/pi/mod.rs"]
 mod pi;
+#[path = "cli/podman.rs"]
+mod podman;
 #[path = "cli/prune.rs"]
 mod prune;
 #[path = "cli/recreate.rs"]

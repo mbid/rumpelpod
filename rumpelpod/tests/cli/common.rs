@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 
 use indoc::formatdoc;
 use indoc::indoc;
-use rumpelpod::config::{load_json_config, Host};
+use rumpelpod::config::{load_json_config, ContainerEngine, Host};
 use rumpelpod::daemon::protocol::{
     ContainerId, Daemon, DaemonClient, EnsurePiConfigRequest, LaunchProgress, LaunchResult,
     PodLaunchParams, PodName,
@@ -639,9 +639,12 @@ fn resolve_test_host(repo_path: &Path) -> Host {
             node_selector: kubernetes.node_selector,
             tolerations: kubernetes.tolerations,
             builder: kubernetes.builder,
+            image_builder: ContainerEngine::Auto,
         };
     }
-    Host::Localhost
+    Host::Localhost {
+        engine: ContainerEngine::Auto,
+    }
 }
 
 /// Write a standard test devcontainer.json with a Dockerfile build section.
