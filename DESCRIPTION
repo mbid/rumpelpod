@@ -11,4 +11,4 @@ devcontainer smoke tests.
 Add default Podman smoke coverage and expose `cargo xtest --executor
 podman` as the full-suite Podman redirect. The Podman test harness can
 run inside restricted devcontainers through Podman's rootful service,
-overlay storage on Sysbox-backed ext4, and host-network defaults.
+overlay storage on a devcontainer volume, and host-network defaults.
