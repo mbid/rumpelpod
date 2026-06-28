@@ -34,39 +34,36 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         gnupg \
         docker.io \
         podman \
-        fuse-overlayfs \
-        slirp4netns \
         kubectl \
         screen \
         skopeo \
         procps \
         unzip
 
-# Rootless Podman cannot start nested containers under this devcontainer's
-# outer sandbox because /dev/fuse, /dev/net/tun, and some mount operations are
-# unavailable.  Use Podman's normal rootful API service instead of a wrapper:
-# the user-facing `podman` CLI talks to /run/podman/podman.sock, while the
-# service uses vfs storage and chroot build isolation so it does not need those
-# host devices.
+# Rootless Podman cannot create its user namespace under this outer sandbox.
+# Use Podman's rootful API service, but keep its storage away from Docker's
+# private data-root. Sysbox host-backs /var/lib/buildkit with ext4 for nested
+# runtimes; Podman's default /var/lib/containers path stays on the outer
+# overlay root and falls back to fuse-overlayfs, which cannot run without
+# /dev/fuse. Host networking avoids /dev/net/tun during Dockerfile RUN steps.
 RUN mkdir -p \
         /etc/containers \
         /etc/systemd/system/podman.socket.d \
-        /etc/systemd/system/podman.service.d \
     && printf '%s\n' \
         '[storage]' \
-        'driver = "vfs"' \
+        'driver = "overlay"' \
         'runroot = "/run/rumpelpod-podman/storage"' \
-        'graphroot = "/var/lib/rumpelpod-podman/storage"' \
+        'graphroot = "/var/lib/buildkit/rumpelpod-podman/storage"' \
         > /etc/containers/storage.conf \
+    && printf '%s\n' \
+        '[containers]' \
+        'netns = "host"' \
+        > /etc/containers/containers.conf \
     && printf '%s\n' \
         '[Socket]' \
         'SocketGroup=docker' \
         'SocketMode=0660' \
         > /etc/systemd/system/podman.socket.d/rumpelpod.conf \
-    && printf '%s\n' \
-        '[Service]' \
-        'Environment=BUILDAH_ISOLATION=chroot' \
-        > /etc/systemd/system/podman.service.d/rumpelpod.conf \
     && systemctl enable podman.socket
 
 # Docker daemon config for the nested k3d setup:

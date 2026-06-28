@@ -22,10 +22,8 @@
 // Not all helpers are used by every executor.
 #![allow(dead_code)]
 
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 
 use indoc::formatdoc;
 use serde_json::{json, Value};
@@ -83,18 +81,6 @@ pub fn executor_supports_stop() -> bool {
     true
 }
 
-#[derive(Clone, Copy)]
-enum PodmanCliMode {
-    Native,
-    SudoVfs,
-}
-
-static PODMAN_CLI_MODE: OnceLock<Option<PodmanCliMode>> = OnceLock::new();
-
-fn podman_cli_mode() -> Option<PodmanCliMode> {
-    *PODMAN_CLI_MODE.get_or_init(detect_podman_cli_mode)
-}
-
 fn command_succeeds(command: &mut Command) -> bool {
     command
         .stdout(Stdio::null())
@@ -103,38 +89,8 @@ fn command_succeeds(command: &mut Command) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn detect_podman_cli_mode() -> Option<PodmanCliMode> {
-    if command_succeeds(Command::new("podman").arg("info")) {
-        return Some(PodmanCliMode::Native);
-    }
-
-    if !Path::new("/usr/bin/sudo").is_file() || !Path::new("/usr/bin/podman").is_file() {
-        return None;
-    }
-
-    let root = "/tmp/rumpelpod-podman-detect-root";
-    let runroot = "/tmp/rumpelpod-podman-detect-runroot";
-    let succeeds = command_succeeds(
-        Command::new("/usr/bin/sudo")
-            .args(["-n", "/usr/bin/podman"])
-            .args(["--storage-driver=vfs", "--root", root, "--runroot", runroot])
-            .arg("info"),
-    );
-    let _ = Command::new("/usr/bin/sudo")
-        .args(["-n", "rm", "-rf", root, runroot])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-
-    if succeeds {
-        Some(PodmanCliMode::SudoVfs)
-    } else {
-        None
-    }
-}
-
 pub fn podman_executor_available() -> bool {
-    podman_cli_mode().is_some()
+    command_succeeds(Command::new("podman").arg("info"))
 }
 
 pub fn skip_unless_podman_executor() -> bool {
@@ -143,68 +99,6 @@ pub fn skip_unless_podman_executor() -> bool {
     } else {
         skip_test();
         false
-    }
-}
-
-pub struct PodmanTestCli {
-    cleanup_paths: Vec<PathBuf>,
-}
-
-impl PodmanTestCli {
-    pub fn install(home: &TestHome) -> Option<Self> {
-        match podman_cli_mode()? {
-            PodmanCliMode::Native => {
-                home.link_local_bin("podman");
-                Some(Self {
-                    cleanup_paths: Vec::new(),
-                })
-            }
-            PodmanCliMode::SudoVfs => {
-                let root = home.path().join("podman-root");
-                let runroot = home.path().join("podman-runroot");
-                let root_display = root.display();
-                let runroot_display = runroot.display();
-                let script = formatdoc! {r#"
-                    #!/bin/sh
-                    if [ "$1" = "build" ]; then
-                        shift
-                        exec /usr/bin/sudo -n /usr/bin/podman \
-                            --storage-driver=vfs \
-                            --root "{root_display}" \
-                            --runroot "{runroot_display}" \
-                            build --network host "$@"
-                    fi
-                    exec /usr/bin/sudo -n /usr/bin/podman \
-                        --storage-driver=vfs \
-                        --root "{root_display}" \
-                        --runroot "{runroot_display}" \
-                        "$@"
-                "#};
-                let path = home.bin_dir().join("podman");
-                std::fs::write(&path, script).expect("writing podman test wrapper");
-                let mut perms = std::fs::metadata(&path)
-                    .expect("stat podman test wrapper")
-                    .permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&path, perms).expect("chmod podman test wrapper");
-                Some(Self {
-                    cleanup_paths: vec![root, runroot],
-                })
-            }
-        }
-    }
-}
-
-impl Drop for PodmanTestCli {
-    fn drop(&mut self) {
-        for path in &self.cleanup_paths {
-            let path = path.display().to_string();
-            let _ = Command::new("/usr/bin/sudo")
-                .args(["-n", "rm", "-rf", &path])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
     }
 }
 
@@ -226,7 +120,7 @@ pub struct ExecutorResources {
 
 enum Resources {
     Docker,
-    Podman { _cli: PodmanTestCli },
+    Podman,
     Ssh { _remote: super::ssh::SshRemoteHost },
     K8s { namespace: K8sTestNamespace },
 }
@@ -257,14 +151,17 @@ impl ExecutorResources {
     }
 
     pub fn podman(home: &TestHome) -> Self {
-        let cli = PodmanTestCli::install(home).expect("podman executor is not available");
+        if !podman_executor_available() {
+            panic!("podman executor is not available");
+        }
+        home.link_local_bin("podman");
         let json = serde_json::to_string_pretty(&json!({
             "containerEngine": "podman",
         }))
         .unwrap();
         ExecutorResources {
             json,
-            _resources: Resources::Podman { _cli: cli },
+            _resources: Resources::Podman,
         }
     }
 

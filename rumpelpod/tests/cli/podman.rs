@@ -13,7 +13,7 @@ use std::fs;
 use rumpelpod::CommandExt;
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
-use crate::executor::{skip_unless_podman_executor, PodmanTestCli};
+use crate::executor::skip_unless_podman_executor;
 
 fn last_stdout_line(stdout: &[u8]) -> String {
     String::from_utf8_lossy(stdout)
@@ -32,7 +32,7 @@ fn podman_auto_fallback_and_explicit_engine_smoke() {
 
     let repo = TestRepo::new();
     let home = TestHome::new();
-    let _podman = PodmanTestCli::install(&home).expect("podman executor is not available");
+    home.link_local_bin("podman");
     let daemon = TestDaemon::start(&home);
     write_test_devcontainer(&repo, "", "");
 
