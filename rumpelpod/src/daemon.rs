@@ -13,9 +13,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::image::OutputLine;
 use anyhow::{Context, Result};
+use git2::Repository;
 use listenfd::ListenFd;
 use log::error;
 use rusqlite::Connection;
@@ -30,10 +32,11 @@ use crate::devcontainer::{
     DevContainer, GpuRequirement, HostRequirements, MountType, Port, PortAttributes,
     SubstitutionContext,
 };
+use crate::executor::PodBackendInfo;
 use crate::gateway;
 use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use host_connection::{HostConnectionEvent, HostConnectionEventRx, HostConnectionRegistry};
-use pod_connection::PodConnectionRegistry;
+use pod_connection::{PodConnectionRegistry, PodConnectionStatus};
 use protocol::{
     AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, ForkPodRequest, Image,
     LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
@@ -1399,8 +1402,6 @@ enum ReconnectPodResult {
 /// Returns None if the ref doesn't exist.
 /// "ahead N" means the pod is N commits ahead of the host HEAD.
 fn compute_git_info(repo_path: &Path, pod_name: &str) -> Option<PodGitInfo> {
-    use git2::Repository;
-
     let repo = Repository::open(repo_path).ok()?;
 
     // Get the current HEAD commit (host)
@@ -1434,6 +1435,27 @@ fn compute_git_info(repo_path: &Path, pod_name: &str) -> Option<PodGitInfo> {
         repo_state,
         last_commit_time,
     })
+}
+
+fn cached_pod_status(
+    db_status: db::PodStatus,
+    connection_status: Option<PodConnectionStatus>,
+) -> PodStatus {
+    match db_status {
+        db::PodStatus::Initializing | db::PodStatus::Error => PodStatus::Stopped,
+        db::PodStatus::Stopping => PodStatus::Stopping,
+        db::PodStatus::Deleting => PodStatus::Deleting,
+        db::PodStatus::DeleteFailed => PodStatus::Broken,
+        db::PodStatus::Ready => match connection_status {
+            Some(PodConnectionStatus::Connected) | Some(PodConnectionStatus::Connecting) => {
+                PodStatus::Running
+            }
+            Some(PodConnectionStatus::HostDisconnected)
+            | Some(PodConnectionStatus::PodDisconnected)
+            | None => PodStatus::Disconnected,
+            Some(PodConnectionStatus::Stopped) => PodStatus::Stopped,
+        },
+    }
 }
 
 /// Copy only the minimal Claude Code config files needed to authenticate
@@ -3640,6 +3662,47 @@ impl DaemonServer {
             .with_context(|| format!("no pod connection for pod '{pod_name}'"))?;
         connection.ensure_codex_proxy(container_url, container_token)
     }
+
+    fn sync_list_pod_refs(&self, repo_path: &Path, pods: &[db::PodRecord]) -> Result<()> {
+        for pod in pods {
+            match pod.status {
+                db::PodStatus::Ready => {}
+                db::PodStatus::Initializing
+                | db::PodStatus::Error
+                | db::PodStatus::Stopping
+                | db::PodStatus::Deleting
+                | db::PodStatus::DeleteFailed => continue,
+            }
+
+            let connection_status = self.pod_connections.status(repo_path, &pod.name);
+            match connection_status {
+                Some(PodConnectionStatus::Connected) | Some(PodConnectionStatus::Connecting) => {}
+                Some(PodConnectionStatus::HostDisconnected)
+                | Some(PodConnectionStatus::PodDisconnected)
+                | Some(PodConnectionStatus::Stopped)
+                | None => continue,
+            }
+
+            let Some(endpoint) = self.pod_connections.endpoint(repo_path, &pod.name) else {
+                continue;
+            };
+            let client = PodClient::new_with_timeout(
+                &endpoint.url,
+                &endpoint.token,
+                Duration::from_secs(10),
+            )
+            .with_context(|| {
+                let name = &pod.name;
+                format!("creating sync client for pod '{name}'")
+            })?;
+            client.git_push().with_context(|| {
+                let name = &pod.name;
+                format!("syncing refs from pod '{name}'")
+            })?;
+        }
+
+        Ok(())
+    }
 }
 
 pub(crate) fn generate_codex_proxy_token() -> String {
@@ -3826,105 +3889,102 @@ impl Daemon for DaemonServer {
         Ok(())
     }
 
-    fn list_pods(&self, repo_path: PathBuf) -> Result<Vec<PodInfo>> {
-        use crate::executor::PodBackendInfo;
-
-        // Get pods from database (includes remote pods)
+    fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>> {
         let conn = self.db.lock().unwrap();
         let db_pods = db::list_pods(&conn, &repo_path)?;
-        drop(conn); // Release lock before calling Docker API
+        drop(conn);
 
-        // Collect unique hosts and check backend status once per host.
-        // Local Docker and local Podman have separate stores, so the
-        // stored host JSON is part of the key.
+        if sync_refs {
+            self.sync_list_pod_refs(&repo_path, &db_pods)?;
+        }
+
         let mut status_maps: HashMap<String, Option<HashMap<String, PodBackendInfo>>> =
             HashMap::new();
-        for pod in &db_pods {
-            let host = serde_json::from_str::<Host>(&pod.host).ok();
-            match &host {
-                Some(h @ Host::Localhost { .. }) if !status_maps.contains_key(&pod.host) => {
-                    let status_map = self
-                        .host_executor(h)
-                        .and_then(|e| e.list_by_repo(&repo_path))
-                        .ok();
-                    status_maps.insert(pod.host.clone(), status_map);
+        if sync {
+            // Local Docker and local Podman have separate stores, so
+            // the stored host JSON is part of the key.
+            for pod in &db_pods {
+                let host = serde_json::from_str::<Host>(&pod.host).ok();
+                match &host {
+                    Some(h @ Host::Localhost { .. }) if !status_maps.contains_key(&pod.host) => {
+                        let status_map = self
+                            .host_executor(h)
+                            .and_then(|e| e.list_by_repo(&repo_path))
+                            .ok();
+                        status_maps.insert(pod.host.clone(), status_map);
+                    }
+                    Some(h @ Host::Kubernetes { .. }) if !status_maps.contains_key(&pod.host) => {
+                        let status_map = self
+                            .host_executor(h)
+                            .and_then(|e| e.list_by_repo(&repo_path))
+                            .ok();
+                        status_maps.insert(pod.host.clone(), status_map);
+                    }
+                    Some(h @ Host::Ssh { .. }) if !status_maps.contains_key(&pod.host) => {
+                        let status_map = self
+                            .host_connections
+                            .get(h)
+                            .filter(|c| c.is_connected())
+                            .and_then(|_| {
+                                self.host_executor(h)
+                                    .and_then(|e| e.list_by_repo(&repo_path))
+                                    .ok()
+                            });
+                        status_maps.insert(pod.host.clone(), status_map);
+                    }
+                    Some(Host::Localhost { .. }) => {}
+                    Some(Host::Kubernetes { .. }) => {}
+                    Some(Host::Ssh { .. }) => {}
+                    None => {}
                 }
-                Some(h @ Host::Kubernetes { .. }) if !status_maps.contains_key(&pod.host) => {
-                    // Cache per kubernetes host to avoid N API calls
-                    // when many pods share a cluster/namespace.
-                    let status_map = self
-                        .host_executor(h)
-                        .and_then(|e| e.list_by_repo(&repo_path))
-                        .ok();
-                    status_maps.insert(pod.host.clone(), status_map);
-                }
-                Some(h @ Host::Ssh { .. }) if !status_maps.contains_key(&pod.host) => {
-                    // Only probe if a connection already exists
-                    // and is currently up; do not implicitly
-                    // open a fresh SSH connection from `list`.
-                    let status_map = self
-                        .host_connections
-                        .get(h)
-                        .filter(|c| c.is_connected())
-                        .and_then(|_| {
-                            self.host_executor(h)
-                                .and_then(|e| e.list_by_repo(&repo_path))
-                                .ok()
-                        });
-                    status_maps.insert(pod.host.clone(), status_map);
-                }
-                Some(Host::Localhost { .. }) => {}
-                Some(Host::Kubernetes { .. }) => {}
-                Some(Host::Ssh { .. }) => {}
-                None => {}
             }
         }
 
-        // Build combined list with status from the backend where available
         let mut pods = Vec::new();
         for pod in db_pods {
             let host = serde_json::from_str::<Host>(&pod.host).ok();
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
-            let (status, container_id) = {
+
+            let (status, container_id) = if sync {
                 let container_info = status_maps
                     .get(&pod.host)
                     .and_then(|m| m.as_ref())
                     .and_then(|status_map| status_map.get(&pod.name));
 
                 let status = match pod.status {
-                    db::PodStatus::Stopping => PodStatus::Stopping,
-                    db::PodStatus::Deleting => PodStatus::Deleting,
-                    db::PodStatus::DeleteFailed => PodStatus::Broken,
-                    _ => match container_info {
+                    db::PodStatus::Ready => match container_info {
                         Some(info) => info.status.clone(),
                         None => {
                             if is_remote && status_maps.get(&pod.host).is_none_or(|m| m.is_none()) {
                                 PodStatus::Disconnected
                             } else {
-                                match pod.status {
-                                    db::PodStatus::Ready => PodStatus::Gone,
-                                    db::PodStatus::Initializing | db::PodStatus::Error => {
-                                        PodStatus::Stopped
-                                    }
-                                    db::PodStatus::Stopping
-                                    | db::PodStatus::Deleting
-                                    | db::PodStatus::DeleteFailed => {
-                                        unreachable!()
-                                    }
-                                }
+                                PodStatus::Gone
                             }
                         }
                     },
+                    db::PodStatus::Initializing | db::PodStatus::Error => match container_info {
+                        Some(info) => info.status.clone(),
+                        None => {
+                            if is_remote && status_maps.get(&pod.host).is_none_or(|m| m.is_none()) {
+                                PodStatus::Disconnected
+                            } else {
+                                PodStatus::Stopped
+                            }
+                        }
+                    },
+                    db::PodStatus::Stopping => PodStatus::Stopping,
+                    db::PodStatus::Deleting => PodStatus::Deleting,
+                    db::PodStatus::DeleteFailed => PodStatus::Broken,
                 };
                 let container_id = container_info.map(|info| info.container_id.clone());
                 (status, container_id)
+            } else {
+                let connection_status = self.pod_connections.status(&repo_path, &pod.name);
+                (cached_pod_status(pod.status, connection_status), None)
             };
 
-            // Compute git status on the local machine by comparing HEAD to rumpelpod/<pod_name>
             let git_info = compute_git_info(&repo_path, &pod.name);
 
-            // Display using Host::Display to normalize the format
-            // (e.g. strip default port 22 from old DB entries).
             let display_host = host
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| pod.host.clone());

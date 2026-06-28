@@ -236,7 +236,7 @@ pub fn find_local_grok_cli() -> Option<PathBuf> {
 pub fn confirm_pod_creation(pod_name: &str, repo_root: &Path, create: bool) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
-    let pods = client.list_pods(repo_root.to_path_buf())?;
+    let pods = client.list_pods(repo_root.to_path_buf(), true, false)?;
     if pods.iter().any(|p| p.name == pod_name) {
         return Ok(());
     }

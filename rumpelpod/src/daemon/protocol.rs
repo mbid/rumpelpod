@@ -298,6 +298,8 @@ struct DeleteAllPodsResponse {
 #[derive(Debug, Serialize, Deserialize)]
 struct ListPodsRequest {
     repo_path: PathBuf,
+    sync: bool,
+    sync_refs: bool,
 }
 
 /// Response body for list_pods endpoint.
@@ -442,7 +444,7 @@ pub trait Daemon: Send + Sync + 'static {
 
     // GET /pod
     // Lists all pods for a given repository.
-    fn list_pods(&self, repo_path: PathBuf) -> Result<Vec<PodInfo>>;
+    fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>>;
 
     // POST /pods/delete-all
     // Nukes all containers/pods across all repos.  Only triggers
@@ -734,9 +736,13 @@ impl Daemon for DaemonClient {
         Ok(())
     }
 
-    fn list_pods(&self, repo_path: PathBuf) -> Result<Vec<PodInfo>> {
+    fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>> {
         let url = self.url.join("/pod")?;
-        let request = ListPodsRequest { repo_path };
+        let request = ListPodsRequest {
+            repo_path,
+            sync,
+            sync_refs,
+        };
 
         let response = self
             .client
@@ -1320,7 +1326,7 @@ async fn list_pods_handler<D: Daemon>(
     Json(request): Json<ListPodsRequest>,
 ) -> Response {
     streaming_result_response("listing pods...".into(), move || {
-        let pods = daemon.list_pods(request.repo_path)?;
+        let pods = daemon.list_pods(request.repo_path, request.sync, request.sync_refs)?;
         Ok(ListPodsResponse { pods })
     })
 }
