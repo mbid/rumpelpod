@@ -1,6 +1,7 @@
-Add stale tunnel port regression test
+Refresh pod git remotes after tunnel reconnect
 
-Document the daemon-restart failure where a pod's git remotes keep
-the old in-container tunnel URL after the replacement tunnel binds a
-different port. The new integration test forces that port change and
-shows that an explicit git push still uses the stale URL after re-entry.
+Keep pod-side gateway URLs in sync when the daemon restarts and the
+replacement tunnel binds a different in-container port. The tunnel
+server notifies container-serve when it can, container-serve refreshes
+git remotes on startup and before recovery pushes, and the regression
+test forces a port change before `git push rumpelpod`.
