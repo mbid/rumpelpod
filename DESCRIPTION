@@ -1,0 +1,10 @@
+Make rumpel list use cached pod state by default
+
+`rumpel list` no longer probes container backends unless the user asks
+for a synchronized view.  The default output uses the daemon's pod
+connection state, which is already maintained by each pod's event
+stream.
+
+Add `rumpel list --sync` for callers that need a live refresh before
+printing, including an explicit pod ref push so host-side git state is
+up to date before list computes ahead/behind status.
