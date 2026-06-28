@@ -3434,7 +3434,7 @@ impl DaemonServer {
                 // the daemon has one; otherwise skip snapshotting.
                 // The proxy is normally set up by launch_pod_k8s /
                 // reconnect_k8s before recreate is invoked.
-                let endpoint = self.pod_connections.endpoint(repo_path, &pod_name.0);
+                let endpoint = self.pod_connections.endpoint(&repo_path, &pod_name.0);
 
                 if let Some(endpoint) = endpoint {
                     let container_url = endpoint.url;
