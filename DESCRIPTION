@@ -1,0 +1,6 @@
+Add stale tunnel port regression test
+
+Document the daemon-restart failure where a pod's git remotes keep
+the old in-container tunnel URL after the replacement tunnel binds a
+different port. The new integration test forces that port change and
+shows that an explicit git push still uses the stale URL after re-entry.
