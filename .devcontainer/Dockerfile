@@ -42,7 +42,32 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         procps \
         unzip
 
-COPY --chmod=755 podman /usr/local/bin/podman
+# Rootless Podman cannot start nested containers under this devcontainer's
+# outer sandbox because /dev/fuse, /dev/net/tun, and some mount operations are
+# unavailable.  Use Podman's normal rootful API service instead of a wrapper:
+# the user-facing `podman` CLI talks to /run/podman/podman.sock, while the
+# service uses vfs storage and chroot build isolation so it does not need those
+# host devices.
+RUN mkdir -p \
+        /etc/containers \
+        /etc/systemd/system/podman.socket.d \
+        /etc/systemd/system/podman.service.d \
+    && printf '%s\n' \
+        '[storage]' \
+        'driver = "vfs"' \
+        'runroot = "/run/rumpelpod-podman/storage"' \
+        'graphroot = "/var/lib/rumpelpod-podman/storage"' \
+        > /etc/containers/storage.conf \
+    && printf '%s\n' \
+        '[Socket]' \
+        'SocketGroup=docker' \
+        'SocketMode=0660' \
+        > /etc/systemd/system/podman.socket.d/rumpelpod.conf \
+    && printf '%s\n' \
+        '[Service]' \
+        'Environment=BUILDAH_ISOLATION=chroot' \
+        > /etc/systemd/system/podman.service.d/rumpelpod.conf \
+    && systemctl enable podman.socket
 
 # Docker daemon config for the nested k3d setup:
 # - insecure-registries: the k3d built-in registry speaks HTTP. The
@@ -161,12 +186,10 @@ RUN if ! getent group ${USER} > /dev/null 2>&1; then \
     if ! id -u ${USER} > /dev/null 2>&1; then \
         useradd -m -u ${USER_ID} -g ${USER} ${USER}; \
     fi && \
-    subid_start=$((USER_ID + 1)) && \
-    subid_count=$((65536 - subid_start)) && \
-    printf '%s:%s:%s\n' "${USER}" "$subid_start" "$subid_count" > /etc/subuid && \
-    printf '%s:%s:%s\n' "${USER}" "$subid_start" "$subid_count" > /etc/subgid && \
     echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
     usermod -aG docker -s /bin/bash ${USER}
+
+ENV CONTAINER_HOST=unix:///run/podman/podman.sock
 
 USER ${USER}
 
