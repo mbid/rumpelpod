@@ -252,10 +252,10 @@ fn compute_prepared_tag(
 /// Generate the Dockerfile content for the prepared image.
 ///
 /// The host `.git` dir is bind-mounted at build time so its contents
-/// never end up in an image layer.  It reaches the build either as a
-/// named build context (`gateway`) or, when `gateway_in_context` is
-/// set, as a `gateway` stage populated from a `gateway-git/` copy in
-/// the main build context.
+/// never end up in a layer of the prepared image.  It reaches the
+/// build either as a named build context (`gateway`) or, when
+/// `gateway_in_context` is set, as a `gateway` stage populated from a
+/// `gateway-git/` copy in the main build context.
 ///
 /// After the rumpel binary is installed, remaining setup (repo clone,
 /// Claude CLI) is delegated to `rumpel prepare-image` so the logic

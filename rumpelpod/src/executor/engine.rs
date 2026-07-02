@@ -761,7 +761,11 @@ fn docker_launch(backend: &DockerBackend, id: &PodId, spec: PodSpec) -> Result<(
             ContainerEngine::Docker => {
                 command.args(["--runtime", &runtime]);
             }
-            ContainerEngine::Podman => {}
+            ContainerEngine::Podman => {
+                // `podman create` has no --runtime flag; spec producers
+                // must null the runtime (with a warning) for Podman.
+                panic!("podman pod spec should not carry a runtime")
+            }
             ContainerEngine::Auto => {
                 panic!("container engine auto remained after resolve")
             }

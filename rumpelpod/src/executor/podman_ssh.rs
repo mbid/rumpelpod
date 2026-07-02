@@ -25,14 +25,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use log::debug;
 
 use crate::config::{ContainerEngine, Host};
 
 pub struct PodmanSshProxy {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
-    /// Holds the socket; dropped last, after the accept loop stopped.
+    /// Holds the socket file.  Drop only signals the accept loop; it
+    /// does not join it, so the loop may briefly outlive the dir (its
+    /// listener fd stays valid).
     _dir: tempfile::TempDir,
 }
 
@@ -61,14 +62,18 @@ impl PodmanSshProxy {
                 let conn = match conn {
                     Ok(conn) => conn,
                     Err(e) => {
-                        debug!("podman ssh proxy accept failed: {e}");
+                        // The loop ends here; later podman calls get a
+                        // bare connection error, so leave a trace.
+                        eprintln!("podman ssh proxy accept failed: {e}");
                         break;
                     }
                 };
                 let destination = accept_destination.clone();
                 std::thread::spawn(move || {
                     if let Err(e) = serve_connection(conn, &destination) {
-                        debug!("podman ssh proxy connection to {destination} failed: {e:#}");
+                        // The podman CLI only reports an opaque broken
+                        // connection; the ssh stderr is here.
+                        eprintln!("podman ssh proxy connection to {destination} failed: {e:#}");
                     }
                 });
             }

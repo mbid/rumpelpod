@@ -789,9 +789,11 @@ struct ResolvedLaunch {
     bind_sources: Vec<BindSource>,
     container_repo_path: PathBuf,
     executor: crate::executor::Executor,
-    /// `Some` only for localhost Docker, where client-side interactive
-    /// exec can reuse the exact daemon socket.  SSH and k8s clients
-    /// connect through their native transports.
+    /// Unix socket for engine CLI invocations during the launch: the
+    /// daemon-resolved socket for localhost Docker, the daemon's proxy
+    /// socket for SSH Podman, `None` otherwise.  Only the localhost
+    /// Docker value is forwarded to the client, which reuses it for
+    /// interactive exec.
     docker_socket: Option<PathBuf>,
 }
 
@@ -2388,7 +2390,13 @@ impl DaemonServer {
 
         Ok(LaunchResult {
             container_id: ContainerId(pod_id.as_str().to_string()),
-            docker_socket,
+            // Clients reuse this socket only for localhost Docker.  The
+            // SSH Podman proxy socket is daemon-internal; clients dial
+            // their own proxy.
+            docker_socket: match docker_host {
+                Host::Localhost { .. } => docker_socket,
+                Host::Ssh { .. } | Host::Kubernetes { .. } => None,
+            },
             host: docker_host.clone(),
             image_built: false,
             container_url,
@@ -3105,7 +3113,13 @@ impl DaemonServer {
 
         Ok(LaunchResult {
             container_id,
-            docker_socket,
+            // Clients reuse this socket only for localhost Docker.  The
+            // SSH Podman proxy socket is daemon-internal; clients dial
+            // their own proxy.
+            docker_socket: match &docker_host {
+                Host::Localhost { .. } => docker_socket,
+                Host::Ssh { .. } | Host::Kubernetes { .. } => None,
+            },
             host: docker_host,
             image_built,
             container_url,
