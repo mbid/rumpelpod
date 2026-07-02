@@ -299,32 +299,10 @@ struct DeleteAllPodsResponse {
 
 /// Request body for list_pods endpoint.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ListPodsRequest {
-    pub repo_path: PathBuf,
-    pub freshness: ListPodsFreshness,
-}
-
-impl ListPodsRequest {
-    pub fn cached(repo_path: PathBuf) -> Self {
-        Self {
-            repo_path,
-            freshness: ListPodsFreshness::Cached,
-        }
-    }
-
-    pub fn synchronized(repo_path: PathBuf) -> Self {
-        Self {
-            repo_path,
-            freshness: ListPodsFreshness::Synchronized,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ListPodsFreshness {
-    Cached,
-    Synchronized,
+struct ListPodsRequest {
+    repo_path: PathBuf,
+    sync: bool,
+    sync_refs: bool,
 }
 
 /// Response body for list_pods endpoint.
@@ -483,7 +461,7 @@ pub trait Daemon: Send + Sync + 'static {
 
     // GET /pod
     // Lists all pods for a given repository.
-    fn list_pods(&self, request: ListPodsRequest) -> Result<Vec<PodInfo>>;
+    fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>>;
 
     // POST /pods/delete-all
     // Nukes all containers/pods across all repos.  Only triggers
@@ -780,8 +758,13 @@ impl Daemon for DaemonClient {
         Ok(())
     }
 
-    fn list_pods(&self, request: ListPodsRequest) -> Result<Vec<PodInfo>> {
+    fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>> {
         let url = self.url.join("/pod")?;
+        let request = ListPodsRequest {
+            repo_path,
+            sync,
+            sync_refs,
+        };
 
         let response = self
             .client
@@ -1379,7 +1362,7 @@ async fn list_pods_handler<D: Daemon>(
     Json(request): Json<ListPodsRequest>,
 ) -> Response {
     streaming_result_response("listing pods...".into(), move || {
-        let pods = daemon.list_pods(request)?;
+        let pods = daemon.list_pods(request.repo_path, request.sync, request.sync_refs)?;
         Ok(ListPodsResponse { pods })
     })
 }

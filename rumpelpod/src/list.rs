@@ -9,7 +9,7 @@ use comfy_table::Table;
 
 use crate::cli::ListCommand;
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, ListPodsRequest, PodStatus};
+use crate::daemon::protocol::{Daemon, DaemonClient, PodStatus};
 use crate::git::get_repo_root;
 use crate::pod::types::{ClaudeState, CodexState};
 
@@ -38,11 +38,7 @@ pub fn list(cmd: &ListCommand) -> Result<()> {
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
 
-    let request = match cmd.sync {
-        true => ListPodsRequest::synchronized(repo_path),
-        false => ListPodsRequest::cached(repo_path),
-    };
-    let mut pods = client.list_pods(request)?;
+    let mut pods = client.list_pods(repo_path, cmd.sync, cmd.sync)?;
     // Running pods first, then by most recent commit on the pod's primary branch.
     pods.sort_by_key(|pod| {
         (

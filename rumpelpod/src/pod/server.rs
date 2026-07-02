@@ -722,15 +722,25 @@ fn recover_push(repo_path: &Path, pod_name: &str) {
             return;
         }
     }
-    match Command::new("git")
+    let skip_lfs_pre_push = match crate::git::prepare_lfs_for_rumpelpod_push(repo_path, pod_name) {
+        Ok(skip) => skip,
+        Err(e) => {
+            eprintln!("events: git lfs push failed: {e:#}");
+            return;
+        }
+    };
+    let mut command = Command::new("git");
+    command
         .args(["push", "rumpelpod", "--force", "--quiet"])
         .current_dir(repo_path)
         .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
         .env("GIT_HTTP_LOW_SPEED_TIME", "10")
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-    {
+        .stderr(Stdio::piped());
+    if skip_lfs_pre_push {
+        command.env("GIT_LFS_SKIP_PUSH", "1");
+    }
+    match command.output() {
         Ok(output) if !output.status.success() => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let status = output.status;
@@ -1253,15 +1263,21 @@ async fn git_push_handler(
         .await
         .clone()
         .ok_or_else(|| err_json(anyhow::anyhow!("repo_path not set yet")))?;
+    let pod_name = state.pod_name.clone();
 
     tokio::task::spawn_blocking(move || {
-        let output = Command::new("git")
+        let skip_lfs_pre_push = crate::git::prepare_lfs_for_rumpelpod_push(&repo_path, &pod_name)
+            .context("preparing git lfs for new refs")?;
+        let mut command = Command::new("git");
+        command
             .args(["push", "rumpelpod", "--force", "--quiet"])
             .current_dir(&repo_path)
             .env("GIT_HTTP_LOW_SPEED_LIMIT", "1")
-            .env("GIT_HTTP_LOW_SPEED_TIME", "10")
-            .output()
-            .context("spawning git push")?;
+            .env("GIT_HTTP_LOW_SPEED_TIME", "10");
+        if skip_lfs_pre_push {
+            command.env("GIT_LFS_SKIP_PUSH", "1");
+        }
+        let output = command.output().context("spawning git push")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow::anyhow!("git push rumpelpod failed: {stderr}"));
