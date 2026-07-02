@@ -1,0 +1,21 @@
+Use a dynamic port for the codex app-server
+
+The codex app-server listened on the fixed address 127.0.0.1:4500.
+With host-networked pods (--network=host) every pod shares the host
+loopback, so the first pod's app-server owned port 4500 and every
+other pod's /codex proxy silently connected to it: users ended up
+attached to a codex instance from an unrelated project.
+
+The pod server now spawns the app-server on a fresh ephemeral
+loopback port and advertises it in
+/opt/rumpelpod/codex-app-server-port.  The file is informational
+(debugging and tests): all traffic reaches the app-server through
+the /codex proxy, which uses the in-memory port, so nothing depends
+on the port staying stable across restarts.  Reusing a recorded
+port would be unsound anyway, since under host networking a stale
+port may already belong to a different pod's app-server.
+
+Two guards keep a foreign listener on a recycled port from being
+mistaken for our app-server: the health-check loop re-checks that
+the child is still alive after /healthz answers, and the codex
+state monitor only dials the port of a live child.
