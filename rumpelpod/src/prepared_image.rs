@@ -21,6 +21,7 @@ use crate::cli::PrepareImageCommand;
 use crate::config::{ContainerEngine, Host};
 use crate::git::GitRemote;
 use crate::image::{BuildOutputFn, BuildResult, BuildxMode, Image};
+use crate::CommandExt;
 
 /// GCS bucket hosting Claude Code releases (mirrors pod/pty.rs).
 const CLAUDE_CODE_DIST_BUCKET: &str =
@@ -250,9 +251,11 @@ fn compute_prepared_tag(
 
 /// Generate the Dockerfile content for the prepared image.
 ///
-/// The host `.git` dir is passed as a named build context (`gateway`)
-/// and bind-mounted at build time so its contents never end up in an
-/// image layer.
+/// The host `.git` dir is bind-mounted at build time so its contents
+/// never end up in an image layer.  It reaches the build either as a
+/// named build context (`gateway`) or, when `gateway_in_context` is
+/// set, as a `gateway` stage populated from a `gateway-git/` copy in
+/// the main build context.
 ///
 /// After the rumpel binary is installed, remaining setup (repo clone,
 /// Claude CLI) is delegated to `rumpel prepare-image` so the logic
@@ -269,6 +272,7 @@ fn generate_dockerfile(
     mount_targets: &[String],
     inject_system_prompt: bool,
     description_file: Option<&str>,
+    gateway_in_context: bool,
 ) -> String {
     let repo_path = container_repo_path.display();
     let rumpel = crate::daemon::RUMPEL_CONTAINER_BIN;
@@ -312,6 +316,20 @@ fn generate_dockerfile(
         None => String::new(),
     };
 
+    // Podman's remote API does not transfer additional build contexts
+    // to the server, so for remote Podman builds the git dir travels
+    // inside the main context and a stage stands in for the named
+    // context; `from=gateway` resolves to either.
+    let gateway_stage = if gateway_in_context {
+        formatdoc! {r#"
+            FROM scratch AS gateway
+            COPY gateway-git/ /
+
+        "#}
+    } else {
+        String::new()
+    };
+
     // The image must end with the base image's original USER so that
     // the ENTRYPOINT/CMD runs as the user the base image intended.
     // This is distinct from the container user (remoteUser /
@@ -319,7 +337,7 @@ fn generate_dockerfile(
     // sessions -- switch_user() handles dropping to the container
     // user in-pod.
     formatdoc! {r#"
-        FROM {base_image}
+        {gateway_stage}FROM {base_image}
 
         ARG TARGETARCH
         ARG BASE_USER=root
@@ -357,6 +375,7 @@ fn assemble_build_context(
     description_file: Option<&str>,
     raw_devcontainer_json: &str,
     container_env_keys: &[String],
+    gateway_in_context: bool,
 ) -> Result<tempfile::TempDir> {
     let dockerfile = generate_dockerfile(
         base_image,
@@ -369,6 +388,7 @@ fn assemble_build_context(
         mount_targets,
         inject_system_prompt,
         description_file,
+        gateway_in_context,
     );
     let binaries = find_rumpel_binaries()?;
 
@@ -397,6 +417,24 @@ fn assemble_build_context(
         .context("writing container-env-keys to build context")?;
 
     Ok(tmp)
+}
+
+/// Copy the `.git` dir into the build context as `gateway-git/` for
+/// engines whose remote API cannot transfer additional build contexts.
+fn copy_git_dir_into_context(git_dir: &Path, build_context: &Path) -> Result<()> {
+    let resolved = fs::canonicalize(git_dir).with_context(|| {
+        let dir = git_dir.display();
+        format!("resolving git dir {dir}")
+    })?;
+    let source = resolved.display();
+    let dest = build_context.join("gateway-git");
+    Command::new("cp")
+        .arg("-a")
+        .arg(&resolved)
+        .arg(&dest)
+        .success()
+        .with_context(|| format!("copying git dir {source} into build context"))?;
+    Ok(())
 }
 
 /// Create a symlink to the `.git` dir without the `.git` suffix.
@@ -573,6 +611,18 @@ pub fn build_prepared_image(
         }
     }
 
+    // Podman's remote API does not transfer additional build contexts,
+    // so remote Podman builds ship the git dir inside the main context
+    // instead (see `generate_dockerfile`).
+    let gateway_in_context = matches!(
+        &mode,
+        BuildxMode::Load {
+            docker_host: Host::Ssh { .. },
+            engine: ContainerEngine::Podman,
+            ..
+        }
+    );
+
     let build_ctx = assemble_build_context(
         &buildable_base,
         container_repo_path,
@@ -586,15 +636,17 @@ pub fn build_prepared_image(
         description_file,
         raw_devcontainer_json,
         container_env_keys,
+        gateway_in_context,
     )?;
 
-    let gateway_link = create_gateway_link(git_dir, build_ctx.path())?;
-    let gateway_link_display = gateway_link.display().to_string();
-
-    let mut extra_args = vec![
-        format!("--build-context=gateway={gateway_link_display}"),
-        format!("--build-arg=BASE_USER={image_user}"),
-    ];
+    let mut extra_args = vec![format!("--build-arg=BASE_USER={image_user}")];
+    if gateway_in_context {
+        copy_git_dir_into_context(git_dir, build_ctx.path())?;
+    } else {
+        let gateway_link = create_gateway_link(git_dir, build_ctx.path())?;
+        let gateway_link_display = gateway_link.display().to_string();
+        extra_args.push(format!("--build-context=gateway={gateway_link_display}"));
+    }
     extra_args.extend(build_options.iter().cloned());
 
     let dockerfile = build_ctx.path().join("Dockerfile");

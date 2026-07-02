@@ -1,4 +1,4 @@
-Verify Podman executor
+Verify Podman executor and support Podman over SSH
 
 Fix the devcontainer Podman socket permissions so the non-root test user
 can reach the rootful API service.
@@ -6,3 +6,11 @@ can reach the rootful API service.
 Fix re-entry so an existing pod uses its stored host before resolving
 the current repo config, warn and ignore Podman runtime runArgs, and
 clean up leftover Podman test containers after failed xtest cases.
+
+Support Podman on SSH hosts.  Podman's own ssh:// transport needs
+streamlocal forwarding (rejected by locked-down servers) and ignores
+~/.ssh/config, so rumpelpod instead bridges a local proxy socket through
+`ssh <host> podman system dial-stdio` and points the podman CLI at the
+proxy.  The daemon keeps one proxy per SSH host; CLI-side interactive
+exec starts an ephemeral one.  Covered by a new smoke test against a
+locked-down sshd fixture serving a rootful Podman service.
