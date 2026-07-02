@@ -256,6 +256,14 @@ pub fn run_container_server(
             });
         }
 
+        // Any codex app-server we advertised belonged to a previous
+        // container-serve; this process will never proxy to it, so
+        // drop the record before anything can mistake it for live.
+        crate::port_file::remove_if_present(Path::new(
+            crate::port_file::CODEX_APP_SERVER_PORT_FILE,
+        ))
+        .expect("clearing stale codex app-server port file");
+
         // Reuse the previously recorded port if the file is still
         // around (stable ports across a container restart aid
         // debugging); otherwise let the kernel pick.  Remove the file
