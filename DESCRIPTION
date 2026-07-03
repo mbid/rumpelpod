@@ -1,0 +1,12 @@
+Migrate legacy Localhost host encoding in pod DB
+
+The Podman support changes turned Host::Localhost into a struct variant
+carrying an engine field. Pod records written by earlier versions store
+the host column as the JSON string "Localhost", which the new variant
+no longer deserializes, so any operation on such pods failed with
+"invalid type: unit variant, expected struct variant".
+
+Rewrite legacy rows to the current encoding when opening the database.
+ContainerEngine::Auto prefers Docker, so migrated pods keep targeting
+the Docker engine they were created with, matching how legacy Ssh rows
+already default their engine field.
