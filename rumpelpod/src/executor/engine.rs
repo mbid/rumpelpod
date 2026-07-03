@@ -348,9 +348,9 @@ impl Executor {
     ///
     /// Filters by a backend-specific repo label (full path on docker,
     /// repo-hash on kubernetes).  Returns a map keyed by logical pod
-    /// name (from the `rumpelpod-name` label) with the pod's status
-    /// and backend identifier.  Pods without the name label are
-    /// skipped rather than reported as unnamed.
+    /// name (from the `rumpelpod-name` label) with the pod's status.
+    /// Pods without the name label are skipped rather than reported
+    /// as unnamed.
     pub fn list_by_repo(&self, repo_path: &Path) -> Result<HashMap<String, PodBackendInfo>> {
         match &self.inner {
             Inner::Docker(d) => docker_list_by_repo(d, repo_path),
@@ -363,10 +363,6 @@ impl Executor {
 #[derive(Debug, Clone)]
 pub struct PodBackendInfo {
     pub status: PodStatus,
-    /// Backend's identifier for the pod: docker container id on docker,
-    /// pod name on kubernetes.  Used when callers shell out to
-    /// `docker`/`kubectl` (e.g. interactive exec).
-    pub container_id: String,
 }
 
 /// Options for [`Executor::exec_interactive`].
@@ -452,8 +448,6 @@ impl DockerBackend {
 
 #[derive(Deserialize)]
 struct DockerContainerInspect {
-    #[serde(rename = "Id")]
-    id: Option<String>,
     #[serde(rename = "Config")]
     config: Option<DockerContainerConfig>,
     #[serde(rename = "State")]
@@ -1096,16 +1090,7 @@ fn docker_list_by_repo(
         } else {
             PodStatus::Stopped
         };
-        let container_id = container
-            .id
-            .context("docker container inspect response missing Id")?;
-        out.insert(
-            pod_name,
-            PodBackendInfo {
-                status,
-                container_id,
-            },
-        );
+        out.insert(pod_name, PodBackendInfo { status });
     }
     Ok(out)
 }
@@ -1141,14 +1126,7 @@ fn k8s_list_by_repo(
             "Failed" | "Succeeded" => PodStatus::Gone,
             _ => PodStatus::Disconnected,
         };
-        let container_id = pod.metadata.name.unwrap_or_default();
-        out.insert(
-            pod_name,
-            PodBackendInfo {
-                status,
-                container_id,
-            },
-        );
+        out.insert(pod_name, PodBackendInfo { status });
     }
     Ok(out)
 }

@@ -4,6 +4,7 @@
 //! Integration tests for the `rumpel list` subcommand.
 
 use std::fs;
+use std::process::Command;
 use std::time::Duration;
 
 use retry::delay::{Exponential, Fixed};
@@ -11,7 +12,7 @@ use retry::OperationResult;
 use serde_json::json;
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
-use crate::executor::ExecutorResources;
+use crate::executor::{executor_mode, ExecutorMode, ExecutorResources};
 use crate::ssh::{write_ssh_config, SshRemoteHost, SSH_USER};
 
 #[test]
@@ -86,6 +87,104 @@ fn list_shows_created_pod() {
         stdout.contains("running"),
         "Expected 'running' status in output: {}",
         stdout
+    );
+}
+
+#[test]
+fn list_shows_container_id_without_sync() {
+    fn container_id_column(stdout: &str, pod_name: &str) -> String {
+        let line = stdout
+            .lines()
+            .find(|line| line.contains(pod_name))
+            .unwrap_or_else(|| panic!("no row for pod '{pod_name}' in output: {stdout}"));
+        line.split_whitespace()
+            .last()
+            .expect("matched row is not empty")
+            .to_string()
+    }
+
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let mut daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "cid-test", "--", "echo", "hello"])
+        .output()
+        .expect("Failed to run rumpel enter command");
+    assert!(
+        output.status.success(),
+        "rumpel enter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Without --sync the daemon serves from its cache and never
+    // queries the backend, so the container id must come from the
+    // derivation, not from a live lookup.
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to run rumpel list command");
+    assert!(
+        output.status.success(),
+        "rumpel list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let container_id = container_id_column(&stdout, "cid-test");
+    assert!(
+        container_id.starts_with("rumpel-") && container_id.contains("cid-test"),
+        "unexpected container id '{container_id}' in output: {stdout}"
+    );
+
+    // The derived id must name the real backend container.  SSH and
+    // K8s put the container runtime behind a tunnel / the cluster
+    // API, so only the local engines can be cross-checked directly.
+    let engine_cli = match executor_mode() {
+        ExecutorMode::Docker => Some("docker"),
+        ExecutorMode::Podman => Some("podman"),
+        ExecutorMode::Ssh | ExecutorMode::K8s => None,
+    };
+    if let Some(engine_cli) = engine_cli {
+        let output = Command::new(engine_cli)
+            .args([
+                "ps",
+                "--all",
+                "--filter",
+                "label=dev.rumpelpod.name=cid-test",
+                "--format",
+                "{{.Names}}",
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("{engine_cli} ps failed: {e}"));
+        assert!(output.status.success());
+        let names = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            names.lines().any(|name| name == container_id),
+            "container id '{container_id}' not among {engine_cli} container names: {names}"
+        );
+    }
+
+    // The id is derived from persisted state only, so it must survive
+    // a daemon restart.
+    daemon.kill();
+    let daemon = TestDaemon::start(&home);
+    let output = pod_command(&repo, &daemon)
+        .arg("list")
+        .output()
+        .expect("Failed to run rumpel list command");
+    assert!(
+        output.status.success(),
+        "rumpel list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(
+        container_id_column(&stdout, "cid-test"),
+        container_id,
+        "container id changed across daemon restart: {stdout}"
     );
 }
 
