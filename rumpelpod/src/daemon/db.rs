@@ -218,17 +218,6 @@ pub fn open_db(path: &Path) -> Result<Connection> {
         }
     }
 
-    // Pre-Podman versions serialized Host::Localhost as a unit variant
-    // (the JSON string "Localhost"), which no longer deserializes now
-    // that the variant carries an engine field. Rewrite such rows to the
-    // current encoding; ContainerEngine::Auto prefers Docker, so legacy
-    // pods keep running against the Docker engine they were created with.
-    conn.execute(
-        r#"UPDATE pods SET host = '{"Localhost":{"engine":"auto"}}' WHERE host = '"Localhost"'"#,
-        [],
-    )
-    .context("failed to migrate legacy Localhost host encoding")?;
-
     Ok(conn)
 }
 
@@ -625,49 +614,6 @@ mod tests {
         let pod = get_pod(&conn, &repo_path, "remote").unwrap().unwrap();
         assert_eq!(pod.id, id);
         assert_eq!(pod.host, serde_json::to_string(&ssh_host).unwrap());
-    }
-
-    #[test]
-    fn test_open_db_migrates_legacy_unit_localhost_host() {
-        let temp_dir = TempDir::with_prefix("rumpelpod-db-test-").unwrap();
-        let db_path = temp_dir.path().join("test.db");
-
-        // Simulate a pod row written by a pre-Podman version, which
-        // serialized Host::Localhost as a unit variant.
-        let conn = open_db(&db_path).unwrap();
-        let now = Utc::now().to_rfc3339();
-        conn.execute(
-            "INSERT INTO pods
-                (repo_path, name, host, status, token, image, devcontainer_json,
-                 local_env, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            rusqlite::params![
-                "/home/user/project",
-                "legacy",
-                "\"Localhost\"",
-                PodStatus::Ready.as_str(),
-                "test-token",
-                "img:tag",
-                "{}",
-                "[]",
-                now,
-                now
-            ],
-        )
-        .unwrap();
-        drop(conn);
-
-        let conn = open_db(&db_path).unwrap();
-        let pod = get_pod(&conn, Path::new("/home/user/project"), "legacy")
-            .unwrap()
-            .unwrap();
-        let host: Host = serde_json::from_str(&pod.host).unwrap();
-        assert_eq!(
-            host,
-            Host::Localhost {
-                engine: crate::config::ContainerEngine::Auto,
-            }
-        );
     }
 
     #[test]
