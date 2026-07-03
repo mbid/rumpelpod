@@ -1,5 +1,5 @@
 Bump version to 0.3.0
 
-Bump the rumpelpod crate version from 0.2.0 to 0.3.0. Cargo.lock is
-patched for the rumpelpod entry only; all third party dependencies
-stay at their current locked versions.
+Bump the rumpelpod and tools crate versions from 0.2.0 to 0.3.0.
+Cargo.lock is patched for the workspace crate entries only; all third
+party dependencies stay at their current locked versions.
