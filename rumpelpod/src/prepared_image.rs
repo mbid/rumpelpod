@@ -460,6 +460,13 @@ fn assemble_build_context(
     );
     let binaries = find_rumpel_binaries()?;
 
+    // TODO: BuildKit's incremental context transfer is keyed to the
+    // context path, so a fresh temp dir per build means every
+    // cache-miss build re-transfers the whole context, including
+    // gateway-git/.  Staging at a stable per-repo path would enable
+    // delta transfer for docker and k8s builders (podman's remote API
+    // has no incremental filesync).  Only worth it if cache-miss
+    // builds of large repos turn out to be frequent enough to hurt.
     let tmp = tempfile::tempdir().context("creating build context temp dir")?;
     fs::write(tmp.path().join("Dockerfile"), dockerfile)
         .context("writing Dockerfile to build context")?;
