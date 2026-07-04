@@ -120,6 +120,64 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     Ok(())
 }
 
+/// Read the local Claude Code OAuth credentials, if any.
+///
+/// On Linux, Claude Code stores them in ~/.claude/.credentials.json.
+/// On macOS it stores them in the login Keychain (service "Claude
+/// Code-credentials") instead, and the file usually does not exist.
+/// Try the file first, then fall back to the Keychain.
+pub(crate) fn read_local_credentials(local_home: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(local_home.join(".claude/.credentials.json")) {
+        Ok(data) => return Ok(Some(data)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json"))
+        }
+    }
+    Ok(read_keychain_credentials())
+}
+
+/// Read the Claude Code credentials from the macOS login Keychain.
+///
+/// The item's password is the same JSON document that
+/// .credentials.json holds on Linux.  Any failure degrades to `None`
+/// (same as a missing credentials file) so users authenticating by
+/// other means (API key, env vars) are not blocked.
+#[cfg(target_os = "macos")]
+fn read_keychain_credentials() -> Option<Vec<u8>> {
+    let output = match std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            log::warn!("could not run security(1) to read Claude Code Keychain credentials: {e}");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        // Exit code 44 (errSecItemNotFound) is the normal "no Keychain
+        // credentials" case.
+        if output.status.code() != Some(44) {
+            log::warn!(
+                "security(1) failed reading Claude Code Keychain credentials: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        return None;
+    }
+    let mut data = output.stdout;
+    if data.last() == Some(&b'\n') {
+        data.pop();
+    }
+    (!data.is_empty()).then_some(data)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_keychain_credentials() -> Option<Vec<u8>> {
+    None
+}
+
 /// Copy only authentication credentials from the local machine into
 /// the pod.
 ///
@@ -137,17 +195,13 @@ pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
 
     let mut files: Vec<HomeFileEntry> = Vec::new();
 
-    // .claude/.credentials.json -- OAuth tokens
-    match std::fs::read(local_home.join(".claude/.credentials.json")) {
-        Ok(data) => {
-            files.push(HomeFileEntry {
-                path: ".claude/.credentials.json".to_string(),
-                content: base64_encode(&data),
-                create_parents: true,
-            });
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
+    // OAuth tokens -- .claude/.credentials.json or the macOS Keychain
+    if let Some(data) = read_local_credentials(&local_home)? {
+        files.push(HomeFileEntry {
+            path: ".claude/.credentials.json".to_string(),
+            content: base64_encode(&data),
+            create_parents: true,
+        });
     }
 
     // primaryApiKey -- read-modify-write on .claude.json
@@ -183,4 +237,41 @@ pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
 
     eprintln!("authentication credentials updated");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_home(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rumpelpod-claude-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch home");
+        dir
+    }
+
+    #[test]
+    fn read_local_credentials_prefers_file() {
+        let home = scratch_home("file");
+        std::fs::create_dir_all(home.join(".claude")).expect("create .claude");
+        std::fs::write(home.join(".claude/.credentials.json"), b"{\"k\":1}")
+            .expect("write credentials");
+        let creds = read_local_credentials(&home).expect("read credentials");
+        assert_eq!(creds.as_deref(), Some(b"{\"k\":1}".as_slice()));
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
+
+    // On macOS a missing file falls back to the real login Keychain,
+    // so this is only deterministic elsewhere.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn read_local_credentials_missing_file() {
+        let home = scratch_home("missing");
+        let creds = read_local_credentials(&home).expect("read credentials");
+        assert_eq!(creds, None);
+        std::fs::remove_dir_all(&home).expect("cleanup");
+    }
 }
