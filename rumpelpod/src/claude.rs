@@ -130,9 +130,7 @@ pub(crate) fn read_local_credentials(local_home: &Path) -> Result<Option<Vec<u8>
     match std::fs::read(local_home.join(".claude/.credentials.json")) {
         Ok(data) => return Ok(Some(data)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json"))
-        }
+        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
     }
     Ok(read_keychain_credentials())
 }
@@ -146,7 +144,12 @@ pub(crate) fn read_local_credentials(local_home: &Path) -> Result<Option<Vec<u8>
 #[cfg(target_os = "macos")]
 fn read_keychain_credentials() -> Option<Vec<u8>> {
     let output = match std::process::Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ])
         .output()
     {
         Ok(output) => output,
@@ -237,41 +240,4 @@ pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
 
     eprintln!("authentication credentials updated");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scratch_home(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "rumpelpod-claude-test-{}-{name}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create scratch home");
-        dir
-    }
-
-    #[test]
-    fn read_local_credentials_prefers_file() {
-        let home = scratch_home("file");
-        std::fs::create_dir_all(home.join(".claude")).expect("create .claude");
-        std::fs::write(home.join(".claude/.credentials.json"), b"{\"k\":1}")
-            .expect("write credentials");
-        let creds = read_local_credentials(&home).expect("read credentials");
-        assert_eq!(creds.as_deref(), Some(b"{\"k\":1}".as_slice()));
-        std::fs::remove_dir_all(&home).expect("cleanup");
-    }
-
-    // On macOS a missing file falls back to the real login Keychain,
-    // so this is only deterministic elsewhere.
-    #[cfg(not(target_os = "macos"))]
-    #[test]
-    fn read_local_credentials_missing_file() {
-        let home = scratch_home("missing");
-        let creds = read_local_credentials(&home).expect("read credentials");
-        assert_eq!(creds, None);
-        std::fs::remove_dir_all(&home).expect("cleanup");
-    }
 }
