@@ -154,7 +154,13 @@ fn read_keychain_credentials() -> Option<Vec<u8>> {
     {
         Ok(output) => output,
         Err(e) => {
-            log::warn!("could not run security(1) to read Claude Code Keychain credentials: {e}");
+            // eprintln rather than log::warn: the default log filter
+            // hides warnings, and silently degrading to "no
+            // credentials" would leave users guessing why their pod
+            // asks them to log in again.
+            eprintln!(
+                "warning: could not run security(1) to read Claude Code Keychain credentials: {e}"
+            );
             return None;
         }
     };
@@ -162,9 +168,10 @@ fn read_keychain_credentials() -> Option<Vec<u8>> {
         // Exit code 44 (errSecItemNotFound) is the normal "no Keychain
         // credentials" case.
         if output.status.code() != Some(44) {
-            log::warn!(
-                "security(1) failed reading Claude Code Keychain credentials: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            eprintln!(
+                "warning: security(1) failed reading Claude Code Keychain credentials: {stderr}"
             );
         }
         return None;
