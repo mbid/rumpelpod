@@ -1,9 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE=debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271
-
-FROM $BASE_IMAGE
+# The devcontainer build passes BASE_IMAGE through from the host
+# environment; when unset it arrives as an empty string, so the pinned
+# default must live in the :- fallback rather than the ARG default.
+# devcontainer.json cannot carry the default itself: the devcontainers
+# CLI truncates ${localEnv:VAR:default} values at the next colon, which
+# image references necessarily contain.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE:-debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271}
 
 USER root
 
@@ -18,10 +23,16 @@ USER root
 # older than a week. snapshot.debian.org throttles under load, hence
 # the retries.
 ARG APT_SNAPSHOT=20260623T000000Z
+# sed exits 0 even when nothing matches, so assert the rewrite took;
+# otherwise a base image with a different sources layout would build
+# unpinned without any error.
 RUN sed -i -E \
         -e "s|^URIs: http://deb.debian.org/debian-security$|URIs: http://snapshot.debian.org/archive/debian-security/${APT_SNAPSHOT}\nCheck-Valid-Until: no|" \
         -e "s|^URIs: http://deb.debian.org/debian$|URIs: http://snapshot.debian.org/archive/debian/${APT_SNAPSHOT}\nCheck-Valid-Until: no|" \
         /etc/apt/sources.list.d/debian.sources \
+    && grep -q "^URIs: http://snapshot.debian.org/archive/debian/${APT_SNAPSHOT}$" \
+        /etc/apt/sources.list.d/debian.sources \
+    && ! grep -rq "deb.debian.org" /etc/apt/sources.list.d/ \
     && echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
 RUN export DEBIAN_FRONTEND=noninteractive \
