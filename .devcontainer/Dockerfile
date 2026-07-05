@@ -9,12 +9,18 @@ USER root
 
 # Freeze apt on the snapshot.debian.org timestamp matching the base image
 # build date so package versions do not drift between rebuilds. Bump
-# APT_SNAPSHOT and BASE_IMAGE together. Snapshotted Release files keep the
-# Valid-Until stamp from their build day, so apt's staleness check must be
-# off once the pin is older than a week; GPG verification still applies.
-# snapshot.debian.org throttles under load, hence the retries.
+# APT_SNAPSHOT and BASE_IMAGE together. The URIs are rewritten to the
+# snapshot host directly (rather than using the deb822 Snapshot field)
+# over plain http: the bare base image has no ca-certificates yet, and
+# archive integrity comes from the signed InRelease files, not the
+# transport. Snapshotted Release files keep the Valid-Until stamp from
+# their build day, so apt's staleness check must be off once the pin is
+# older than a week. snapshot.debian.org throttles under load, hence
+# the retries.
 ARG APT_SNAPSHOT=20260623T000000Z
-RUN sed -i "s|^URIs:|Snapshot: ${APT_SNAPSHOT}\nCheck-Valid-Until: no\nURIs:|" \
+RUN sed -i -E \
+        -e "s|^URIs: http://deb.debian.org/debian-security$|URIs: http://snapshot.debian.org/archive/debian-security/${APT_SNAPSHOT}\nCheck-Valid-Until: no|" \
+        -e "s|^URIs: http://deb.debian.org/debian$|URIs: http://snapshot.debian.org/archive/debian/${APT_SNAPSHOT}\nCheck-Valid-Until: no|" \
         /etc/apt/sources.list.d/debian.sources \
     && echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
 
