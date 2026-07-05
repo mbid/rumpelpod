@@ -1,0 +1,7 @@
+Add missing SPDX header to rust-toolchain.toml
+
+A full cargo pipeline run failed only in
+source_files_have_license_header: rust-toolchain.toml (added when
+pinning devcontainer build inputs) was missing the SPDX license
+header. All other 448 tests passed, including every LLM-cache-backed
+claude/codex/grok test, so no cache updates were needed.
