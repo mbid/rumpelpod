@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The pin lives in the :- fallback because the devcontainer build
-# passes BASE_IMAGE through as an empty string when unset.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE:-debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271}
 
