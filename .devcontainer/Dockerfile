@@ -1,27 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The devcontainer build passes BASE_IMAGE through from the host
-# environment; when unset it arrives as an empty string, so the pinned
-# default must live in the :- fallback rather than the ARG default.
-# devcontainer.json cannot carry the default itself: the devcontainers
-# CLI truncates ${localEnv:VAR:default} values at the next colon, which
-# image references necessarily contain.
+# The pin lives in the :- fallback because the devcontainer build
+# passes BASE_IMAGE through as an empty string when unset.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE:-debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271}
 
 USER root
 
-# Freeze apt on the snapshot.debian.org timestamp matching the base image
-# build date so package versions do not drift between rebuilds. Bump
-# APT_SNAPSHOT and BASE_IMAGE together. The URIs are rewritten to the
-# snapshot host directly (rather than using the deb822 Snapshot field)
-# over plain http: the bare base image has no ca-certificates yet, and
-# archive integrity comes from the signed InRelease files, not the
-# transport. Snapshotted Release files keep the Valid-Until stamp from
-# their build day, so apt's staleness check must be off once the pin is
-# older than a week. snapshot.debian.org throttles under load, hence
-# the retries.
+# Freeze apt on the archive snapshot matching the base image build date
+# so package versions do not drift; bump both pins together.
 ARG APT_SNAPSHOT=20260623T000000Z
 # sed exits 0 even when nothing matches, so assert the rewrite took;
 # otherwise a base image with a different sources layout would build
