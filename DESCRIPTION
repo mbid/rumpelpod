@@ -1,0 +1,40 @@
+Build, test, and publish release binaries in CI
+
+Replace the separate build-and-release workflow with a single CI
+workflow that runs the test suite the way local development does:
+inside the .devcontainer image, under sysbox, with systemd and nested
+containers. The linux jobs install sysbox and call ci/run-pipeline.sh,
+which builds the image, boots it, checks out the commit under test, and
+runs cargo pipeline --release. Keeping the sequence in a script keeps
+the workflow thin and lets the same steps run locally.
+
+The commit under test is fetched straight from its origin over the
+network (REPO_URL/COMMIT) rather than bind-mounted, so a fork's own
+repo works by pointing REPO_URL at it. The devcontainer's baked-in
+clone with its prebuilt target/ is preserved for incremental builds.
+The base image is already pinned by digest in the Dockerfile.
+
+The published binaries are the ones the tests ran against, not a
+separate build: cargo pipeline --release builds and tests the optimized
+rumpel binary (the --release flag threads through to xtest, which
+builds the tests and the binary under test with --release), and
+run-pipeline.sh copies that binary out of the container for the release
+job to attach to the GitHub release on tags. macos is build-only
+because its runners have no docker daemon for the pod tests. Jobs are
+flat, not a matrix, so each platform shows up on its own in the checks
+UI.
+
+Getting the LLM replay cache to hit under CI's strict offline mode
+required making the agents deterministic. Claude decides some behavior
+at runtime rather than from the image: it fetches Statsig feature gates
+keyed on a random per-run anonymousId, and those gates add a "ttl"
+prompt-cache hint and inject a random available-skills reminder into
+tool results, so the same devcontainer image behaved differently in CI
+than locally. The claude tests set
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC (no gate fetch) and
+CLAUDE_CODE_DISABLE_THINKING (thinking signatures are fresh every
+generation) in the devcontainer remoteEnv. Two residual, non-Claude
+sources are normalized out of the cache key: the random port the pod
+git server binds (which leaks into git remote -v tool output) and
+grok's available-skills reminder (listed in a nondeterministic on-disk
+order); grok's cache is re-recorded for the new key.
