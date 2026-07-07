@@ -1,17 +1,21 @@
-Show container ids in list without --sync
+Serve real container ids from a daemon cache
 
-The CONTAINER ID column was only populated when --sync queried the
-backend; plain "rumpel list" always showed it blank. The daemon now
-keeps an in-memory cache of backend container ids (docker container
-id, kubernetes pod name), keyed by repo path and pod name, and serves
-list requests from it. The cache is filled at launch (docker create
-prints the id; the k8s pod name is the pod id we chose), refreshed by
-the same per-host queries --sync runs, and entries are dropped when
-the daemon deletes a container, so recreate never shows a stale id.
+The previous iteration (already merged) made plain "rumpel list" show
+the CONTAINER ID column by deriving the backend container name from
+the repo path and pod name, replacing the docker hash id and dropping
+the 12-char truncation. That conflated the availability fix with a
+change of the column's meaning. Restore the original output (docker
+container id, kubernetes pod name, 12-char truncation) and keep it
+available without --sync via an in-memory cache in the daemon.
 
-Because docker assigns ids at creation and nothing persists them,
-a restarted daemon re-fetches ids on the first list: hosts not yet
-reconciled this daemon lifetime are queried once, then marked warmed
-so gone containers do not trigger a backend query on every list.
-SSH hosts are only queried while connected, as with --sync. This
-avoids a DB schema change, for which there is no migration story yet.
+The cache is filled at launch (docker create prints the id on stdout,
+so no extra query) and by the same per-host queries --sync runs;
+entries are dropped at every site where the daemon deletes a
+container, so a recreate never shows a stale id. Docker assigns ids
+at creation and nothing persists them, so a restarted daemon
+re-fetches them on the first list: hosts not yet reconciled this
+daemon lifetime are queried once and then marked warmed, so pods
+whose containers are gone do not trigger a backend query on every
+list. SSH hosts are only queried while connected, as with --sync.
+This avoids a DB schema change, for which there is no migration
+story yet.
