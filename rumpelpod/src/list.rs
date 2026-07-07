@@ -78,9 +78,6 @@ pub fn list(cmd: &ListCommand) -> Result<()> {
             PodStatus::Broken => "broken",
         };
         let repo_state = pod.repo_state.as_deref().unwrap_or("");
-        let header = "CONTAINER ID";
-        let container_id = pod.container_id.as_deref().unwrap_or("");
-        let container_id = &container_id[..container_id.len().min(header.len())];
 
         let mut row = vec![pod.name];
         if show_claude {
@@ -93,7 +90,7 @@ pub fn list(cmd: &ListCommand) -> Result<()> {
         if show_host {
             row.push(pod.host);
         }
-        row.push(container_id.to_string());
+        row.push(pod.container_id);
         table.add_row(row);
     }
 

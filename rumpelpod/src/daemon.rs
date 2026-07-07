@@ -4138,13 +4138,13 @@ impl Daemon for DaemonServer {
             let host = serde_json::from_str::<Host>(&pod.host).ok();
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
 
-            let (status, container_id) = if sync {
+            let status = if sync {
                 let container_info = status_maps
                     .get(&pod.host)
                     .and_then(|m| m.as_ref())
                     .and_then(|status_map| status_map.get(&pod.name));
 
-                let status = match pod.status {
+                match pod.status {
                     db::PodStatus::Ready => match container_info {
                         Some(info) => info.status.clone(),
                         None => {
@@ -4168,13 +4168,19 @@ impl Daemon for DaemonServer {
                     db::PodStatus::Stopping => PodStatus::Stopping,
                     db::PodStatus::Deleting => PodStatus::Deleting,
                     db::PodStatus::DeleteFailed => PodStatus::Broken,
-                };
-                let container_id = container_info.map(|info| info.container_id.clone());
-                (status, container_id)
+                }
             } else {
                 let connection_status = self.pod_connections.status(&repo_path, &pod.name);
-                (cached_pod_status(pod.status, connection_status), None)
+                cached_pod_status(pod.status, connection_status)
             };
+
+            // The backend id is a pure function of the repo path and
+            // pod name.  db::list_pods matches rows on the exact
+            // repo_path, so deriving from the request path reproduces
+            // the launch-time id without querying the backend and
+            // stays correct across daemon restarts.
+            let container_id =
+                crate::executor::pod_id_for(&PodName(pod.name.clone()), &repo_path).to_string();
 
             let git_info = compute_git_info(&repo_path, &pod.name);
 
