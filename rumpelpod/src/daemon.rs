@@ -1554,11 +1554,7 @@ fn copy_claude_config_via_pod(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude.json")),
     };
-    let credentials = match std::fs::read(claude_dir.join(".credentials.json")) {
-        Ok(data) => Some(data),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(anyhow::Error::from(e).context("reading ~/.claude/.credentials.json")),
-    };
+    let credentials = crate::claude::read_local_credentials(&local_home)?;
     let settings = match std::fs::read(claude_dir.join("settings.json")) {
         Ok(data) => Some(data),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
