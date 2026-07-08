@@ -153,6 +153,12 @@ impl HostConnectionRegistry {
     /// brings them up, and callers can also force an immediate probe
     /// via `HostConnection::ensure_connected` (e.g. `Executor::new`).
     pub fn get_or_create(&self, host: &Host) -> Result<Arc<HostConnection>> {
+        // Pods stored by pre-Podman versions carry `ContainerEngine::Auto`
+        // in the database forever, since only a fresh launch resolves it
+        // before storing the host.  Resolve here too so `Executor::new`,
+        // which panics on an unresolved engine, always sees a concrete one.
+        let host = host.clone().resolve_docker_engine()?;
+        let host = &host;
         let key = HostKey::from_host(host);
         let mut conns = self.conns.lock().unwrap();
         if let Some(conn) = conns.get(&key).and_then(Weak::upgrade) {
@@ -167,7 +173,8 @@ impl HostConnectionRegistry {
     /// by paths like `list_pods` that should not implicitly start new
     /// remote connections.
     pub fn get(&self, host: &Host) -> Option<Arc<HostConnection>> {
-        let key = HostKey::from_host(host);
+        let host = host.clone().resolve_docker_engine().ok()?;
+        let key = HostKey::from_host(&host);
         let mut conns = self.conns.lock().unwrap();
         let conn = conns.get(&key).and_then(Weak::upgrade);
         if conn.is_none() {

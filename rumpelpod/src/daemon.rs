@@ -2795,6 +2795,15 @@ impl DaemonServer {
             if let Some(existing) = db::get_pod(&conn, &repo_path, &pod_name.0)? {
                 let existing_host: Host = serde_json::from_str(&existing.host)
                     .context("parsing stored host for existing pod")?;
+                // Pods stored by pre-Podman versions carry
+                // ContainerEngine::Auto in the DB forever, since only a
+                // fresh launch resolves it before storing the host.
+                // Resolve here so the LaunchResult handed back to the
+                // client (which matches on a concrete engine) never
+                // sees Auto for a reconnected pod.
+                let existing_host = existing_host
+                    .resolve_docker_engine()
+                    .context("resolving container engine for existing pod")?;
                 drop(conn);
                 match self.reconnect_pod(
                     &pod_name,
@@ -3343,6 +3352,13 @@ impl DaemonServer {
         // v1 lock: fork on the source's host, ignore any explicit --host.
         let docker_host: Host = serde_json::from_str(&source_record.host)
             .context("parsing source pod's stored host")?;
+        // Pods stored by pre-Podman versions carry ContainerEngine::Auto
+        // in the DB forever, since only a fresh launch resolves it before
+        // storing the host.  Resolve here so the forked pod's stored host,
+        // and the LaunchResult handed back to the client, never carry Auto.
+        let docker_host = docker_host
+            .resolve_docker_engine()
+            .context("resolving container engine for source pod")?;
 
         // Bail mid-turn unless the user opted in.  TTY confirmation
         // happens client-side; the daemon only enforces the policy.

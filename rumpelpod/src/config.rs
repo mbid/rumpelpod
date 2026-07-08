@@ -392,6 +392,32 @@ impl Host {
             }
         }
     }
+
+    /// Resolve `Auto` into a concrete engine for Localhost/SSH hosts
+    /// before opening a connection to an *existing* pod (reconnect,
+    /// stop, delete).  Kubernetes hosts pass through unchanged: their
+    /// `image_builder` only matters for building a fresh image, and
+    /// resolving it here would demand a local docker/podman just to
+    /// reach an already-running cluster pod.
+    ///
+    /// Pods stored by pre-Podman versions carry `Auto` in the database
+    /// forever, since only a fresh launch calls
+    /// `resolve_container_tools` before storing the host.
+    pub fn resolve_docker_engine(self) -> Result<Self> {
+        match self {
+            Host::Localhost { engine } => Ok(Host::Localhost {
+                engine: engine.resolve(true, "local container executor")?,
+            }),
+            Host::Ssh {
+                ssh_destination,
+                engine,
+            } => Ok(Host::Ssh {
+                ssh_destination,
+                engine: engine.resolve(true, "ssh container executor")?,
+            }),
+            host @ Host::Kubernetes { .. } => Ok(host),
+        }
+    }
 }
 
 impl std::fmt::Display for Host {

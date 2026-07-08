@@ -8,13 +8,19 @@
 //! These tests run in the normal Docker-oriented suite and verify that
 //! a host with Podman but no Docker still gets a working local executor,
 //! and that a remote Podman host is reachable over SSH.
+//!
+//! Also covers `ContainerEngine::Auto` resolution for pods stored by
+//! pre-Podman rumpelpod versions, which never had a per-pod engine to
+//! resolve in the first place.
 
 use std::fs;
 
 use rumpelpod::CommandExt;
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
-use crate::executor::{docker_available, skip_test, skip_unless_podman_executor};
+use crate::executor::{
+    self, docker_available, skip_test, skip_unless_podman_executor, ExecutorResources,
+};
 use crate::ssh::{write_ssh_config, SshRemoteHost};
 
 fn last_stdout_line(stdout: &[u8]) -> String {
@@ -129,4 +135,54 @@ fn podman_ssh_smoke() {
         .success()
         .expect("rumpel re-enter on podman ssh host failed");
     assert_eq!(last_stdout_line(&stdout), "again");
+}
+
+/// Pre-Podman versions stored `Host::Localhost` as the bare JSON string
+/// `"Localhost"` rather than today's struct variant. It still
+/// deserializes fine (see the `Host` custom `Deserialize` impl), but
+/// carries `ContainerEngine::Auto` forever since nothing re-resolves a
+/// loaded `Host` before the daemon reconnects to running pods on
+/// startup. Restoring such a pod used to panic in `Executor::new` and
+/// crash-loop the whole daemon.
+#[test]
+fn restart_resolves_legacy_auto_engine_host() {
+    // Restore-on-startup only exercises the localhost Docker path.
+    if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
+        executor::skip_test();
+        return;
+    }
+
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let mut daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+    let pod_name = "legacy-host-pod";
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "echo", "setup"])
+        .success()
+        .expect("initial enter failed");
+
+    daemon.kill();
+
+    let db_path = home.path().join("state/rumpelpod/db.sqlite");
+    let conn = rusqlite::Connection::open(&db_path).expect("opening test db");
+    let updated = conn
+        .execute(
+            "UPDATE pods SET host = '\"Localhost\"' WHERE name = ?1",
+            rusqlite::params![pod_name],
+        )
+        .expect("rewriting stored host to the legacy format");
+    assert_eq!(updated, 1, "expected to rewrite exactly one pod row");
+    drop(conn);
+
+    // Restarting the daemon must survive restoring this pod instead of
+    // panicking on the unresolved Auto engine.
+    let daemon = TestDaemon::start(&home);
+    pod_command(&repo, &daemon)
+        .args(["list"])
+        .success()
+        .expect("daemon should stay up after restoring a legacy-format pod");
 }
