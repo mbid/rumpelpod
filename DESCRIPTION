@@ -1,25 +1,8 @@
-Resolve stale ContainerEngine::Auto in pod hosts
+Raise xtest global retry budget to 10
 
-Pods stored by pre-Podman rumpelpod versions (0.2/0.3, and any version
-before per-pod container-engine tracking existed) carry
-`ContainerEngine::Auto` in the database forever: a fresh launch
-resolves `Auto` to a concrete engine before storing the host, but
-nothing re-resolved a `Host` loaded back from storage before it was
-used to reconnect, stop, delete, or fork an existing pod.
+CI has been seeing pipeline runs fail outright once more than 3 tests
+flake in a single run, since RETRY_BUDGET capped total retries across
+the whole suite regardless of how many distinct tests flaked. Raise
+the budget to 10 so a handful of unrelated flakes don't sink a run.
 
-`restore_running_pods`, which runs unconditionally on daemon startup
-to reconnect to pods that were running before a restart, hit this via
-`Executor::new`'s `panic!("... unresolved container engine auto")`,
-crash-looping the whole daemon (rumpelpod.service repeatedly restarting
-in systemd).
-
-Resolve the engine at `HostConnectionRegistry::get_or_create`/`get`,
-the single chokepoint through which every Docker/SSH connection is
-built, and also right after loading a stored host in the `rumpel
-enter` reentry and fork paths so the `LaunchResult` handed back to
-clients never carries `Auto` either. Kubernetes hosts are left
-untouched: their `image_builder` engine is irrelevant to opening a
-connection to an already-running cluster pod.
-
-Added a regression test that rewrites a pod's stored host to the
-legacy bare-string `"Localhost"` format and restarts the daemon.
+Per-test retry count (XTEST_RETRIES, default 1) is unchanged.
