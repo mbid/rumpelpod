@@ -48,7 +48,8 @@ pub fn list(cmd: &ListCommand) -> Result<()> {
     });
 
     if cmd.json {
-        println!("{}", serde_json::to_string(&pods)?);
+        let json = serde_json::to_string(&pods)?;
+        println!("{json}");
         return Ok(());
     }
 

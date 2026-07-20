@@ -6,30 +6,30 @@ import type { PodStatus } from "./PodStatus";
 /**
  * Information about a pod.
  */
-export type PodInfo = { name: string, status: PodStatus, created: string, 
+export type PodInfo = { name: string, status: PodStatus, created: string,
 /**
  * Host where the pod runs: "local" or an SSH URL like "user@host:port".
  */
-host: string, 
+host: string,
 /**
  * State of the repository in the pod (e.g. "ahead 1, behind 2").
  */
-repo_state: string | null, 
+repo_state: string | null,
 /**
  * Backend id of the pod's container: the full docker container id,
  * or the kubernetes pod name.  Served from the daemon's cache;
  * `None` when the container is gone or the backend has not been
  * reachable since the daemon started.
  */
-container_id: string | null, 
+container_id: string | null,
 /**
  * Committer timestamp (unix seconds) of the tip of the pod's primary branch on the host.
  */
-last_commit_time: number | null, 
+last_commit_time: number | null,
 /**
  * Current Claude Code session state, if known.
  */
-claude_state: ClaudeState | null, 
+claude_state: ClaudeState | null,
 /**
  * Current Codex session state, if known.
  */

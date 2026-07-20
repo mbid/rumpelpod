@@ -338,12 +338,11 @@ RUN native_arch=$(dpkg --print-architecture) \
         native_target=aarch64-unknown-linux-musl; \
     fi \
     && mkdir -p ~/.local/bin \
-    && ln -sf "/workspaces/rumpelpod/target/${native_target}/debug/rumpel" ~/.local/bin/rumpel
+    && cp "/workspaces/rumpelpod/target/${native_target}/debug/rumpel" ~/.local/bin/rumpel
 
 USER root
 
-RUN mv /tmp/rumpelpod-vscode/node_modules /opt/rumpelpod-vscode-node-modules \
-    && rm -rf /tmp/rumpelpod-vscode
+RUN rm -rf /tmp/rumpelpod-vscode
 
 COPY --chmod=755 .devcontainer/start-vscode.sh /usr/local/bin/start-rumpelpod-vscode
 COPY --chown=${USER}:${USER} .devcontainer/rumpelpod.socket .devcontainer/rumpelpod.service .devcontainer/rumpelpod-vscode.service /home/${USER}/.config/systemd/user/

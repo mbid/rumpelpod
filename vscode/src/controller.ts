@@ -71,11 +71,27 @@ export class RumpelpodController {
       const first = plan.files[0];
       if (first !== undefined) {
         await this.reviewDocuments.open(item.repository, item.pod.name, plan, first);
+      } else {
+        await this.reviewDocuments.openStatus(
+          item.repository,
+          item.pod.name,
+          `No changes to review for ${item.pod.name}.`,
+        );
       }
     } catch (error) {
       this.model.logError(`opening review for ${item.pod.name}`, error);
+      const message = errorMessage(error);
+      try {
+        await this.reviewDocuments.openStatus(
+          item.repository,
+          item.pod.name,
+          `Review is not available for ${item.pod.name}: ${message}`,
+        );
+      } catch (statusError) {
+        this.model.logError(`showing review status for ${item.pod.name}`, statusError);
+      }
       await vscode.window.showWarningMessage(
-        `The ${item.pod.name} agent is open, but its review is not available: ${errorMessage(error)}`,
+        `The ${item.pod.name} agent is open, but its review is not available: ${message}`,
       );
     }
   }

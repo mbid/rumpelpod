@@ -110,7 +110,29 @@ async function main() {
         await page.locator(".monaco-workbench").waitFor({ state: "visible", timeout: 60_000 });
         await openRumpelpodView(page);
 
+        const createPod = page.getByRole("button", { name: "Create Pod", exact: true });
+        await createPod.waitFor({ state: "visible", timeout: 30_000 });
+        await createPod.click();
+        const agentPicks = page.locator(".quick-input-list .monaco-list-row");
+        await agentPicks.first().waitFor({ state: "visible", timeout: 30_000 });
+        const agentLabels = (await agentPicks.allTextContents()).join("\n");
+        assert(agentLabels.includes("Claude Code"), `agent picker omitted Claude: ${agentLabels}`);
+        assert(agentLabels.includes("Codex"), `agent picker omitted Codex: ${agentLabels}`);
+        await page.keyboard.press("Escape");
+
         const pod = await locatePodOrReportError(page, podName);
+        await pod.click();
+        const terminalTab = page
+            .locator(".tab")
+            .filter({ hasText: "Rumpelpod:" })
+            .filter({ hasText: podName })
+            .filter({ hasText: "codex" });
+        await terminalTab.first().waitFor({ state: "visible", timeout: 30_000 });
+        await page
+            .locator(".terminal-editor .xterm")
+            .first()
+            .waitFor({ state: "visible", timeout: 30_000 });
+
         await expandTreeItem(pod);
 
         const file = await locateTreeItem(page, changedFile);

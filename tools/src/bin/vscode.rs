@@ -44,7 +44,7 @@ fn run() -> Result<()> {
 
     if args.check {
         check_types(&generated)?;
-        ensure_npm_dependencies(&vscode_dir)?;
+        install_npm_dependencies(&vscode_dir)?;
         run_command(
             Command::new("npm")
                 .args(["run", "check"])
@@ -65,7 +65,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    ensure_npm_dependencies(&vscode_dir)?;
+    install_npm_dependencies(&vscode_dir)?;
     run_command(
         Command::new("npm")
             .args(["run", "package"])
@@ -86,6 +86,7 @@ fn run() -> Result<()> {
         let rumpel = rumpel.display();
         return Err(anyhow::anyhow!("built rumpel binary not found at {rumpel}"));
     }
+    let rumpel = install_rumpel(&rumpel)?;
 
     let mut install = Command::new(&rumpel);
     configure_user_bus(&mut install);
@@ -121,10 +122,34 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn ensure_npm_dependencies(vscode_dir: &Path) -> Result<()> {
-    if vscode_dir.join("node_modules").exists() {
-        return Ok(());
-    }
+fn install_rumpel(source: &Path) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("locating the home directory")?;
+    let bin_dir = home.join(".local/bin");
+    std::fs::create_dir_all(&bin_dir).with_context(|| {
+        let bin_dir = bin_dir.display();
+        format!("creating development binary directory {bin_dir}")
+    })?;
+
+    let staged = tempfile::NamedTempFile::new_in(&bin_dir)
+        .context("creating staged rumpel development binary")?;
+    std::fs::copy(source, staged.path()).context("staging rumpel development binary")?;
+    let permissions = std::fs::metadata(source)
+        .context("reading rumpel development binary permissions")?
+        .permissions();
+    std::fs::set_permissions(staged.path(), permissions)
+        .context("setting rumpel development binary permissions")?;
+    let destination = bin_dir.join("rumpel");
+    staged
+        .persist(&destination)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            let destination = destination.display();
+            format!("installing rumpel development binary at {destination}")
+        })?;
+    Ok(destination)
+}
+
+fn install_npm_dependencies(vscode_dir: &Path) -> Result<()> {
     run_command(
         Command::new("npm").arg("ci").current_dir(vscode_dir),
         "installing VS Code extension dependencies",
@@ -166,6 +191,7 @@ fn generate_types(output: &Path) -> Result<()> {
     PodInfo::export_all(&config).context("generating PodInfo TypeScript bindings")?;
     ReviewPlan::export_all(&config).context("generating ReviewPlan TypeScript bindings")?;
     AgentKind::export_all(&config).context("generating AgentKind TypeScript bindings")?;
+    normalize_generated_types(output)?;
 
     std::fs::write(
         output.join("protocol.ts"),
@@ -181,6 +207,44 @@ fn generate_types(output: &Path) -> Result<()> {
         ),
     )
     .context("writing generated TypeScript protocol barrel")?;
+    Ok(())
+}
+
+fn normalize_generated_types(root: &Path) -> Result<()> {
+    let entries = std::fs::read_dir(root).with_context(|| {
+        let root = root.display();
+        format!("reading generated bindings directory {root}")
+    })?;
+    for entry in entries {
+        let entry = entry.context("reading generated bindings entry")?;
+        let path = entry.path();
+        let file_type = entry.file_type().context("reading generated file type")?;
+        if file_type.is_dir() {
+            normalize_generated_types(&path)?;
+            continue;
+        }
+        if !file_type.is_file() || path.extension() != Some(OsStr::new("ts")) {
+            continue;
+        }
+
+        let source = std::fs::read_to_string(&path).with_context(|| {
+            let path = path.display();
+            format!("reading generated TypeScript file {path}")
+        })?;
+        let had_final_newline = source.ends_with('\n');
+        let mut normalized = source
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if had_final_newline {
+            normalized.push('\n');
+        }
+        std::fs::write(&path, normalized).with_context(|| {
+            let path = path.display();
+            format!("normalizing generated TypeScript file {path}")
+        })?;
+    }
     Ok(())
 }
 

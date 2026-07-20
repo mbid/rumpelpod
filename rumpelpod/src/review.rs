@@ -224,18 +224,22 @@ pub fn build_review_plan(
     pod_name: &str,
     paths: &[String],
 ) -> Result<ReviewPlan> {
-    let target = format!("refs/rumpelpod/{pod_name}");
+    let target_ref = format!("refs/rumpelpod/{pod_name}");
+    let target_commit = format!("{target_ref}^{{commit}}");
     let ref_check = Command::new("git")
-        .args(["rev-parse", "--verify", &target])
+        .args(["rev-parse", "--verify", &target_commit])
         .current_dir(repo_root)
         .output()
         .context("failed to check pod ref")?;
 
     if !ref_check.status.success() {
         return Err(anyhow::anyhow!(
-            "pod ref '{target}' not found in host repository (pod has no commits yet)"
+            "pod ref '{target_ref}' not found in host repository (pod has no commits yet)"
         ));
     }
+    let target = String::from_utf8_lossy(&ref_check.stdout)
+        .trim()
+        .to_string();
 
     let head_output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -429,7 +433,8 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
     let plan = build_review_plan(&repo_root, &cmd.name, &cmd.paths)?;
     if cmd.json {
-        println!("{}", serde_json::to_string(&plan)?);
+        let json = serde_json::to_string(&plan)?;
+        println!("{json}");
         return Ok(());
     }
 

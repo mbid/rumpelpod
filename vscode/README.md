@@ -23,10 +23,12 @@ cargo vscode
 ```
 
 The devcontainer starts that workspace at port 3000 and forwards it as
-`Rumpelpod VS Code`. Use `npm run watch` for TypeScript-only iteration, and run
-`cargo vscode` again when the daemon, generated contracts, or installed VSIX
-must change. `cargo vscode --check` performs the extension checks used by the
-Rust pipeline without updating either live service.
+`Rumpelpod VS Code`. Its per-container password is available with
+`cat ~/.config/rumpelpod/vscode-password`. Use `npm run watch` for
+TypeScript-only iteration, and run `cargo vscode` again when the daemon,
+generated contracts, or installed VSIX must change. `cargo vscode --check`
+performs the extension checks used by the Rust pipeline without updating
+either live service.
 
 The browser integration test launches an isolated code-server instance and a
 real rumpelpod daemon, then drives the packaged extension with Playwright. Run
