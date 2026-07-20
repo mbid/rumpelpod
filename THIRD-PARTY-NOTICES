@@ -7308,6 +7308,8 @@ Used by:
   - objc2-encode 4.1.0  (https://github.com/madsmtm/objc2)
   - objc2 0.6.4  (https://github.com/madsmtm/objc2)
   - rsqlite-vfs 0.1.1
+  - ts-rs-macros 12.0.1  (https://github.com/Aleph-Alpha/ts-rs)
+  - ts-rs 12.0.1  (https://github.com/Aleph-Alpha/ts-rs)
 MIT License
 
 Copyright (c) <year> <copyright holders>
@@ -7479,6 +7481,7 @@ Used by:
   - aho-corasick 1.1.4  (https://github.com/BurntSushi/aho-corasick)
   - jiff 0.2.29  (https://github.com/BurntSushi/jiff)
   - memchr 2.8.2  (https://github.com/BurntSushi/memchr)
+  - termcolor 1.4.1  (https://github.com/BurntSushi/termcolor)
   - walkdir 2.5.0  (https://github.com/BurntSushi/walkdir)
 The MIT License (MIT)
 
