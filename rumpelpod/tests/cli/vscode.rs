@@ -4,14 +4,14 @@
 //! Browser integration coverage for the VS Code extension.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::process::CommandExt as ProcessCommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use indoc::{formatdoc, indoc};
-use nix::sys::signal::{killpg, Signal};
+use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use rumpelpod::CommandExt as RumpelCommandExt;
 
@@ -25,11 +25,11 @@ const CHANGED_FILE: &str = "browser-diff.txt";
 const ORIGINAL_CONTENT: &str = "content from the host";
 const POD_CONTENT: &str = "content from the pod";
 
-struct ProcessGroup {
+struct CodeServer {
     child: Child,
 }
 
-impl Drop for ProcessGroup {
+impl Drop for CodeServer {
     fn drop(&mut self) {
         match self.child.try_wait() {
             Ok(Some(_)) => return,
@@ -40,8 +40,8 @@ impl Drop for ProcessGroup {
         }
 
         let pid = Pid::from_raw(self.child.id() as i32);
-        if let Err(error) = killpg(pid, Signal::SIGTERM) {
-            eprintln!("stopping code-server process group failed: {error}");
+        if let Err(error) = kill(pid, Signal::SIGTERM) {
+            eprintln!("stopping code-server failed: {error}");
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -51,8 +51,8 @@ impl Drop for ProcessGroup {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Ok(None) => {
-                    if let Err(error) = killpg(pid, Signal::SIGKILL) {
-                        eprintln!("killing code-server process group failed: {error}");
+                    if let Err(error) = kill(pid, Signal::SIGKILL) {
+                        eprintln!("killing code-server failed: {error}");
                     }
                     if let Err(error) = self.child.wait() {
                         eprintln!("waiting for killed code-server failed: {error}");
@@ -125,6 +125,33 @@ fn reserve_loopback_port() -> u16 {
     listener.local_addr().expect("read reserved port").port()
 }
 
+fn code_server_is_ready(port: u16) -> bool {
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .is_err()
+    {
+        return false;
+    }
+    if stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    let compact: String = response
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    response.starts_with("HTTP/1.1 200") && compact.contains("\"status\":\"alive\"")
+}
+
 fn wait_for_pod_ref(repo: &TestRepo, expected_commit: &str) {
     let pod_ref = format!("refs/rumpelpod/{POD_NAME}");
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -146,19 +173,22 @@ fn wait_for_pod_ref(repo: &TestRepo, expected_commit: &str) {
     }
 }
 
-fn wait_for_server(child: &mut Child, port: u16) {
+fn wait_for_server(child: &mut Child, port: u16) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return;
-        }
         if let Some(status) = child.try_wait().expect("check code-server status") {
-            panic!("code-server exited before accepting connections: {status}");
+            return Err(format!(
+                "code-server exited before accepting connections: {status}"
+            ));
         }
-        assert!(
-            Instant::now() < deadline,
-            "code-server did not accept connections on port {port} within 30 seconds"
-        );
+        if code_server_is_ready(port) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "code-server did not become healthy on port {port} within 30 seconds"
+            ));
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -189,43 +219,43 @@ fn start_code_server(
     daemon: &TestDaemon,
     user_data_dir: &Path,
     extensions_dir: &Path,
-    port: u16,
-) -> ProcessGroup {
-    let address = format!("127.0.0.1:{port}");
+) -> (CodeServer, u16) {
     let ambient_path = std::env::var("PATH").expect("PATH is not set");
     let daemon_bin = daemon.bin_dir.display();
     let extension_path = format!("{daemon_bin}:{ambient_path}");
 
-    let mut command = Command::new(code_server);
-    command
-        .arg("--auth")
-        .arg("none")
-        .arg("--bind-addr")
-        .arg(&address)
-        .arg("--disable-telemetry")
-        .arg("--disable-update-check")
-        .arg("--disable-getting-started-override")
-        .arg("--user-data-dir")
-        .arg(user_data_dir)
-        .arg("--extensions-dir")
-        .arg(extensions_dir)
-        .arg(repo.path())
-        .env("HOME", &daemon.home_path)
-        .env("PATH", extension_path)
-        .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
-        .stdin(Stdio::null());
-    unsafe {
-        command.pre_exec(|| {
-            libc::setpgid(0, 0);
-            Ok(())
-        });
+    let mut failures = Vec::new();
+    for _attempt in 0..3 {
+        let port = reserve_loopback_port();
+        let address = format!("127.0.0.1:{port}");
+        let mut command = Command::new(code_server);
+        command
+            .arg("--auth")
+            .arg("none")
+            .arg("--bind-addr")
+            .arg(&address)
+            .arg("--disable-telemetry")
+            .arg("--disable-update-check")
+            .arg("--disable-getting-started-override")
+            .arg("--user-data-dir")
+            .arg(user_data_dir)
+            .arg("--extensions-dir")
+            .arg(extensions_dir)
+            .arg(repo.path())
+            .env("HOME", &daemon.home_path)
+            .env("PATH", &extension_path)
+            .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
+            .stdin(Stdio::null());
+        let child = command
+            .spawn_with_logging("CODE-SERVER")
+            .expect("start code-server");
+        let mut server = CodeServer { child };
+        match wait_for_server(&mut server.child, port) {
+            Ok(()) => return (server, port),
+            Err(error) => failures.push(error),
+        }
     }
-    let child = command
-        .spawn_with_logging("CODE-SERVER")
-        .expect("start code-server");
-    let mut group = ProcessGroup { child };
-    wait_for_server(&mut group.child, port);
-    group
+    panic!("code-server failed to start after three attempts: {failures:?}")
 }
 
 fn write_code_server_settings(user_data_dir: &Path) {
@@ -338,14 +368,12 @@ fn vscode_browser_opens_pod_change_as_diff() {
     write_code_server_settings(&user_data_dir);
     install_extension(&code_server, &vsix, &user_data_dir, &extensions_dir);
 
-    let port = reserve_loopback_port();
-    let _code_server = start_code_server(
+    let (_code_server, port) = start_code_server(
         &code_server,
         &repo,
         &daemon,
         &user_data_dir,
         &extensions_dir,
-        port,
     );
     let artifacts = root
         .join("target/vscode-integration")

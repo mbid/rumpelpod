@@ -100,6 +100,16 @@ async function main() {
 
         const diffEditor = page.locator(".monaco-diff-editor").last();
         await diffEditor.waitFor({ state: "visible", timeout: 30_000 });
+        await diffEditor
+            .locator(".view-line")
+            .filter({ hasText: originalContent })
+            .first()
+            .waitFor({ state: "visible", timeout: 30_000 });
+        await diffEditor
+            .locator(".view-line")
+            .filter({ hasText: podContent })
+            .first()
+            .waitFor({ state: "visible", timeout: 30_000 });
         const editorText = await diffEditor.locator(".view-lines").allTextContents();
         const rendered = editorText.join("\n");
         assert(
