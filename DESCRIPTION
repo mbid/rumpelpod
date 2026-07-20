@@ -1,5 +1,6 @@
 Bump coding agent CLIs and refresh offline caches
 
 Update the devcontainer and integration fixtures to current Claude Code,
-Codex, Grok, and pi releases. Regenerate real API response caches so the
-updated agents remain covered by deterministic offline tests.
+Codex, Grok, and pi releases. Adapt Claude tests to its native package
+split and flushed session semantics. Regenerate real API response caches
+so the updated agents remain covered by deterministic offline tests.

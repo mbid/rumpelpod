@@ -18,31 +18,29 @@ use crate::executor::ExecutorResources;
 /// Pinned Claude Code version for deterministic tests.
 const CLAUDE_CODE_VERSION: &str = "2.1.216";
 
-/// npm registry URL for the pinned Claude Code version.
-fn claude_code_tarball_url() -> String {
-    format!("https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-{CLAUDE_CODE_VERSION}.tgz")
-}
-
 /// Write a devcontainer with a pinned Claude CLI.
 ///
-/// Downloads the pinned npm package inside the Docker build and
-/// extracts it without npm -- only the node runtime is needed.
-/// Omitting npm also prevents Claude CLI's background `npm view`
-/// update check.  Date drift in the request body is handled at the
-/// cache-proxy layer (see normalize_cache_fields), so no Date hook
-/// is needed here.
+/// Downloads the pinned platform package directly because the wrapper
+/// package's postinstall script normally selects and installs this native
+/// binary. Avoiding the wrapper also prevents its npm update checks. Date
+/// drift in the request body is handled at the cache-proxy layer (see
+/// normalize_cache_fields), so no Date hook is needed here.
 fn write_claude_test_devcontainer(repo: &TestRepo) {
-    let tarball_url = claude_code_tarball_url();
-
     let extra_dockerfile = formatdoc! {r#"
-        RUN apk add --no-cache nodejs curl
-        RUN mkdir -p /usr/local/bin /usr/local/lib \
-            && curl -fsSL "{tarball_url}" \
-            | tar xz -C /usr/local/lib \
-            && mv /usr/local/lib/package /usr/local/lib/claude-code \
-            && ln -s /usr/local/lib/claude-code/cli.js /usr/local/bin/claude \
-            && chmod +x /usr/local/lib/claude-code/cli.js
-    "#};
+        RUN apk add --no-cache curl
+        RUN arch="$(uname -m)" \
+            && case "$arch" in \
+                x86_64) claude_arch=x64 ;; \
+                aarch64) claude_arch=arm64 ;; \
+                *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+            esac \
+            && package="claude-code-linux-$claude_arch" \
+            && mkdir -p /tmp/claude-code /usr/local/bin \
+            && curl -fsSL "https://registry.npmjs.org/@anthropic-ai/$package/-/$package-{CLAUDE_CODE_VERSION}.tgz" \
+            | tar xz -C /tmp/claude-code \
+            && mv /tmp/claude-code/package/claude /usr/local/bin/claude \
+            && chmod +x /usr/local/bin/claude
+    "#, CLAUDE_CODE_VERSION = CLAUDE_CODE_VERSION};
 
     // ANTHROPIC_BASE_URL points at the pod server's LLM cache proxy
     // route.  `${containerEnv:RUMPELPOD_SERVER_PORT}` resolves to the
@@ -261,6 +259,11 @@ impl ClaudeSession {
     ///
     /// Periodically dumps the screen contents so failures are debuggable.
     pub fn wait_for(&mut self, needle: &str) -> String {
+        let contents = self.parser.screen().contents();
+        if contents.contains(needle) {
+            return contents;
+        }
+
         let mut last_dump = Instant::now();
 
         loop {
