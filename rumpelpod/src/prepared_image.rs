@@ -1458,7 +1458,7 @@ fn install_node_standalone() -> Result<PathBuf> {
 /// Pinned Grok CLI version.  xAI serves a per-(version, platform) static
 /// binary, so pinning keeps prepared images reproducible instead of
 /// tracking whatever `stable` points at on a given day.
-const GROK_VERSION: &str = "0.2.60";
+const GROK_VERSION: &str = "0.2.106";
 
 /// Download and install the pinned Grok CLI binary matching the host
 /// architecture.

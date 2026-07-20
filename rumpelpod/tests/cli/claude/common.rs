@@ -16,7 +16,7 @@ use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::ExecutorResources;
 
 /// Pinned Claude Code version for deterministic tests.
-const CLAUDE_CODE_VERSION: &str = "2.1.85";
+const CLAUDE_CODE_VERSION: &str = "2.1.216";
 
 /// npm registry URL for the pinned Claude Code version.
 fn claude_code_tarball_url() -> String {

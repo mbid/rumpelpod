@@ -226,7 +226,7 @@ RUN dpkg_arch=$(dpkg --print-architecture) && \
     mkdir -p ~/.cargo && \
     printf '[build]\ntarget = "%s"\n' "$default_target" > ~/.cargo/config.toml
 
-RUN curl -fsSL https://claude.ai/install.sh | bash -s 2.1.201
+RUN curl -fsSL https://claude.ai/install.sh | bash -s 2.1.216
 
 USER root
 
@@ -237,7 +237,7 @@ RUN ARCH=$(uname -m) && \
         x86_64) CODEX_ARCH="x86_64-unknown-linux-musl" ;; \
         aarch64) CODEX_ARCH="aarch64-unknown-linux-musl" ;; \
     esac && \
-    curl -fsSL "https://github.com/openai/codex/releases/download/rust-v0.142.5/codex-$CODEX_ARCH.tar.gz" \
+    curl -fsSL "https://github.com/openai/codex/releases/download/rust-v0.144.6/codex-$CODEX_ARCH.tar.gz" \
     | tar xz -C /tmp && \
     mv "/tmp/codex-$CODEX_ARCH" /usr/local/bin/codex && \
     chmod +x /usr/local/bin/codex
@@ -249,10 +249,10 @@ RUN ARCH=$(uname -m) && \
         x86_64) GROK_ARCH="x86_64" ;; \
         aarch64) GROK_ARCH="aarch64" ;; \
     esac && \
-    curl -fsSL "https://x.ai/cli/grok-0.2.60-linux-$GROK_ARCH" -o /usr/local/bin/grok && \
+    curl -fsSL "https://x.ai/cli/grok-0.2.106-linux-$GROK_ARCH" -o /usr/local/bin/grok && \
     chmod +x /usr/local/bin/grok
 
-ARG PI_VERSION=0.79.10
+ARG PI_VERSION=0.80.10
 ARG NODE_VERSION=22.23.1
 
 # pi requires a newer Node than stable distro packages often provide.
