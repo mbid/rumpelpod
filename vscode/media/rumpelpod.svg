@@ -1,0 +1,6 @@
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path fill="none" stroke="currentColor" stroke-width="1.8" d="M5 7.5 12 3l7 4.5v9L12 21l-7-4.5zm0 0 7 4.5 7-4.5M12 12v9"/>
+  <circle cx="12" cy="12" r="2" fill="currentColor"/>
+</svg>

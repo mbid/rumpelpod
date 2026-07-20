@@ -1,0 +1,7 @@
+.gitignore
+esbuild.mjs
+integration/**
+node_modules/**
+src/**
+tsconfig.json
+*.vsix

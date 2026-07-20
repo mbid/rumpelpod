@@ -1,0 +1,152 @@
+{
+  "name": "rumpelpod-vscode",
+  "displayName": "Rumpelpod",
+  "description": "Switch between rumpelpod agents and review their changes.",
+  "version": "0.4.0",
+  "publisher": "nvidia",
+  "license": "Apache-2.0",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NVIDIA/rumpelpod.git",
+    "directory": "vscode"
+  },
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onView:rumpelpod.pods"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "rumpelpod.createPod",
+        "title": "Create Pod",
+        "category": "Rumpelpod",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rumpelpod.refresh",
+        "title": "Refresh Pods",
+        "category": "Rumpelpod",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rumpelpod.openPod",
+        "title": "Open Pod",
+        "category": "Rumpelpod"
+      },
+      {
+        "command": "rumpelpod.changeAgent",
+        "title": "Change Agent",
+        "category": "Rumpelpod",
+        "icon": "$(person)"
+      },
+      {
+        "command": "rumpelpod.openReviewFile",
+        "title": "Open Review File",
+        "category": "Rumpelpod"
+      }
+    ],
+    "configuration": {
+      "title": "Rumpelpod",
+      "properties": {
+        "rumpelpod.defaultAgent": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "grok",
+            "pi"
+          ],
+          "default": "codex",
+          "description": "Agent assigned to a pod when no choice has been saved for it."
+        },
+        "rumpelpod.executable": {
+          "type": "string",
+          "default": "rumpel",
+          "description": "Path to the rumpel command used by the extension."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rumpelpod",
+          "title": "Rumpelpod",
+          "icon": "media/rumpelpod.svg"
+        }
+      ]
+    },
+    "views": {
+      "rumpelpod": [
+        {
+          "id": "rumpelpod.pods",
+          "name": "Pods"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "rumpelpod.createPod",
+          "when": "view == rumpelpod.pods",
+          "group": "navigation@1"
+        },
+        {
+          "command": "rumpelpod.refresh",
+          "when": "view == rumpelpod.pods",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "rumpelpod.changeAgent",
+          "when": "view == rumpelpod.pods && viewItem == rumpelpod.pod",
+          "group": "inline@1"
+        },
+        {
+          "command": "rumpelpod.changeAgent",
+          "when": "view == rumpelpod.pods && viewItem == rumpelpod.pod",
+          "group": "rumpelpod@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "rumpelpod.openPod",
+          "when": "false"
+        },
+        {
+          "command": "rumpelpod.changeAgent",
+          "when": "false"
+        },
+        {
+          "command": "rumpelpod.openReviewFile",
+          "when": "false"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc --noEmit",
+    "package": "npm run check && npm run build && vsce package --out dist/rumpelpod-vscode.vsix",
+    "test:integration": "playwright test --config integration/playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "22.15.3",
+    "@types/vscode": "1.109.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3"
+  }
+}
