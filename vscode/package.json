@@ -138,7 +138,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "check": "tsc --noEmit",
-    "package": "npm run check && npm run build && vsce package --out dist/rumpelpod-vscode.vsix"
+    "package": "npm run check && npm run build && vsce package --skip-license --out dist/rumpelpod-vscode.vsix"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
