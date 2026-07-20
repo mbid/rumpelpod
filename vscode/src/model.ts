@@ -165,10 +165,63 @@ function isPodInfo(value: unknown): value is PodInfo {
     "name" in value &&
     "status" in value &&
     "created" in value &&
+    "host" in value &&
+    "repo_state" in value &&
+    "container_id" in value &&
+    "last_commit_time" in value &&
+    "claude_state" in value &&
+    "codex_state" in value &&
     typeof value.name === "string" &&
-    typeof value.status === "string" &&
-    typeof value.created === "string"
+    isPodStatus(value.status) &&
+    typeof value.created === "string" &&
+    typeof value.host === "string" &&
+    isNullableString(value.repo_state) &&
+    isNullableString(value.container_id) &&
+    (value.last_commit_time === null || typeof value.last_commit_time === "number") &&
+    isClaudeState(value.claude_state) &&
+    isCodexState(value.codex_state)
   );
+}
+
+function isPodStatus(value: unknown): value is PodInfo["status"] {
+  switch (value) {
+    case "Running":
+    case "Stopped":
+    case "Gone":
+    case "Disconnected":
+    case "Stopping":
+    case "Deleting":
+    case "Broken":
+      return true;
+  }
+  return false;
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isClaudeState(value: unknown): value is PodInfo["claude_state"] {
+  switch (value) {
+    case null:
+    case "processing":
+    case "waiting_for_input":
+    case "auth_error":
+    case "stopped":
+      return true;
+  }
+  return false;
+}
+
+function isCodexState(value: unknown): value is PodInfo["codex_state"] {
+  switch (value) {
+    case null:
+    case "processing":
+    case "idle":
+    case "error":
+      return true;
+  }
+  return false;
 }
 
 function isReviewPlan(value: unknown): value is ReviewPlan {
