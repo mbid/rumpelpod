@@ -200,18 +200,15 @@ fn file_exists_at_revision(
     revision: &str,
     file_path: &str,
 ) -> Result<bool> {
-    let object = format!("{revision}:{file_path}");
+    let pathspec = format!(":(literal){file_path}");
     let output = Command::new("git")
-        .args(["cat-file", "-e", &object])
+        .args(["ls-tree", "-z", "--name-only", revision, "--", &pathspec])
         .current_dir(repo_root)
         .output()
         .context("failed to check file content at revision")?;
 
     if output.status.success() {
-        return Ok(true);
-    }
-    if output.status.code() == Some(128) {
-        return Ok(false);
+        return Ok(!output.stdout.is_empty());
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -294,7 +291,7 @@ fn get_file_at_commit(
     repo_root: &std::path::Path,
     commit: &str,
     file_path: &str,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .args(["show", &format!("{commit}:{file_path}")])
         .current_dir(repo_root)
@@ -309,7 +306,7 @@ fn get_file_at_commit(
         ));
     }
 
-    Ok(Some(output.stdout))
+    Ok(output.stdout)
 }
 
 /// Write content to a temporary file.
@@ -493,14 +490,14 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
 
         // Get file content at merge base (local/old version)
         let local_content = if review_file.base_exists {
-            get_file_at_commit(&repo_root, &plan.base, file_path)?
+            Some(get_file_at_commit(&repo_root, &plan.base, file_path)?)
         } else {
             None
         };
 
         // Get file content at pod ref (remote/new version)
         let remote_content = if review_file.target_exists {
-            get_file_at_commit(&repo_root, &plan.target, file_path)?
+            Some(get_file_at_commit(&repo_root, &plan.target, file_path)?)
         } else {
             None
         };
