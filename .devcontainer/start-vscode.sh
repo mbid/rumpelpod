@@ -6,6 +6,7 @@ set -eu
 
 workspace=${WORKSPACE:-/workspaces/rumpelpod}
 extension_dir="$workspace/vscode"
+export PATH="$HOME/.local/bin:$PATH"
 
 if [ ! -d "$extension_dir/node_modules" ]; then
     cp -a /opt/rumpelpod-vscode-node-modules "$extension_dir/node_modules"

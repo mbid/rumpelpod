@@ -217,7 +217,7 @@ USER ${USER}
 # The toolchain version must match rust-toolchain.toml at the repo root.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
         --default-toolchain 1.96.1
-ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
+ENV PATH="/home/${USER}/.local/bin:/home/${USER}/.cargo/bin:${PATH}"
 RUN rustup component add rust-analyzer \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
