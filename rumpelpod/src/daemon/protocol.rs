@@ -27,6 +27,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::task::block_in_place;
 use tokio_stream::StreamExt;
+use ts_rs::TS;
 use url::Url;
 
 use crate::async_runtime::block_on;
@@ -136,7 +137,8 @@ fn validate_dns_1123_label(s: &str) -> Result<(), &'static str> {
 }
 
 /// Status of a pod container.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export_to = "PodStatus.ts")]
 pub enum PodStatus {
     Running,
     Stopped,
@@ -153,7 +155,8 @@ pub enum PodStatus {
 }
 
 /// Information about a pod.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export_to = "PodInfo.ts")]
 pub struct PodInfo {
     pub name: String,
     pub status: PodStatus,

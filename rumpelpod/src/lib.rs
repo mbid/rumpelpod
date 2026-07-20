@@ -41,7 +41,7 @@ mod pty_attach;
 mod pty_session;
 mod recreate;
 mod registry;
-mod review;
+pub mod review;
 mod service;
 mod slow_guard;
 mod ssh;
@@ -49,6 +49,7 @@ mod stop;
 mod switch_user;
 mod tcp_proxy;
 mod tunnel;
+pub mod vscode;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

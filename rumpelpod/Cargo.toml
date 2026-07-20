@@ -67,6 +67,7 @@ tar = ">= 0"
 flate2 = ">= 0"
 walkdir = ">= 0"
 tower-http = { version = ">= 0", features = ["compression-gzip", "decompression-gzip"] }
+ts-rs = { version = "12.0.1", features = ["serde-compat"] }
 
 [build-dependencies]
 sha2 = ">= 0"

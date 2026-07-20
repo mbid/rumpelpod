@@ -1,0 +1,6 @@
+Add browser-based VS Code workflow for rumpelpod
+
+Add a VS Code extension for switching among pods with persistent agent
+terminals and native review diffs. Include generated Rust-to-TypeScript
+types, browser-mode development tooling, devcontainer services, and real
+daemon browser integration coverage.

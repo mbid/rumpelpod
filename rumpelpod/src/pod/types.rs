@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::git::GitIdentity;
 
@@ -177,8 +178,9 @@ pub struct WriteHomeFilesResponse {
 // ---------------------------------------------------------------------------
 
 /// Observable state of a Claude Code session inside the pod.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export_to = "ClaudeState.ts")]
 pub enum ClaudeState {
     /// Claude is actively generating a response.
     Processing,
@@ -204,8 +206,9 @@ pub struct NotifyClaudeStateRequest {
 ///
 /// Derived from `thread/status/changed` notifications on the Codex
 /// app-server WebSocket protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export_to = "CodexState.ts")]
 pub enum CodexState {
     /// A turn is running and the agent is actively working.
     Processing,

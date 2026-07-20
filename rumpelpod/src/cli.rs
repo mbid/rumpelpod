@@ -130,6 +130,10 @@ pub struct ListCommand {
     /// Refresh live pod state before printing.
     #[arg(long)]
     pub sync: bool,
+
+    /// Print the daemon response as JSON for editor integrations.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -607,6 +611,10 @@ pub struct ReviewCommand {
     /// Skip prompting before opening each file
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
+
+    /// Print the review revisions and files as JSON without opening a difftool.
+    #[arg(long)]
+    pub json: bool,
 
     /// Restrict review to specific paths (like git difftool -- <path>...)
     #[arg(last = true, value_name = "PATH")]

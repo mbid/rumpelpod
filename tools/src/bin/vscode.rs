@@ -1,0 +1,220 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! Build and refresh the browser VS Code development environment.
+
+use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode};
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use rumpelpod::daemon::protocol::PodInfo;
+use rumpelpod::review::ReviewPlan;
+use rumpelpod::vscode::AgentKind;
+use ts_rs::{Config, TS};
+
+#[derive(Parser)]
+struct Args {
+    /// Verify generated bindings and compile/package the extension without updating services.
+    #[arg(long)]
+    check: bool,
+
+    /// Generate TypeScript bindings without building the extension or updating services.
+    #[arg(long)]
+    types_only: bool,
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
+    let args = Args::parse();
+    let repo_root = tools::repo_root()?;
+    let generated = repo_root.join("vscode/src/generated");
+
+    if args.check {
+        check_types(&generated)?;
+        run_command(
+            Command::new("npm")
+                .args(["run", "check"])
+                .current_dir(repo_root.join("vscode")),
+            "checking the VS Code extension",
+        )?;
+        run_command(
+            Command::new("npm")
+                .args(["run", "package"])
+                .current_dir(repo_root.join("vscode")),
+            "packaging the VS Code extension",
+        )?;
+        return Ok(());
+    }
+
+    generate_types(&generated)?;
+    if args.types_only {
+        return Ok(());
+    }
+
+    let vscode_dir = repo_root.join("vscode");
+    if !vscode_dir.join("node_modules").exists() {
+        run_command(
+            Command::new("npm").arg("ci").current_dir(&vscode_dir),
+            "installing VS Code extension dependencies",
+        )?;
+    }
+    run_command(
+        Command::new("npm")
+            .args(["run", "package"])
+            .current_dir(&vscode_dir),
+        "packaging the VS Code extension",
+    )?;
+
+    run_command(
+        tools::cargo_cmd().args(["build", "-p", "rumpelpod", "--bin", "rumpel"]),
+        "building rumpel",
+    )?;
+    let rumpel = std::env::current_exe()
+        .context("locating the VS Code development tool")?
+        .parent()
+        .context("VS Code development tool has no parent directory")?
+        .join("rumpel");
+    if !rumpel.exists() {
+        let rumpel = rumpel.display();
+        return Err(anyhow::anyhow!("built rumpel binary not found at {rumpel}"));
+    }
+
+    let mut install = Command::new(&rumpel);
+    configure_user_bus(&mut install);
+    run_command(
+        &mut install.arg("system-install"),
+        "updating the rumpelpod daemon",
+    )?;
+
+    let code_server = Path::new("/usr/local/bin/code-server");
+    if !code_server.exists() {
+        return Err(anyhow::anyhow!(
+            "code-server is not installed; rebuild the rumpelpod devcontainer"
+        ));
+    }
+    let vsix = vscode_dir.join("dist/rumpelpod-vscode.vsix");
+    let mut install_extension = Command::new(code_server);
+    configure_user_bus(&mut install_extension);
+    run_command(
+        install_extension
+            .args(["--force", "--install-extension"])
+            .arg(&vsix),
+        "installing the VS Code extension",
+    )?;
+
+    let mut restart = Command::new("systemctl");
+    configure_user_bus(&mut restart);
+    run_command(
+        restart.args(["--user", "restart", "rumpelpod-vscode.service"]),
+        "restarting browser VS Code",
+    )?;
+
+    println!("rumpelpod VS Code is available on port 3000");
+    Ok(())
+}
+
+fn configure_user_bus(command: &mut Command) {
+    let uid = unsafe { libc::getuid() };
+    let runtime_dir = format!("/run/user/{uid}");
+    command.env("XDG_RUNTIME_DIR", &runtime_dir).env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        format!("unix:path={runtime_dir}/bus"),
+    );
+}
+
+fn run_command(command: &mut Command, description: &str) -> Result<()> {
+    let status = command
+        .status()
+        .with_context(|| format!("failed while {description}"))?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("{description} exited with {status}"));
+    }
+    Ok(())
+}
+
+fn generate_types(output: &Path) -> Result<()> {
+    if output.exists() {
+        std::fs::remove_dir_all(output).with_context(|| {
+            let output = output.display();
+            format!("removing generated bindings at {output}")
+        })?;
+    }
+    std::fs::create_dir_all(output).with_context(|| {
+        let output = output.display();
+        format!("creating generated bindings directory {output}")
+    })?;
+
+    let config = Config::new().with_out_dir(output).with_large_int("number");
+    PodInfo::export_all(&config).context("generating PodInfo TypeScript bindings")?;
+    ReviewPlan::export_all(&config).context("generating ReviewPlan TypeScript bindings")?;
+    AgentKind::export_all(&config).context("generating AgentKind TypeScript bindings")?;
+
+    std::fs::write(
+        output.join("protocol.ts"),
+        concat!(
+            "// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n",
+            "// SPDX-License-Identifier: Apache-2.0\n",
+            "\n",
+            "// Rust is the source of truth for these API types.\n",
+            "export type { AgentKind } from \"./AgentKind\";\n",
+            "export type { PodInfo } from \"./PodInfo\";\n",
+            "export type { ReviewFile } from \"./ReviewFile\";\n",
+            "export type { ReviewPlan } from \"./ReviewPlan\";\n",
+        ),
+    )
+    .context("writing generated TypeScript protocol barrel")?;
+    Ok(())
+}
+
+fn check_types(expected: &Path) -> Result<()> {
+    let temp = tempfile::TempDir::with_prefix("rumpelpod-vscode-types-")?;
+    generate_types(temp.path())?;
+    let actual_files = read_tree(temp.path())?;
+    let expected_files = read_tree(expected)?;
+    if actual_files != expected_files {
+        return Err(anyhow::anyhow!(
+            "generated VS Code API types are stale; run `cargo vscode --types-only`"
+        ));
+    }
+    Ok(())
+}
+
+fn read_tree(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    read_tree_into(root, root, &mut files)?;
+    Ok(files)
+}
+
+fn read_tree_into(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| {
+        let dir = dir.display();
+        format!("reading generated bindings directory {dir}")
+    })?;
+    for entry in entries {
+        let entry = entry.context("reading generated bindings entry")?;
+        let path = entry.path();
+        let file_type = entry.file_type().context("reading generated file type")?;
+        if file_type.is_dir() {
+            read_tree_into(root, &path, files)?;
+        } else if file_type.is_file() && path.extension() == Some(OsStr::new("ts")) {
+            let relative = path
+                .strip_prefix(root)
+                .context("generated file escaped its output directory")?
+                .to_path_buf();
+            files.insert(relative, std::fs::read(&path)?);
+        }
+    }
+    Ok(())
+}
