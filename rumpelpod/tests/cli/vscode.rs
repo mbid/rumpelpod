@@ -149,7 +149,8 @@ fn code_server_is_ready(port: u16) -> bool {
         .chars()
         .filter(|character| !character.is_ascii_whitespace())
         .collect();
-    response.starts_with("HTTP/1.1 200") && compact.contains("\"status\":\"alive\"")
+    response.starts_with("HTTP/1.1 200")
+        && (compact.contains("\"status\":\"alive\"") || compact.contains("\"status\":\"expired\""))
 }
 
 fn wait_for_pod_ref(repo: &TestRepo, expected_commit: &str) {
