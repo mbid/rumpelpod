@@ -62,3 +62,6 @@ mod stop;
 mod systemd;
 #[path = "cli/version.rs"]
 mod version;
+#[cfg(target_os = "linux")]
+#[path = "cli/vscode.rs"]
+mod vscode;
