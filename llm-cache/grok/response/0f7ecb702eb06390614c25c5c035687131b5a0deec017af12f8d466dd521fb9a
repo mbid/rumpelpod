@@ -1,0 +1,53 @@
+{"status":200,"path":"/v1/chat/completions","headers":{"access-control-allow-origin":"*","access-control-expose-headers":"*","cache-control":"no-cache","cf-cache-status":"DYNAMIC","cf-ray":"a1e56b4fae0d2518-SJC","content-type":"text/event-stream","date":"Mon, 20 Jul 2026 22:31:59 GMT","server":"cloudflare","set-cookie":"__cf_bm=seh6O5MpWYls2KvI.7OdM89ZVvrfC5VytD0yTnaJMR8-1784586718.6687033-1.0.1.1-Y4Va1.ra5aYYWz73uC4sqEeR9XM4KyZNShz72WeX2eyPq37L_fKQ6hG0JGDOfU.by_4iG4tO0GQG2OBKEdv73j0uDS2j565Oz._.Xfvp43mMMwr30LnzjyvhcTdLjGAu; HttpOnly; SameSite=None; Secure; Path=/; Domain=x.ai; Expires=Mon, 20 Jul 2026 23:01:59 GMT","strict-transport-security":"max-age=31536000","traceparent":"00-ec601f4358c32e796255314ac08e6d89-d1c367020000866d-01","vary":"origin, access-control-request-method, access-control-request-headers","x-data-retention":"zdr","x-ratelimit-limit-requests":"7200","x-ratelimit-limit-tokens":"50000000","x-ratelimit-remaining-requests":"7200","x-ratelimit-remaining-tokens":"50000000","x-request-id":"c3858e44-7b29-91f5-9289-eb39a19e8994","x-zero-data-retention":"true"}}
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":"The","role":"assistant"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" user"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" is"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" asking"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" a"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" simple"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" question"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":":"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" \""}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":"What"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" is"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" the"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" capital"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" of"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" France"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":"?"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" Answer"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" in"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" one"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":" word"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":".\""}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"reasoning_content":"\n"}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{"tool_calls":[{"id":"call-de3434f1-54cc-4f03-bf96-2227a70355bd-0","function":{"name":"session_title","arguments":"{\"session_title\":\"Capital of France One-Word Answer\"}"},"index":0,"type":"function"}]}}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: {"id":"c3858e44-7b29-91f5-9289-eb39a19e8994","object":"chat.completion.chunk","created":1784586719,"model":"grok-4.5","choices":[],"usage":{"prompt_tokens":453,"completion_tokens":20,"total_tokens":531,"prompt_tokens_details":{"text_tokens":453,"audio_tokens":0,"image_tokens":0,"cached_tokens":128},"completion_tokens_details":{"reasoning_tokens":58,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0},"num_sources_used":0,"cost_in_usd_ticks":11564000},"system_fingerprint":"fp_a39489019fa99b6e","service_tier":"default"}
+
+data: [DONE]
+
