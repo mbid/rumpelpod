@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use indoc::{formatdoc, indoc};
+use indoc::formatdoc;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::Pid;
 use rumpelpod::CommandExt as RumpelCommandExt;
@@ -259,19 +259,20 @@ fn start_code_server(
     panic!("code-server failed to start after three attempts: {failures:?}")
 }
 
-fn write_code_server_settings(user_data_dir: &Path) {
+fn write_code_server_settings(user_data_dir: &Path, daemon: &TestDaemon) {
     let settings_dir = user_data_dir.join("User");
     fs::create_dir_all(&settings_dir).expect("create code-server settings directory");
+    let executable = daemon.bin_dir.join("rumpel");
+    let settings = serde_json::json!({
+        "security.workspace.trust.enabled": false,
+        "telemetry.telemetryLevel": "off",
+        "workbench.startupEditor": "none",
+        "diffEditor.renderSideBySide": true,
+        "rumpelpod.executable": executable,
+    });
     fs::write(
         settings_dir.join("settings.json"),
-        indoc! {r#"
-            {
-                "security.workspace.trust.enabled": false,
-                "telemetry.telemetryLevel": "off",
-                "workbench.startupEditor": "none",
-                "diffEditor.renderSideBySide": true
-            }
-        "#},
+        serde_json::to_string_pretty(&settings).expect("serialize code-server settings"),
     )
     .expect("write code-server settings");
 }
@@ -366,7 +367,7 @@ fn vscode_browser_opens_pod_change_as_diff() {
     let user_data_dir = browser_home.path().join("user-data");
     let extensions_dir = browser_home.path().join("extensions");
     fs::create_dir_all(&extensions_dir).expect("create code-server extension directory");
-    write_code_server_settings(&user_data_dir);
+    write_code_server_settings(&user_data_dir, &daemon);
     install_extension(&code_server, &vsix, &user_data_dir, &extensions_dir);
 
     let (_code_server, port) = start_code_server(

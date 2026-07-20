@@ -53,6 +53,24 @@ async function locateTreeItem(page, text) {
     return matching.first();
 }
 
+async function locatePodOrReportError(page, podName) {
+    const pod = page.getByRole("treeitem").filter({ hasText: podName });
+    const failure = page.getByRole("treeitem").filter({ hasText: "Could not list pods" });
+    await pod.or(failure).first().waitFor({ state: "visible" });
+    if (await pod.count()) {
+        return pod.first();
+    }
+
+    const item = failure.first();
+    await item.hover();
+    await page.waitForTimeout(500);
+    const hoverText = await page.locator(".monaco-hover").allTextContents();
+    const markup = await item.evaluate((element) => element.outerHTML);
+    throw new Error(
+        `extension could not list pods; hover: ${JSON.stringify(hoverText)}; item: ${markup}`,
+    );
+}
+
 async function expandTreeItem(item) {
     if ((await item.getAttribute("aria-expanded")) === "true") {
         return;
@@ -92,7 +110,7 @@ async function main() {
         await page.locator(".monaco-workbench").waitFor({ state: "visible", timeout: 60_000 });
         await openRumpelpodView(page);
 
-        const pod = await locateTreeItem(page, podName);
+        const pod = await locatePodOrReportError(page, podName);
         await expandTreeItem(pod);
 
         const file = await locateTreeItem(page, changedFile);
@@ -111,7 +129,7 @@ async function main() {
             .first()
             .waitFor({ state: "visible", timeout: 30_000 });
         const editorText = await diffEditor.locator(".view-lines").allTextContents();
-        const rendered = editorText.join("\n");
+        const rendered = editorText.join("\n").replace(/\u00a0/g, " ");
         assert(
             rendered.includes(originalContent),
             `diff editor did not render original content; rendered text: ${rendered}`,
