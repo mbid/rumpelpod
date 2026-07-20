@@ -52,6 +52,12 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         procps \
         unzip
 
+# Headless browser used by the VS Code integration test. Avoid desktop
+# recommendations because the browser UI itself is never displayed.
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install --yes --no-install-recommends chromium
+
 # Rootless Podman cannot create its user namespace under this outer sandbox.
 # Use Podman's rootful API service. The devcontainer runtime creates a
 # dedicated volume at /var/lib/containers; without it, Podman's rootful storage
@@ -188,6 +194,8 @@ ARG GROUP_ID=1000
 ENV USER=${USER}
 ENV USER_ID=${USER_ID}
 ENV GROUP_ID=${GROUP_ID}
+ENV XDG_RUNTIME_DIR=/run/user/${USER_ID}
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_ID}/bus
 
 # Ensure the user and group exist, handling the case where the base image
 # already provides them (possibly with a different uid/gid/shell).
@@ -198,7 +206,9 @@ RUN if ! getent group ${USER} > /dev/null 2>&1; then \
         useradd -m -u ${USER_ID} -g ${USER} ${USER}; \
     fi && \
     echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
-    usermod -aG docker -s /bin/bash ${USER}
+    usermod -aG docker -s /bin/bash ${USER} \
+    && mkdir -p /var/lib/systemd/linger \
+    && touch /var/lib/systemd/linger/${USER}
 
 ENV CONTAINER_HOST=unix:///run/podman/podman.sock
 
@@ -241,6 +251,23 @@ RUN ARCH=$(uname -m) && \
     | tar xz -C /tmp && \
     mv "/tmp/codex-$CODEX_ARCH" /usr/local/bin/codex && \
     chmod +x /usr/local/bin/codex
+
+# code-server supplies the remote extension host and xterm.js terminal
+# while keeping the development UI accessible through a normal browser.
+ARG CODE_SERVER_VERSION=4.121.0
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64) CODE_SERVER_ARCH="amd64"; CODE_SERVER_SHA256="3860893f15376e5f984492c5c92e87c51975d67e3902410f422823d9f60e06af" ;; \
+        aarch64) CODE_SERVER_ARCH="arm64"; CODE_SERVER_SHA256="de5101a3c1f86b385343f4824e7d6a82c3229cdbb4f18a3277525649338acb71" ;; \
+        *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    CODE_SERVER_TARBALL="code-server-${CODE_SERVER_VERSION}-linux-${CODE_SERVER_ARCH}.tar.gz" && \
+    curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${CODE_SERVER_TARBALL}" \
+        -o "/tmp/${CODE_SERVER_TARBALL}" && \
+    echo "${CODE_SERVER_SHA256}  /tmp/${CODE_SERVER_TARBALL}" | sha256sum -c - && \
+    tar xzf "/tmp/${CODE_SERVER_TARBALL}" -C /opt && \
+    ln -s "/opt/code-server-${CODE_SERVER_VERSION}-linux-${CODE_SERVER_ARCH}/bin/code-server" /usr/local/bin/code-server && \
+    rm "/tmp/${CODE_SERVER_TARBALL}"
 
 # Install the xAI Grok CLI: a single statically-linked binary served
 # per (version, platform), pinned for reproducibility.
@@ -288,7 +315,15 @@ RUN git clone https://github.com/nvidia/rumpelpod /workspaces/rumpelpod \
     && git -C /workspaces/rumpelpod checkout --detach "${RUMPELPOD_REF}"
 WORKDIR /workspaces/rumpelpod
 
-COPY --chown=${USER}:${USER} --chmod=755 commit-msg /workspaces/rumpelpod/.git/hooks/commit-msg
+COPY --chown=${USER}:${USER} --chmod=755 .devcontainer/commit-msg /workspaces/rumpelpod/.git/hooks/commit-msg
+
+# Cache extension dependencies independently from its source so normal
+# TypeScript edits do not make the dependency layer cold.
+COPY --chown=${USER}:${USER} vscode/package.json vscode/package-lock.json /tmp/rumpelpod-vscode/
+RUN npm ci --prefix /tmp/rumpelpod-vscode
+COPY --chown=${USER}:${USER} vscode /tmp/rumpelpod-vscode
+RUN npm --prefix /tmp/rumpelpod-vscode run package \
+    && code-server --force --install-extension /tmp/rumpelpod-vscode/dist/rumpelpod-vscode.vsix
 
 # Populate target/ so incremental builds are fast.
 RUN cargo build --bin rumpel --target x86_64-unknown-linux-musl \
@@ -296,7 +331,29 @@ RUN cargo build --bin rumpel --target x86_64-unknown-linux-musl \
     && cargo build --bin xtest --bin pipeline \
     && cargo test --no-run
 
+RUN native_arch=$(dpkg --print-architecture) \
+    && if [ "$native_arch" = "amd64" ]; then \
+        native_target=x86_64-unknown-linux-musl; \
+    else \
+        native_target=aarch64-unknown-linux-musl; \
+    fi \
+    && mkdir -p ~/.local/bin \
+    && ln -sf "/workspaces/rumpelpod/target/${native_target}/debug/rumpel" ~/.local/bin/rumpel
+
 USER root
+
+RUN mv /tmp/rumpelpod-vscode/node_modules /opt/rumpelpod-vscode-node-modules \
+    && rm -rf /tmp/rumpelpod-vscode
+
+COPY --chmod=755 .devcontainer/start-vscode.sh /usr/local/bin/start-rumpelpod-vscode
+COPY --chown=${USER}:${USER} .devcontainer/rumpelpod.socket .devcontainer/rumpelpod.service .devcontainer/rumpelpod-vscode.service /home/${USER}/.config/systemd/user/
+RUN mkdir -p "/home/${USER}/.config/systemd/user/sockets.target.wants" \
+        "/home/${USER}/.config/systemd/user/default.target.wants" \
+    && ln -s ../rumpelpod.socket \
+        "/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket" \
+    && ln -s ../rumpelpod-vscode.service \
+        "/home/${USER}/.config/systemd/user/default.target.wants/rumpelpod-vscode.service" \
+    && chown -R ${USER}:${USER} "/home/${USER}/.config"
 
 # Pre-download container images so services start without network access.
 # Sources are pinned by digest because tags (especially :latest and :2)
@@ -313,14 +370,14 @@ RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\n
     > /etc/systemd/system/preload-images.service \
     && systemctl enable preload-images.service
 
-COPY provision-k3d.sh /usr/local/bin/provision-k3d.sh
+COPY .devcontainer/provision-k3d.sh /usr/local/bin/provision-k3d.sh
 RUN chmod +x /usr/local/bin/provision-k3d.sh
 
 RUN printf '[Unit]\nDescription=Provision k3d cluster\nAfter=preload-images.service\nRequires=preload-images.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/provision-k3d.sh\nEnvironment=CLOUD_DIR=/workspaces/rumpelpod/cloud\nEnvironment=CONTAINER_USER=%s\n\n[Install]\nWantedBy=multi-user.target\n' "${USER}" \
     > /etc/systemd/system/provision-k3d.service \
     && systemctl enable provision-k3d.service
 
-COPY entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
+COPY .devcontainer/entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
 
 ENV RUMPELPOD_TEST_SYSTEMD=1
 

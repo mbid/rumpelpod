@@ -1,6 +1,7 @@
 {
     "build": {
         "dockerfile": "Dockerfile",
+        "context": "..",
         "args": {
             "BASE_IMAGE": "${localEnv:BASE_IMAGE}"
         }
@@ -10,6 +11,14 @@
         "--env-file", ".env"
     ],
     "containerUser": "user",
+    "forwardPorts": [3000],
+    "portsAttributes": {
+        "3000": {
+            "label": "Rumpelpod VS Code",
+            "onAutoForward": "openBrowser",
+            "protocol": "http"
+        }
+    },
     "mounts": [
         {
             "type": "bind",

@@ -40,19 +40,21 @@ fn run() -> Result<()> {
     let args = Args::parse();
     let repo_root = tools::repo_root()?;
     let generated = repo_root.join("vscode/src/generated");
+    let vscode_dir = repo_root.join("vscode");
 
     if args.check {
         check_types(&generated)?;
+        ensure_npm_dependencies(&vscode_dir)?;
         run_command(
             Command::new("npm")
                 .args(["run", "check"])
-                .current_dir(repo_root.join("vscode")),
+                .current_dir(&vscode_dir),
             "checking the VS Code extension",
         )?;
         run_command(
             Command::new("npm")
                 .args(["run", "package"])
-                .current_dir(repo_root.join("vscode")),
+                .current_dir(&vscode_dir),
             "packaging the VS Code extension",
         )?;
         return Ok(());
@@ -63,13 +65,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    let vscode_dir = repo_root.join("vscode");
-    if !vscode_dir.join("node_modules").exists() {
-        run_command(
-            Command::new("npm").arg("ci").current_dir(&vscode_dir),
-            "installing VS Code extension dependencies",
-        )?;
-    }
+    ensure_npm_dependencies(&vscode_dir)?;
     run_command(
         Command::new("npm")
             .args(["run", "package"])
@@ -94,7 +90,7 @@ fn run() -> Result<()> {
     let mut install = Command::new(&rumpel);
     configure_user_bus(&mut install);
     run_command(
-        &mut install.arg("system-install"),
+        install.arg("system-install"),
         "updating the rumpelpod daemon",
     )?;
 
@@ -123,6 +119,16 @@ fn run() -> Result<()> {
 
     println!("rumpelpod VS Code is available on port 3000");
     Ok(())
+}
+
+fn ensure_npm_dependencies(vscode_dir: &Path) -> Result<()> {
+    if vscode_dir.join("node_modules").exists() {
+        return Ok(());
+    }
+    run_command(
+        Command::new("npm").arg("ci").current_dir(vscode_dir),
+        "installing VS Code extension dependencies",
+    )
 }
 
 fn configure_user_bus(command: &mut Command) {
