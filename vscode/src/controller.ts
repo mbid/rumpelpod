@@ -125,7 +125,11 @@ export class RumpelpodController {
 
   public async restoreAssignedPods(): Promise<void> {
     const last = this.model.lastPod();
-    for (const assignment of this.model.assignedPods()) {
+    const assignments = this.model.assignedPods();
+    if (assignments.length > 0) {
+      await this.terminals.waitForRestoration();
+    }
+    for (const assignment of assignments) {
       try {
         const item = await this.tree.findPod(assignment.repository, assignment.pod);
         if (item === undefined) {

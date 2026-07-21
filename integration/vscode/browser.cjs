@@ -9,6 +9,15 @@ const { createRequire } = require("node:module");
 const requireFromExtension = createRequire(path.join(process.cwd(), "package.json"));
 const { chromium } = requireFromExtension("@playwright/test");
 
+const REFERENCE_IMAGES = [
+    "01-pod-list.png",
+    "02-agent-picker.png",
+    "03-pod-name.png",
+    "04-created-pod.png",
+    "05-review.png",
+    "06-restored-terminal.png",
+];
+
 function requiredEnvironment(name) {
     const value = process.env[name];
     assert(value, `${name} is required`);
@@ -83,16 +92,26 @@ async function expandTreeItem(item) {
     }
 }
 
-async function capture(page, artifacts, referenceImages, name) {
+async function capture(page, artifacts, name) {
     fs.mkdirSync(artifacts, { recursive: true });
     const artifactPath = path.join(artifacts, name);
     await page.screenshot({
         path: artifactPath,
         fullPage: true,
     });
-    if (referenceImages) {
-        fs.mkdirSync(referenceImages, { recursive: true });
-        fs.copyFileSync(artifactPath, path.join(referenceImages, name));
+}
+
+function publishReferenceImages(artifacts, referenceImages) {
+    if (!referenceImages) {
+        return;
+    }
+    for (const name of REFERENCE_IMAGES) {
+        const artifact = path.join(artifacts, name);
+        assert(fs.existsSync(artifact), `successful browser run omitted ${artifact}`);
+    }
+    fs.mkdirSync(referenceImages, { recursive: true });
+    for (const name of REFERENCE_IMAGES) {
+        fs.copyFileSync(path.join(artifacts, name), path.join(referenceImages, name));
     }
 }
 
@@ -122,7 +141,7 @@ async function waitForPod(page, podName) {
 
 function terminalTab(page, podName) {
     return page
-        .locator(".tab")
+        .locator(".tab:visible")
         .filter({ hasText: "Rumpelpod:" })
         .filter({ hasText: podName })
         .filter({ hasText: "codex" });
@@ -168,6 +187,38 @@ async function waitForCodexPrompt(page, terminal, requireStartupOutput = true) {
     }
     const rendered = await terminalText(terminal);
     assert(rendered.includes("\u203a"), `Codex did not reach its input prompt: ${rendered}`);
+}
+
+async function endCodexProcess(page, terminal) {
+    let rendered = "";
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+        if ((await terminal.count()) === 0 || !(await terminal.isVisible())) {
+            return;
+        }
+        await terminal.click();
+        await page.keyboard.press("Control+C");
+        await page.waitForTimeout(500);
+        if ((await terminal.count()) === 0 || !(await terminal.isVisible())) {
+            return;
+        }
+        rendered = await terminalText(terminal);
+        if (rendered.includes("terminated with exit code")) {
+            return;
+        }
+    }
+    throw new Error(`Codex terminal did not exit after repeated interrupts: ${rendered}`);
+}
+
+async function waitForSingleTerminalTab(page, podName) {
+    const deadline = Date.now() + 30_000;
+    const tabs = terminalTab(page, podName);
+    while (Date.now() < deadline) {
+        if ((await tabs.count()) === 1) {
+            return tabs.first();
+        }
+        await page.waitForTimeout(100);
+    }
+    throw new Error(`pod ${podName} did not settle on one terminal tab`);
 }
 
 async function login(page, url, password) {
@@ -216,7 +267,7 @@ async function main() {
 
         const reviewPodBeforeCreation = await locatePodOrReportError(page, podName);
         await reviewPodBeforeCreation.waitFor({ state: "visible", timeout: 30_000 });
-        await capture(page, artifacts, referenceImages, "01-pod-list.png");
+        await capture(page, artifacts, "01-pod-list.png");
 
         await reviewPodBeforeCreation.click();
         await terminalTab(page, podName).first().waitFor({ state: "visible", timeout: 30_000 });
@@ -230,7 +281,7 @@ async function main() {
         const agentLabels = (await agentPicks.allTextContents()).join("\n");
         assert(agentLabels.includes("Claude Code"), `agent picker omitted Claude: ${agentLabels}`);
         assert(agentLabels.includes("Codex"), `agent picker omitted Codex: ${agentLabels}`);
-        await capture(page, artifacts, referenceImages, "02-agent-picker.png");
+        await capture(page, artifacts, "02-agent-picker.png");
         await selectQuickPick(page, "Codex");
 
         const podNameInput = page.locator(".quick-input-widget input");
@@ -241,7 +292,7 @@ async function main() {
             "pod creation did not advance to the name input",
         );
         await podNameInput.fill(createdPodName);
-        await capture(page, artifacts, referenceImages, "03-pod-name.png");
+        await capture(page, artifacts, "03-pod-name.png");
         await page.keyboard.press("Enter");
 
         const createdTerminalTab = terminalTab(page, createdPodName);
@@ -276,7 +327,7 @@ async function main() {
             listedPodLabels.some((label) => label.includes(createdPodName)),
             `created pod was not listed: ${JSON.stringify(listedPodLabels)}`,
         );
-        await capture(page, artifacts, referenceImages, "04-created-pod.png");
+        await capture(page, artifacts, "04-created-pod.png");
 
         const pod = await locatePodOrReportError(page, podName);
         await pod.click();
@@ -343,23 +394,26 @@ async function main() {
             assignedReviewLabel.includes("Codex - running"),
             `opened pod kept a stale agent label: ${assignedReviewLabel}`,
         );
-        await capture(page, artifacts, referenceImages, "05-review.png");
+        await capture(page, artifacts, "05-review.png");
+
+        const createdPodBeforeRestart = await locatePodOrReportError(page, createdPodName);
+        await createdPodBeforeRestart.click();
+        const endingTerminal = page.locator(".terminal-editor .xterm:visible").first();
+        await endingTerminal.waitFor({ state: "visible", timeout: 30_000 });
+        await endCodexProcess(page, endingTerminal);
+        await createdPodBeforeRestart.click();
+        await waitForSingleTerminalTab(page, createdPodName);
+        const restartedTerminal = page.locator(".terminal-editor .xterm:visible").first();
+        await restartedTerminal.waitFor({ state: "visible", timeout: 30_000 });
+        await waitForCodexPrompt(page, restartedTerminal);
 
         await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
         await page.locator(".monaco-workbench").waitFor({ state: "visible", timeout: 60_000 });
         await openRumpelpodView(page);
         await terminalTab(page, createdPodName).first().waitFor({ state: "visible", timeout: 30_000 });
         await terminalTab(page, podName).first().waitFor({ state: "visible", timeout: 30_000 });
-        assert.equal(
-            await terminalTab(page, createdPodName).count(),
-            1,
-            "created pod terminal was duplicated after reload",
-        );
-        assert.equal(
-            await terminalTab(page, podName).count(),
-            1,
-            "review pod terminal was duplicated after reload",
-        );
+        await waitForSingleTerminalTab(page, createdPodName);
+        await waitForSingleTerminalTab(page, podName);
         const restoredCreatedPod = await locatePodOrReportError(page, createdPodName);
         await restoredCreatedPod.click();
         await terminalTab(page, createdPodName).first().waitFor({ state: "visible", timeout: 30_000 });
@@ -376,12 +430,13 @@ async function main() {
             .filter({ hasText: `No changes to review for ${createdPodName}` })
             .first()
             .waitFor({ state: "visible", timeout: 30_000 });
-        await capture(page, artifacts, referenceImages, "06-restored-terminal.png");
+        await capture(page, artifacts, "06-restored-terminal.png");
         assert.equal(
             browserErrors.length,
             0,
             `browser page errors occurred: ${browserErrors.map((error) => error.message).join("; ")}`,
         );
+        publishReferenceImages(artifacts, referenceImages);
     } catch (error) {
         fs.mkdirSync(artifacts, { recursive: true });
         try {

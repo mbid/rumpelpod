@@ -170,7 +170,7 @@ fn get_changed_files(
     paths: &[String],
 ) -> Result<Vec<String>> {
     let mut cmd = Command::new("git");
-    cmd.args(["diff", "--name-only", base, target]);
+    cmd.args(["diff", "--name-only", "-z", base, target]);
     if !paths.is_empty() {
         cmd.arg("--");
         cmd.args(paths);
@@ -186,11 +186,16 @@ fn get_changed_files(
         return Err(anyhow::anyhow!("failed to get changed files: {stderr}"));
     }
 
-    let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect();
+    let mut files = Vec::new();
+    for path in output.stdout.split(|byte| *byte == 0) {
+        if path.is_empty() {
+            continue;
+        }
+        let path = std::str::from_utf8(path)
+            .context("changed file path is not valid UTF-8")?
+            .to_string();
+        files.push(path);
+    }
 
     Ok(files)
 }

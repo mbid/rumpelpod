@@ -11,8 +11,33 @@ const TERMINAL_KEY_ENV = "RUMPELPOD_VSCODE_TERMINAL";
 export class AgentTerminals implements vscode.Disposable {
   private readonly terminals = new Map<string, vscode.Terminal>();
   private readonly closeSubscription: vscode.Disposable;
+  private readonly openSubscription: vscode.Disposable;
 
   public constructor() {
+    this.openSubscription = vscode.window.onDidOpenTerminal((terminal) => {
+      const identity = terminalIdentity(terminal);
+      const matched =
+        identity === undefined
+          ? [...this.terminals.entries()].find(([, candidate]) =>
+              sameTerminal(candidate, terminal),
+            )
+          : undefined;
+      const key = identity ?? matched?.[0];
+      if (key === undefined) {
+        return;
+      }
+      const existing = this.terminals.get(key);
+      if (existing === undefined || existing === terminal) {
+        this.terminals.set(key, terminal);
+        return;
+      }
+      if (terminal.exitStatus !== undefined) {
+        terminal.dispose();
+        return;
+      }
+      existing.dispose();
+      this.terminals.set(key, terminal);
+    });
     this.closeSubscription = vscode.window.onDidCloseTerminal((terminal) => {
       for (const [key, candidate] of this.terminals) {
         if (candidate === terminal) {
@@ -23,6 +48,30 @@ export class AgentTerminals implements vscode.Disposable {
     });
   }
 
+  public waitForRestoration(): Promise<void> {
+    // VS Code restores persistent terminals independently of extension activation.
+    // Let that list settle before deciding which assigned agents need a new process.
+    return new Promise((resolve) => {
+      const earliest = Date.now() + 1_000;
+      let quietTimer: NodeJS.Timeout;
+      let deadline: NodeJS.Timeout;
+      const finish = (): void => {
+        clearTimeout(quietTimer);
+        clearTimeout(deadline);
+        opened.dispose();
+        resolve();
+      };
+      const schedule = (): void => {
+        clearTimeout(quietTimer);
+        const delay = Math.max(250, earliest - Date.now());
+        quietTimer = setTimeout(finish, delay);
+      };
+      const opened = vscode.window.onDidOpenTerminal(schedule);
+      deadline = setTimeout(finish, 3_000);
+      schedule();
+    });
+  }
+
   public show(
     repository: Repository,
     pod: string,
@@ -30,15 +79,29 @@ export class AgentTerminals implements vscode.Disposable {
     executable: string,
   ): vscode.Terminal {
     const key = terminalKey(repository, pod);
-    const existing = this.terminals.get(key) ?? findRestoredTerminal(key);
+    const name = terminalName(repository, pod, agent);
+    const candidates = new Set([
+      ...matchingTerminals(key, name, repository.root),
+      ...(this.terminals.get(key) === undefined ? [] : [this.terminals.get(key)]),
+    ]);
+    const existing = [...candidates].find(
+      (candidate): candidate is vscode.Terminal =>
+        candidate !== undefined && candidate.exitStatus === undefined,
+    );
+    for (const candidate of candidates) {
+      if (candidate !== undefined && candidate !== existing) {
+        candidate.dispose();
+      }
+    }
     if (existing !== undefined) {
       this.terminals.set(key, existing);
       existing.show(false);
       return existing;
     }
+    this.terminals.delete(key);
 
     const terminal = vscode.window.createTerminal({
-      name: `Rumpelpod: ${repository.name}/${pod} (${agent})`,
+      name,
       cwd: repository.root,
       env: { [TERMINAL_KEY_ENV]: key },
       iconPath: new vscode.ThemeIcon("terminal"),
@@ -47,27 +110,32 @@ export class AgentTerminals implements vscode.Disposable {
         preserveFocus: false,
       },
       message: `Starting ${agent} in rumpelpod ${pod}`,
+      shellArgs: [agent, "--create", pod],
+      shellPath: executable,
     });
     this.terminals.set(key, terminal);
     terminal.show(false);
-    terminal.sendText(
-      `${quoteForPosixShell(executable)} ${agent} --create ${quoteForPosixShell(pod)}`,
-      true,
-    );
     return terminal;
   }
 
   public replace(repository: Repository, pod: string): void {
     const key = terminalKey(repository, pod);
-    const terminal = this.terminals.get(key) ?? findRestoredTerminal(key);
-    if (terminal !== undefined) {
-      this.terminals.delete(key);
-      terminal.dispose();
+    const prefix = terminalNamePrefix(repository, pod);
+    const terminals = new Set([
+      ...matchingTerminals(key, prefix, repository.root, true),
+      ...(this.terminals.get(key) === undefined ? [] : [this.terminals.get(key)]),
+    ]);
+    this.terminals.delete(key);
+    for (const terminal of terminals) {
+      if (terminal !== undefined) {
+        terminal.dispose();
+      }
     }
   }
 
   public dispose(): void {
     this.closeSubscription.dispose();
+    this.openSubscription.dispose();
   }
 }
 
@@ -75,13 +143,57 @@ function terminalKey(repository: Repository, pod: string): string {
   return JSON.stringify([repository.root, pod]);
 }
 
-function findRestoredTerminal(key: string): vscode.Terminal | undefined {
-  return vscode.window.terminals.find((terminal) => {
-    const creationOptions = terminal.creationOptions;
-    return "env" in creationOptions && creationOptions.env?.[TERMINAL_KEY_ENV] === key;
+function terminalName(repository: Repository, pod: string, agent: AgentKind): string {
+  return `${terminalNamePrefix(repository, pod)}${agent})`;
+}
+
+function terminalNamePrefix(repository: Repository, pod: string): string {
+  return `Rumpelpod: ${repository.name}/${pod} (`;
+}
+
+function matchingTerminals(
+  key: string,
+  name: string,
+  repositoryRoot: string,
+  prefix = false,
+): vscode.Terminal[] {
+  return vscode.window.terminals.filter((terminal) => {
+    if (terminalIdentity(terminal) === key) {
+      return true;
+    }
+    const nameMatches = prefix ? terminal.name.startsWith(name) : terminal.name === name;
+    if (!nameMatches) {
+      return false;
+    }
+    const cwd = terminalCwd(terminal);
+    return cwd === undefined || cwd === repositoryRoot;
   });
 }
 
-function quoteForPosixShell(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
+function terminalIdentity(terminal: vscode.Terminal): string | undefined {
+  const creationOptions = terminal.creationOptions;
+  return "env" in creationOptions
+    ? (creationOptions.env?.[TERMINAL_KEY_ENV] ?? undefined)
+    : undefined;
+}
+
+function terminalCwd(terminal: vscode.Terminal): string | undefined {
+  const creationOptions = terminal.creationOptions;
+  if (!("cwd" in creationOptions)) {
+    return undefined;
+  }
+  const cwd = creationOptions.cwd;
+  if (typeof cwd === "string") {
+    return cwd;
+  }
+  return cwd?.fsPath;
+}
+
+function sameTerminal(left: vscode.Terminal, right: vscode.Terminal): boolean {
+  if (left.name !== right.name) {
+    return false;
+  }
+  const leftCwd = terminalCwd(left);
+  const rightCwd = terminalCwd(right);
+  return leftCwd === undefined || rightCwd === undefined || leftCwd === rightCwd;
 }
