@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import * as vscode from "vscode";
+import { createHash } from "node:crypto";
 
 import type { AgentKind } from "./generated/protocol";
 import type { Repository } from "./model";
@@ -148,7 +149,13 @@ function terminalName(repository: Repository, pod: string, agent: AgentKind): st
 }
 
 function terminalNamePrefix(repository: Repository, pod: string): string {
-  return `Rumpelpod: ${repository.name}/${pod} (`;
+  // Restored terminals can lose their cwd and environment, so the visible name
+  // must distinguish roots even when workspace folders share a basename.
+  const rootIdentity = createHash("sha256")
+    .update(repository.root)
+    .digest("hex")
+    .slice(0, 12);
+  return `Rumpelpod: ${repository.name}/${pod} [${rootIdentity}] (`;
 }
 
 function matchingTerminals(
