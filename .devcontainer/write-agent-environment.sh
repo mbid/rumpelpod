@@ -14,7 +14,8 @@ fi
 
 destination=${RUMPELPOD_AGENT_ENVIRONMENT_FILE:-$user_home/.config/rumpelpod/agent-environment}
 destination_dir=$(dirname "$destination")
-mkdir -p "$destination_dir"
+owner_group=$(id -gn "$container_user")
+install -d -m 700 -o "$container_user" -g "$owner_group" "$destination_dir"
 temp_file=$(mktemp "${destination}.XXXXXX")
 chmod 600 "$temp_file"
 
@@ -62,7 +63,6 @@ else
     done
 fi
 
-owner_group=$(id -gn "$container_user")
 chown "$container_user:$owner_group" "$temp_file"
 mv -f "$temp_file" "$destination"
 temp_file=

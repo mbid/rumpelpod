@@ -309,7 +309,8 @@ fn vscode_agent_environment_is_systemd_safe() {
     let root = workspace_root();
     let temporary = tempfile::tempdir().expect("create agent environment test directory");
     let source = temporary.path().join("process-environment");
-    let destination = temporary.path().join("agent-environment");
+    let credentials = temporary.path().join("rumpelpod");
+    let destination = credentials.join("agent-environment");
     fs::write(
         &source,
         b"UNRELATED=discard\0OPENAI_API_KEY=sentinel\"with\\chars\0",
@@ -317,11 +318,13 @@ fn vscode_agent_environment_is_systemd_safe() {
     .expect("write NUL-delimited process environment");
     let user = std::env::var("USER").expect("USER is not set");
 
-    Command::new("bash")
+    let destination_argument =
+        format!("RUMPELPOD_AGENT_ENVIRONMENT_FILE={}", destination.display());
+    Command::new("sudo")
+        .args(["--non-interactive", "env", &destination_argument, "bash"])
         .arg(root.join(".devcontainer/write-agent-environment.sh"))
         .arg(&user)
         .arg(&source)
-        .env("RUMPELPOD_AGENT_ENVIRONMENT_FILE", &destination)
         .success()
         .expect("write protected agent environment");
 
@@ -340,6 +343,12 @@ fn vscode_agent_environment_is_systemd_safe() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600, "agent environment was not private");
+
+    Command::new("sudo")
+        .args(["--non-interactive", "--user", &user, "touch"])
+        .arg(credentials.join("vscode-password"))
+        .success()
+        .expect("user service can create sibling credentials after root entrypoint setup");
 }
 
 #[test]
