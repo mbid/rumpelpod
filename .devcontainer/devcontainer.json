@@ -9,6 +9,7 @@
     "runArgs": [
         "--runtime=sysbox-runc"
     ],
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/rumpelpod,type=bind",
     "workspaceFolder": "/workspaces/rumpelpod",
     "containerEnv": {
         "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
