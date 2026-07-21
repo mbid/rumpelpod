@@ -53,7 +53,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  void controller.restoreLastPod();
+  void runCommand(model, "restoring assigned pods", () => controller.restoreAssignedPods());
 }
 
 export function deactivate(): void {}

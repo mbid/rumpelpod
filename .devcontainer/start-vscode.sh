@@ -5,7 +5,7 @@
 set -eu
 
 workspace=${WORKSPACE:-/workspaces/rumpelpod}
-extension_dir="$workspace/vscode"
+bind_addr=${RUMPELPOD_VSCODE_BIND_ADDR:-127.0.0.1:3000}
 export PATH="$HOME/.local/bin:$PATH"
 
 credentials_dir="$HOME/.config/rumpelpod"
@@ -22,13 +22,9 @@ if [ -z "$vscode_password" ]; then
 fi
 export PASSWORD="$vscode_password"
 
-npm --prefix "$extension_dir" ci --prefer-offline --no-audit --no-fund
-npm --prefix "$extension_dir" run package
-code-server --force --install-extension "$extension_dir/dist/rumpelpod-vscode.vsix"
-
 exec code-server \
     --auth password \
-    --bind-addr 0.0.0.0:3000 \
+    --bind-addr "$bind_addr" \
     --disable-telemetry \
     --disable-update-check \
     --disable-workspace-trust \

@@ -239,6 +239,7 @@ fn service_unit_content() -> Result<String> {
 
         [Service]
         Type=simple
+        EnvironmentFile=-%h/.config/rumpelpod/agent-environment
         ExecStart={exe_path} daemon
         Restart=on-failure
         RestartSec=5

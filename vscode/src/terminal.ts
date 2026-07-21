@@ -72,7 +72,7 @@ export class AgentTerminals implements vscode.Disposable {
 }
 
 function terminalKey(repository: Repository, pod: string): string {
-  return `${repository.root}\u0000${pod}`;
+  return JSON.stringify([repository.root, pod]);
 }
 
 function findRestoredTerminal(key: string): vscode.Terminal | undefined {

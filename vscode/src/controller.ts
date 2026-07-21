@@ -56,14 +56,23 @@ export class RumpelpodController {
     }
     await this.model.setAgent(repository, pod, agent);
     await this.model.rememberPod(repository, pod);
+    await this.reviewDocuments.openStatus(
+      repository,
+      pod,
+      `${pod} is starting. Its review will be available after the agent creates changes.`,
+    );
     this.terminals.show(repository, pod, agent, this.model.executable());
     this.scheduleRefreshes();
   }
 
   public async openPod(item: PodItem): Promise<void> {
-    const agent = this.model.getAgent(item.repository, item.pod.name) ?? this.model.defaultAgent();
+    const savedAgent = this.model.getAgent(item.repository, item.pod.name);
+    const agent = savedAgent ?? this.model.defaultAgent();
     await this.model.setAgent(item.repository, item.pod.name, agent);
     await this.model.rememberPod(item.repository, item.pod.name);
+    if (savedAgent === undefined) {
+      this.tree.refresh();
+    }
     this.terminals.show(item.repository, item.pod.name, agent, this.model.executable());
 
     try {
@@ -114,23 +123,35 @@ export class RumpelpodController {
     this.terminals.show(item.repository, item.pod.name, agent, this.model.executable());
   }
 
-  public async restoreLastPod(): Promise<void> {
+  public async restoreAssignedPods(): Promise<void> {
     const last = this.model.lastPod();
-    if (last === undefined) {
-      return;
+    for (const assignment of this.model.assignedPods()) {
+      try {
+        const item = await this.tree.findPod(assignment.repository, assignment.pod);
+        if (item === undefined) {
+          continue;
+        }
+        this.terminals.show(
+          item.repository,
+          item.pod.name,
+          assignment.agent,
+          this.model.executable(),
+        );
+      } catch (error) {
+        this.model.logError(`restoring pod ${assignment.pod}`, error);
+      }
     }
-    try {
-      const item = await this.tree.findPod(last.repository, last.pod);
-      if (item === undefined) {
-        return;
+    if (last !== undefined) {
+      try {
+        const item = await this.tree.findPod(last.repository, last.pod);
+        const agent =
+          item === undefined ? undefined : this.model.getAgent(item.repository, item.pod.name);
+        if (item !== undefined && agent !== undefined) {
+          this.terminals.show(item.repository, item.pod.name, agent, this.model.executable());
+        }
+      } catch (error) {
+        this.model.logError(`selecting restored pod ${last.pod}`, error);
       }
-      const agent = this.model.getAgent(item.repository, item.pod.name);
-      if (agent === undefined) {
-        return;
-      }
-      this.terminals.show(item.repository, item.pod.name, agent, this.model.executable());
-    } catch (error) {
-      this.model.logError(`restoring pod ${last.pod}`, error);
     }
   }
 

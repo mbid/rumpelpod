@@ -21,6 +21,10 @@ interface LastPod {
   readonly pod: string;
 }
 
+export interface AssignedPod extends LastPod {
+  readonly agent: AgentKind;
+}
+
 export class RumpelpodModel {
   private repositoriesPromise: Promise<readonly Repository[]> | undefined;
 
@@ -62,6 +66,33 @@ export class RumpelpodModel {
     const assignments = this.assignments();
     assignments[assignmentKey(repository, pod)] = agent;
     await this.workspaceState.update(AGENT_ASSIGNMENTS_KEY, assignments);
+  }
+
+  public assignedPods(): readonly AssignedPod[] {
+    return Object.entries(this.assignments()).map(([key, candidate]) => {
+      let identity: unknown;
+      try {
+        identity = JSON.parse(key);
+      } catch (error) {
+        throw new Error(`stored rumpelpod agent assignment has an invalid key: ${key}`, {
+          cause: error,
+        });
+      }
+      if (
+        !Array.isArray(identity) ||
+        identity.length !== 2 ||
+        typeof identity[0] !== "string" ||
+        typeof identity[1] !== "string"
+      ) {
+        throw new Error(`stored rumpelpod agent assignment has an invalid key: ${key}`);
+      }
+      if (!isAgentKind(candidate)) {
+        throw new Error(
+          `stored rumpelpod agent assignment has an unknown agent: ${String(candidate)}`,
+        );
+      }
+      return { repository: identity[0], pod: identity[1], agent: candidate };
+    });
   }
 
   public defaultAgent(): AgentKind {
@@ -155,7 +186,7 @@ export class RumpelpodModel {
 }
 
 function assignmentKey(repository: Repository, pod: string): string {
-  return `${repository.root}\u0000${pod}`;
+  return JSON.stringify([repository.root, pod]);
 }
 
 function isPodInfo(value: unknown): value is PodInfo {

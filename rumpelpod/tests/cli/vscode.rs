@@ -6,6 +6,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -21,9 +22,11 @@ use crate::common::{
 use crate::executor::ExecutorResources;
 
 const POD_NAME: &str = "vscode-review";
+const CREATED_POD_NAME: &str = "vscode-created";
 const CHANGED_FILE: &str = "browser-diff.txt";
 const ORIGINAL_CONTENT: &str = "content from the host";
 const POD_CONTENT: &str = "content from the pod";
+const CODE_SERVER_PASSWORD: &str = "rumpelpod-browser-test";
 
 struct CodeServer {
     child: Child,
@@ -232,7 +235,7 @@ fn start_code_server(
         let mut command = Command::new(code_server);
         command
             .arg("--auth")
-            .arg("none")
+            .arg("password")
             .arg("--bind-addr")
             .arg(&address)
             .arg("--disable-telemetry")
@@ -246,6 +249,7 @@ fn start_code_server(
             .env("HOME", &daemon.home_path)
             .env("PATH", &extension_path)
             .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
+            .env("PASSWORD", CODE_SERVER_PASSWORD)
             .stdin(Stdio::null());
         let child = command
             .spawn_with_logging("CODE-SERVER")
@@ -264,9 +268,11 @@ fn write_code_server_settings(user_data_dir: &Path, daemon: &TestDaemon) {
     fs::create_dir_all(&settings_dir).expect("create code-server settings directory");
     let executable = daemon.bin_dir.join("rumpel");
     let settings = serde_json::json!({
+        "editor.accessibilitySupport": "on",
         "security.workspace.trust.enabled": false,
         "telemetry.telemetryLevel": "off",
         "workbench.startupEditor": "none",
+        "workbench.secondarySideBar.defaultVisibility": "hidden",
         "diffEditor.renderSideBySide": true,
         "rumpelpod.executable": executable,
     });
@@ -286,19 +292,59 @@ fn run_browser_assertions(root: &Path, port: u16, chromium: &Path, artifacts: &P
         .current_dir(root.join("vscode"))
         .env("RUMPELPOD_VSCODE_URL", base_url)
         .env("RUMPELPOD_VSCODE_POD", POD_NAME)
+        .env("RUMPELPOD_VSCODE_CREATED_POD", CREATED_POD_NAME)
         .env("RUMPELPOD_VSCODE_CHANGED_FILE", CHANGED_FILE)
         .env("RUMPELPOD_VSCODE_ORIGINAL_CONTENT", ORIGINAL_CONTENT)
         .env("RUMPELPOD_VSCODE_POD_CONTENT", POD_CONTENT)
         .env("RUMPELPOD_CHROMIUM", chromium)
         .env("RUMPELPOD_VSCODE_ARTIFACTS", artifacts)
+        .env("RUMPELPOD_VSCODE_PASSWORD", CODE_SERVER_PASSWORD)
         .status()
         .expect("run Playwright browser assertions");
     assert!(status.success(), "Playwright browser assertions failed");
 }
 
 #[test]
-fn vscode_browser_opens_pod_change_as_diff() {
-    println!("xtest:timeout=300");
+fn vscode_agent_environment_is_systemd_safe() {
+    let root = workspace_root();
+    let temporary = tempfile::tempdir().expect("create agent environment test directory");
+    let source = temporary.path().join("process-environment");
+    let destination = temporary.path().join("agent-environment");
+    fs::write(
+        &source,
+        b"UNRELATED=discard\0OPENAI_API_KEY=sentinel\"with\\chars\0",
+    )
+    .expect("write NUL-delimited process environment");
+    let user = std::env::var("USER").expect("USER is not set");
+
+    Command::new("bash")
+        .arg(root.join(".devcontainer/write-agent-environment.sh"))
+        .arg(&user)
+        .arg(&source)
+        .env("RUMPELPOD_AGENT_ENVIRONMENT_FILE", &destination)
+        .success()
+        .expect("write protected agent environment");
+
+    let content = fs::read_to_string(&destination).expect("read agent environment");
+    assert_eq!(
+        content, "OPENAI_API_KEY=\"sentinel\\\"with\\\\chars\"\n",
+        "agent environment was not escaped for systemd"
+    );
+    assert!(
+        !content.contains("UNRELATED"),
+        "unapproved variable was written"
+    );
+    let mode = fs::metadata(&destination)
+        .expect("read agent environment metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "agent environment was not private");
+}
+
+#[test]
+fn vscode_browser_lists_creates_and_reviews_pods() {
+    println!("xtest:timeout=360");
 
     let root = workspace_root();
     let code_server = executable_on_path("code-server");
@@ -319,8 +365,9 @@ fn vscode_browser_opens_pod_change_as_diff() {
     create_commit(repo.path(), "Add browser diff fixture");
 
     let home = TestHome::new();
+    crate::codex::common::setup_controlled_home(&home);
     let executor = ExecutorResources::setup(&home);
-    let daemon = TestDaemon::start(&home);
+    let daemon = TestDaemon::start_with_local_llm_clis(&home);
     write_test_devcontainer(&repo, "", "");
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).expect("write rumpelpod config");
 

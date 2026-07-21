@@ -33,7 +33,10 @@ repo_root=$(cd "$script_dir/.." && pwd)
 
 # The base image is pinned by digest in the Dockerfile itself, so the
 # build needs no --build-arg to stay reproducible.
-docker build --tag rumpelpod-dev "$repo_root/.devcontainer"
+docker build \
+  --file "$repo_root/.devcontainer/Dockerfile" \
+  --tag rumpelpod-dev \
+  "$repo_root"
 
 # Sysbox lets the container run systemd and nested containers (docker,
 # podman, k3d) without --privileged, the same as local development.

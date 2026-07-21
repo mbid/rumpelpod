@@ -9,7 +9,8 @@ Requires=rumpelpod.socket
 [Service]
 Type=simple
 WorkingDirectory=/workspaces/rumpelpod
-ExecStart=/usr/local/bin/start-rumpelpod-vscode
+EnvironmentFile=-%h/.config/rumpelpod/agent-environment
+ExecStart=%h/.local/lib/rumpelpod/start-vscode.sh
 Restart=on-failure
 RestartSec=2
 

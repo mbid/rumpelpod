@@ -22,18 +22,45 @@ installs both, and restarts the browser workspace:
 cargo vscode
 ```
 
-The devcontainer starts that workspace at port 3000 and forwards it as
-`Rumpelpod VS Code`. Its per-container password is available with
-`cat ~/.config/rumpelpod/vscode-password`. Use `npm run watch` for
-TypeScript-only iteration, and run `cargo vscode` again when the daemon,
-generated contracts, or installed VSIX must change. `cargo vscode --check`
-performs the extension checks used by the Rust pipeline without updating
-either live service.
+The devcontainer runs `cargo vscode` after creation, starts that workspace at
+port 3000, and forwards it as `Rumpelpod VS Code`. Its per-container password
+is available with `cat ~/.config/rumpelpod/vscode-password`. The server listens
+only on the container loopback interface, so use the forwarded URL rather than
+trying to reach the container directly. When this repository is itself inside
+a rumpelpod, run `rumpel ports POD_NAME` in the parent checkout and open the
+local port labeled `Rumpelpod VS Code`.
+
+Use `npm run watch` for fast TypeScript compilation feedback. Run `cargo
+vscode` to put any change into the live browser workspace; it refreshes the
+daemon, generated contracts, installed VSIX, and user service files, then waits
+until the browser service is healthy. `cargo vscode --check` performs the
+extension checks used by the Rust pipeline without updating either live
+service.
 
 The browser integration test launches an isolated code-server instance and a
 real rumpelpod daemon, then drives the packaged extension with Playwright. Run
 it through the normal test pipeline:
 
 ```sh
-cargo pipeline vscode_browser_opens_pod_change_as_diff
+cargo pipeline vscode_browser_lists_creates_and_reviews_pods
 ```
+
+Successful runs capture the pod list, agent picker, pod-name prompt, live Codex
+terminal, terminal-plus-review layout, restored terminals, and a Playwright
+trace under `target/vscode-integration/`. To refresh the checked-in reference
+images while running the same test, use:
+
+```sh
+RUMPELPOD_VSCODE_REFERENCE_IMAGES="$PWD/vscode/docs/images" \
+    cargo pipeline vscode_browser_lists_creates_and_reviews_pods
+```
+
+The creation flow reaches a real Codex prompt while the daemon reports the new
+pod as running:
+
+![Created pod with a live Codex terminal](docs/images/04-created-pod.png)
+
+Selecting another pod keeps its agent on the left and opens the daemon-backed
+review diff on the right:
+
+![Pod terminal and review diff](docs/images/05-review.png)

@@ -5,8 +5,15 @@
 # Materialize credentials from cloud/<name>/ directories into the
 # standard locations (~/.kube/, ~/.ssh/) before systemd starts.
 
+set -eu
+
 USER_HOME="/home/${USER:-user}"
 CLOUD_DIR="${WORKSPACE:-/workspaces/rumpelpod}/cloud"
+
+# User services start under a separately-created systemd manager and do not
+# inherit the container process environment. Persist only the agent keys that
+# the daemon and browser terminals are intended to receive.
+/usr/local/bin/write-rumpelpod-agent-environment "${USER:-user}"
 
 # Copy the first kubeconfig found to ~/.kube/config for interactive use.
 for kc in "$CLOUD_DIR"/*/kubeconfig; do

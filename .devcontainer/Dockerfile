@@ -344,14 +344,12 @@ USER root
 
 RUN rm -rf /tmp/rumpelpod-vscode
 
-COPY --chmod=755 .devcontainer/start-vscode.sh /usr/local/bin/start-rumpelpod-vscode
+COPY --chmod=755 .devcontainer/write-agent-environment.sh /usr/local/bin/write-rumpelpod-agent-environment
+COPY --chown=${USER}:${USER} --chmod=755 .devcontainer/start-vscode.sh /home/${USER}/.local/lib/rumpelpod/start-vscode.sh
 COPY --chown=${USER}:${USER} .devcontainer/rumpelpod.socket .devcontainer/rumpelpod.service .devcontainer/rumpelpod-vscode.service /home/${USER}/.config/systemd/user/
 RUN mkdir -p "/home/${USER}/.config/systemd/user/sockets.target.wants" \
-        "/home/${USER}/.config/systemd/user/default.target.wants" \
     && ln -s ../rumpelpod.socket \
         "/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket" \
-    && ln -s ../rumpelpod-vscode.service \
-        "/home/${USER}/.config/systemd/user/default.target.wants/rumpelpod-vscode.service" \
     && chown -R ${USER}:${USER} "/home/${USER}/.config"
 
 # Pre-download container images so services start without network access.

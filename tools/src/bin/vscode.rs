@@ -5,8 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -88,6 +92,25 @@ fn run() -> Result<()> {
     }
     let rumpel = install_rumpel(&rumpel)?;
 
+    let home = dirs::home_dir().context("locating the home directory")?;
+    install_runtime_file(
+        &repo_root.join(".devcontainer/start-vscode.sh"),
+        &home.join(".local/lib/rumpelpod/start-vscode.sh"),
+        0o755,
+    )?;
+    install_runtime_file(
+        &repo_root.join(".devcontainer/rumpelpod-vscode.service"),
+        &home.join(".config/systemd/user/rumpelpod-vscode.service"),
+        0o644,
+    )?;
+
+    let mut daemon_reload = Command::new("systemctl");
+    configure_user_bus(&mut daemon_reload);
+    run_command(
+        daemon_reload.args(["--user", "daemon-reload"]),
+        "reloading development user services",
+    )?;
+
     let mut install = Command::new(&rumpel);
     configure_user_bus(&mut install);
     run_command(
@@ -111,15 +134,110 @@ fn run() -> Result<()> {
         "installing the VS Code extension",
     )?;
 
+    let mut enable = Command::new("systemctl");
+    configure_user_bus(&mut enable);
+    run_command(
+        enable.args(["--user", "enable", "rumpelpod-vscode.service"]),
+        "enabling browser VS Code",
+    )?;
+
     let mut restart = Command::new("systemctl");
     configure_user_bus(&mut restart);
     run_command(
         restart.args(["--user", "restart", "rumpelpod-vscode.service"]),
         "restarting browser VS Code",
     )?;
+    wait_for_vscode()?;
 
     println!("rumpelpod VS Code is available on port 3000");
     Ok(())
+}
+
+fn install_runtime_file(source: &Path, destination: &Path, mode: u32) -> Result<()> {
+    let parent = destination.parent().with_context(|| {
+        let destination = destination.display();
+        format!("runtime file has no parent directory: {destination}")
+    })?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        let parent = parent.display();
+        format!("creating runtime file directory {parent}")
+    })?;
+
+    let staged = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        let parent = parent.display();
+        format!("creating staged runtime file in {parent}")
+    })?;
+    std::fs::copy(source, staged.path()).with_context(|| {
+        let source = source.display();
+        format!("staging runtime file {source}")
+    })?;
+    std::fs::set_permissions(staged.path(), std::fs::Permissions::from_mode(mode))
+        .context("setting runtime file permissions")?;
+    staged
+        .persist(destination)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            let destination = destination.display();
+            format!("installing runtime file at {destination}")
+        })?;
+    Ok(())
+}
+
+fn vscode_is_ready() -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_secs(1)) else {
+        return false;
+    };
+    if stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .is_err()
+    {
+        return false;
+    }
+    if stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    let compact: String = response
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect();
+    response.starts_with("HTTP/1.1 200")
+        && (compact.contains("\"status\":\"alive\"") || compact.contains("\"status\":\"expired\""))
+}
+
+fn wait_for_vscode() -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if vscode_is_ready() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let mut status = Command::new("systemctl");
+    configure_user_bus(&mut status);
+    let output = status
+        .args([
+            "--user",
+            "--no-pager",
+            "--full",
+            "status",
+            "rumpelpod-vscode.service",
+        ])
+        .output()
+        .context("reading browser VS Code service status")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(anyhow::anyhow!(
+        "browser VS Code did not become healthy on port 3000 within 60 seconds\n{stdout}{stderr}"
+    ))
 }
 
 fn install_rumpel(source: &Path) -> Result<PathBuf> {
