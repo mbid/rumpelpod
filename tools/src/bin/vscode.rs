@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -93,6 +93,7 @@ fn run() -> Result<()> {
     let rumpel = install_rumpel(&rumpel)?;
 
     let home = dirs::home_dir().context("locating the home directory")?;
+    remove_legacy_vscode_password(&home)?;
     install_runtime_file(
         &repo_root.join(".devcontainer/start-vscode.sh"),
         &home.join(".local/lib/rumpelpod/start-vscode.sh"),
@@ -151,6 +152,18 @@ fn run() -> Result<()> {
 
     println!("rumpelpod VS Code is available on port 3000");
     Ok(())
+}
+
+fn remove_legacy_vscode_password(home: &Path) -> Result<()> {
+    let password = home.join(".config/rumpelpod/vscode-password");
+    match std::fs::remove_file(&password) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            let password = password.display();
+            Err(error).with_context(|| format!("removing obsolete VS Code password {password}"))
+        }
+    }
 }
 
 fn install_runtime_file(source: &Path, destination: &Path, mode: u32) -> Result<()> {

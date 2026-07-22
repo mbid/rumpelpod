@@ -23,12 +23,13 @@ cargo vscode
 ```
 
 The devcontainer runs `cargo vscode` after creation, starts that workspace at
-port 3000, and forwards it as `Rumpelpod VS Code`. Its per-container password
-is available with `cat ~/.config/rumpelpod/vscode-password`. The server listens
-only on the container loopback interface, so use the forwarded URL rather than
+port 3000, and forwards it as `Rumpelpod VS Code`. The server is unauthenticated
+and its address is fixed to the container loopback interface, so it cannot be
+exposed on a container network interface. Use the forwarded URL rather than
 trying to reach the container directly. When this repository is itself inside
 a rumpelpod, run `rumpel ports POD_NAME` in the parent checkout and open the
-local port labeled `Rumpelpod VS Code`.
+local port labeled `Rumpelpod VS Code`; rumpel also binds that forward only on
+the host loopback interface.
 
 Use `npm run watch` for fast TypeScript compilation feedback. Run `cargo
 vscode` to put any change into the live browser workspace; it refreshes the

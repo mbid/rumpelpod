@@ -221,13 +221,10 @@ async function waitForSingleTerminalTab(page, podName) {
     throw new Error(`pod ${podName} did not settle on one terminal tab`);
 }
 
-async function login(page, url, password) {
+async function openCodeServer(page, url) {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
     const passwordInput = page.locator('input[name="password"]');
-    if (await passwordInput.count()) {
-        await passwordInput.fill(password);
-        await page.keyboard.press("Enter");
-    }
+    assert.equal(await passwordInput.count(), 0, "code-server unexpectedly required a password");
     await page.locator(".monaco-workbench").waitFor({ state: "visible", timeout: 60_000 });
 }
 
@@ -240,7 +237,6 @@ async function main() {
     const podContent = requiredEnvironment("RUMPELPOD_VSCODE_POD_CONTENT");
     const executablePath = requiredEnvironment("RUMPELPOD_CHROMIUM");
     const artifacts = requiredEnvironment("RUMPELPOD_VSCODE_ARTIFACTS");
-    const password = requiredEnvironment("RUMPELPOD_VSCODE_PASSWORD");
     const referenceImages = process.env.RUMPELPOD_VSCODE_REFERENCE_IMAGES;
 
     const browser = await chromium.launch({
@@ -262,7 +258,7 @@ async function main() {
     });
 
     try {
-        await login(page, url, password);
+        await openCodeServer(page, url);
         await openRumpelpodView(page);
 
         const reviewPodBeforeCreation = await locatePodOrReportError(page, podName);

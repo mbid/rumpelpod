@@ -6,14 +6,14 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use indoc::formatdoc;
+use indoc::{formatdoc, indoc};
 use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid;
+use nix::unistd::{Pid, Uid};
 use rumpelpod::CommandExt as RumpelCommandExt;
 
 use crate::common::{
@@ -26,8 +26,6 @@ const CREATED_POD_NAME: &str = "vscode-created";
 const CHANGED_FILE: &str = "browser-diff.txt";
 const ORIGINAL_CONTENT: &str = "content from the host";
 const POD_CONTENT: &str = "content from the pod";
-const CODE_SERVER_PASSWORD: &str = "rumpelpod-browser-test";
-
 struct CodeServer {
     child: Child,
 }
@@ -235,7 +233,7 @@ fn start_code_server(
         let mut command = Command::new(code_server);
         command
             .arg("--auth")
-            .arg("password")
+            .arg("none")
             .arg("--bind-addr")
             .arg(&address)
             .arg("--disable-telemetry")
@@ -249,7 +247,6 @@ fn start_code_server(
             .env("HOME", &daemon.home_path)
             .env("PATH", &extension_path)
             .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
-            .env("PASSWORD", CODE_SERVER_PASSWORD)
             .stdin(Stdio::null());
         let child = command
             .spawn_with_logging("CODE-SERVER")
@@ -298,7 +295,6 @@ fn run_browser_assertions(root: &Path, port: u16, chromium: &Path, artifacts: &P
         .env("RUMPELPOD_VSCODE_POD_CONTENT", POD_CONTENT)
         .env("RUMPELPOD_CHROMIUM", chromium)
         .env("RUMPELPOD_VSCODE_ARTIFACTS", artifacts)
-        .env("RUMPELPOD_VSCODE_PASSWORD", CODE_SERVER_PASSWORD)
         .status()
         .expect("run Playwright browser assertions");
     assert!(status.success(), "Playwright browser assertions failed");
@@ -309,8 +305,7 @@ fn vscode_agent_environment_is_systemd_safe() {
     let root = workspace_root();
     let temporary = tempfile::tempdir().expect("create agent environment test directory");
     let source = temporary.path().join("process-environment");
-    let credentials = temporary.path().join("rumpelpod");
-    let destination = credentials.join("agent-environment");
+    let destination = temporary.path().join("rumpelpod/agent-environment");
     fs::write(
         &source,
         b"UNRELATED=discard\0OPENAI_API_KEY=sentinel\"with\\chars\0",
@@ -343,12 +338,70 @@ fn vscode_agent_environment_is_systemd_safe() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600, "agent environment was not private");
+    let directory_owner = fs::metadata(destination.parent().expect("agent environment parent"))
+        .expect("read agent environment directory metadata")
+        .uid();
+    assert_eq!(
+        directory_owner,
+        Uid::current().as_raw(),
+        "root entrypoint setup left the user service directory under another owner"
+    );
+}
 
-    Command::new("sudo")
-        .args(["--non-interactive", "--user", &user, "touch"])
-        .arg(credentials.join("vscode-password"))
+#[test]
+fn vscode_server_is_unauthenticated_and_loopback_only() {
+    let root = workspace_root();
+    let temporary = tempfile::tempdir().expect("create VS Code service test directory");
+    let home = temporary.path().join("home");
+    let bin_dir = home.join(".local/bin");
+    let capture = temporary.path().join("code-server-arguments");
+    let code_server = bin_dir.join("code-server");
+    fs::create_dir_all(&bin_dir).expect("create fake code-server directory");
+    fs::write(
+        &code_server,
+        indoc! {r#"
+            #!/bin/sh
+            set -eu
+            if [ "${PASSWORD+x}" = x ] || [ "${HASHED_PASSWORD+x}" = x ]; then
+                exit 91
+            fi
+            printf '%s\n' "$@" > "$CAPTURE"
+        "#},
+    )
+    .expect("write fake code-server");
+    fs::set_permissions(&code_server, fs::Permissions::from_mode(0o755))
+        .expect("make fake code-server executable");
+
+    Command::new("sh")
+        .arg(root.join(".devcontainer/start-vscode.sh"))
+        .env("HOME", &home)
+        .env("WORKSPACE", "/tmp/rumpelpod-vscode-workspace")
+        .env("CAPTURE", &capture)
+        .env("PASSWORD", "must-not-reach-code-server")
+        .env("HASHED_PASSWORD", "must-not-reach-code-server")
+        .env("RUMPELPOD_VSCODE_BIND_ADDR", "0.0.0.0:9999")
         .success()
-        .expect("user service can create sibling credentials after root entrypoint setup");
+        .expect("start loopback-only code-server service");
+
+    let arguments = fs::read_to_string(&capture).expect("read code-server arguments");
+    assert_eq!(
+        arguments,
+        indoc! {"
+            --auth
+            none
+            --bind-addr
+            127.0.0.1:3000
+            --disable-telemetry
+            --disable-update-check
+            --disable-workspace-trust
+            /tmp/rumpelpod-vscode-workspace
+        "},
+        "the browser service accepted authentication or network overrides"
+    );
+    assert!(
+        !home.join(".config/rumpelpod/vscode-password").exists(),
+        "the browser service created a password credential"
+    );
 }
 
 #[test]
