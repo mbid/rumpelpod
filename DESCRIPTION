@@ -5,3 +5,6 @@ terminals and native review diffs. Include generated Rust-to-TypeScript
 types, browser-mode development tooling, devcontainer services, and real
 daemon browser integration coverage. Keep the browser server
 unauthenticated and reachable only through loopback port forwarding.
+
+Serve a separate anyhow demo repository so live test pods use a standard
+nested runtime.

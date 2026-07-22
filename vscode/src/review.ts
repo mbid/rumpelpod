@@ -10,21 +10,13 @@ import { runProcess } from "./process";
 const REVIEW_SCHEME = "rumpelpod-review";
 const BINARY_FILE_MESSAGE = "Binary file cannot be displayed by the text diff editor.\n";
 
-interface ReviewFileDocumentDescriptor {
+interface ReviewDocumentDescriptor {
   readonly kind: "file";
   readonly exists: boolean;
   readonly path: string;
   readonly repository: string;
   readonly revision: string;
 }
-
-interface ReviewStatusDocumentDescriptor {
-  readonly kind: "status";
-  readonly message: string;
-  readonly repository: string;
-}
-
-type ReviewDocumentDescriptor = ReviewFileDocumentDescriptor | ReviewStatusDocumentDescriptor;
 
 export class ReviewDocuments implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly registration: vscode.Disposable;
@@ -52,6 +44,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     plan: ReviewPlan,
     file: ReviewFile,
   ): Promise<void> {
+    await this.clear();
     const base = reviewUri(repository, plan.base, file.path, file.base_exists, "base");
     const target = reviewUri(repository, plan.target, file.path, file.target_exists, "target");
     await vscode.commands.executeCommand(
@@ -67,18 +60,22 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     );
   }
 
-  public async openStatus(
-    repository: Repository,
-    pod: string,
-    message: string,
-  ): Promise<void> {
-    const uri = statusUri(repository, pod, message);
-    const document = await vscode.workspace.openTextDocument(uri);
-    await vscode.window.showTextDocument(document, {
-      preview: true,
-      preserveFocus: false,
-      viewColumn: vscode.ViewColumn.Two,
-    });
+  public async clear(): Promise<void> {
+    const tabs = vscode.window.tabGroups.all.flatMap((group) =>
+      group.tabs.filter((tab) => isReviewTab(tab)),
+    );
+    if (tabs.length > 0) {
+      await vscode.window.tabGroups.close(tabs, true);
+    }
+  }
+
+  public async clearPlaceholders(): Promise<void> {
+    const tabs = vscode.window.tabGroups.all.flatMap((group) =>
+      group.tabs.filter((tab) => isReviewPlaceholderTab(tab)),
+    );
+    if (tabs.length > 0) {
+      await vscode.window.tabGroups.close(tabs, true);
+    }
   }
 
   public dispose(): void {
@@ -88,9 +85,6 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
 
   private async load(uri: vscode.Uri): Promise<string> {
     const descriptor = decodeDescriptor(uri);
-    if (descriptor.kind === "status") {
-      return `${descriptor.message}\n`;
-    }
     if (!descriptor.exists) {
       return "";
     }
@@ -105,6 +99,22 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     }
     return result.stdout.toString("utf8");
   }
+}
+
+function isReviewTab(tab: vscode.Tab): boolean {
+  const input = tab.input;
+  if (input instanceof vscode.TabInputText) {
+    return input.uri.scheme === REVIEW_SCHEME;
+  }
+  if (input instanceof vscode.TabInputTextDiff) {
+    return input.original.scheme === REVIEW_SCHEME || input.modified.scheme === REVIEW_SCHEME;
+  }
+  return false;
+}
+
+function isReviewPlaceholderTab(tab: vscode.Tab): boolean {
+  const input = tab.input;
+  return input instanceof vscode.TabInputText && input.uri.scheme === REVIEW_SCHEME;
 }
 
 function reviewUri(
@@ -128,16 +138,6 @@ function reviewUri(
   });
 }
 
-function statusUri(repository: Repository, pod: string, message: string): vscode.Uri {
-  return vscode.Uri.from({
-    scheme: REVIEW_SCHEME,
-    path: `/${pod}-review.txt`,
-    query: encodeURIComponent(
-      JSON.stringify({ kind: "status", message, repository: repository.root }),
-    ),
-  });
-}
-
 function decodeDescriptor(uri: vscode.Uri): ReviewDocumentDescriptor {
   let parsed: unknown;
   try {
@@ -152,21 +152,6 @@ function decodeDescriptor(uri: vscode.Uri): ReviewDocumentDescriptor {
     typeof parsed.kind !== "string"
   ) {
     throw new Error(`invalid rumpelpod review descriptor: ${uri.toString()}`);
-  }
-  if (parsed.kind === "status") {
-    if (
-      !("message" in parsed) ||
-      !("repository" in parsed) ||
-      typeof parsed.message !== "string" ||
-      typeof parsed.repository !== "string"
-    ) {
-      throw new Error(`invalid rumpelpod review status descriptor: ${uri.toString()}`);
-    }
-    return {
-      kind: "status",
-      message: parsed.message,
-      repository: parsed.repository,
-    };
   }
   if (
     parsed.kind !== "file" ||

@@ -338,7 +338,9 @@ RUN native_arch=$(dpkg --print-architecture) \
         native_target=aarch64-unknown-linux-musl; \
     fi \
     && mkdir -p ~/.local/bin \
-    && cp "/workspaces/rumpelpod/target/${native_target}/debug/rumpel" ~/.local/bin/rumpel
+    && cp "/workspaces/rumpelpod/target/${native_target}/debug/rumpel" ~/.local/bin/rumpel \
+    && cp /workspaces/rumpelpod/target/x86_64-unknown-linux-musl/debug/rumpel ~/.local/bin/rumpel-linux-amd64 \
+    && cp /workspaces/rumpelpod/target/aarch64-unknown-linux-musl/debug/rumpel ~/.local/bin/rumpel-linux-arm64
 
 USER root
 
@@ -346,7 +348,11 @@ RUN rm -rf /tmp/rumpelpod-vscode
 
 COPY --chmod=755 .devcontainer/write-agent-environment.sh /usr/local/bin/write-rumpelpod-agent-environment
 COPY --chown=${USER}:${USER} --chmod=755 .devcontainer/start-vscode.sh /home/${USER}/.local/lib/rumpelpod/start-vscode.sh
+COPY --chown=${USER}:${USER} --chmod=755 .devcontainer/prepare-vscode-demo.sh /home/${USER}/.local/lib/rumpelpod/prepare-vscode-demo.sh
 COPY --chown=${USER}:${USER} .devcontainer/rumpelpod.socket .devcontainer/rumpelpod.service .devcontainer/rumpelpod-vscode.service /home/${USER}/.config/systemd/user/
+USER ${USER}
+RUN /home/${USER}/.local/lib/rumpelpod/prepare-vscode-demo.sh
+USER root
 RUN mkdir -p "/home/${USER}/.config/systemd/user/sockets.target.wants" \
     && ln -s ../rumpelpod.socket \
         "/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket" \

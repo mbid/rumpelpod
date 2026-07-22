@@ -22,14 +22,20 @@ installs both, and restarts the browser workspace:
 cargo vscode
 ```
 
-The devcontainer runs `cargo vscode` after creation, starts that workspace at
-port 3000, and forwards it as `Rumpelpod VS Code`. The server is unauthenticated
-and its address is fixed to the container loopback interface, so it cannot be
-exposed on a container network interface. Use the forwarded URL rather than
-trying to reach the container directly. When this repository is itself inside
-a rumpelpod, run `rumpel ports POD_NAME` in the parent checkout and open the
-local port labeled `Rumpelpod VS Code`; rumpel also binds that forward only on
-the host loopback interface.
+The devcontainer runs `cargo vscode` after creation and serves a dedicated
+`anyhow` 1.0.102 demo repository from
+`~/.local/share/rumpelpod/anyhow-demo` at port 3000. This keeps the live editor
+outside the rumpelpod source checkout: pods created through the extension use
+the demo's ordinary Rust devcontainer and do not try to nest Sysbox inside
+Sysbox. The demo is seeded from Cargo's pinned registry source on first use;
+later `cargo vscode` runs preserve its pods and working tree.
+
+The server is unauthenticated and its address is fixed to the container
+loopback interface, so it cannot be exposed on a container network interface.
+Use the forwarded URL rather than trying to reach the container directly. When
+this repository is itself inside a rumpelpod, run `rumpel ports POD_NAME` in
+the parent checkout and open the local port labeled `Rumpelpod VS Code`;
+rumpel also binds that forward only on the host loopback interface.
 
 Use `npm run watch` for fast TypeScript compilation feedback. Run `cargo
 vscode` to put any change into the live browser workspace; it refreshes the

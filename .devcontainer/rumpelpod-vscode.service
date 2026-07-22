@@ -5,6 +5,7 @@
 Description=Rumpelpod browser VS Code
 After=rumpelpod.socket
 Requires=rumpelpod.socket
+ConditionPathIsDirectory=%h/.local/share/rumpelpod/anyhow-demo/.git
 
 [Service]
 Type=simple

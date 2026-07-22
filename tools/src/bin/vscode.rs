@@ -19,6 +19,11 @@ use rumpelpod::review::ReviewPlan;
 use rumpelpod::vscode::AgentKind;
 use ts_rs::{Config, TS};
 
+const LINUX_RUMPEL_TARGETS: [(&str, &str); 2] = [
+    ("x86_64-unknown-linux-musl", "rumpel-linux-amd64"),
+    ("aarch64-unknown-linux-musl", "rumpel-linux-arm64"),
+];
+
 #[derive(Parser)]
 struct Args {
     /// Verify generated bindings and compile/package the extension without updating services.
@@ -77,23 +82,52 @@ fn run() -> Result<()> {
         "packaging the VS Code extension",
     )?;
 
-    run_command(
-        tools::cargo_cmd().args(["build", "-p", "rumpelpod", "--bin", "rumpel"]),
-        "building rumpel",
-    )?;
-    let rumpel = std::env::current_exe()
-        .context("locating the VS Code development tool")?
-        .parent()
-        .context("VS Code development tool has no parent directory")?
-        .join("rumpel");
+    for (target, _) in LINUX_RUMPEL_TARGETS {
+        run_command(
+            tools::cargo_cmd().args([
+                "build",
+                "-p",
+                "rumpelpod",
+                "--bin",
+                "rumpel",
+                "--target",
+                target,
+            ]),
+            &format!("building rumpel for {target}"),
+        )?;
+    }
+    let native_target = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-unknown-linux-musl",
+        "aarch64" => "aarch64-unknown-linux-musl",
+        architecture => {
+            return Err(anyhow::anyhow!(
+                "unsupported VS Code development architecture: {architecture}"
+            ));
+        }
+    };
+    let rumpel = repo_root
+        .join("target")
+        .join(native_target)
+        .join("debug/rumpel");
     if !rumpel.exists() {
         let rumpel = rumpel.display();
         return Err(anyhow::anyhow!("built rumpel binary not found at {rumpel}"));
     }
-    let rumpel = install_rumpel(&rumpel)?;
+    let rumpel = install_rumpel(&rumpel, &repo_root)?;
 
     let home = dirs::home_dir().context("locating the home directory")?;
     remove_legacy_vscode_password(&home)?;
+    let prepare_demo = home.join(".local/lib/rumpelpod/prepare-vscode-demo.sh");
+    install_runtime_file(
+        &repo_root.join(".devcontainer/prepare-vscode-demo.sh"),
+        &prepare_demo,
+        0o755,
+    )?;
+    let mut prepare_demo_command = Command::new(&prepare_demo);
+    run_command(
+        &mut prepare_demo_command,
+        "preparing the anyhow VS Code demo workspace",
+    )?;
     install_runtime_file(
         &repo_root.join(".devcontainer/start-vscode.sh"),
         &home.join(".local/lib/rumpelpod/start-vscode.sh"),
@@ -150,7 +184,9 @@ fn run() -> Result<()> {
     )?;
     wait_for_vscode()?;
 
-    println!("rumpelpod VS Code is available on port 3000");
+    let workspace = home.join(".local/share/rumpelpod/anyhow-demo");
+    let workspace = workspace.display();
+    println!("rumpelpod VS Code is serving {workspace} on port 3000");
     Ok(())
 }
 
@@ -253,7 +289,7 @@ fn wait_for_vscode() -> Result<()> {
     ))
 }
 
-fn install_rumpel(source: &Path) -> Result<PathBuf> {
+fn install_rumpel(source: &Path, repo_root: &Path) -> Result<PathBuf> {
     let home = dirs::home_dir().context("locating the home directory")?;
     let bin_dir = home.join(".local/bin");
     std::fs::create_dir_all(&bin_dir).with_context(|| {
@@ -261,23 +297,42 @@ fn install_rumpel(source: &Path) -> Result<PathBuf> {
         format!("creating development binary directory {bin_dir}")
     })?;
 
-    let staged = tempfile::NamedTempFile::new_in(&bin_dir)
+    let destination = bin_dir.join("rumpel");
+    install_binary(source, &destination)?;
+    for (target, name) in LINUX_RUMPEL_TARGETS {
+        let payload = repo_root.join("target").join(target).join("debug/rumpel");
+        install_binary(&payload, &bin_dir.join(name))?;
+    }
+    Ok(destination)
+}
+
+fn install_binary(source: &Path, destination: &Path) -> Result<()> {
+    let parent = destination.parent().with_context(|| {
+        let destination = destination.display();
+        format!("development binary has no parent directory: {destination}")
+    })?;
+    let staged = tempfile::NamedTempFile::new_in(parent)
         .context("creating staged rumpel development binary")?;
-    std::fs::copy(source, staged.path()).context("staging rumpel development binary")?;
+    std::fs::copy(source, staged.path()).with_context(|| {
+        let source = source.display();
+        format!("staging rumpel development binary {source}")
+    })?;
     let permissions = std::fs::metadata(source)
-        .context("reading rumpel development binary permissions")?
+        .with_context(|| {
+            let source = source.display();
+            format!("reading rumpel development binary permissions from {source}")
+        })?
         .permissions();
     std::fs::set_permissions(staged.path(), permissions)
         .context("setting rumpel development binary permissions")?;
-    let destination = bin_dir.join("rumpel");
     staged
-        .persist(&destination)
+        .persist(destination)
         .map_err(|error| error.error)
         .with_context(|| {
             let destination = destination.display();
             format!("installing rumpel development binary at {destination}")
         })?;
-    Ok(destination)
+    Ok(())
 }
 
 fn install_npm_dependencies(vscode_dir: &Path) -> Result<()> {

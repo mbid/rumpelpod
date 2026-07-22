@@ -53,6 +53,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  void runCommand(model, "removing obsolete review placeholders", () =>
+    reviews.clearPlaceholders(),
+  );
   void runCommand(model, "restoring assigned pods", () => controller.restoreAssignedPods());
 }
 

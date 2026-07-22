@@ -141,7 +141,7 @@ async function waitForPod(page, podName) {
 
 function terminalTab(page, podName) {
     return page
-        .locator(".tab:visible")
+        .locator(".editor-group-container .tabs-container .tab:visible")
         .filter({ hasText: "Rumpelpod:" })
         .filter({ hasText: podName })
         .filter({ hasText: "codex" });
@@ -296,14 +296,19 @@ async function main() {
         const createdTerminal = page.locator(".terminal-editor .xterm:visible").first();
         await createdTerminal.waitFor({ state: "visible", timeout: 30_000 });
 
-        const startingStatus = page
-            .locator(".monaco-editor:visible .view-lines")
-            .filter({ hasText: `${createdPodName} is starting` });
-        await startingStatus.first().waitFor({ state: "visible", timeout: 30_000 });
+        await page
+            .locator(".monaco-diff-editor:visible")
+            .first()
+            .waitFor({ state: "hidden", timeout: 30_000 });
         assert.equal(
             await page.locator(".monaco-diff-editor:visible").count(),
             0,
             "creating a pod left the previous pod's diff visible",
+        );
+        assert.equal(
+            await page.locator(".tab:visible").filter({ hasText: `${createdPodName}-review.txt` }).count(),
+            0,
+            "creating a pod opened a synthetic review document",
         );
         await waitForCodexPrompt(page, createdTerminal);
 
@@ -394,6 +399,15 @@ async function main() {
 
         const createdPodBeforeRestart = await locatePodOrReportError(page, createdPodName);
         await createdPodBeforeRestart.click();
+        await page
+            .locator(".monaco-diff-editor:visible")
+            .first()
+            .waitFor({ state: "hidden", timeout: 30_000 });
+        assert.equal(
+            await page.locator(".tab:visible").filter({ hasText: "-review.txt" }).count(),
+            0,
+            "a pod without changes opened a synthetic review document",
+        );
         const endingTerminal = page.locator(".terminal-editor .xterm:visible").first();
         await endingTerminal.waitFor({ state: "visible", timeout: 30_000 });
         await endCodexProcess(page, endingTerminal);
@@ -421,11 +435,16 @@ async function main() {
         const restoredTerminal = page.locator(".terminal-editor .xterm:visible").first();
         await restoredTerminal.waitFor({ state: "visible", timeout: 30_000 });
         await waitForCodexPrompt(page, restoredTerminal, false);
-        await page
-            .locator(".monaco-editor:visible .view-lines")
-            .filter({ hasText: `No changes to review for ${createdPodName}` })
-            .first()
-            .waitFor({ state: "visible", timeout: 30_000 });
+        assert.equal(
+            await page.locator(".monaco-diff-editor:visible").count(),
+            0,
+            "restoring a pod without changes left a diff visible",
+        );
+        assert.equal(
+            await page.locator(".tab:visible").filter({ hasText: "-review.txt" }).count(),
+            0,
+            "restoring a pod opened a synthetic review document",
+        );
         await capture(page, artifacts, "06-restored-terminal.png");
         assert.equal(
             browserErrors.length,

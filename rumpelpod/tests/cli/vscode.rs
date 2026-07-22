@@ -375,7 +375,6 @@ fn vscode_server_is_unauthenticated_and_loopback_only() {
     Command::new("sh")
         .arg(root.join(".devcontainer/start-vscode.sh"))
         .env("HOME", &home)
-        .env("WORKSPACE", "/tmp/rumpelpod-vscode-workspace")
         .env("CAPTURE", &capture)
         .env("PASSWORD", "must-not-reach-code-server")
         .env("HASHED_PASSWORD", "must-not-reach-code-server")
@@ -384,9 +383,11 @@ fn vscode_server_is_unauthenticated_and_loopback_only() {
         .expect("start loopback-only code-server service");
 
     let arguments = fs::read_to_string(&capture).expect("read code-server arguments");
+    let workspace = home.join(".local/share/rumpelpod/anyhow-demo");
+    let workspace = workspace.display();
     assert_eq!(
         arguments,
-        indoc! {"
+        formatdoc! {"
             --auth
             none
             --bind-addr
@@ -394,13 +395,104 @@ fn vscode_server_is_unauthenticated_and_loopback_only() {
             --disable-telemetry
             --disable-update-check
             --disable-workspace-trust
-            /tmp/rumpelpod-vscode-workspace
+            {workspace}
         "},
         "the browser service accepted authentication or network overrides"
     );
     assert!(
         !home.join(".config/rumpelpod/vscode-password").exists(),
         "the browser service created a password credential"
+    );
+}
+
+#[test]
+fn vscode_demo_workspace_uses_standard_runtime() {
+    let root = workspace_root();
+    let temporary = tempfile::tempdir().expect("create VS Code demo test directory");
+    let home = temporary.path().join("home");
+    let source = temporary.path().join("cached-anyhow");
+    let workspace = home.join(".local/share/rumpelpod/anyhow-demo");
+    fs::create_dir_all(source.join("src")).expect("create cached anyhow source");
+    fs::write(
+        source.join("Cargo.toml"),
+        indoc! {r#"
+            [package]
+            name = "anyhow"
+            version = "1.0.102"
+            edition = "2021"
+        "#},
+    )
+    .expect("write cached anyhow manifest");
+    fs::write(source.join("src/lib.rs"), "pub struct Error;\n")
+        .expect("write cached anyhow source");
+    fs::write(source.join(".cargo-ok"), "").expect("write registry marker");
+    fs::write(source.join(".cargo_vcs_info.json"), "{}").expect("write registry metadata");
+
+    let prepare = root.join(".devcontainer/prepare-vscode-demo.sh");
+    Command::new("sh")
+        .arg(&prepare)
+        .env("HOME", &home)
+        .env("RUMPELPOD_VSCODE_DEMO_SOURCE", &source)
+        .success()
+        .expect("seed VS Code demo workspace");
+
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".devcontainer/devcontainer.json"))
+            .expect("read demo devcontainer"),
+    )
+    .expect("parse demo devcontainer");
+    assert_eq!(config["workspaceFolder"], "/workspace/anyhow");
+    assert_eq!(config["containerUser"], "root");
+    assert!(
+        config.get("runArgs").is_none(),
+        "demo devcontainer requested an outer-container runtime"
+    );
+    assert_eq!(config["userEnvProbe"], "none");
+    let dockerfile = fs::read_to_string(workspace.join(".devcontainer/Dockerfile"))
+        .expect("read demo Dockerfile");
+    assert!(
+        dockerfile.contains(
+            "rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3"
+        ),
+        "demo Rust image was not pinned"
+    );
+    assert!(
+        !dockerfile.contains("sysbox"),
+        "demo Dockerfile requested Sysbox"
+    );
+    assert!(!workspace.join(".cargo-ok").exists());
+    assert!(!workspace.join(".cargo_vcs_info.json").exists());
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&workspace)
+        .success()
+        .expect("read demo repository status");
+    assert!(status.is_empty(), "seeded demo repository was dirty");
+    let user_name = Command::new("git")
+        .args(["config", "--local", "user.name"])
+        .current_dir(&workspace)
+        .success()
+        .expect("read demo repository Git user name");
+    assert_eq!(user_name, b"Rumpelpod VS Code\n");
+    let user_email = Command::new("git")
+        .args(["config", "--local", "user.email"])
+        .current_dir(&workspace)
+        .success()
+        .expect("read demo repository Git email");
+    assert_eq!(user_email, b"rumpelpod-vscode@localhost\n");
+
+    let marker = workspace.join("developer-work");
+    fs::write(&marker, "preserve me\n").expect("write demo developer work");
+    Command::new("sh")
+        .arg(&prepare)
+        .env("HOME", &home)
+        .env("RUMPELPOD_VSCODE_DEMO_SOURCE", &source)
+        .success()
+        .expect("re-run VS Code demo preparation");
+    assert_eq!(
+        fs::read_to_string(marker).expect("read preserved demo work"),
+        "preserve me\n",
+        "live extension rebuild replaced the demo working tree"
     );
 }
 
