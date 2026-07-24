@@ -1,16 +1,17 @@
 # Rumpelpod for VS Code
 
-This workspace extension keeps each rumpelpod agent in a persistent VS Code
-terminal, rendered by VS Code's xterm.js terminal frontend, and opens that
+This workspace extension shows the active rumpelpod agent in a persistent VS
+Code terminal, rendered by VS Code's xterm.js terminal frontend, and opens that
 pod's review in the adjacent editor group. It is built for desktop VS Code and
 browser-hosted VS Code servers whose extension host runs on the same machine as
 the `rumpel` command.
 
-Open the Rumpelpod activity bar view, select a pod, or use the `+` action to
-choose an agent and create one. Selecting a pod shows its agent terminal on the
-left and the first changed file on the right. Expand a pod to choose another
-changed file. The selected agent is saved in workspace state; use `Change
-Agent` from a pod's context menu to replace it.
+Click the Rumpelpod status item to switch pods. The same picker has a `+`
+button for creating a pod and a terminal button on each row for opening an
+ordinary shell in that pod. Selecting a pod shows its agent chat on the left
+and the first changed file on the right. Use the review editor's list action to
+choose another changed file. Only the last active agent chat is restored; agent
+assignments remain saved per pod.
 
 ## Development
 
@@ -52,10 +53,10 @@ it through the normal test pipeline:
 cargo pipeline vscode_browser_lists_creates_and_reviews_pods
 ```
 
-Successful runs capture the pod list, agent picker, pod-name prompt, live Codex
-terminal, terminal-plus-review layout, restored terminals, and a Playwright
-trace under `target/vscode-integration/`. To refresh the checked-in reference
-images while running the same test, use:
+Successful runs capture the pod switcher, agent picker, pod-name prompt, live
+Codex terminal, terminal-plus-review layout, restored terminal, and a
+Playwright trace under `target/vscode-integration/`. To refresh the checked-in
+reference images while running the same test, use:
 
 ```sh
 RUMPELPOD_VSCODE_REFERENCE_IMAGES="$PWD/vscode/docs/images" \
@@ -65,9 +66,9 @@ RUMPELPOD_VSCODE_REFERENCE_IMAGES="$PWD/vscode/docs/images" \
 The creation flow reaches a real Codex prompt while the daemon reports the new
 pod as running:
 
-![Created pod with a live Codex terminal](docs/images/04-created-pod.png)
+![Created pod with a live Codex terminal](docs/images/06-created-chat.png)
 
-Selecting another pod keeps its agent on the left and opens the daemon-backed
-review diff on the right:
+The test then makes a real commit inside the active pod. The daemon event
+updates both the status item and the review without a manual refresh:
 
-![Pod terminal and review diff](docs/images/05-review.png)
+![Pod terminal and live review diff](docs/images/02-live-review.png)

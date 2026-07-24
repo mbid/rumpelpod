@@ -154,27 +154,6 @@ fn code_server_is_ready(port: u16) -> bool {
         && (compact.contains("\"status\":\"alive\"") || compact.contains("\"status\":\"expired\""))
 }
 
-fn wait_for_pod_ref(repo: &TestRepo, expected_commit: &str) {
-    let pod_ref = format!("refs/rumpelpod/{POD_NAME}");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let output = Command::new("git")
-            .args(["rev-parse", "--verify", &pod_ref])
-            .current_dir(repo.path())
-            .output()
-            .expect("read pod ref");
-        let actual = String::from_utf8_lossy(&output.stdout);
-        if output.status.success() && actual.trim() == expected_commit {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{pod_ref} did not reach commit {expected_commit} within 30 seconds"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
 fn wait_for_server(child: &mut Child, port: u16) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -280,7 +259,14 @@ fn write_code_server_settings(user_data_dir: &Path, daemon: &TestDaemon) {
     .expect("write code-server settings");
 }
 
-fn run_browser_assertions(root: &Path, port: u16, chromium: &Path, artifacts: &Path) {
+fn run_browser_assertions(
+    root: &Path,
+    port: u16,
+    chromium: &Path,
+    artifacts: &Path,
+    repo: &TestRepo,
+    daemon: &TestDaemon,
+) {
     fs::create_dir_all(artifacts).expect("create browser artifact directory");
     let script = root.join("integration/vscode/browser.cjs");
     let base_url = format!("http://127.0.0.1:{port}");
@@ -293,6 +279,10 @@ fn run_browser_assertions(root: &Path, port: u16, chromium: &Path, artifacts: &P
         .env("RUMPELPOD_VSCODE_CHANGED_FILE", CHANGED_FILE)
         .env("RUMPELPOD_VSCODE_ORIGINAL_CONTENT", ORIGINAL_CONTENT)
         .env("RUMPELPOD_VSCODE_POD_CONTENT", POD_CONTENT)
+        .env("RUMPELPOD_VSCODE_REPO_ROOT", repo.path())
+        .env("RUMPELPOD_VSCODE_RUMPEL", daemon.bin_dir.join("rumpel"))
+        .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
+        .env("RUMPELPOD_VSCODE_HOME", &daemon.home_path)
         .env("RUMPELPOD_CHROMIUM", chromium)
         .env("RUMPELPOD_VSCODE_ARTIFACTS", artifacts)
         .status()
@@ -538,40 +528,6 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
         .args(["enter", "--create", POD_NAME, "--", "echo", "setup"])
         .success()
         .expect("launch test pod");
-    let change_command = formatdoc! {"
-        printf '%s\\n' '{POD_CONTENT}' > {CHANGED_FILE} && \\
-        git add {CHANGED_FILE} && \\
-        git commit --no-verify -m 'Change browser diff fixture'
-    "};
-    pod_command(&repo, &daemon)
-        .args([
-            "enter",
-            "--create",
-            POD_NAME,
-            "--",
-            "sh",
-            "-c",
-            &change_command,
-        ])
-        .success()
-        .expect("commit changed file in pod");
-    let pod_head = pod_command(&repo, &daemon)
-        .args([
-            "enter",
-            "--create",
-            POD_NAME,
-            "--",
-            "git",
-            "rev-parse",
-            "HEAD",
-        ])
-        .success()
-        .expect("read pod commit");
-    let pod_head = String::from_utf8(pod_head)
-        .expect("pod commit is utf8")
-        .trim()
-        .to_string();
-    wait_for_pod_ref(&repo, &pod_head);
 
     let browser_home = tempfile::tempdir().expect("create code-server home");
     let user_data_dir = browser_home.path().join("user-data");
@@ -590,5 +546,5 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     let artifacts = root
         .join("target/vscode-integration")
         .join(std::process::id().to_string());
-    run_browser_assertions(&root, port, &chromium, &artifacts);
+    run_browser_assertions(&root, port, &chromium, &artifacts, &repo, &daemon);
 }

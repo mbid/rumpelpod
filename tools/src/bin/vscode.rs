@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use rumpelpod::daemon::protocol::PodInfo;
+use rumpelpod::daemon::protocol::{DaemonEvent, PodInfo};
 use rumpelpod::review::ReviewPlan;
 use rumpelpod::vscode::AgentKind;
 use ts_rs::{Config, TS};
@@ -375,6 +375,7 @@ fn generate_types(output: &Path) -> Result<()> {
 
     let config = Config::new().with_out_dir(output).with_large_int("number");
     PodInfo::export_all(&config).context("generating PodInfo TypeScript bindings")?;
+    DaemonEvent::export_all(&config).context("generating DaemonEvent TypeScript bindings")?;
     ReviewPlan::export_all(&config).context("generating ReviewPlan TypeScript bindings")?;
     AgentKind::export_all(&config).context("generating AgentKind TypeScript bindings")?;
     normalize_generated_types(output)?;
@@ -387,6 +388,7 @@ fn generate_types(output: &Path) -> Result<()> {
             "\n",
             "// Rust is the source of truth for these API types.\n",
             "export type { AgentKind } from \"./AgentKind\";\n",
+            "export type { DaemonEvent } from \"./DaemonEvent\";\n",
             "export type { PodInfo } from \"./PodInfo\";\n",
             "export type { ReviewFile } from \"./ReviewFile\";\n",
             "export type { ReviewPlan } from \"./ReviewPlan\";\n",

@@ -4,59 +4,63 @@
 import * as vscode from "vscode";
 
 import { RumpelpodController } from "./controller";
+import { DaemonEvents } from "./events";
 import { RumpelpodModel } from "./model";
 import { ReviewDocuments } from "./review";
 import { AgentTerminals } from "./terminal";
-import { PodItem, PodTreeProvider, ReviewFileItem } from "./tree";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Rumpelpod", { log: true });
   const model = new RumpelpodModel(context.workspaceState, output);
-  const tree = new PodTreeProvider(model);
   const terminals = new AgentTerminals();
   const reviews = new ReviewDocuments();
-  const controller = new RumpelpodController(model, tree, terminals, reviews);
-
-  const treeView = vscode.window.createTreeView("rumpelpod.pods", {
-    treeDataProvider: tree,
-    showCollapseAll: true,
-  });
+  const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  status.name = "Rumpelpod Active Agent";
+  status.command = "rumpelpod.showPods";
+  const controller = new RumpelpodController(model, terminals, reviews, status);
+  const events = new DaemonEvents(model, controller);
 
   context.subscriptions.push(
     output,
-    tree,
     terminals,
     reviews,
+    status,
     controller,
-    treeView,
-    vscode.commands.registerCommand("rumpelpod.refresh", () => controller.refresh()),
+    events,
+    vscode.commands.registerCommand("rumpelpod.showPods", () =>
+      runCommand(model, "selecting a pod", () => controller.showPodSwitcher()),
+    ),
+    vscode.commands.registerCommand("rumpelpod.refresh", () =>
+      runCommand(model, "refreshing the active pod", () => controller.refresh()),
+    ),
     vscode.commands.registerCommand("rumpelpod.createPod", () =>
       runCommand(model, "creating a pod", () => controller.createPod()),
     ),
-    vscode.commands.registerCommand("rumpelpod.openPod", (item: PodItem) =>
-      runCommand(model, `opening pod ${item.pod.name}`, () => controller.openPod(item)),
+    vscode.commands.registerCommand("rumpelpod.changeActiveAgent", () =>
+      runCommand(model, "changing the active agent", () => controller.changeActiveAgent()),
     ),
-    vscode.commands.registerCommand("rumpelpod.changeAgent", (item: PodItem) =>
-      runCommand(model, `changing the agent for ${item.pod.name}`, () =>
-        controller.changeAgent(item),
-      ),
-    ),
-    vscode.commands.registerCommand("rumpelpod.openReviewFile", (item: ReviewFileItem) =>
-      runCommand(model, `opening review file ${item.file.path}`, () =>
-        controller.openReviewFile(item),
-      ),
+    vscode.commands.registerCommand("rumpelpod.pickReviewFile", () =>
+      runCommand(model, "selecting a review file", () => controller.pickReviewFile()),
     ),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("rumpelpod.defaultAgent")) {
-        tree.refresh();
+        controller.updateStatus();
+      }
+      if (event.affectsConfiguration("rumpelpod.executable")) {
+        events.restart();
       }
     }),
   );
 
+  controller.updateStatus();
+  void events.start().catch((error: unknown) => {
+    model.logError("starting rumpelpod daemon events", error);
+    events.restart();
+  });
   void runCommand(model, "removing obsolete review placeholders", () =>
     reviews.clearPlaceholders(),
   );
-  void runCommand(model, "restoring assigned pods", () => controller.restoreAssignedPods());
+  void runCommand(model, "restoring the active pod", () => controller.restoreLastPod());
 }
 
 export function deactivate(): void {}

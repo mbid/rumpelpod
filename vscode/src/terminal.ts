@@ -8,14 +8,20 @@ import type { AgentKind } from "./generated/protocol";
 import type { Repository } from "./model";
 
 const TERMINAL_KEY_ENV = "RUMPELPOD_VSCODE_TERMINAL";
+const SHELL_TERMINAL_ENV = "RUMPELPOD_VSCODE_SHELL";
 
 export class AgentTerminals implements vscode.Disposable {
+  private readonly shells = new Set<vscode.Terminal>();
   private readonly terminals = new Map<string, vscode.Terminal>();
   private readonly closeSubscription: vscode.Disposable;
   private readonly openSubscription: vscode.Disposable;
 
   public constructor() {
     this.openSubscription = vscode.window.onDidOpenTerminal((terminal) => {
+      if (isShellTerminal(terminal)) {
+        this.shells.add(terminal);
+        return;
+      }
       const identity = terminalIdentity(terminal);
       const matched =
         identity === undefined
@@ -40,6 +46,7 @@ export class AgentTerminals implements vscode.Disposable {
       this.terminals.set(key, terminal);
     });
     this.closeSubscription = vscode.window.onDidCloseTerminal((terminal) => {
+      this.shells.delete(terminal);
       for (const [key, candidate] of this.terminals) {
         if (candidate === terminal) {
           this.terminals.delete(key);
@@ -73,7 +80,7 @@ export class AgentTerminals implements vscode.Disposable {
     });
   }
 
-  public show(
+  public showActive(
     repository: Repository,
     pod: string,
     agent: AgentKind,
@@ -89,11 +96,8 @@ export class AgentTerminals implements vscode.Disposable {
       (candidate): candidate is vscode.Terminal =>
         candidate !== undefined && candidate.exitStatus === undefined,
     );
-    for (const candidate of candidates) {
-      if (candidate !== undefined && candidate !== existing) {
-        candidate.dispose();
-      }
-    }
+    this.disposeShellTerminals();
+    this.disposeInactiveAgentTerminals(existing);
     if (existing !== undefined) {
       this.terminals.set(key, existing);
       existing.show(false);
@@ -119,6 +123,25 @@ export class AgentTerminals implements vscode.Disposable {
     return terminal;
   }
 
+  public showShell(repository: Repository, pod: string, executable: string): vscode.Terminal {
+    const terminal = vscode.window.createTerminal({
+      name: `Rumpelpod shell: ${repository.name}/${pod}`,
+      cwd: repository.root,
+      env: { [SHELL_TERMINAL_ENV]: terminalKey(repository, pod) },
+      iconPath: new vscode.ThemeIcon("terminal-bash"),
+      location: {
+        viewColumn: vscode.ViewColumn.One,
+        preserveFocus: false,
+      },
+      message: `Opening a shell in rumpelpod ${pod}`,
+      shellArgs: ["enter", pod],
+      shellPath: executable,
+    });
+    this.shells.add(terminal);
+    terminal.show(false);
+    return terminal;
+  }
+
   public replace(repository: Repository, pod: string): void {
     const key = terminalKey(repository, pod);
     const prefix = terminalNamePrefix(repository, pod);
@@ -137,6 +160,28 @@ export class AgentTerminals implements vscode.Disposable {
   public dispose(): void {
     this.closeSubscription.dispose();
     this.openSubscription.dispose();
+  }
+
+  private disposeInactiveAgentTerminals(active: vscode.Terminal | undefined): void {
+    for (const terminal of vscode.window.terminals) {
+      if (terminal !== active && isAgentTerminal(terminal)) {
+        terminal.dispose();
+      }
+    }
+    for (const [key, terminal] of this.terminals) {
+      if (terminal !== active) {
+        this.terminals.delete(key);
+      }
+    }
+  }
+
+  private disposeShellTerminals(): void {
+    for (const terminal of vscode.window.terminals) {
+      if (this.shells.has(terminal) || isShellTerminal(terminal)) {
+        terminal.dispose();
+      }
+    }
+    this.shells.clear();
   }
 }
 
@@ -182,6 +227,18 @@ function terminalIdentity(terminal: vscode.Terminal): string | undefined {
   return "env" in creationOptions
     ? (creationOptions.env?.[TERMINAL_KEY_ENV] ?? undefined)
     : undefined;
+}
+
+function isAgentTerminal(terminal: vscode.Terminal): boolean {
+  return terminalIdentity(terminal) !== undefined || terminal.name.startsWith("Rumpelpod: ");
+}
+
+function isShellTerminal(terminal: vscode.Terminal): boolean {
+  const creationOptions = terminal.creationOptions;
+  return (
+    ("env" in creationOptions && creationOptions.env?.[SHELL_TERMINAL_ENV] !== undefined) ||
+    terminal.name.startsWith("Rumpelpod shell: ")
+  );
 }
 
 function terminalCwd(terminal: vscode.Terminal): string | undefined {

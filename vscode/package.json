@@ -22,10 +22,16 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onView:rumpelpod.pods"
+    "onStartupFinished"
   ],
   "contributes": {
     "commands": [
+      {
+        "command": "rumpelpod.showPods",
+        "title": "Switch Pod",
+        "category": "Rumpelpod",
+        "icon": "$(list-selection)"
+      },
       {
         "command": "rumpelpod.createPod",
         "title": "Create Pod",
@@ -34,25 +40,21 @@
       },
       {
         "command": "rumpelpod.refresh",
-        "title": "Refresh Pods",
+        "title": "Refresh Active Pod",
         "category": "Rumpelpod",
         "icon": "$(refresh)"
       },
       {
-        "command": "rumpelpod.openPod",
-        "title": "Open Pod",
-        "category": "Rumpelpod"
-      },
-      {
-        "command": "rumpelpod.changeAgent",
-        "title": "Change Agent",
+        "command": "rumpelpod.changeActiveAgent",
+        "title": "Change Active Agent",
         "category": "Rumpelpod",
         "icon": "$(person)"
       },
       {
-        "command": "rumpelpod.openReviewFile",
-        "title": "Open Review File",
-        "category": "Rumpelpod"
+        "command": "rumpelpod.pickReviewFile",
+        "title": "Select Review File",
+        "category": "Rumpelpod",
+        "icon": "$(list-tree)"
       }
     ],
     "configuration": {
@@ -76,60 +78,17 @@
         }
       }
     },
-    "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "rumpelpod",
-          "title": "Rumpelpod",
-          "icon": "media/rumpelpod.svg"
-        }
-      ]
-    },
-    "views": {
-      "rumpelpod": [
-        {
-          "id": "rumpelpod.pods",
-          "name": "Pods"
-        }
-      ]
-    },
     "menus": {
-      "view/title": [
+      "editor/title": [
         {
-          "command": "rumpelpod.createPod",
-          "when": "view == rumpelpod.pods",
+          "command": "rumpelpod.showPods",
+          "when": "terminalEditorFocus",
           "group": "navigation@1"
         },
         {
-          "command": "rumpelpod.refresh",
-          "when": "view == rumpelpod.pods",
-          "group": "navigation@2"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "rumpelpod.changeAgent",
-          "when": "view == rumpelpod.pods && viewItem == rumpelpod.pod",
-          "group": "inline@1"
-        },
-        {
-          "command": "rumpelpod.changeAgent",
-          "when": "view == rumpelpod.pods && viewItem == rumpelpod.pod",
-          "group": "rumpelpod@1"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "rumpelpod.openPod",
-          "when": "false"
-        },
-        {
-          "command": "rumpelpod.changeAgent",
-          "when": "false"
-        },
-        {
-          "command": "rumpelpod.openReviewFile",
-          "when": "false"
+          "command": "rumpelpod.pickReviewFile",
+          "when": "resourceScheme == rumpelpod-review",
+          "group": "navigation@1"
         }
       ]
     }

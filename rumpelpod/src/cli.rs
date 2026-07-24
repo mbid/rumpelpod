@@ -136,6 +136,13 @@ pub struct ListCommand {
     pub json: bool,
 }
 
+#[derive(Args, Debug)]
+pub struct EventsCommand {
+    /// Print one JSON object per line for editor integrations.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Run a command or interactive shell in a pod.
@@ -155,6 +162,9 @@ pub enum Command {
     /// Shows pod name, status (running/stopped), and creation time.
     #[command(verbatim_doc_comment)]
     List(ListCommand),
+
+    /// Stream pod status and review invalidations from the daemon.
+    Events(EventsCommand),
 
     /// Stop one or more pod containers without removing them.
     ///
@@ -865,8 +875,18 @@ pub enum GitHookSubcommand {
     /// Handle git pre-receive hook events (host repo)
     HostPreReceive,
 
+    /// Notify the daemon after host repository refs were updated
+    HostPostReceive(HostPostReceiveCommand),
+
     /// Handle git pre-commit hook events: validate the DESCRIPTION file
     PreCommitDescription(PreCommitDescriptionCommand),
+}
+
+#[derive(Args)]
+pub struct HostPostReceiveCommand {
+    /// Host repository whose pod refs were updated.
+    #[arg(long)]
+    pub repo_path: PathBuf,
 }
 
 #[derive(Subcommand)]

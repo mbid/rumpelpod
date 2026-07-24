@@ -588,6 +588,13 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
         Some(info) => info,
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
+    let daemon_socket = match crate::daemon::socket_path() {
+        Ok(path) => path,
+        Err(error) => {
+            warn!("Failed to resolve daemon socket for Git hooks: {error:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     // Resolve the git directory for this request.  The URL path
     // determines whether this targets the main repo or a submodule:
@@ -648,6 +655,10 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
         .env("GIT_PROJECT_ROOT", project_root.to_string_lossy())
         .env("GIT_HTTP_EXPORT_ALL", "")
         .env(POD_NAME_ENV, &info.pod_name)
+        .env(
+            crate::daemon::SOCKET_PATH_ENV,
+            daemon_socket.to_string_lossy(),
+        )
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "http.receivepack")
         .env("GIT_CONFIG_VALUE_0", "true")

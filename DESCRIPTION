@@ -9,3 +9,8 @@ unauthenticated and reachable only through loopback port forwarding.
 Serve a separate anyhow demo repository so live test pods use a standard
 nested runtime. Keep the demo beside the rumpelpod checkout under
 `/workspaces` so it is easy to find from the development container.
+
+Make the active agent chat the primary VS Code surface and replace the
+persistent pod tree with a compact switcher. Stream typed daemon events
+to the extension so agent status and native review diffs update
+immediately when a pod commits.

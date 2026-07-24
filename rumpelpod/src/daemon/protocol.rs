@@ -178,6 +178,23 @@ pub struct PodInfo {
     pub codex_state: Option<CodexState>,
 }
 
+/// State invalidations streamed by the daemon to long-lived UI clients.
+///
+/// Events identify the affected pod but deliberately do not duplicate
+/// `PodInfo` or `ReviewPlan`. Clients re-read those snapshots after an
+/// invalidation so a lagged stream can recover with a single `Resync`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export_to = "DaemonEvent.ts")]
+pub enum DaemonEvent {
+    /// Re-read every visible repository after subscribing or losing events.
+    Resync,
+    /// Container connectivity or agent session state changed.
+    PodStatusChanged { repository: String, pod: String },
+    /// The pod's host-side review ref changed.
+    PodReviewChanged { repository: String, pod: String },
+}
+
 /// Information about a forwarded port.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortInfo {
@@ -400,6 +417,13 @@ pub struct PodReconnectRequest {
     pub pod_name: String,
 }
 
+/// Request body used by the host post-receive hook after a pod ref update.
+#[derive(Debug, Serialize, Deserialize)]
+struct PodReviewChangedRequest {
+    repo_path: PathBuf,
+    pod_name: String,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -510,6 +534,19 @@ pub trait Daemon: Send + Sync + 'static {
         _pod_name: &str,
     ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
         None
+    }
+
+    // GET /events
+    // Subscribe to daemon-wide state invalidations.
+    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<DaemonEvent> {
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        rx
+    }
+
+    // POST /events/review-changed
+    // Called by the host post-receive hook after Git committed pod refs.
+    fn notify_pod_review_changed(&self, _repo_path: &Path, _pod_name: &str) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -901,9 +938,55 @@ impl Daemon for DaemonClient {
             Err(anyhow::anyhow!("server error: {msg}"))
         }
     }
+
+    fn notify_pod_review_changed(&self, repo_path: &Path, pod_name: &str) -> Result<()> {
+        let url = self.url.join("/events/review-changed")?;
+        let request = PodReviewChangedRequest {
+            repo_path: repo_path.to_path_buf(),
+            pod_name: pod_name.to_string(),
+        };
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let status = response.status();
+        let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+            error: "unknown error".to_string(),
+        });
+        let message = error.error;
+        Err(anyhow::anyhow!(
+            "review event endpoint returned {status}: {message}"
+        ))
+    }
 }
 
 impl DaemonClient {
+    /// Subscribe to daemon-wide state invalidations.
+    pub fn daemon_events(&self) -> Result<DaemonEventStream> {
+        let url = self.url.join("/events")?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "unknown error".to_string(),
+            });
+            let message = error.error;
+            return Err(anyhow::anyhow!(
+                "events endpoint returned {status}: {message}"
+            ));
+        }
+        Ok(DaemonEventStream::new(response))
+    }
+
     /// Subscribe to pod-level reconnection events (SSH + pod).
     pub fn pod_reconnect_events(
         &self,
@@ -935,6 +1018,61 @@ impl DaemonClient {
         }
 
         Ok(ReconnectStream::new(response))
+    }
+}
+
+/// SSE-backed iterator over daemon-wide state invalidations.
+pub struct DaemonEventStream {
+    lines: std::io::Lines<BufReader<reqwest::blocking::Response>>,
+}
+
+impl DaemonEventStream {
+    fn new(response: reqwest::blocking::Response) -> Self {
+        Self {
+            lines: BufReader::new(response).lines(),
+        }
+    }
+}
+
+impl Iterator for DaemonEventStream {
+    type Item = Result<DaemonEvent>;
+
+    fn next(&mut self) -> Option<Result<DaemonEvent>> {
+        loop {
+            let line = match self.lines.next()? {
+                Ok(line) => line,
+                Err(error) => {
+                    return Some(Err(anyhow::anyhow!(
+                        "failed to read daemon event stream: {error}"
+                    )))
+                }
+            };
+            if line != "event: daemon_event" {
+                continue;
+            }
+            let data_line = match self.lines.next() {
+                Some(Ok(line)) => line,
+                Some(Err(error)) => {
+                    return Some(Err(anyhow::anyhow!(
+                        "failed to read daemon event data: {error}"
+                    )))
+                }
+                None => {
+                    return Some(Err(anyhow::anyhow!(
+                        "daemon event stream ended before its data"
+                    )))
+                }
+            };
+            let Some(data) = data_line.strip_prefix("data: ") else {
+                return Some(Err(anyhow::anyhow!(
+                    "expected daemon event data, got: {data_line}"
+                )));
+            };
+            return Some(
+                serde_json::from_str(data)
+                    .map_err(|error| anyhow::anyhow!("parsing daemon event: {error}")),
+            );
+        }
     }
 }
 
@@ -1449,6 +1587,84 @@ async fn ensure_ssh_agent_handler<D: Daemon>(
     }
 }
 
+fn daemon_event_message(event: &DaemonEvent) -> String {
+    let data = serde_json::to_string(event).expect("DaemonEvent is serializable");
+    sse_event("daemon_event", &data)
+}
+
+/// Stream daemon invalidations with an initial full-refresh marker.
+///
+/// A lagged subscriber receives the same marker because the payloads are
+/// invalidations, not a replayable state log.
+fn daemon_events_sse_response(rx: tokio::sync::broadcast::Receiver<DaemonEvent>) -> Response {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
+    tokio::spawn(forward_daemon_events(rx, event_tx));
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx)
+        .map(Ok::<_, std::convert::Infallible>);
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .expect("building response never fails")
+}
+
+async fn forward_daemon_events(
+    mut rx: tokio::sync::broadcast::Receiver<DaemonEvent>,
+    event_tx: tokio::sync::mpsc::Sender<String>,
+) {
+    if event_tx
+        .send(daemon_event_message(&DaemonEvent::Resync))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut keepalive = tokio::time::interval(Duration::from_secs(30));
+    keepalive.tick().await;
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                let event = match result {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        DaemonEvent::Resync
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                if event_tx.send(daemon_event_message(&event)).await.is_err() {
+                    break;
+                }
+            }
+            _ = keepalive.tick() => {
+                if event_tx.send(": keepalive\n\n".to_string()).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn daemon_events_handler<D: Daemon>(State(daemon): State<Arc<D>>) -> Response {
+    daemon_events_sse_response(daemon.subscribe_events())
+}
+
+async fn pod_review_changed_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<PodReviewChangedRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    daemon
+        .notify_pod_review_changed(&request.repo_path, &request.pod_name)
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("{error:#}"),
+                }),
+            )
+        })
+}
+
 /// Build an SSE response from a broadcast receiver of reconnect events.
 fn reconnect_sse_response(rx: tokio::sync::broadcast::Receiver<ReconnectEvent>) -> Response {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
@@ -1557,6 +1773,11 @@ where
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .route("/pod/pi-config", put(ensure_pi_config_handler::<D>))
         .route("/pod/ssh-agent", post(ensure_ssh_agent_handler::<D>))
+        .route("/events", get(daemon_events_handler::<D>))
+        .route(
+            "/events/review-changed",
+            post(pod_review_changed_handler::<D>),
+        )
         .route(
             "/pod/reconnect-events",
             post(pod_reconnect_events_handler::<D>),
@@ -1571,4 +1792,27 @@ where
             .await
             .unwrap();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn daemon_event_stream_resyncs_initially_and_after_lag() {
+        let (source_tx, source_rx) = tokio::sync::broadcast::channel(1);
+        let event = DaemonEvent::PodStatusChanged {
+            repository: "/repo".to_string(),
+            pod: "one".to_string(),
+        };
+        let _ = source_tx.send(event.clone());
+        let _ = source_tx.send(event);
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(4);
+
+        let task = tokio::spawn(forward_daemon_events(source_rx, output_tx));
+        let expected = daemon_event_message(&DaemonEvent::Resync);
+        assert_eq!(output_rx.recv().await.as_deref(), Some(expected.as_str()));
+        assert_eq!(output_rx.recv().await.as_deref(), Some(expected.as_str()));
+        task.abort();
+    }
 }

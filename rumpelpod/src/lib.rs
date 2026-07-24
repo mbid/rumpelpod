@@ -18,6 +18,7 @@ pub use command_ext::CommandExt;
 pub mod daemon;
 mod delete;
 mod enter;
+mod events;
 mod fork;
 pub mod gateway;
 mod git;
@@ -159,6 +160,9 @@ pub fn run() -> Result<()> {
         Command::List(ref cmd) => {
             list::list(cmd)?;
         }
+        Command::Events(ref cmd) => {
+            events::events(cmd)?;
+        }
         Command::Stop(ref cmd) => {
             stop::stop(cmd)?;
         }
@@ -230,6 +234,9 @@ pub fn run() -> Result<()> {
             }
             GitHookSubcommand::HostPreReceive => {
                 hook::host_pre_receive()?;
+            }
+            GitHookSubcommand::HostPostReceive(ref cmd) => {
+                hook::host_post_receive(&cmd.repo_path)?;
             }
             GitHookSubcommand::PreCommitDescription(ref cmd) => {
                 hook::pre_commit_description(cmd)?;

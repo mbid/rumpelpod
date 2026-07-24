@@ -43,6 +43,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     pod: string,
     plan: ReviewPlan,
     file: ReviewFile,
+    preserveFocus = false,
   ): Promise<void> {
     await this.clear();
     const base = reviewUri(repository, plan.base, file.path, file.base_exists, "base");
@@ -54,7 +55,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       `${pod}: ${file.path}`,
       {
         preview: true,
-        preserveFocus: false,
+        preserveFocus,
         viewColumn: vscode.ViewColumn.Two,
       } satisfies vscode.TextDocumentShowOptions,
     );
@@ -67,6 +68,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     if (tabs.length > 0) {
       await vscode.window.tabGroups.close(tabs, true);
     }
+    this.content.clear();
   }
 
   public async clearPlaceholders(): Promise<void> {
