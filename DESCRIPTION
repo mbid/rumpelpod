@@ -7,4 +7,5 @@ daemon browser integration coverage. Keep the browser server
 unauthenticated and reachable only through loopback port forwarding.
 
 Serve a separate anyhow demo repository so live test pods use a standard
-nested runtime.
+nested runtime. Keep the demo beside the rumpelpod checkout under
+`/workspaces` so it is easy to find from the development container.

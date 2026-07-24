@@ -24,7 +24,7 @@ cargo vscode
 
 The devcontainer runs `cargo vscode` after creation and serves a dedicated
 `anyhow` 1.0.102 demo repository from
-`~/.local/share/rumpelpod/anyhow-demo` at port 3000. This keeps the live editor
+`/workspaces/anyhow-demo` at port 3000. This keeps the live editor
 outside the rumpelpod source checkout: pods created through the extension use
 the demo's ordinary Rust devcontainer and do not try to nest Sysbox inside
 Sysbox. The demo is seeded from Cargo's pinned registry source on first use;

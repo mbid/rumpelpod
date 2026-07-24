@@ -4,7 +4,7 @@
 
 set -eu
 
-workspace=${RUMPELPOD_VSCODE_WORKSPACE:-$HOME/.local/share/rumpelpod/anyhow-demo}
+workspace=${RUMPELPOD_VSCODE_WORKSPACE:-/workspaces/anyhow-demo}
 if [ -d "$workspace/.git" ]; then
     exit 0
 fi

@@ -383,7 +383,7 @@ fn vscode_server_is_unauthenticated_and_loopback_only() {
         .expect("start loopback-only code-server service");
 
     let arguments = fs::read_to_string(&capture).expect("read code-server arguments");
-    let workspace = home.join(".local/share/rumpelpod/anyhow-demo");
+    let workspace = Path::new("/workspaces/anyhow-demo");
     let workspace = workspace.display();
     assert_eq!(
         arguments,
@@ -403,6 +403,13 @@ fn vscode_server_is_unauthenticated_and_loopback_only() {
         !home.join(".config/rumpelpod/vscode-password").exists(),
         "the browser service created a password credential"
     );
+    let service = fs::read_to_string(root.join(".devcontainer/rumpelpod-vscode.service"))
+        .expect("read VS Code service");
+    assert!(
+        service.contains("ConditionPathIsDirectory=/workspaces/anyhow-demo/.git")
+            && service.contains("WorkingDirectory=/workspaces/anyhow-demo"),
+        "the browser service did not use the demo repository in /workspaces"
+    );
 }
 
 #[test]
@@ -411,7 +418,7 @@ fn vscode_demo_workspace_uses_standard_runtime() {
     let temporary = tempfile::tempdir().expect("create VS Code demo test directory");
     let home = temporary.path().join("home");
     let source = temporary.path().join("cached-anyhow");
-    let workspace = home.join(".local/share/rumpelpod/anyhow-demo");
+    let workspace = temporary.path().join("workspaces/anyhow-demo");
     fs::create_dir_all(source.join("src")).expect("create cached anyhow source");
     fs::write(
         source.join("Cargo.toml"),
@@ -433,6 +440,7 @@ fn vscode_demo_workspace_uses_standard_runtime() {
         .arg(&prepare)
         .env("HOME", &home)
         .env("RUMPELPOD_VSCODE_DEMO_SOURCE", &source)
+        .env("RUMPELPOD_VSCODE_WORKSPACE", &workspace)
         .success()
         .expect("seed VS Code demo workspace");
 
@@ -487,6 +495,7 @@ fn vscode_demo_workspace_uses_standard_runtime() {
         .arg(&prepare)
         .env("HOME", &home)
         .env("RUMPELPOD_VSCODE_DEMO_SOURCE", &source)
+        .env("RUMPELPOD_VSCODE_WORKSPACE", &workspace)
         .success()
         .expect("re-run VS Code demo preparation");
     assert_eq!(

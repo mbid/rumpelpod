@@ -184,7 +184,7 @@ fn run() -> Result<()> {
     )?;
     wait_for_vscode()?;
 
-    let workspace = home.join(".local/share/rumpelpod/anyhow-demo");
+    let workspace = Path::new("/workspaces/anyhow-demo");
     let workspace = workspace.display();
     println!("rumpelpod VS Code is serving {workspace} on port 3000");
     Ok(())

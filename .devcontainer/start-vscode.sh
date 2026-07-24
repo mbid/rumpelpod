@@ -4,7 +4,7 @@
 
 set -eu
 
-workspace=${WORKSPACE:-$HOME/.local/share/rumpelpod/anyhow-demo}
+workspace=${WORKSPACE:-/workspaces/anyhow-demo}
 export PATH="$HOME/.local/bin:$PATH"
 unset PASSWORD HASHED_PASSWORD
 
