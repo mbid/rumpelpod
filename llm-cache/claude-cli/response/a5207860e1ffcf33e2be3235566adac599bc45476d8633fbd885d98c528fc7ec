@@ -1,0 +1,1 @@
+{"status":200,"path":"/api/hello","headers":{"cf-cache-status":"DYNAMIC","cf-ray":"a205896ef8608ea2-SJC","content-length":"20","content-security-policy":"default-src 'none'; frame-ancestors 'none'","content-type":"application/json","date":"Fri, 24 Jul 2026 20:04:56 GMT","server":"cloudflare","server-timing":"x-originResponse;dur=","x-robots-tag":"none"}}
