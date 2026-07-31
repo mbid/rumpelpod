@@ -112,19 +112,9 @@
     "menus": {
       "view/title": [
         {
-          "command": "rumpelpod.showPods",
-          "when": "view == rumpelpod.agent",
-          "group": "navigation@1"
-        },
-        {
           "command": "rumpelpod.createPod",
           "when": "view == rumpelpod.agent",
-          "group": "navigation@2"
-        },
-        {
-          "command": "rumpelpod.openActiveShell",
-          "when": "view == rumpelpod.agent && rumpelpod.hasActivePod",
-          "group": "navigation@3"
+          "group": "navigation@1"
         },
         {
           "command": "rumpelpod.changeActiveAgent",

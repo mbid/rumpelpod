@@ -19,23 +19,104 @@ body {
 
 #app {
   display: flex;
+  flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+
+#pod-selector {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--vscode-sideBarTitle-foreground, var(--vscode-sideBar-foreground));
+  cursor: pointer;
+  display: flex;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 12px 6px;
+  text-align: left;
+}
+
+#pod-selector:hover #pod-name {
+  color: var(--vscode-textLink-foreground);
+}
+
+#pod-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#pod-chevron {
+  border-bottom: 1px solid currentColor;
+  border-right: 1px solid currentColor;
+  flex: none;
+  height: 5px;
+  margin-bottom: 3px;
+  transform: rotate(45deg);
+  width: 5px;
+}
+
+#terminal-tabs {
+  border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, transparent);
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 0 8px;
+}
+
+.terminal-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font: inherit;
+  padding: 5px 7px 4px;
+}
+
+.terminal-tab:hover {
+  color: var(--vscode-foreground);
+}
+
+body[data-rumpelpod-active-tab="agent"] #agent-tab,
+body[data-rumpelpod-active-tab="shell"] #shell-tab {
+  border-bottom-color: var(--vscode-focusBorder);
+  color: var(--vscode-foreground);
+}
+
+#surfaces,
+.surface {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.surface {
   position: relative;
 }
 
-#terminal {
+body[data-rumpelpod-active-tab="agent"] #shell-surface,
+body[data-rumpelpod-active-tab="shell"] #agent-surface {
+  display: none;
+}
+
+.terminal {
   flex: 1;
   min-height: 0;
   min-width: 0;
   padding: 4px 2px 2px 6px;
 }
 
-#terminal .xterm {
+.terminal .xterm {
   height: 100%;
 }
 
-#empty {
+.empty {
   align-items: center;
   box-sizing: border-box;
   display: flex;
@@ -47,12 +128,12 @@ body {
   text-align: center;
 }
 
-#empty p {
+.empty p {
   margin: 0;
   max-width: 24em;
 }
 
-#restart {
+.restart {
   background: var(--vscode-button-background);
   border: 0;
   color: var(--vscode-button-foreground);
@@ -60,19 +141,23 @@ body {
   padding: 5px 12px;
 }
 
-#restart:hover {
+.restart:hover {
   background: var(--vscode-button-hoverBackground);
 }
 
-body[data-rumpelpod-state="running"] #empty,
-body[data-rumpelpod-state="starting"] #empty {
+body[data-rumpelpod-agent-state="running"] #agent-empty,
+body[data-rumpelpod-agent-state="starting"] #agent-empty,
+body[data-rumpelpod-shell-state="running"] #shell-empty,
+body[data-rumpelpod-shell-state="starting"] #shell-empty {
   display: none;
 }
 
-body:not([data-rumpelpod-state="running"]):not([data-rumpelpod-state="starting"]) #terminal {
+body:not([data-rumpelpod-agent-state="running"]):not([data-rumpelpod-agent-state="starting"]) #agent-terminal,
+body:not([data-rumpelpod-shell-state="running"]):not([data-rumpelpod-shell-state="starting"]) #shell-terminal {
   display: none;
 }
 
-body:not([data-rumpelpod-state="exited"]) #restart {
+body:not([data-rumpelpod-agent-state="exited"]) #agent-restart,
+body:not([data-rumpelpod-shell-state="exited"]) #shell-restart {
   display: none;
 }

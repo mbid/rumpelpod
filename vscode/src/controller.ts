@@ -3,7 +3,7 @@
 
 import * as vscode from "vscode";
 
-import type { AgentKind, PodInfo, ReviewFile, ReviewPlan } from "./generated/protocol";
+import type { AgentKind, PodInfo, ReviewFile } from "./generated/protocol";
 import { AGENTS, agentDescription, agentLabel } from "./agents";
 import type { Repository, RumpelpodModel } from "./model";
 import type { ReviewDocuments } from "./review";
@@ -29,27 +29,19 @@ interface ReviewFilePick extends vscode.QuickPickItem {
 
 interface ActivePod {
   readonly agent: AgentKind;
-  readonly currentFile: string | undefined;
   readonly generation: number;
   readonly info: PodInfo | undefined;
-  readonly plan: ReviewPlan | undefined;
   readonly pod: string;
   readonly repository: Repository;
 }
 
 type SwitcherAction =
   | { readonly kind: "create" }
-  | { readonly kind: "open"; readonly pick: PodPick }
-  | { readonly kind: "shell"; readonly pick: PodPick };
+  | { readonly kind: "open"; readonly pick: PodPick };
 
 const CREATE_POD_BUTTON: vscode.QuickInputButton = {
   iconPath: new vscode.ThemeIcon("add"),
   tooltip: "Create Pod",
-};
-
-const OPEN_SHELL_BUTTON: vscode.QuickInputButton = {
-  iconPath: new vscode.ThemeIcon("terminal"),
-  tooltip: "Open Pod Shell",
 };
 
 export class RumpelpodController implements vscode.Disposable {
@@ -105,13 +97,6 @@ export class RumpelpodController implements vscode.Disposable {
         return;
       case "open":
         await this.openPod(action.pick.repository, action.pick.pod);
-        return;
-      case "shell":
-        this.terminals.showShell(
-          action.pick.repository,
-          action.pick.pod.name,
-          this.model.executable(),
-        );
         return;
     }
   }
@@ -193,24 +178,23 @@ export class RumpelpodController implements vscode.Disposable {
       if (active === undefined) {
         return;
       }
-      const file =
-        plan.files.find((candidate) => candidate.path === active.currentFile) ?? plan.files[0];
-      this.active = {
-        ...active,
-        currentFile: file?.path,
-        plan,
-      };
-      if (file === undefined) {
-        await this.reviewDocuments.openEmpty(selected.repository, selected.pod, preserveFocus);
-        return;
+      const restoreTerminalFocus = preserveFocus && this.terminals.hasFocus();
+      try {
+        if (plan.files.length === 0) {
+          await this.reviewDocuments.openEmpty(selected.repository, selected.pod, preserveFocus);
+          return;
+        }
+        await this.reviewDocuments.open(
+          selected.repository,
+          selected.pod,
+          plan,
+          preserveFocus,
+        );
+      } finally {
+        if (restoreTerminalFocus) {
+          await this.terminals.restoreFocus();
+        }
       }
-      await this.reviewDocuments.open(
-        selected.repository,
-        selected.pod,
-        plan,
-        file,
-        preserveFocus,
-      );
     });
   }
 
@@ -248,10 +232,8 @@ export class RumpelpodController implements vscode.Disposable {
     }
     this.active = {
       agent,
-      currentFile: undefined,
       generation,
       info: undefined,
-      plan: undefined,
       pod,
       repository,
     };
@@ -281,10 +263,8 @@ export class RumpelpodController implements vscode.Disposable {
     }
     this.active = {
       agent,
-      currentFile: undefined,
       generation,
       info: pod,
-      plan: undefined,
       pod: pod.name,
       repository,
     };
@@ -374,10 +354,9 @@ export class RumpelpodController implements vscode.Disposable {
       label: file.path,
       description: reviewFileDescription(file),
       file,
-      picked: file.path === selected.currentFile,
     }));
     const pick = await vscode.window.showQuickPick(picks, {
-      placeHolder: `Select a changed file in ${selected.pod}`,
+      placeHolder: `Jump to a changed file in ${selected.pod}`,
       ignoreFocusOut: true,
       matchOnDescription: true,
     });
@@ -385,12 +364,18 @@ export class RumpelpodController implements vscode.Disposable {
     if (pick === undefined || active === undefined) {
       return;
     }
-    this.active = {
-      ...active,
-      currentFile: pick.file.path,
-      plan,
-    };
-    await this.refreshActiveReview(false);
+    await this.enqueueReviewUpdate(async () => {
+      if (this.currentSelection(active) === undefined) {
+        return;
+      }
+      await this.reviewDocuments.open(
+        active.repository,
+        active.pod,
+        plan,
+        false,
+        pick.file,
+      );
+    });
   }
 
   public async restoreLastPod(): Promise<boolean> {
@@ -498,7 +483,6 @@ export class RumpelpodController implements vscode.Disposable {
     ].filter((value): value is string => value !== undefined);
     return {
       agent,
-      buttons: [OPEN_SHELL_BUTTON],
       description: descriptions.join(" - "),
       detail: `Host: ${pod.host} - Created: ${pod.created}`,
       iconPath: podStatusIcon(pod.status),
@@ -573,10 +557,6 @@ function waitForSwitcherAction(
         resolve({ kind: "create" });
         picker.hide();
       }
-    });
-    picker.onDidTriggerItemButton((event) => {
-      resolve({ kind: "shell", pick: event.item });
-      picker.hide();
     });
     picker.onDidHide(() => resolve(undefined));
     picker.show();

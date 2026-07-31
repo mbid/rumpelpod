@@ -7,6 +7,9 @@ import "./webview.css";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 
+type TerminalTab = "agent" | "shell";
+type ViewState = "empty" | "exited" | "running" | "starting";
+
 interface WebviewApi<State> {
   getState(): State | undefined;
   postMessage(message: unknown): void;
@@ -15,22 +18,25 @@ interface WebviewApi<State> {
 
 declare function acquireVsCodeApi<State = unknown>(): WebviewApi<State>;
 
-type ViewState = "empty" | "exited" | "running" | "starting";
-
 interface PersistedState {
+  readonly activeTab?: TerminalTab;
   readonly agent?: string;
   readonly pod?: string;
   readonly repository?: string;
 }
 
 interface AgentStateMessage {
+  readonly activeTab: TerminalTab;
   readonly agent: string;
-  readonly message: string;
+  readonly agentMessage: string;
+  readonly agentSession: number;
+  readonly agentState: ViewState;
   readonly pod: string;
   readonly repository: string;
   readonly repositoryState: string;
-  readonly session: number;
-  readonly state: ViewState;
+  readonly shellMessage: string;
+  readonly shellSession: number;
+  readonly shellState: ViewState;
   readonly type: "state";
 }
 
@@ -38,50 +44,59 @@ interface OutputMessage {
   readonly data: string;
   readonly sequence: number;
   readonly session: number;
+  readonly tab: TerminalTab;
   readonly type: "output";
 }
 
-type HostMessage = AgentStateMessage | OutputMessage;
+interface FocusMessage {
+  readonly type: "focus";
+}
+
+interface TerminalSurface {
+  readonly empty: HTMLElement;
+  readonly fit: FitAddon;
+  readonly restart: HTMLElement;
+  readonly terminal: Terminal;
+}
+
+type HostMessage = AgentStateMessage | FocusMessage | OutputMessage;
 
 const vscode = acquireVsCodeApi<PersistedState>();
 const body = document.body;
-const terminalElement = requiredElement("terminal");
-const emptyMessage = requiredElement("empty-message");
-const restart = requiredElement("restart");
-const fit = new FitAddon();
-const terminal = new Terminal({
-  allowProposedApi: false,
-  convertEol: false,
-  cursorBlink: true,
-  cursorStyle: "block",
-  fontFamily: cssVariable("--vscode-editor-font-family"),
-  fontSize: 13,
-  screenReaderMode: true,
-  scrollback: 10_000,
-  theme: {
-    background: cssVariable("--vscode-sideBar-background"),
-    foreground: cssVariable("--vscode-sideBar-foreground"),
-    cursor: cssVariable("--vscode-terminalCursor-foreground"),
-    selectionBackground: cssVariable("--vscode-terminal-selectionBackground"),
-  },
-});
+const podSelector = requiredElement("pod-selector");
+const podName = requiredElement("pod-name");
+const agentTab = requiredElement("agent-tab");
+const shellTab = requiredElement("shell-tab");
+const surfaces: Record<TerminalTab, TerminalSurface> = {
+  agent: createSurface("agent"),
+  shell: createSurface("shell"),
+};
 
-let activeSession = 0;
+let activeTab: TerminalTab = "agent";
 let resizeTimer: number | undefined;
+const sessions: Record<TerminalTab, number> = { agent: 0, shell: 0 };
 
-terminal.loadAddon(fit);
-terminal.open(terminalElement);
-terminal.onData((data) => {
-  if (activeSession !== 0) {
-    vscode.postMessage({ data, session: activeSession, type: "input" });
-  }
-});
+for (const tab of terminalTabs()) {
+  const surface = surfaces[tab];
+  surface.terminal.onData((data) => {
+    const session = sessions[tab];
+    if (session !== 0) {
+      vscode.postMessage({ data, session, tab, type: "input" });
+    }
+  });
+  surface.restart.addEventListener("click", () => {
+    const session = sessions[tab];
+    if (session !== 0) {
+      vscode.postMessage({ session, tab, type: "restart" });
+    }
+  });
+}
 
-restart.addEventListener("click", () => {
-  if (activeSession !== 0) {
-    vscode.postMessage({ session: activeSession, type: "restart" });
-  }
+podSelector.addEventListener("click", () => {
+  vscode.postMessage({ type: "selectPod" });
 });
+agentTab.addEventListener("click", () => selectTab("agent"));
+shellTab.addEventListener("click", () => selectTab("shell"));
 
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (!isHostMessage(event.data)) {
@@ -90,64 +105,147 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
   const message = event.data;
   switch (message.type) {
     case "state":
-      activeSession = message.session;
+      activeTab = message.activeTab;
+      sessions.agent = message.agentSession;
+      sessions.shell = message.shellSession;
+      body.dataset.rumpelpodActiveTab = activeTab;
       body.dataset.rumpelpodAgent = message.agent;
       body.dataset.rumpelpodPod = message.pod;
       body.dataset.rumpelpodRepository = message.repository;
       body.dataset.rumpelpodRepositoryState = message.repositoryState;
-      body.dataset.rumpelpodSession = String(message.session);
-      body.dataset.rumpelpodState = message.state;
-      emptyMessage.textContent = message.message;
+      podName.textContent = message.pod.length === 0 ? "Select pod" : message.pod;
+      agentTab.textContent = message.agent.length === 0 ? "agent" : message.agent.toLowerCase();
+      updateSelectedTab();
+      updateSurface("agent", message.agentSession, message.agentState, message.agentMessage);
+      updateSurface("shell", message.shellSession, message.shellState, message.shellMessage);
       vscode.setState({
+        activeTab,
         agent: message.agent,
         pod: message.pod,
         repository: message.repository,
       });
-      if (message.state === "starting") {
-        body.dataset.rumpelpodRenderedSession = "";
-        terminal.reset();
-      }
       scheduleFit();
       return;
     case "output":
-      if (message.session === activeSession) {
-        terminal.write(message.data, () => {
-          if (message.session === activeSession) {
-            body.dataset.rumpelpodRenderedSession = String(message.session);
-            vscode.postMessage({
-              sequence: message.sequence,
-              session: message.session,
-              type: "outputAck",
-            });
-          }
-        });
+      if (message.session !== sessions[message.tab]) {
+        return;
       }
+      surfaces[message.tab].terminal.write(message.data, () => {
+        if (message.session === sessions[message.tab]) {
+          if (message.tab === "agent") {
+            body.dataset.rumpelpodRenderedSession = String(message.session);
+          }
+          vscode.postMessage({
+            sequence: message.sequence,
+            session: message.session,
+            tab: message.tab,
+            type: "outputAck",
+          });
+        }
+      });
+      return;
+    case "focus":
+      surfaces[activeTab].terminal.focus();
+      reportTerminalFocus();
       return;
   }
 });
 
-new ResizeObserver(scheduleFit).observe(terminalElement);
+for (const tab of terminalTabs()) {
+  new ResizeObserver(scheduleFit).observe(requiredElement(`${tab}-terminal`));
+}
 document.addEventListener("visibilitychange", scheduleFit);
+document.addEventListener("focusin", reportTerminalFocus);
+document.addEventListener("focusout", () => queueMicrotask(reportTerminalFocus));
 window.addEventListener("resize", scheduleFit);
 
 const restored = vscode.getState();
 if (restored?.pod !== undefined) {
   body.dataset.rumpelpodPod = restored.pod;
+  podName.textContent = restored.pod;
 }
 if (restored?.agent !== undefined) {
   body.dataset.rumpelpodAgent = restored.agent;
+  agentTab.textContent = restored.agent.toLowerCase();
 }
 if (restored?.repository !== undefined) {
   body.dataset.rumpelpodRepository = restored.repository;
 }
+if (restored?.activeTab !== undefined) {
+  activeTab = restored.activeTab;
+}
+body.dataset.rumpelpodActiveTab = activeTab;
 body.dataset.rumpelpodAgentView = "true";
 body.dataset.rumpelpodRenderedSession = "";
 body.dataset.rumpelpodSession = "0";
 body.dataset.rumpelpodState = "empty";
-emptyMessage.textContent = "Select or create a pod from the view toolbar.";
+updateSelectedTab();
 
 scheduleFit();
-vscode.postMessage({ cols: terminal.cols, rows: terminal.rows, type: "ready" });
+vscode.postMessage({
+  cols: surfaces[activeTab].terminal.cols,
+  rows: surfaces[activeTab].terminal.rows,
+  type: "ready",
+});
+
+function createSurface(tab: TerminalTab): TerminalSurface {
+  const terminal = new Terminal({
+    allowProposedApi: false,
+    convertEol: false,
+    cursorBlink: true,
+    cursorStyle: "block",
+    fontFamily: cssVariable("--vscode-editor-font-family"),
+    fontSize: 13,
+    screenReaderMode: true,
+    scrollback: 10_000,
+    theme: {
+      background: cssVariable("--vscode-sideBar-background"),
+      foreground: cssVariable("--vscode-sideBar-foreground"),
+      cursor: cssVariable("--vscode-terminalCursor-foreground"),
+      selectionBackground: cssVariable("--vscode-terminal-selectionBackground"),
+    },
+  });
+  const fit = new FitAddon();
+  terminal.loadAddon(fit);
+  terminal.open(requiredElement(`${tab}-terminal`));
+  return {
+    empty: requiredElement(`${tab}-empty-message`),
+    fit,
+    restart: requiredElement(`${tab}-restart`),
+    terminal,
+  };
+}
+
+function selectTab(tab: TerminalTab): void {
+  if (activeTab === tab) {
+    return;
+  }
+  activeTab = tab;
+  body.dataset.rumpelpodActiveTab = tab;
+  updateSelectedTab();
+  vscode.postMessage({ tab, type: "selectTab" });
+  scheduleFit();
+}
+
+function updateSelectedTab(): void {
+  agentTab.setAttribute("aria-selected", String(activeTab === "agent"));
+  shellTab.setAttribute("aria-selected", String(activeTab === "shell"));
+}
+
+function updateSurface(tab: TerminalTab, session: number, state: ViewState, message: string): void {
+  const previousSession = Number(body.dataset[`rumpelpod${capitalize(tab)}Session`] ?? "0");
+  sessions[tab] = session;
+  body.dataset[`rumpelpod${capitalize(tab)}Session`] = String(session);
+  body.dataset[`rumpelpod${capitalize(tab)}State`] = state;
+  surfaces[tab].empty.textContent = message;
+  if (session !== previousSession && state === "starting") {
+    surfaces[tab].terminal.reset();
+  }
+  if (tab === activeTab) {
+    body.dataset.rumpelpodSession = String(session);
+    body.dataset.rumpelpodState = state;
+  }
+}
 
 function scheduleFit(): void {
   if (resizeTimer !== undefined) {
@@ -155,19 +253,51 @@ function scheduleFit(): void {
   }
   resizeTimer = window.setTimeout(() => {
     resizeTimer = undefined;
-    if (body.dataset.rumpelpodState !== "running" && body.dataset.rumpelpodState !== "starting") {
+    const state = body.dataset[`rumpelpod${capitalize(activeTab)}State`];
+    if (state !== "running" && state !== "starting") {
       return;
     }
-    fit.fit();
-    if (activeSession !== 0) {
+    const surface = surfaces[activeTab];
+    surface.fit.fit();
+    const session = sessions[activeTab];
+    if (session !== 0) {
+      body.dataset.rumpelpodSession = String(session);
+      body.dataset.rumpelpodState = state;
       vscode.postMessage({
-        cols: terminal.cols,
-        rows: terminal.rows,
-        session: activeSession,
+        cols: surface.terminal.cols,
+        rows: surface.terminal.rows,
+        session,
+        tab: activeTab,
         type: "resize",
       });
     }
   }, 25);
+}
+
+let terminalFocused = false;
+
+function reportTerminalFocus(): void {
+  const activeElement = document.activeElement;
+  const focused =
+    activeElement instanceof HTMLTextAreaElement && activeElement.closest(".terminal") !== null;
+  if (focused === terminalFocused) {
+    return;
+  }
+  terminalFocused = focused;
+  vscode.postMessage({ focused, type: "terminalFocus" });
+}
+
+function capitalize(tab: TerminalTab): "Agent" | "Shell" {
+  switch (tab) {
+    case "agent":
+      return "Agent";
+    case "shell":
+      return "Shell";
+  }
+}
+
+function terminalTabs(): readonly TerminalTab[] {
+  return ["agent", "shell"];
 }
 
 function cssVariable(name: string): string {
@@ -187,6 +317,8 @@ function isHostMessage(value: unknown): value is HostMessage {
     return false;
   }
   switch (value.type) {
+    case "focus":
+      return true;
     case "output":
       return (
         "data" in value &&
@@ -194,27 +326,47 @@ function isHostMessage(value: unknown): value is HostMessage {
         "sequence" in value &&
         typeof value.sequence === "number" &&
         "session" in value &&
-        typeof value.session === "number"
+        typeof value.session === "number" &&
+        "tab" in value &&
+        isTerminalTab(value.tab)
       );
     case "state":
       return (
+        "activeTab" in value &&
+        isTerminalTab(value.activeTab) &&
         "agent" in value &&
         typeof value.agent === "string" &&
-        "message" in value &&
-        typeof value.message === "string" &&
+        "agentMessage" in value &&
+        typeof value.agentMessage === "string" &&
+        "agentSession" in value &&
+        typeof value.agentSession === "number" &&
+        "agentState" in value &&
+        isViewState(value.agentState) &&
         "pod" in value &&
         typeof value.pod === "string" &&
         "repository" in value &&
         typeof value.repository === "string" &&
         "repositoryState" in value &&
         typeof value.repositoryState === "string" &&
-        "session" in value &&
-        typeof value.session === "number" &&
-        "state" in value &&
-        isViewState(value.state)
+        "shellMessage" in value &&
+        typeof value.shellMessage === "string" &&
+        "shellSession" in value &&
+        typeof value.shellSession === "number" &&
+        "shellState" in value &&
+        isViewState(value.shellState)
       );
   }
   return false;
+}
+
+function isTerminalTab(value: unknown): value is TerminalTab {
+  switch (value) {
+    case "agent":
+    case "shell":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function isViewState(value: unknown): value is ViewState {

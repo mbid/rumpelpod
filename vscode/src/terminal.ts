@@ -18,7 +18,8 @@ const MIN_COLUMNS = 2;
 const MAX_COLUMNS = 500;
 const MIN_ROWS = 2;
 const MAX_ROWS = 300;
-const SHELL_TERMINAL_ENV = "RUMPELPOD_VSCODE_SHELL";
+const TERMINATION_GRACE_MILLISECONDS = 500;
+type TerminalTab = "agent" | "shell";
 
 interface AgentSelection {
   readonly agent: AgentKind;
@@ -30,45 +31,97 @@ interface AgentSelection {
   readonly state: string;
 }
 
-interface RunningAgent {
+interface RunningTerminal {
   readonly data: NodePty.IDisposable;
   readonly exit: NodePty.IDisposable;
   readonly process: NodePty.IPty;
   readonly session: number;
+  readonly tab: TerminalTab;
+}
+
+interface TerminalChannel {
+  bufferedOutput: string;
+  outputInFlight:
+    | { readonly data: string; readonly sequence: number; readonly session: number }
+    | undefined;
+  outputSequence: number;
+  pausedOutput: NodePty.IPty | undefined;
+  running: RunningTerminal | undefined;
+  session: number;
+  viewMessage: string | undefined;
+  viewState: "empty" | "exited" | "running" | "starting";
 }
 
 type ViewMessage =
   | { readonly cols: number; readonly rows: number; readonly type: "ready" }
-  | { readonly data: string; readonly session: number; readonly type: "input" }
-  | { readonly sequence: number; readonly session: number; readonly type: "outputAck" }
-  | { readonly cols: number; readonly rows: number; readonly session: number; readonly type: "resize" }
-  | { readonly session: number; readonly type: "restart" };
+  | {
+      readonly data: string;
+      readonly session: number;
+      readonly tab: TerminalTab;
+      readonly type: "input";
+    }
+  | {
+      readonly sequence: number;
+      readonly session: number;
+      readonly tab: TerminalTab;
+      readonly type: "outputAck";
+    }
+  | {
+      readonly cols: number;
+      readonly rows: number;
+      readonly session: number;
+      readonly tab: TerminalTab;
+      readonly type: "resize";
+    }
+  | { readonly session: number; readonly tab: TerminalTab; readonly type: "restart" }
+  | { readonly tab: TerminalTab; readonly type: "selectTab" }
+  | { readonly type: "selectPod" }
+  | { readonly focused: boolean; readonly type: "terminalFocus" };
+
+function newChannel(): TerminalChannel {
+  return {
+    bufferedOutput: "",
+    outputInFlight: undefined,
+    outputSequence: 0,
+    pausedOutput: undefined,
+    running: undefined,
+    session: 0,
+    viewMessage: undefined,
+    viewState: "empty",
+  };
+}
 
 export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly didShowEmitter = new vscode.EventEmitter<void>();
   private readonly legacyTerminalSubscription: vscode.Disposable;
-  private readonly shells = new Set<vscode.Terminal>();
-  private readonly shellCloseSubscription: vscode.Disposable;
-  private bufferedOutput = "";
+  private readonly agentChannel = newChannel();
+  private readonly shellChannel = newChannel();
+  private activeTab: TerminalTab = "agent";
   private columns = 80;
   private disposed = false;
   private generation = 0;
-  private outputInFlight:
-    | { readonly data: string; readonly sequence: number; readonly session: number }
-    | undefined;
-  private outputSequence = 0;
-  private pausedOutput: NodePty.IPty | undefined;
   private ready = false;
   private rows = 24;
-  private running: RunningAgent | undefined;
   private selection: AgentSelection | undefined;
-  private session = 0;
+  private shellKey: string | undefined;
+  private shellSwitches = Promise.resolve();
   private switches = Promise.resolve();
+  private terminalFocused = false;
   private view: vscode.WebviewView | undefined;
-  private viewMessage: string | undefined;
-  private viewState: "empty" | "exited" | "running" | "starting" = "empty";
 
   public readonly onDidShow = this.didShowEmitter.event;
+
+  public hasFocus(): boolean {
+    return this.terminalFocused;
+  }
+
+  public async restoreFocus(): Promise<void> {
+    const view = this.view;
+    if (view === undefined) {
+      return;
+    }
+    await view.webview.postMessage({ type: "focus" });
+  }
 
   public constructor(
     private readonly extensionUri: vscode.Uri,
@@ -80,15 +133,14 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     this.legacyTerminalSubscription = vscode.window.onDidOpenTerminal((terminal) => {
       disposeLegacyAgentTerminal(terminal);
     });
-    this.shellCloseSubscription = vscode.window.onDidCloseTerminal((terminal) => {
-      this.shells.delete(terminal);
-    });
   }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.reserveReattachment();
+    this.reserveBufferedOutput(this.shellChannel);
     this.view = webviewView;
     this.ready = false;
+    this.terminalFocused = false;
     webviewView.webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "dist")],
@@ -107,6 +159,7 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       if (this.view === webviewView) {
         this.view = undefined;
         this.ready = false;
+        this.terminalFocused = false;
       }
     });
     this.updateView();
@@ -128,7 +181,10 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       current.agent === agent &&
       current.executable === executable;
     let generation = current?.generation ?? this.generation;
-    if (!sameSelection || (this.running === undefined && this.viewState === "exited")) {
+    if (
+      !sameSelection ||
+      (this.agentChannel.running === undefined && this.agentChannel.viewState === "exited")
+    ) {
       generation = ++this.generation;
       this.selection = {
         agent,
@@ -139,9 +195,20 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
         repositoryState: sameSelection ? current.repositoryState : "",
         state: sameSelection ? current.state : "starting",
       };
-      this.session += 1;
-      this.resetOutputBuffer();
-      this.updateView("starting");
+      this.agentChannel.session += 1;
+      this.resetOutputBuffer(this.agentChannel);
+      this.updateChannel(this.agentChannel, "starting");
+    }
+
+    this.activeTab = "agent";
+    this.updateView();
+    const key = terminalKey(repository, pod);
+    if (this.shellKey !== undefined && this.shellKey !== key) {
+      this.shellKey = undefined;
+      await this.enqueueShellSwitch(async () => {
+        await this.stopRunning(this.shellChannel, "closing the previous pod shell");
+        this.resetChannel(this.shellChannel);
+      });
     }
 
     await vscode.commands.executeCommand("workbench.view.extension.rumpelpod");
@@ -178,56 +245,48 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     }
     const generation = ++this.generation;
     this.selection = { ...selected, generation };
-    this.session += 1;
-    this.resetOutputBuffer();
-    this.updateView("starting");
+    this.agentChannel.session += 1;
+    this.resetOutputBuffer(this.agentChannel);
+    this.updateChannel(this.agentChannel, "starting");
     await this.reconcile(generation);
   }
 
-  public showShell(repository: Repository, pod: string, executable: string): vscode.Terminal {
-    const terminal = vscode.window.createTerminal({
-      name: `Rumpelpod shell: ${repository.name}/${pod}`,
-      cwd: repository.root,
-      env: { [SHELL_TERMINAL_ENV]: terminalKey(repository, pod) },
-      iconPath: new vscode.ThemeIcon("terminal-bash"),
-      location: vscode.TerminalLocation.Panel,
-      message: `Opening a shell in rumpelpod ${pod}`,
-      shellArgs: ["enter", pod],
-      shellPath: executable,
+  public showShell(repository: Repository, pod: string, executable: string): void {
+    const selected = this.selection;
+    if (selected?.repository.root !== repository.root || selected.pod !== pod) {
+      throw new Error(`select ${pod} before opening its shell`);
+    }
+    this.activeTab = "shell";
+    this.updateView();
+    void this.openShellView(repository, pod, executable).catch((error: unknown) => {
+      this.reportError("opening the pod shell", error);
     });
-    this.shells.add(terminal);
-    terminal.show(false);
-    return terminal;
   }
 
   public dispose(): void {
     this.disposed = true;
     this.generation += 1;
+    this.terminalFocused = false;
     this.didShowEmitter.dispose();
     this.legacyTerminalSubscription.dispose();
-    this.shellCloseSubscription.dispose();
-    const running = this.running;
-    this.running = undefined;
-    if (running !== undefined) {
-      running.data.dispose();
-      running.exit.dispose();
-      try {
-        running.process.write("\x01d");
-      } catch (error) {
-        this.reportError("detaching the active agent", error);
+    for (const channel of [this.agentChannel, this.shellChannel]) {
+      const running = channel.running;
+      channel.running = undefined;
+      if (running === undefined) {
+        continue;
       }
-      setTimeout(() => {
-        try {
-          running.process.kill();
-        } catch (error) {
-          this.reportError("closing the active agent attachment", error);
-        }
-      }, 250);
+      if (channel.pausedOutput === running.process) {
+        this.resumePausedOutput(channel);
+      }
+      const context = `closing the active ${running.tab}`;
+      void this.terminateRunning(running, context).catch((error: unknown) => {
+        this.reportError(context, error);
+      });
     }
   }
 
   private async startNow(selected: AgentSelection, session: number): Promise<void> {
-    this.updateView("starting");
+    this.updateChannel(this.agentChannel, "starting");
     let process: NodePty.IPty;
     try {
       process = loadNodePty().spawn(selected.executable, [selected.agent, "--create", selected.pod], {
@@ -238,43 +297,129 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
         rows: this.rows,
       });
     } catch (error) {
-      this.updateView("exited", `Starting ${agentLabel(selected.agent)} failed: ${errorMessage(error)}`);
+      this.updateChannel(
+        this.agentChannel,
+        "exited",
+        `Starting ${agentLabel(selected.agent)} failed: ${errorMessage(error)}`,
+      );
       throw error;
     }
-    const running: RunningAgent = {
+    const running: RunningTerminal = {
       data: process.onData((data) => {
-        this.handleOutput(session, data);
+        this.handleOutput(this.agentChannel, running, data);
       }),
       exit: process.onExit((event) => {
-        this.handleExit(running, event);
+        this.handleExit(this.agentChannel, running, event);
       }),
       process,
       session,
+      tab: "agent",
     };
-    this.running = running;
-    this.updateView("running");
+    this.agentChannel.running = running;
+    this.updateChannel(this.agentChannel, "running");
   }
 
-  private handleOutput(session: number, data: string): void {
-    if (session !== this.session) {
+  private async startShell(repository: Repository, pod: string, executable: string): Promise<void> {
+    return this.enqueueShellSwitch(() => this.startShellNow(repository, pod, executable));
+  }
+
+  private async startShellNow(
+    repository: Repository,
+    pod: string,
+    executable: string,
+  ): Promise<void> {
+    const key = terminalKey(repository, pod);
+    if (this.shellKey === key && this.shellChannel.running !== undefined) {
+      this.updateView();
       return;
     }
-    this.bufferedOutput = `${this.bufferedOutput}${data}`;
-    this.pauseOutputIfNeeded();
-    this.flushBufferedOutput();
+    await this.stopRunning(this.shellChannel, "closing the previous pod shell");
+    if (
+      this.disposed ||
+      this.selection?.repository.root !== repository.root ||
+      this.selection.pod !== pod
+    ) {
+      return;
+    }
+    this.shellKey = key;
+    this.shellChannel.session += 1;
+    this.resetOutputBuffer(this.shellChannel);
+    this.updateChannel(this.shellChannel, "starting");
+    let process: NodePty.IPty;
+    try {
+      process = loadNodePty().spawn(executable, ["enter", pod], {
+        cols: this.columns,
+        cwd: repository.root,
+        env: { ...globalThis.process.env },
+        name: "xterm-256color",
+        rows: this.rows,
+      });
+    } catch (error) {
+      this.updateChannel(
+        this.shellChannel,
+        "exited",
+        `Starting the shell failed: ${errorMessage(error)}`,
+      );
+      throw error;
+    }
+    const session = this.shellChannel.session;
+    const running: RunningTerminal = {
+      data: process.onData((data) => {
+        this.handleOutput(this.shellChannel, running, data);
+      }),
+      exit: process.onExit((event) => {
+        this.handleExit(this.shellChannel, running, event);
+      }),
+      process,
+      session,
+      tab: "shell",
+    };
+    this.shellChannel.running = running;
+    this.updateChannel(this.shellChannel, "running");
   }
 
-  private handleExit(running: RunningAgent, event: { exitCode: number; signal?: number }): void {
-    if (this.running !== running) {
+  private async openShellView(
+    repository: Repository,
+    pod: string,
+    executable: string,
+  ): Promise<void> {
+    await vscode.commands.executeCommand("workbench.view.extension.rumpelpod");
+    this.view?.show(false);
+    await this.startShell(repository, pod, executable);
+  }
+
+  private handleOutput(
+    channel: TerminalChannel,
+    running: RunningTerminal,
+    data: string,
+  ): void {
+    if (channel.running !== running || running.session !== channel.session) {
+      return;
+    }
+    channel.bufferedOutput = `${channel.bufferedOutput}${data}`;
+    this.pauseOutputIfNeeded(channel);
+    this.flushBufferedOutput(channel, running.tab);
+  }
+
+  private handleExit(
+    channel: TerminalChannel,
+    running: RunningTerminal,
+    event: { exitCode: number; signal?: number },
+  ): void {
+    if (channel.running !== running) {
       return;
     }
     running.data.dispose();
     running.exit.dispose();
-    this.running = undefined;
+    channel.running = undefined;
     const signal = event.signal === undefined ? "" : `, signal ${event.signal}`;
-    this.updateView(
+    const label = running.tab === "agent"
+      ? `${agentLabel(this.selection?.agent ?? "codex")} attachment`
+      : "Shell";
+    this.updateChannel(
+      channel,
       "exited",
-      `${agentLabel(this.selection?.agent ?? "codex")} attachment exited (${event.exitCode}${signal}).`,
+      `${label} exited (${event.exitCode}${signal}).`,
     );
   }
 
@@ -290,88 +435,142 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
         this.ready = true;
         this.columns = clamp(value.cols, MIN_COLUMNS, MAX_COLUMNS);
         this.rows = clamp(value.rows, MIN_ROWS, MAX_ROWS);
-        this.updateView(
-          this.running?.session === this.session ? "running" : this.viewState,
+        this.updateChannel(
+          this.agentChannel,
+          this.agentChannel.running?.session === this.agentChannel.session
+            ? "running"
+            : this.agentChannel.viewState,
         );
-        this.flushBufferedOutput();
+        this.flushBufferedOutput(this.agentChannel, "agent");
+        this.flushBufferedOutput(this.shellChannel, "shell");
         this.reconcileCurrent("starting the active agent");
         return;
       case "input":
-        if (value.session === this.session && this.running !== undefined) {
-          this.running.process.write(value.data);
+        {
+          const channel = this.channel(value.tab);
+          if (value.session === channel.session && channel.running !== undefined) {
+            channel.running.process.write(value.data);
+          }
         }
         return;
       case "outputAck":
-        if (
-          value.session === this.session &&
-          this.outputInFlight?.session === value.session &&
-          this.outputInFlight.sequence === value.sequence
-        ) {
-          this.outputInFlight = undefined;
-          this.flushBufferedOutput();
-          this.resumeOutputIfPossible();
+        {
+          const channel = this.channel(value.tab);
+          if (
+            value.session === channel.session &&
+            channel.outputInFlight?.session === value.session &&
+            channel.outputInFlight.sequence === value.sequence
+          ) {
+            channel.outputInFlight = undefined;
+            this.flushBufferedOutput(channel, value.tab);
+            this.resumeOutputIfPossible(channel);
+          }
         }
         return;
       case "resize":
-        if (value.session !== this.session) {
-          return;
-        }
-        this.columns = clamp(value.cols, MIN_COLUMNS, MAX_COLUMNS);
-        this.rows = clamp(value.rows, MIN_ROWS, MAX_ROWS);
-        if (this.running !== undefined) {
-          this.running.process.resize(this.columns, this.rows);
+        {
+          const channel = this.channel(value.tab);
+          if (value.session !== channel.session) {
+            return;
+          }
+          this.columns = clamp(value.cols, MIN_COLUMNS, MAX_COLUMNS);
+          this.rows = clamp(value.rows, MIN_ROWS, MAX_ROWS);
+          channel.running?.process.resize(this.columns, this.rows);
         }
         return;
       case "restart":
-        if (value.session === this.session) {
+        if (value.tab === "agent") {
+          if (value.session !== this.agentChannel.session) {
+            return;
+          }
           void this.restartActive().catch((error: unknown) => {
             this.reportError("restarting the active agent", error);
           });
+          return;
         }
+        if (value.session === this.shellChannel.session) {
+          const selected = this.selection;
+          if (selected === undefined) {
+            this.reportError("restarting the active pod shell", new Error("no pod is selected"));
+            return;
+          }
+          this.shellKey = undefined;
+          void this.startShell(selected.repository, selected.pod, selected.executable).catch(
+            (error: unknown) => {
+              this.reportError("restarting the active pod shell", error);
+            },
+          );
+        }
+        return;
+      case "selectPod":
+        void vscode.commands.executeCommand("rumpelpod.showPods").then(undefined, (error: unknown) => {
+          this.reportError("selecting a pod from the agent view", error);
+        });
+        return;
+      case "selectTab":
+        if (value.tab === "agent") {
+          this.activeTab = "agent";
+          this.updateView();
+          return;
+        }
+        const selected = this.selection;
+        if (selected === undefined) {
+          this.reportError("opening the pod shell", new Error("select a pod first"));
+          return;
+        }
+        this.showShell(selected.repository, selected.pod, selected.executable);
+        return;
+      case "terminalFocus":
+        this.terminalFocused = value.focused;
         return;
     }
   }
 
-  private flushBufferedOutput(): void {
+  private flushBufferedOutput(channel: TerminalChannel, tab: TerminalTab): void {
     if (
-      this.bufferedOutput.length === 0 ||
+      channel.bufferedOutput.length === 0 ||
       this.view === undefined ||
       !this.ready ||
-      this.outputInFlight !== undefined
+      channel.outputInFlight !== undefined
     ) {
       return;
     }
     const view = this.view;
-    const data = this.bufferedOutput;
-    const session = this.session;
-    const sequence = ++this.outputSequence;
-    this.bufferedOutput = "";
+    const data = channel.bufferedOutput;
+    const session = channel.session;
+    const sequence = ++channel.outputSequence;
+    channel.bufferedOutput = "";
     const output = { data, sequence, session };
-    this.outputInFlight = output;
+    channel.outputInFlight = output;
     void Promise.resolve(
-      view.webview.postMessage({ data, sequence, session, type: "output" }),
+      view.webview.postMessage({ data, sequence, session, tab, type: "output" }),
     ).then(
       (delivered) => {
         if (!delivered) {
-          this.restoreUndeliveredOutput(output);
+          this.restoreUndeliveredOutput(channel, output);
         }
       },
       (error: unknown) => {
-        this.restoreUndeliveredOutput(output, error);
+        this.restoreUndeliveredOutput(channel, output, error);
       },
     );
   }
 
-  private updateView(
+  private updateChannel(
+    channel: TerminalChannel,
     viewState?: "empty" | "exited" | "running" | "starting",
     message?: string,
   ): void {
     if (viewState !== undefined) {
-      if (viewState !== this.viewState || message !== undefined) {
-        this.viewMessage = message;
+      if (viewState !== channel.viewState || message !== undefined) {
+        channel.viewMessage = message;
       }
-      this.viewState = viewState;
+      channel.viewState = viewState;
     }
+    this.updateView();
+  }
+
+  private updateView(): void {
     const selected = this.selection;
     const view = this.view;
     void vscode.commands.executeCommand(
@@ -382,37 +581,38 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     if (view === undefined) {
       return;
     }
-    if (selected === undefined) {
-      view.title = "Agent";
-      view.description = undefined;
-    } else {
-      view.title = `${selected.pod} / ${agentLabel(selected.agent)}`;
-      const details = [selected.state, selected.repositoryState].filter((value) => value.length > 0);
-      view.description = details.join(" / ");
-    }
+    view.title = "";
+    view.description = undefined;
     void view.webview.postMessage({
+      activeTab: this.activeTab,
       agent: selected?.agent ?? "",
-      message: this.viewMessage ?? emptyMessage(selected, this.viewState),
+      agentMessage:
+        this.agentChannel.viewMessage ?? emptyMessage(selected, this.agentChannel.viewState),
+      agentSession: this.agentChannel.session,
+      agentState: selected === undefined ? "empty" : this.agentChannel.viewState,
       pod: selected?.pod ?? "",
       repository: selected?.repository.name ?? "",
       repositoryState: selected?.repositoryState ?? "",
-      session: this.session,
-      state: selected === undefined ? "empty" : this.viewState,
+      shellMessage: this.shellChannel.viewMessage ?? shellMessage(this.shellChannel.viewState),
+      shellSession: this.shellChannel.session,
+      shellState: selected === undefined ? "empty" : this.shellChannel.viewState,
       type: "state",
     });
   }
 
-  private async stopRunning(): Promise<void> {
-    const running = this.running;
-    this.running = undefined;
+  private async stopRunning(channel: TerminalChannel, context: string): Promise<void> {
+    const running = channel.running;
+    channel.running = undefined;
     if (running === undefined) {
       return;
     }
-    if (this.pausedOutput === running.process) {
-      this.resumePausedOutput();
+    if (channel.pausedOutput === running.process) {
+      this.resumePausedOutput(channel);
     }
-    running.data.dispose();
-    running.exit.dispose();
+    await this.terminateRunning(running, context);
+  }
+
+  private async terminateRunning(running: RunningTerminal, context: string): Promise<void> {
     let exited = false;
     let resolveExit: (() => void) | undefined;
     const processExited = new Promise<void>((resolve) => {
@@ -422,19 +622,31 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       exited = true;
       resolveExit?.();
     });
+    running.data.dispose();
+    running.exit.dispose();
     try {
-      running.process.write("\x01d");
+      if (running.tab === "agent") {
+        running.process.write("\x01d");
+      } else {
+        running.process.kill();
+      }
     } catch (error) {
-      this.reportError("detaching the previous agent", error);
+      this.reportError(context, error);
     }
-    await Promise.race([processExited, delay(500)]);
+    await Promise.race([processExited, delay(TERMINATION_GRACE_MILLISECONDS)]);
     if (!exited) {
       try {
         running.process.kill();
       } catch (error) {
-        this.reportError("closing the previous agent attachment", error);
+        this.reportError(context, error);
       }
-      await Promise.race([processExited, delay(500)]);
+      await Promise.race([processExited, delay(TERMINATION_GRACE_MILLISECONDS)]);
+    }
+    if (!exited) {
+      this.reportError(
+        context,
+        new Error(`${running.tab} terminal did not exit after fallback kill`),
+      );
     }
     exit.dispose();
   }
@@ -450,41 +662,53 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   private reserveReattachment(): void {
-    if (this.selection === undefined || this.running === undefined) {
+    if (this.selection === undefined || this.agentChannel.running === undefined) {
       return;
     }
     const generation = ++this.generation;
     this.selection = { ...this.selection, generation };
-    this.session += 1;
-    this.resetOutputBuffer();
-    this.viewMessage = undefined;
-    this.viewState = "starting";
+    this.agentChannel.session += 1;
+    this.resetOutputBuffer(this.agentChannel);
+    this.agentChannel.viewMessage = undefined;
+    this.agentChannel.viewState = "starting";
   }
 
-  private pauseOutputIfNeeded(): void {
-    const process = this.running?.process;
+  private reserveBufferedOutput(channel: TerminalChannel): void {
+    const output = channel.outputInFlight;
+    if (output === undefined) {
+      return;
+    }
+    channel.outputInFlight = undefined;
+    if (output.session === channel.session) {
+      channel.bufferedOutput = `${output.data}${channel.bufferedOutput}`;
+    }
+  }
+
+  private pauseOutputIfNeeded(channel: TerminalChannel): void {
+    const process = channel.running?.process;
     if (
-      this.queuedOutputLength() < MAX_BUFFERED_OUTPUT ||
+      this.queuedOutputLength(channel) < MAX_BUFFERED_OUTPUT ||
       process === undefined ||
-      this.pausedOutput !== undefined
+      channel.pausedOutput !== undefined
     ) {
       return;
     }
     try {
       process.pause();
-      this.pausedOutput = process;
+      channel.pausedOutput = process;
     } catch (error) {
-      this.reportError("pausing agent output", error);
+      this.reportError("pausing terminal output", error);
     }
   }
 
-  private resetOutputBuffer(): void {
-    this.bufferedOutput = "";
-    this.outputInFlight = undefined;
-    this.resumePausedOutput();
+  private resetOutputBuffer(channel: TerminalChannel): void {
+    channel.bufferedOutput = "";
+    channel.outputInFlight = undefined;
+    this.resumePausedOutput(channel);
   }
 
   private restoreUndeliveredOutput(
+    channel: TerminalChannel,
     output: {
       readonly data: string;
       readonly sequence: number;
@@ -492,40 +716,40 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     },
     error?: unknown,
   ): void {
-    if (this.outputInFlight !== output) {
+    if (channel.outputInFlight !== output) {
       return;
     }
-    this.outputInFlight = undefined;
-    if (output.session === this.session) {
-      this.bufferedOutput = `${output.data}${this.bufferedOutput}`;
+    channel.outputInFlight = undefined;
+    if (output.session === channel.session) {
+      channel.bufferedOutput = `${output.data}${channel.bufferedOutput}`;
       this.ready = false;
-      this.pauseOutputIfNeeded();
+      this.pauseOutputIfNeeded(channel);
     }
     if (error !== undefined) {
-      this.reportError("sending agent output to the terminal", error);
+      this.reportError("sending terminal output to the webview", error);
     }
   }
 
-  private resumeOutputIfPossible(): void {
-    if (this.queuedOutputLength() < MAX_BUFFERED_OUTPUT / 2) {
-      this.resumePausedOutput();
+  private resumeOutputIfPossible(channel: TerminalChannel): void {
+    if (this.queuedOutputLength(channel) < MAX_BUFFERED_OUTPUT / 2) {
+      this.resumePausedOutput(channel);
     }
   }
 
-  private queuedOutputLength(): number {
-    return this.bufferedOutput.length + (this.outputInFlight?.data.length ?? 0);
+  private queuedOutputLength(channel: TerminalChannel): number {
+    return channel.bufferedOutput.length + (channel.outputInFlight?.data.length ?? 0);
   }
 
-  private resumePausedOutput(): void {
-    const process = this.pausedOutput;
-    this.pausedOutput = undefined;
+  private resumePausedOutput(channel: TerminalChannel): void {
+    const process = channel.pausedOutput;
+    channel.pausedOutput = undefined;
     if (process === undefined) {
       return;
     }
     try {
       process.resume();
     } catch (error) {
-      this.reportError("resuming agent output", error);
+      this.reportError("resuming terminal output", error);
     }
   }
 
@@ -539,14 +763,14 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       ) {
         return;
       }
-      const session = this.session;
-      if (this.running?.session === session) {
+      const session = this.agentChannel.session;
+      if (this.agentChannel.running?.session === session) {
         return;
       }
-      await this.stopRunning();
+      await this.stopRunning(this.agentChannel, "closing the previous agent attachment");
       if (
         this.selection?.generation !== generation ||
-        this.session !== session ||
+        this.agentChannel.session !== session ||
         !this.ready ||
         this.disposed
       ) {
@@ -560,6 +784,29 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     const result = this.switches.then(update);
     this.switches = result.catch(() => {});
     return result;
+  }
+
+  private enqueueShellSwitch(update: () => Promise<void>): Promise<void> {
+    const result = this.shellSwitches.then(update);
+    this.shellSwitches = result.catch(() => {});
+    return result;
+  }
+
+  private channel(tab: TerminalTab): TerminalChannel {
+    switch (tab) {
+      case "agent":
+        return this.agentChannel;
+      case "shell":
+        return this.shellChannel;
+    }
+  }
+
+  private resetChannel(channel: TerminalChannel): void {
+    channel.session += 1;
+    this.resetOutputBuffer(channel);
+    channel.viewMessage = undefined;
+    channel.viewState = "empty";
+    this.updateView();
   }
 
   private html(webview: vscode.Webview): string {
@@ -577,10 +824,29 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
 </head>
 <body>
   <main id="app">
-    <div id="terminal" aria-label="Rumpelpod agent terminal"></div>
-    <div id="empty">
-      <p id="empty-message">Select or create a pod from the view toolbar.</p>
-      <button id="restart" type="button">Restart attachment</button>
+    <button id="pod-selector" type="button" aria-label="Select pod">
+      <span id="pod-name">Select pod</span>
+      <span id="pod-chevron" aria-hidden="true"></span>
+    </button>
+    <nav id="terminal-tabs" aria-label="Pod terminal" role="tablist">
+      <button id="agent-tab" class="terminal-tab" type="button" role="tab" aria-controls="agent-surface" aria-selected="true">agent</button>
+      <button id="shell-tab" class="terminal-tab" type="button" role="tab" aria-controls="shell-surface" aria-selected="false">shell</button>
+    </nav>
+    <div id="surfaces">
+      <section id="agent-surface" class="surface">
+        <div id="agent-terminal" class="terminal" aria-label="Rumpelpod agent terminal"></div>
+        <div id="agent-empty" class="empty">
+          <p id="agent-empty-message">Select or create a pod.</p>
+          <button id="agent-restart" class="restart" type="button">Restart attachment</button>
+        </div>
+      </section>
+      <section id="shell-surface" class="surface">
+        <div id="shell-terminal" class="terminal" aria-label="Rumpelpod shell terminal"></div>
+        <div id="shell-empty" class="empty">
+          <p id="shell-empty-message">Select a pod to open its shell.</p>
+          <button id="shell-restart" class="restart" type="button">Restart shell</button>
+        </div>
+      </section>
     </div>
   </main>
   <script nonce="${nonce}" src="${script}"></script>
@@ -594,16 +860,28 @@ function emptyMessage(
   state: "empty" | "exited" | "running" | "starting",
 ): string {
   if (selected === undefined) {
-    return "Select or create a pod from the view toolbar.";
+    return "Select or create a pod above.";
   }
   switch (state) {
     case "empty":
-      return "Select or create a pod from the view toolbar.";
+      return "Select or create a pod above.";
     case "exited":
       return `${agentLabel(selected.agent)} is not attached.`;
     case "running":
     case "starting":
       return `Starting ${agentLabel(selected.agent)} in ${selected.pod}.`;
+  }
+}
+
+function shellMessage(state: "empty" | "exited" | "running" | "starting"): string {
+  switch (state) {
+    case "empty":
+      return "Select shell to open a terminal in this pod.";
+    case "exited":
+      return "The pod shell has exited.";
+    case "running":
+    case "starting":
+      return "Starting the pod shell.";
   }
 }
 
@@ -619,23 +897,50 @@ function isViewMessage(value: unknown): value is ViewMessage {
         "data" in value &&
         typeof value.data === "string" &&
         "session" in value &&
-        typeof value.session === "number"
+        typeof value.session === "number" &&
+        "tab" in value &&
+        isTerminalTab(value.tab)
       );
     case "outputAck":
       return (
         "sequence" in value &&
         typeof value.sequence === "number" &&
         "session" in value &&
-        typeof value.session === "number"
+        typeof value.session === "number" &&
+        "tab" in value &&
+        isTerminalTab(value.tab)
       );
     case "resize":
       return (
         hasDimensions(value) &&
         "session" in value &&
-        typeof value.session === "number"
+        typeof value.session === "number" &&
+        "tab" in value &&
+        isTerminalTab(value.tab)
       );
     case "restart":
-      return "session" in value && typeof value.session === "number";
+      return (
+        "session" in value &&
+        typeof value.session === "number" &&
+        "tab" in value &&
+        isTerminalTab(value.tab)
+      );
+    case "selectPod":
+      return true;
+    case "selectTab":
+      return "tab" in value && isTerminalTab(value.tab);
+    case "terminalFocus":
+      return "focused" in value && typeof value.focused === "boolean";
+    default:
+      return false;
+  }
+}
+
+function isTerminalTab(value: unknown): value is TerminalTab {
+  switch (value) {
+    case "agent":
+    case "shell":
+      return true;
     default:
       return false;
   }
@@ -661,7 +966,10 @@ function terminalKey(repository: Repository, pod: string): string {
 }
 
 function disposeLegacyAgentTerminal(terminal: vscode.Terminal): void {
-  if (terminal.name.startsWith("Rumpelpod: ")) {
+  if (
+    terminal.name.startsWith("Rumpelpod: ") ||
+    terminal.name.startsWith("Rumpelpod shell: ")
+  ) {
     terminal.dispose();
   }
 }

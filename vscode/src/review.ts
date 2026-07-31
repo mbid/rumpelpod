@@ -8,7 +8,6 @@ import type { Repository } from "./model";
 import { runProcess } from "./process";
 
 const REVIEW_SCHEME = "rumpelpod-review";
-const REVIEW_TITLE_PREFIX = "Rumpelpod review: ";
 const BINARY_FILE_MESSAGE = "Binary file cannot be displayed by the text diff editor.\n";
 
 interface ReviewDocumentDescriptor {
@@ -19,21 +18,29 @@ interface ReviewDocumentDescriptor {
   readonly revision: string;
 }
 
-interface EmptyReviewTab {
+interface ReviewTab {
   readonly source: string;
   readonly tab: vscode.Tab;
 }
 
+interface MultiDiffResource {
+  readonly modifiedUri: vscode.Uri;
+  readonly originalUri: vscode.Uri;
+}
+
 interface OpenMultiDiffEditorOptions {
   readonly multiDiffSourceUri: vscode.Uri;
-  readonly resources: readonly never[];
+  readonly resources: readonly MultiDiffResource[];
+  readonly reveal?: {
+    readonly modifiedUri: vscode.Uri;
+  };
   readonly title: string;
 }
 
 export class ReviewDocuments implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly registration: vscode.Disposable;
   private readonly content = new Map<string, Promise<string>>();
-  private emptyReview: EmptyReviewTab | undefined;
+  private review: ReviewTab | undefined;
 
   public constructor() {
     this.registration = vscode.workspace.registerTextDocumentContentProvider(REVIEW_SCHEME, this);
@@ -55,23 +62,25 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     repository: Repository,
     pod: string,
     plan: ReviewPlan,
-    file: ReviewFile,
     preserveFocus = false,
+    reveal?: ReviewFile,
   ): Promise<void> {
-    await this.clear();
-    const base = reviewUri(repository, plan.base, file.path, file.base_exists, "base");
-    const target = reviewUri(repository, plan.target, file.path, file.target_exists, "target");
-    await vscode.commands.executeCommand(
-      "vscode.diff",
-      base,
-      target,
-      `${REVIEW_TITLE_PREFIX}${pod}: ${file.path}`,
-      {
-        preview: true,
-        preserveFocus,
-        viewColumn: vscode.ViewColumn.One,
-      } satisfies vscode.TextDocumentShowOptions,
-    );
+    const source = populatedReviewUri(repository, pod, plan);
+    const sourceKey = source.toString();
+    const resources = plan.files.map((file) => reviewResource(repository, plan, file));
+    const current = this.review;
+    const currentIsOpen = current !== undefined && this.isOpen(current.tab);
+    if (current?.source === sourceKey && currentIsOpen && preserveFocus && reveal === undefined) {
+      return;
+    }
+    if (current?.source !== sourceKey || !currentIsOpen) {
+      await this.clear();
+    }
+    const revealUri = reveal === undefined
+      ? undefined
+      : reviewUri(repository, plan.target, reveal.path, reveal.target_exists, "target");
+    const tab = await this.show(source, pod, resources, revealUri);
+    this.review = { source: sourceKey, tab };
   }
 
   public async openEmpty(
@@ -81,7 +90,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
   ): Promise<void> {
     const source = emptyReviewUri(repository, pod);
     const sourceKey = source.toString();
-    const current = this.emptyReview;
+    const current = this.review;
     const currentIsOpen = current !== undefined && this.isOpen(current.tab);
     if (current?.source === sourceKey && currentIsOpen && preserveFocus) {
       return;
@@ -89,47 +98,52 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     if (current?.source !== sourceKey || !currentIsOpen) {
       await this.clear();
     }
-    const tab = await this.showEmpty(source, pod);
-    this.emptyReview = { source: sourceKey, tab };
+    const tab = await this.show(source, pod, []);
+    this.review = { source: sourceKey, tab };
   }
 
   public async reclaimEmpty(repositoryRoot: string, pod: string): Promise<void> {
-    const current = this.emptyReview;
+    const current = this.review;
     if (current !== undefined && this.isOpen(current.tab)) {
       return;
     }
-    this.emptyReview = undefined;
+    this.review = undefined;
     if (!vscode.window.tabGroups.all.some((group) => group.tabs.some(isEmptyMultiDiffTab))) {
       return;
     }
     const source = emptyReviewUri(repositoryRoot, pod);
-    const tab = await this.showEmpty(source, pod);
-    this.emptyReview = { source: source.toString(), tab };
+    const tab = await this.show(source, pod, []);
+    this.review = { source: source.toString(), tab };
   }
 
-  private async showEmpty(source: vscode.Uri, pod: string): Promise<vscode.Tab> {
-    const title = `${REVIEW_TITLE_PREFIX}${pod}`;
-    // vscode.changes uses a random identity, which duplicates a restored clean review.
+  private async show(
+    source: vscode.Uri,
+    pod: string,
+    resources: readonly MultiDiffResource[],
+    reveal?: vscode.Uri,
+  ): Promise<vscode.Tab> {
+    // vscode.changes uses a random identity, which duplicates a restored review.
     await vscode.commands.executeCommand(
       "_workbench.openMultiDiffEditor",
       {
         multiDiffSourceUri: source,
-        resources: [],
-        title,
+        resources,
+        reveal: reveal === undefined ? undefined : { modifiedUri: reveal },
+        title: pod,
       } satisfies OpenMultiDiffEditorOptions,
     );
     const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    if (tab === undefined || !isEmptyMultiDiffTab(tab)) {
-      throw new Error(`VS Code did not open the empty review for pod '${pod}'`);
+    if (tab === undefined || !isMultiDiffTab(tab, resources.length)) {
+      throw new Error(`VS Code did not open the review for pod '${pod}'`);
     }
     return tab;
   }
 
   public async clear(): Promise<void> {
-    const emptyReview = this.emptyReview;
-    this.emptyReview = undefined;
+    const review = this.review;
+    this.review = undefined;
     const tabs = vscode.window.tabGroups.all.flatMap((group) =>
-      group.tabs.filter((tab) => tab === emptyReview?.tab || isReviewTab(tab)),
+      group.tabs.filter((tab) => tab === review?.tab || isReviewTab(tab)),
     );
     if (tabs.length > 0) {
       await vscode.window.tabGroups.close(tabs, true);
@@ -183,7 +197,10 @@ function isReviewTab(tab: vscode.Tab): boolean {
   if (input instanceof vscode.TabInputTextDiff) {
     return input.original.scheme === REVIEW_SCHEME || input.modified.scheme === REVIEW_SCHEME;
   }
-  return false;
+  const textDiffs = multiDiffs(input);
+  return textDiffs !== undefined && textDiffs.length > 0 && textDiffs.every((diff) =>
+    diff.original.scheme === REVIEW_SCHEME || diff.modified.scheme === REVIEW_SCHEME
+  );
 }
 
 function isReviewPlaceholderTab(tab: vscode.Tab): boolean {
@@ -192,14 +209,24 @@ function isReviewPlaceholderTab(tab: vscode.Tab): boolean {
 }
 
 function isEmptyMultiDiffTab(tab: vscode.Tab): boolean {
-  const input: unknown = tab.input;
-  return (
-    typeof input === "object" &&
-    input !== null &&
-    "textDiffs" in input &&
-    Array.isArray(input.textDiffs) &&
-    input.textDiffs.length === 0
-  );
+  return multiDiffs(tab.input)?.length === 0;
+}
+
+function isMultiDiffTab(tab: vscode.Tab, resourceCount: number): boolean {
+  return multiDiffs(tab.input)?.length === resourceCount;
+}
+
+function multiDiffs(input: unknown): readonly vscode.TabInputTextDiff[] | undefined {
+  if (
+    typeof input !== "object" ||
+    input === null ||
+    !("textDiffs" in input) ||
+    !Array.isArray(input.textDiffs) ||
+    !input.textDiffs.every((diff) => diff instanceof vscode.TabInputTextDiff)
+  ) {
+    return undefined;
+  }
+  return input.textDiffs;
 }
 
 function emptyReviewUri(repository: Repository | string, pod: string): vscode.Uri {
@@ -210,6 +237,46 @@ function emptyReviewUri(repository: Repository | string, pod: string): vscode.Ur
     path: `/${pod}`,
     query: encodeURIComponent(repositoryRoot),
   });
+}
+
+function populatedReviewUri(
+  repository: Repository,
+  pod: string,
+  plan: ReviewPlan,
+): vscode.Uri {
+  return vscode.Uri.from({
+    scheme: REVIEW_SCHEME,
+    authority: "review",
+    path: `/${pod}`,
+    query: encodeURIComponent(JSON.stringify({
+      base: plan.base,
+      repository: repository.root,
+      target: plan.target,
+    })),
+  });
+}
+
+function reviewResource(
+  repository: Repository,
+  plan: ReviewPlan,
+  file: ReviewFile,
+): MultiDiffResource {
+  return {
+    modifiedUri: reviewUri(
+      repository,
+      plan.target,
+      file.path,
+      file.target_exists,
+      "target",
+    ),
+    originalUri: reviewUri(
+      repository,
+      plan.base,
+      file.path,
+      file.base_exists,
+      "base",
+    ),
+  };
 }
 
 function reviewUri(
@@ -228,7 +295,8 @@ function reviewUri(
   };
   return vscode.Uri.from({
     scheme: REVIEW_SCHEME,
-    path: `/${side}/${filePath}`,
+    authority: side,
+    path: `/${filePath}`,
     query: encodeURIComponent(JSON.stringify(descriptor)),
   });
 }

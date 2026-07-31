@@ -23,3 +23,9 @@ reads use the daemon's current inventory.
 Always open a native review editor when selecting or restoring a pod.
 Show an empty changes editor for clean pods instead of leaving the main
 editor blank or displaying the previous pod's diff.
+
+Make the active pod name the sidebar's pod selector and put its agent
+and shell in extension-owned xterm tabs that keep both PTYs alive. Show
+every changed file in one native vertically stacked VS Code review with
+concise pod and file-path labels. Keep terminal focus intact when daemon
+events refresh that review.
