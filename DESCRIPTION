@@ -29,3 +29,6 @@ and shell in extension-owned xterm tabs that keep both PTYs alive. Show
 every changed file in one native vertically stacked VS Code review with
 concise pod and file-path labels. Keep terminal focus intact when daemon
 events refresh that review.
+
+Pin the active review and recreate it after an explicit pinned-editor
+close so the main Rumpelpod surface cannot disappear.

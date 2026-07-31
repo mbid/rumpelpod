@@ -13,11 +13,11 @@ to switch between the preserved extension-owned terminals. The view toolbar
 creates pods; agent selection, refresh, and attachment restart commands are in
 its overflow menu. The pod picker also has a `+` button.
 Selecting a pod attaches the sidebar terminal to its configured agent and
-opens every changed file on the right in one vertically stacked review. Use the
-review editor's list action to jump to a particular file. Pods without changed
-files still open a native empty review surface instead of leaving the previous
-editor visible. Agent assignments and the last active pod are saved across
-browser reloads.
+opens every changed file on the right in one vertically stacked review. The
+review is pinned, and the extension restores it if an explicit pinned-editor
+close removes it. Pods without changed files still open a native empty review
+surface instead of leaving the previous editor visible. Agent assignments and
+the last active pod are saved across browser reloads.
 
 ## Development
 

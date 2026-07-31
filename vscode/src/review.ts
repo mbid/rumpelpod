@@ -19,6 +19,8 @@ interface ReviewDocumentDescriptor {
 }
 
 interface ReviewTab {
+  readonly pod: string;
+  readonly resources: readonly MultiDiffResource[];
   readonly source: string;
   readonly tab: vscode.Tab;
 }
@@ -31,19 +33,25 @@ interface MultiDiffResource {
 interface OpenMultiDiffEditorOptions {
   readonly multiDiffSourceUri: vscode.Uri;
   readonly resources: readonly MultiDiffResource[];
-  readonly reveal?: {
-    readonly modifiedUri: vscode.Uri;
-  };
   readonly title: string;
 }
 
 export class ReviewDocuments implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly registration: vscode.Disposable;
+  private readonly tabSubscription: vscode.Disposable;
   private readonly content = new Map<string, Promise<string>>();
+  private readonly restoreTimers = new Set<NodeJS.Timeout>();
+  private disposed = false;
+  private operations = Promise.resolve();
   private review: ReviewTab | undefined;
 
-  public constructor() {
+  public constructor(
+    private readonly reportError: (context: string, error: unknown) => void,
+  ) {
     this.registration = vscode.workspace.registerTextDocumentContentProvider(REVIEW_SCHEME, this);
+    this.tabSubscription = vscode.window.tabGroups.onDidChangeTabs((event) => {
+      this.restoreClosedReview(event);
+    });
   }
 
   public provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
@@ -63,30 +71,46 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     pod: string,
     plan: ReviewPlan,
     preserveFocus = false,
-    reveal?: ReviewFile,
+  ): Promise<void> {
+    return this.enqueue(() => this.openNow(repository, pod, plan, preserveFocus));
+  }
+
+  private async openNow(
+    repository: Repository,
+    pod: string,
+    plan: ReviewPlan,
+    preserveFocus: boolean,
   ): Promise<void> {
     const source = populatedReviewUri(repository, pod, plan);
     const sourceKey = source.toString();
     const resources = plan.files.map((file) => reviewResource(repository, plan, file));
     const current = this.review;
     const currentIsOpen = current !== undefined && this.isOpen(current.tab);
-    if (current?.source === sourceKey && currentIsOpen && preserveFocus && reveal === undefined) {
+    if (current?.source === sourceKey && currentIsOpen && preserveFocus) {
       return;
     }
     if (current?.source !== sourceKey || !currentIsOpen) {
-      await this.clear();
+      await this.clearNow();
     }
-    const revealUri = reveal === undefined
-      ? undefined
-      : reviewUri(repository, plan.target, reveal.path, reveal.target_exists, "target");
-    const tab = await this.show(source, pod, resources, revealUri);
-    this.review = { source: sourceKey, tab };
+    const tab = await this.show(source, pod, resources);
+    if (this.disposed) {
+      await this.closeDisposedTab(tab);
+    }
+    this.review = { pod, resources, source: sourceKey, tab };
   }
 
   public async openEmpty(
     repository: Repository,
     pod: string,
     preserveFocus = false,
+  ): Promise<void> {
+    return this.enqueue(() => this.openEmptyNow(repository, pod, preserveFocus));
+  }
+
+  private async openEmptyNow(
+    repository: Repository,
+    pod: string,
+    preserveFocus: boolean,
   ): Promise<void> {
     const source = emptyReviewUri(repository, pod);
     const sourceKey = source.toString();
@@ -96,13 +120,20 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       return;
     }
     if (current?.source !== sourceKey || !currentIsOpen) {
-      await this.clear();
+      await this.clearNow();
     }
     const tab = await this.show(source, pod, []);
-    this.review = { source: sourceKey, tab };
+    if (this.disposed) {
+      await this.closeDisposedTab(tab);
+    }
+    this.review = { pod, resources: [], source: sourceKey, tab };
   }
 
   public async reclaimEmpty(repositoryRoot: string, pod: string): Promise<void> {
+    return this.enqueue(() => this.reclaimEmptyNow(repositoryRoot, pod));
+  }
+
+  private async reclaimEmptyNow(repositoryRoot: string, pod: string): Promise<void> {
     const current = this.review;
     if (current !== undefined && this.isOpen(current.tab)) {
       return;
@@ -113,14 +144,21 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     }
     const source = emptyReviewUri(repositoryRoot, pod);
     const tab = await this.show(source, pod, []);
-    this.review = { source: source.toString(), tab };
+    if (this.disposed) {
+      await this.closeDisposedTab(tab);
+    }
+    this.review = {
+      pod,
+      resources: [],
+      source: source.toString(),
+      tab,
+    };
   }
 
   private async show(
     source: vscode.Uri,
     pod: string,
     resources: readonly MultiDiffResource[],
-    reveal?: vscode.Uri,
   ): Promise<vscode.Tab> {
     // vscode.changes uses a random identity, which duplicates a restored review.
     await vscode.commands.executeCommand(
@@ -128,18 +166,22 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       {
         multiDiffSourceUri: source,
         resources,
-        reveal: reveal === undefined ? undefined : { modifiedUri: reveal },
         title: pod,
       } satisfies OpenMultiDiffEditorOptions,
     );
+    await vscode.commands.executeCommand("workbench.action.pinEditor");
     const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    if (tab === undefined || !isMultiDiffTab(tab, resources.length)) {
+    if (tab === undefined || !tab.isPinned || !isMultiDiffTab(tab, resources.length)) {
       throw new Error(`VS Code did not open the review for pod '${pod}'`);
     }
     return tab;
   }
 
   public async clear(): Promise<void> {
+    return this.enqueue(() => this.clearNow());
+  }
+
+  private async clearNow(): Promise<void> {
     const review = this.review;
     this.review = undefined;
     const tabs = vscode.window.tabGroups.all.flatMap((group) =>
@@ -152,6 +194,10 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
   }
 
   public async clearPlaceholders(): Promise<void> {
+    return this.enqueue(() => this.clearPlaceholdersNow());
+  }
+
+  private async clearPlaceholdersNow(): Promise<void> {
     const tabs = vscode.window.tabGroups.all.flatMap((group) =>
       group.tabs.filter((tab) => isReviewPlaceholderTab(tab)),
     );
@@ -161,8 +207,62 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
   }
 
   public dispose(): void {
+    this.disposed = true;
+    this.review = undefined;
+    for (const timeout of this.restoreTimers) {
+      clearTimeout(timeout);
+    }
+    this.restoreTimers.clear();
     this.registration.dispose();
+    this.tabSubscription.dispose();
     this.content.clear();
+  }
+
+  private restoreClosedReview(event: vscode.TabChangeEvent): void {
+    const review = this.review;
+    if (
+      review === undefined ||
+      !event.closed.some((tab) => isSameReviewTab(tab, review))
+    ) {
+      return;
+    }
+    const timeout = setTimeout(() => {
+      this.restoreTimers.delete(timeout);
+      void this.enqueue(async () => {
+        if (this.disposed || this.review !== review || this.isOpen(review.tab)) {
+          return;
+        }
+        const tab = await this.show(
+          vscode.Uri.parse(review.source),
+          review.pod,
+          review.resources,
+        );
+        if (this.disposed || this.review !== review) {
+          await vscode.window.tabGroups.close(tab, true);
+          return;
+        }
+        this.review = { ...review, tab };
+      }).catch((error: unknown) => {
+        this.reportError("restoring the active pod review", error);
+      });
+    }, 0);
+    this.restoreTimers.add(timeout);
+  }
+
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operations.then(() => {
+      if (this.disposed) {
+        throw new Error("Rumpelpod reviews have been disposed");
+      }
+      return operation();
+    });
+    this.operations = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async closeDisposedTab(tab: vscode.Tab): Promise<never> {
+    await vscode.window.tabGroups.close(tab, true);
+    throw new Error("Rumpelpod reviews were disposed while opening an editor");
   }
 
   private async load(uri: vscode.Uri): Promise<string> {
@@ -200,6 +300,24 @@ function isReviewTab(tab: vscode.Tab): boolean {
   const textDiffs = multiDiffs(input);
   return textDiffs !== undefined && textDiffs.length > 0 && textDiffs.every((diff) =>
     diff.original.scheme === REVIEW_SCHEME || diff.modified.scheme === REVIEW_SCHEME
+  );
+}
+
+function isSameReviewTab(tab: vscode.Tab, review: ReviewTab): boolean {
+  if (tab === review.tab) {
+    return true;
+  }
+  if (tab.label !== review.tab.label) {
+    return false;
+  }
+  const diffs = multiDiffs(tab.input);
+  return diffs !== undefined && diffs.length === review.resources.length && diffs.every(
+    (diff, index) => {
+      const resource = review.resources[index];
+      return resource !== undefined &&
+        diff.original.toString() === resource.originalUri.toString() &&
+        diff.modified.toString() === resource.modifiedUri.toString();
+    },
   );
 }
 

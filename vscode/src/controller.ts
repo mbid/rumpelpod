@@ -3,7 +3,7 @@
 
 import * as vscode from "vscode";
 
-import type { AgentKind, PodInfo, ReviewFile } from "./generated/protocol";
+import type { AgentKind, PodInfo } from "./generated/protocol";
 import { AGENTS, agentDescription, agentLabel } from "./agents";
 import type { Repository, RumpelpodModel } from "./model";
 import type { ReviewDocuments } from "./review";
@@ -21,10 +21,6 @@ interface PodPick extends vscode.QuickPickItem {
   readonly agent: AgentKind;
   readonly pod: PodInfo;
   readonly repository: Repository;
-}
-
-interface ReviewFilePick extends vscode.QuickPickItem {
-  readonly file: ReviewFile;
 }
 
 interface ActivePod {
@@ -337,47 +333,6 @@ export class RumpelpodController implements vscode.Disposable {
     return this.terminals.restartActive();
   }
 
-  public async pickReviewFile(): Promise<void> {
-    const selected = this.active;
-    if (selected === undefined) {
-      throw new Error("select a pod before selecting a review file");
-    }
-    const plan = await this.model.review(selected.repository, selected.pod);
-    if (this.currentSelection(selected) === undefined) {
-      return;
-    }
-    if (plan.files.length === 0) {
-      await vscode.window.showInformationMessage(`${selected.pod} has no changes to review`);
-      return;
-    }
-    const picks: ReviewFilePick[] = plan.files.map((file) => ({
-      label: file.path,
-      description: reviewFileDescription(file),
-      file,
-    }));
-    const pick = await vscode.window.showQuickPick(picks, {
-      placeHolder: `Jump to a changed file in ${selected.pod}`,
-      ignoreFocusOut: true,
-      matchOnDescription: true,
-    });
-    const active = this.currentSelection(selected);
-    if (pick === undefined || active === undefined) {
-      return;
-    }
-    await this.enqueueReviewUpdate(async () => {
-      if (this.currentSelection(active) === undefined) {
-        return;
-      }
-      await this.reviewDocuments.open(
-        active.repository,
-        active.pod,
-        plan,
-        false,
-        pick.file,
-      );
-    });
-  }
-
   public async restoreLastPod(): Promise<boolean> {
     const generation = this.selectionGeneration;
     if (this.active !== undefined) {
@@ -561,16 +516,6 @@ function waitForSwitcherAction(
     picker.onDidHide(() => resolve(undefined));
     picker.show();
   });
-}
-
-function reviewFileDescription(file: ReviewFile): string {
-  if (!file.base_exists) {
-    return "added";
-  }
-  if (!file.target_exists) {
-    return "deleted";
-  }
-  return "modified";
 }
 
 function agentActivity(pod: PodInfo, agent: AgentKind): string | undefined {

@@ -15,7 +15,9 @@ export function activate(context: vscode.ExtensionContext): void {
   const terminals = new AgentTerminals(context.extensionUri, (operation, error) => {
     model.logError(operation, error);
   });
-  const reviews = new ReviewDocuments();
+  const reviews = new ReviewDocuments((operation, error) => {
+    model.logError(operation, error);
+  });
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.name = "Rumpelpod Active Agent";
   status.command = "rumpelpod.showPods";
@@ -46,9 +48,6 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("rumpelpod.changeActiveAgent", () =>
       runCommand(model, "changing the active agent", () => controller.changeActiveAgent()),
-    ),
-    vscode.commands.registerCommand("rumpelpod.pickReviewFile", () =>
-      runCommand(model, "selecting a review file", () => controller.pickReviewFile()),
     ),
     vscode.commands.registerCommand("rumpelpod.openActiveShell", () =>
       runCommand(model, "opening a pod shell", async () => controller.openActiveShell()),

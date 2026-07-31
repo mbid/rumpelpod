@@ -70,12 +70,6 @@
         "icon": "$(person)"
       },
       {
-        "command": "rumpelpod.pickReviewFile",
-        "title": "Select Review File",
-        "category": "Rumpelpod",
-        "icon": "$(list-tree)"
-      },
-      {
         "command": "rumpelpod.openActiveShell",
         "title": "Open Pod Shell",
         "category": "Rumpelpod",
@@ -130,13 +124,6 @@
           "command": "rumpelpod.restartAgent",
           "when": "view == rumpelpod.agent && rumpelpod.hasActivePod",
           "group": "rumpelpod@3"
-        }
-      ],
-      "editor/title": [
-        {
-          "command": "rumpelpod.pickReviewFile",
-          "when": "resourceScheme == rumpelpod-review",
-          "group": "navigation@1"
         }
       ]
     }

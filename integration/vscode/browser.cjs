@@ -521,6 +521,44 @@ async function waitForReview(page, podName, changedFile, originalContent, podCon
     return diffEditors.first();
 }
 
+function activeReviewTab(page, podName) {
+    return page
+        .locator(".editor-group-container .tabs-container .tab.active:visible")
+        .filter({ hasText: podName });
+}
+
+async function verifyReviewCannotDisappear(page, podName, changedFile, originalContent, podContent) {
+    const pinnedTab = activeReviewTab(page, podName);
+    await pinnedTab.waitFor({ state: "visible", timeout: 30_000 });
+    const pinnedTabHandle = await pinnedTab.elementHandle();
+    assert(pinnedTabHandle, "active review tab had no element handle");
+    await pinnedTab.click();
+    await page.keyboard.press("Control+W");
+    await page.waitForTimeout(300);
+    assert(
+        await pinnedTabHandle.evaluate((element) => element.isConnected),
+        "Ctrl+W closed the pinned review",
+    );
+    await pinnedTabHandle.dispose();
+
+    const explicitlyClosedTab = activeReviewTab(page, podName);
+    const explicitlyClosedTabHandle = await explicitlyClosedTab.elementHandle();
+    assert(explicitlyClosedTabHandle, "review tab had no handle before explicit close");
+    await page.keyboard.press("F1");
+    const commandInput = page.locator(".quick-input-widget:visible input");
+    await commandInput.waitFor({ state: "visible", timeout: 30_000 });
+    await commandInput.fill(">Close Pinned Editor");
+    await waitForQuickPickLabels(page, ["Close Pinned Editor"]);
+    await selectQuickPick(page, "Close Pinned Editor");
+    await page.waitForFunction(
+        (element) => !element.isConnected,
+        explicitlyClosedTabHandle,
+        { timeout: 30_000 },
+    );
+    await explicitlyClosedTabHandle.dispose();
+    await waitForReview(page, podName, changedFile, originalContent, podContent);
+}
+
 async function waitForEmptyReview(page, podName) {
     const tab = page
         .locator(".editor-group-container .tabs-container .tab.active:visible")
@@ -652,7 +690,19 @@ async function main() {
             await terminalHasFocus(liveView.terminal),
             "event-driven review refresh stole focus from the agent terminal",
         );
+        assert.equal(
+            await page.locator('[aria-label="Select Review File"]').count(),
+            0,
+            "review kept the redundant file selector",
+        );
         await capture(page, artifacts, "02-live-review.png");
+        await verifyReviewCannotDisappear(
+            page,
+            podName,
+            changedFile,
+            originalContent,
+            podContent,
+        );
 
         await openPodSwitcher(page);
         const rowsAfterCommit = await quickPickRows(page).allTextContents();
