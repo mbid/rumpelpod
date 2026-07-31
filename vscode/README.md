@@ -13,8 +13,9 @@ agent selection, refresh, and attachment restart commands are in its overflow
 menu. The pod picker also has a `+` button and a shell button on each row.
 Selecting a pod attaches the sidebar terminal to its configured agent and
 opens the first changed file on the right. Use the review editor's list action
-to choose another changed file. Agent assignments and the last active pod are
-saved across browser reloads.
+to choose another changed file. Pods without changed files still open a native
+empty review surface instead of leaving the previous editor visible. Agent
+assignments and the last active pod are saved across browser reloads.
 
 ## Development
 

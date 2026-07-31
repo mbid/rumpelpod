@@ -386,6 +386,19 @@ async function waitForDiff(page, changedFile, originalContent, podContent) {
     return diffEditor;
 }
 
+async function waitForEmptyReview(page, podName) {
+    const tab = page
+        .locator(".editor-group-container .tabs-container .tab.active:visible")
+        .filter({ hasText: `Rumpelpod review: ${podName}` });
+    await tab.waitFor({ state: "visible", timeout: 30_000 });
+    assert.equal(
+        await page.locator(".monaco-diff-editor:visible").count(),
+        0,
+        `the empty ${podName} review rendered a file diff`,
+    );
+    return tab;
+}
+
 async function assertSidebarAndDiffGeometry(page, terminal, diffEditor) {
     const sidebar = page.locator(".part.sidebar:visible");
     const sidebarBounds = await sidebar.boundingBox();
@@ -492,11 +505,7 @@ async function main() {
             "browser-input-probe",
             "cleared input sent through the embedded xterm",
         );
-        assert.equal(
-            await page.locator(".monaco-diff-editor:visible").count(),
-            0,
-            "a clean pod opened a diff before its live commit",
-        );
+        await waitForEmptyReview(page, podName);
         assert.equal(
             await page.locator(".tab:visible").filter({ hasText: "-review.txt" }).count(),
             0,
@@ -577,17 +586,28 @@ async function main() {
             0,
             "creating a pod kept the closed auxiliary shell alive",
         );
-        assert.equal(
-            await page.locator(".monaco-diff-editor:visible").count(),
-            0,
-            "creating a clean pod left the previous pod's diff visible",
-        );
+        await waitForEmptyReview(page, createdPodName);
         assert.equal(
             await page.locator(".tab:visible").filter({ hasText: "-review.txt" }).count(),
             0,
             "creating a pod opened a synthetic review document",
         );
         await capture(page, artifacts, "06-created-chat.png");
+
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+        await page.locator(".monaco-workbench").waitFor({ state: "visible", timeout: 60_000 });
+        await waitForStatusItem(page, createdPodName);
+        const restoredCreatedView = await waitForAgentView(page, createdPodName);
+        await waitForCodexPrompt(page, restoredCreatedView.terminal, false);
+        await waitForEmptyReview(page, createdPodName);
+        assert.equal(
+            await page
+                .locator(".editor-group-container .tabs-container .tab")
+                .filter({ hasText: `Rumpelpod review: ${createdPodName}` })
+                .count(),
+            1,
+            "restoring a clean pod duplicated its empty review editor",
+        );
 
         await openPodSwitcher(page);
         const listedPods = await quickPickRows(page).allTextContents();

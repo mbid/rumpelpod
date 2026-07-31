@@ -19,3 +19,7 @@ shell controls, and event-driven status and review updates.
 Keep pod selection available when another pod has a stale Git callback.
 Only explicit refresh actions synchronize refs; picker and restoration
 reads use the daemon's current inventory.
+
+Always open a native review editor when selecting or restoring a pod.
+Show an empty changes editor for clean pods instead of leaving the main
+editor blank or displaying the previous pod's diff.

@@ -201,7 +201,7 @@ export class RumpelpodController implements vscode.Disposable {
         plan,
       };
       if (file === undefined) {
-        await this.reviewDocuments.clear();
+        await this.reviewDocuments.openEmpty(selected.repository, selected.pod, preserveFocus);
         return;
       }
       await this.reviewDocuments.open(
@@ -237,6 +237,10 @@ export class RumpelpodController implements vscode.Disposable {
       return;
     }
     const generation = ++this.selectionGeneration;
+    await this.reclaimRestoredReview();
+    if (generation !== this.selectionGeneration) {
+      return;
+    }
     await this.model.setAgent(repository, pod, agent);
     await this.model.rememberPod(repository, pod);
     if (generation !== this.selectionGeneration) {
@@ -255,7 +259,7 @@ export class RumpelpodController implements vscode.Disposable {
     const selected = this.active;
     await this.enqueueReviewUpdate(async () => {
       if (this.currentSelection(selected) !== undefined) {
-        await this.reviewDocuments.clear();
+        await this.reviewDocuments.openEmpty(repository, pod);
       }
     });
     await this.terminals.showActive(repository, pod, agent, this.model.executable());
@@ -265,6 +269,10 @@ export class RumpelpodController implements vscode.Disposable {
 
   public async openPod(repository: Repository, pod: PodInfo): Promise<void> {
     const generation = ++this.selectionGeneration;
+    await this.reclaimRestoredReview();
+    if (generation !== this.selectionGeneration) {
+      return;
+    }
     const agent = this.model.getAgent(repository, pod.name) ?? this.model.defaultAgent();
     await this.model.setAgent(repository, pod.name, agent);
     await this.model.rememberPod(repository, pod.name);
@@ -445,6 +453,14 @@ export class RumpelpodController implements vscode.Disposable {
       clearTimeout(timeout);
     }
     this.scheduledRefreshes.clear();
+  }
+
+  private reclaimRestoredReview(): Promise<void> {
+    const last = this.model.lastPod();
+    if (this.active !== undefined || last === undefined) {
+      return Promise.resolve();
+    }
+    return this.reviewDocuments.reclaimEmpty(last.repository, last.pod);
   }
 
   private currentSelection(selected: ActivePod): ActivePod | undefined {
