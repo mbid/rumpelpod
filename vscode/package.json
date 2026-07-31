@@ -26,6 +26,9 @@
     "onView:rumpelpod.agent"
   ],
   "contributes": {
+    "configurationDefaults": {
+      "workbench.editor.showTabs": "none"
+    },
     "viewsContainers": {
       "activitybar": [
         {

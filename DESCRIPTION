@@ -32,3 +32,6 @@ events refresh that review.
 
 Pin the active review and recreate it after an explicit pinned-editor
 close so the main Rumpelpod surface cannot disappear.
+
+Hide VS Code's editor tab strip by default so the single active review
+uses the full editor area without a redundant one-item tab row.

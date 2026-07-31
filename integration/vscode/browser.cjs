@@ -135,12 +135,6 @@ async function waitForQuickPickLabels(page, labels) {
     throw new Error(`quick pick omitted ${labels.join(", ")}: ${rendered}`);
 }
 
-function allAgentTerminalTabs(page) {
-    return page
-        .locator(".editor-group-container .tabs-container .tab:visible")
-        .filter({ hasText: "Rumpelpod:" });
-}
-
 async function terminalText(terminal) {
     const renderedText = terminal.locator(".xterm-accessibility-tree, .xterm-rows");
     if (!(await renderedText.count())) {
@@ -313,11 +307,6 @@ async function waitForAgentView(page, podName, agent = "codex") {
         await frame.locator("#shell-terminal .xterm:visible").count(),
         0,
         "agent tab also rendered the shell xterm",
-    );
-    assert.equal(
-        await allAgentTerminalTabs(page).count(),
-        0,
-        "the embedded agent was also opened as a native editor terminal",
     );
     return {
         agentTab: frame.locator("#agent-tab"),
@@ -506,74 +495,117 @@ async function waitForReview(page, podName, changedFile, originalContent, podCon
         rendered.includes(ADDED_CONTENT),
         `diff editor did not render added file content; rendered text: ${rendered}`,
     );
-    const activeTabs = await page.locator(".tab.active").allTextContents();
+    await page.waitForFunction((pod) => document.title.includes(pod), podName, {
+        timeout: 30_000,
+    });
+    const title = await page.title();
     assert(
-        activeTabs.some((label) => label.includes(podName)),
-        `active multi-diff tab did not name ${podName}: ${JSON.stringify(activeTabs)}`,
+        title.includes(podName),
+        `active multi-diff editor did not name ${podName}: ${title}`,
     );
     assert(
-        activeTabs.every((label) => !label.includes("Rumpelpod review:")),
-        `review retained the verbose title: ${JSON.stringify(activeTabs)}`,
+        !title.includes("Rumpelpod review:"),
+        `review retained the verbose title: ${title}`,
     );
+    await assertEditorTabsHidden(page);
     const editorText = await page.locator(".editor-instance:visible").last().textContent();
     assert(editorText?.includes(changedFile), `review did not label ${changedFile}`);
     assert(editorText?.includes(ADDED_FILE), `review did not label ${ADDED_FILE}`);
     return diffEditors.first();
 }
 
-function activeReviewTab(page, podName) {
-    return page
-        .locator(".editor-group-container .tabs-container .tab.active:visible")
-        .filter({ hasText: podName });
+async function assertEditorTabsHidden(page) {
+    assert.equal(
+        await page.locator(".editor-group-container .tabs-and-actions-container:visible").count(),
+        0,
+        "the single review retained VS Code's editor tab strip",
+    );
+    assert.equal(
+        await page.locator(".editor-group-container .tabs-container .tab:visible").count(),
+        0,
+        "the single review retained a visible editor tab",
+    );
 }
 
 async function verifyReviewCannotDisappear(page, podName, changedFile, originalContent, podContent) {
-    const pinnedTab = activeReviewTab(page, podName);
-    await pinnedTab.waitFor({ state: "visible", timeout: 30_000 });
-    const pinnedTabHandle = await pinnedTab.elementHandle();
-    assert(pinnedTabHandle, "active review tab had no element handle");
-    await pinnedTab.click();
+    const pinnedReview = page.locator(".editor-instance:visible .multiDiffEditor");
+    await pinnedReview.waitFor({ state: "visible", timeout: 30_000 });
+    const pinnedReviewHandle = await pinnedReview.elementHandle();
+    assert(pinnedReviewHandle, "active review had no element handle");
+    await pinnedReview.click();
     await page.keyboard.press("Control+W");
     await page.waitForTimeout(300);
     assert(
-        await pinnedTabHandle.evaluate((element) => element.isConnected),
+        await pinnedReviewHandle.evaluate((element) => element.isConnected),
         "Ctrl+W closed the pinned review",
     );
-    await pinnedTabHandle.dispose();
+    await pinnedReviewHandle.dispose();
 
-    const explicitlyClosedTab = activeReviewTab(page, podName);
-    const explicitlyClosedTabHandle = await explicitlyClosedTab.elementHandle();
-    assert(explicitlyClosedTabHandle, "review tab had no handle before explicit close");
+    const explicitlyClosedReview = page.locator(".editor-instance:visible .multiDiffEditor");
+    await explicitlyClosedReview.click();
     await page.keyboard.press("F1");
     const commandInput = page.locator(".quick-input-widget:visible input");
     await commandInput.waitFor({ state: "visible", timeout: 30_000 });
     await commandInput.fill(">Close Pinned Editor");
     await waitForQuickPickLabels(page, ["Close Pinned Editor"]);
     await selectQuickPick(page, "Close Pinned Editor");
-    await page.waitForFunction(
-        (element) => !element.isConnected,
-        explicitlyClosedTabHandle,
-        { timeout: 30_000 },
-    );
-    await explicitlyClosedTabHandle.dispose();
+    await page.waitForTimeout(500);
     await waitForReview(page, podName, changedFile, originalContent, podContent);
+    await assertSingleOpenReview(page, podName);
 }
 
 async function waitForEmptyReview(page, podName) {
-    const tab = page
-        .locator(".editor-group-container .tabs-container .tab.active:visible")
-        .filter({ hasText: podName });
-    await tab.waitFor({ state: "visible", timeout: 30_000 });
+    await page.waitForFunction((pod) => document.title.includes(pod), podName, {
+        timeout: 30_000,
+    });
+    const title = await page.title();
     assert(
-        !(await tab.textContent())?.includes("Rumpelpod review:"),
-        "empty review retained the verbose title",
+        !title.includes("Rumpelpod review:"),
+        `empty review retained the verbose title: ${title}`,
     );
+    const emptyReview = page
+        .locator(".editor-instance:visible .multiDiffEditor .placeholder.visible")
+        .filter({ hasText: "No Changed Files" });
+    await emptyReview.waitFor({ state: "visible", timeout: 30_000 });
+    await assertEditorTabsHidden(page);
     assert.equal(
         await page.locator(".monaco-diff-editor:visible").count(),
         0,
         `the empty ${podName} review rendered a file diff`,
     );
-    return tab;
+}
+
+async function openEditorLabels(page, expectedLabel) {
+    await page.locator(".editor-instance:visible .multiDiffEditor").click();
+    await page.keyboard.press("Control+P");
+    const input = page.locator(".quick-input-widget:visible input");
+    await input.waitFor({ state: "visible", timeout: 30_000 });
+    await input.fill("edt ");
+    await waitForQuickPickLabels(page, [expectedLabel]);
+    const labels = await quickPickRows(page).allTextContents();
+    await page.keyboard.press("Escape");
+    await page
+        .locator(".quick-input-widget:visible")
+        .waitFor({ state: "hidden", timeout: 30_000 });
+    return labels;
+}
+
+async function assertSingleOpenReview(page, podName) {
+    const labels = await openEditorLabels(page, podName);
+    const matches = labels.filter((label) => label.includes(podName));
+    assert.equal(
+        matches.length,
+        1,
+        `restoring ${podName} duplicated its review editor: ${JSON.stringify(labels)}`,
+    );
+}
+
+async function assertNoNativeAgentEditor(page, podName) {
+    const labels = await openEditorLabels(page, podName);
+    assert(
+        labels.every((label) => !label.includes("Rumpelpod:")),
+        `the embedded agent was also opened as a native editor: ${JSON.stringify(labels)}`,
+    );
 }
 
 async function assertSidebarAndDiffGeometry(page, terminal, diffEditor) {
@@ -658,9 +690,9 @@ async function main() {
             "cleared input sent through the embedded xterm",
         );
         await waitForEmptyReview(page, podName);
-        assert.equal(
-            await page.locator(".tab:visible").filter({ hasText: "-review.txt" }).count(),
-            0,
+        await assertNoNativeAgentEditor(page, podName);
+        assert(
+            !(await page.title()).includes("-review.txt"),
             "a clean pod opened a synthetic review document",
         );
         await capture(page, artifacts, "01-default-chat.png");
@@ -841,9 +873,8 @@ async function main() {
             "creating a pod kept the closed auxiliary shell alive",
         );
         await waitForEmptyReview(page, createdPodName);
-        assert.equal(
-            await page.locator(".tab:visible").filter({ hasText: "-review.txt" }).count(),
-            0,
+        assert(
+            !(await page.title()).includes("-review.txt"),
             "creating a pod opened a synthetic review document",
         );
         await capture(page, artifacts, "06-created-chat.png");
@@ -854,14 +885,7 @@ async function main() {
         const restoredCreatedView = await waitForAgentView(page, createdPodName);
         await waitForCodexPrompt(page, restoredCreatedView.terminal, false);
         await waitForEmptyReview(page, createdPodName);
-        assert.equal(
-            await page
-                .locator(".editor-group-container .tabs-container .tab")
-                .filter({ hasText: createdPodName })
-                .count(),
-            1,
-            "restoring a clean pod duplicated its empty review editor",
-        );
+        await assertSingleOpenReview(page, createdPodName);
 
         await openPodSwitcher(page);
         const listedPods = await quickPickRows(page).allTextContents();

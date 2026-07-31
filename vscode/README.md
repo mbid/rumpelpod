@@ -15,7 +15,10 @@ its overflow menu. The pod picker also has a `+` button.
 Selecting a pod attaches the sidebar terminal to its configured agent and
 opens every changed file on the right in one vertically stacked review. The
 review is pinned, and the extension restores it if an explicit pinned-editor
-close removes it. Pods without changed files still open a native empty review
+close removes it. The extension hides VS Code's editor tab strip by default so
+the single review does not waste a row on its title. Set
+`workbench.editor.showTabs` explicitly to `single` or `multiple` to override
+that default. Pods without changed files still open a native empty review
 surface instead of leaving the previous editor visible. Agent assignments and
 the last active pod are saved across browser reloads.
 
