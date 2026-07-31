@@ -200,6 +200,7 @@ fn start_code_server(
     daemon: &TestDaemon,
     user_data_dir: &Path,
     extensions_dir: &Path,
+    sync_violation: &Path,
 ) -> (CodeServer, u16) {
     let ambient_path = std::env::var("PATH").expect("PATH is not set");
     let daemon_bin = daemon.bin_dir.display();
@@ -226,6 +227,11 @@ fn start_code_server(
             .env("HOME", &daemon.home_path)
             .env("PATH", &extension_path)
             .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
+            .env(
+                "RUMPELPOD_VSCODE_REAL_RUMPEL",
+                daemon.bin_dir.join("rumpel"),
+            )
+            .env("RUMPELPOD_VSCODE_SYNC_VIOLATION", sync_violation)
             .stdin(Stdio::null());
         let child = command
             .spawn_with_logging("CODE-SERVER")
@@ -239,10 +245,9 @@ fn start_code_server(
     panic!("code-server failed to start after three attempts: {failures:?}")
 }
 
-fn write_code_server_settings(user_data_dir: &Path, daemon: &TestDaemon) {
+fn write_code_server_settings(user_data_dir: &Path, executable: &Path) {
     let settings_dir = user_data_dir.join("User");
     fs::create_dir_all(&settings_dir).expect("create code-server settings directory");
-    let executable = daemon.bin_dir.join("rumpel");
     let settings = serde_json::json!({
         "editor.accessibilitySupport": "on",
         "security.workspace.trust.enabled": false,
@@ -256,6 +261,33 @@ fn write_code_server_settings(user_data_dir: &Path, daemon: &TestDaemon) {
         serde_json::to_string_pretty(&settings).expect("serialize code-server settings"),
     )
     .expect("write code-server settings");
+}
+
+fn write_extension_rumpel_wrapper(directory: &Path) -> PathBuf {
+    let executable = directory.join("rumpel-vscode-test");
+    fs::write(
+        &executable,
+        indoc! {r#"
+            #!/bin/sh
+            if [ "$1" = "list" ]; then
+                for argument in "$@"; do
+                    if [ "$argument" = "--sync" ]; then
+                        : > "$RUMPELPOD_VSCODE_SYNC_VIOLATION"
+                        echo "VS Code invoked list --sync during an ordinary UI operation" >&2
+                        exit 97
+                    fi
+                done
+            fi
+            exec "$RUMPELPOD_VSCODE_REAL_RUMPEL" "$@"
+        "#},
+    )
+    .expect("write VS Code rumpel wrapper");
+    let mut permissions = fs::metadata(&executable)
+        .expect("read VS Code rumpel wrapper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&executable, permissions).expect("make VS Code rumpel wrapper executable");
+    executable
 }
 
 fn run_browser_assertions(
@@ -532,7 +564,9 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     let user_data_dir = browser_home.path().join("user-data");
     let extensions_dir = browser_home.path().join("extensions");
     fs::create_dir_all(&extensions_dir).expect("create code-server extension directory");
-    write_code_server_settings(&user_data_dir, &daemon);
+    let extension_rumpel = write_extension_rumpel_wrapper(browser_home.path());
+    let sync_violation = browser_home.path().join("unexpected-list-sync");
+    write_code_server_settings(&user_data_dir, &extension_rumpel);
     install_extension(&code_server, &vsix, &user_data_dir, &extensions_dir);
 
     let (_code_server, port) = start_code_server(
@@ -541,9 +575,14 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
         &daemon,
         &user_data_dir,
         &extensions_dir,
+        &sync_violation,
     );
     let artifacts = root
         .join("target/vscode-integration")
         .join(std::process::id().to_string());
     run_browser_assertions(&root, port, &chromium, &artifacts, &repo, &daemon);
+    assert!(
+        !sync_violation.exists(),
+        "an ordinary VS Code UI operation invoked rumpel list --sync"
+    );
 }

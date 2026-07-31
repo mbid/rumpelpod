@@ -76,7 +76,7 @@ export class RumpelpodController implements vscode.Disposable {
     const picks = (
       await Promise.all(
         repositories.map(async (repository) => {
-          const pods = await this.model.listPods(repository);
+          const pods = await this.model.listPods(repository, false);
           return pods.map((pod) => this.podPick(repository, pod, repositories.length > 1));
         }),
       )
@@ -142,10 +142,10 @@ export class RumpelpodController implements vscode.Disposable {
     return result;
   }
 
-  public async refresh(): Promise<void> {
+  public async refresh(sync: boolean): Promise<void> {
     const failures = (
       await Promise.allSettled([
-        this.refreshPodStatus(true),
+        this.refreshPodStatus(sync),
         this.refreshActiveReview(true),
       ])
     )
@@ -159,7 +159,7 @@ export class RumpelpodController implements vscode.Disposable {
     }
   }
 
-  public refreshPodStatus(sync = false): Promise<void> {
+  public refreshPodStatus(sync: boolean): Promise<void> {
     const selected = this.active;
     return this.enqueueStatusUpdate(async () => {
       if (selected === undefined) {
@@ -399,7 +399,7 @@ export class RumpelpodController implements vscode.Disposable {
     if (repository === undefined) {
       return false;
     }
-    const pods = await this.model.listPods(repository);
+    const pods = await this.model.listPods(repository, false);
     const pod = pods.find((candidate) => candidate.name === last.pod);
     if (
       pod === undefined ||
@@ -532,7 +532,7 @@ export class RumpelpodController implements vscode.Disposable {
     for (const delay of [1_000, 3_000, 10_000]) {
       const timeout = setTimeout(() => {
         this.scheduledRefreshes.delete(timeout);
-        void this.refresh().catch((error: unknown) => {
+        void this.refresh(false).catch((error: unknown) => {
           this.model.logError(`refreshing newly created pod ${this.active?.pod ?? "unknown"}`, error);
         });
       }, delay);

@@ -36,7 +36,7 @@ export class RumpelpodModel {
 
   public async listPods(
     repository: Repository,
-    sync = true,
+    sync: boolean,
   ): Promise<readonly PodInfo[]> {
     const args = sync ? ["list", "--sync", "--json"] : ["list", "--json"];
     const output = await this.runRumpel(repository, args);

@@ -122,7 +122,7 @@ export class DaemonEvents {
 
   private async apply(events: readonly DaemonEvent[]): Promise<void> {
     if (events.some((event) => event.type === "resync")) {
-      await this.controller.refresh();
+      await this.controller.refresh(false);
       return;
     }
     let refreshStatus = false;
@@ -148,7 +148,7 @@ export class DaemonEvents {
     }
     const updates: Promise<void>[] = [];
     if (refreshStatus) {
-      updates.push(this.controller.refreshPodStatus());
+      updates.push(this.controller.refreshPodStatus(false));
     }
     if (refreshReview) {
       updates.push(this.controller.refreshActiveReview(true));

@@ -39,7 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
       runCommand(model, "selecting a pod", () => controller.showPodSwitcher()),
     ),
     vscode.commands.registerCommand("rumpelpod.refresh", () =>
-      runCommand(model, "refreshing the active pod", () => controller.refresh()),
+      runCommand(model, "refreshing the active pod", () => controller.refresh(true)),
     ),
     vscode.commands.registerCommand("rumpelpod.createPod", () =>
       runCommand(model, "creating a pod", () => controller.createPod()),

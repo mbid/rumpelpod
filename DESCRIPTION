@@ -15,3 +15,7 @@ an extension-owned xterm.js terminal in the primary sidebar. Keep the
 native review diff in the main editor and let VS Code choose inline or
 side-by-side rendering. Preserve the compact pod switcher, creation and
 shell controls, and event-driven status and review updates.
+
+Keep pod selection available when another pod has a stale Git callback.
+Only explicit refresh actions synchronize refs; picker and restoration
+reads use the daemon's current inventory.
