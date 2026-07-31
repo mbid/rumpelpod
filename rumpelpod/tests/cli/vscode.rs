@@ -249,7 +249,6 @@ fn write_code_server_settings(user_data_dir: &Path, daemon: &TestDaemon) {
         "telemetry.telemetryLevel": "off",
         "workbench.startupEditor": "none",
         "workbench.secondarySideBar.defaultVisibility": "hidden",
-        "diffEditor.renderSideBySide": true,
         "rumpelpod.executable": executable,
     });
     fs::write(

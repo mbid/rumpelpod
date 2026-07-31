@@ -7,12 +7,14 @@ import { RumpelpodController } from "./controller";
 import { DaemonEvents } from "./events";
 import { RumpelpodModel } from "./model";
 import { ReviewDocuments } from "./review";
-import { AgentTerminals } from "./terminal";
+import { AGENT_VIEW_ID, AgentTerminals } from "./terminal";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Rumpelpod", { log: true });
   const model = new RumpelpodModel(context.workspaceState, output);
-  const terminals = new AgentTerminals();
+  const terminals = new AgentTerminals(context.extensionUri, (operation, error) => {
+    model.logError(operation, error);
+  });
   const reviews = new ReviewDocuments();
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.name = "Rumpelpod Active Agent";
@@ -27,6 +29,12 @@ export function activate(context: vscode.ExtensionContext): void {
     status,
     controller,
     events,
+    terminals.onDidShow(() => {
+      void runCommand(model, "opening the Rumpelpod view", () => controller.enterMode());
+    }),
+    vscode.window.registerWebviewViewProvider(AGENT_VIEW_ID, terminals, {
+      webviewOptions: { retainContextWhenHidden: true },
+    }),
     vscode.commands.registerCommand("rumpelpod.showPods", () =>
       runCommand(model, "selecting a pod", () => controller.showPodSwitcher()),
     ),
@@ -42,6 +50,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("rumpelpod.pickReviewFile", () =>
       runCommand(model, "selecting a review file", () => controller.pickReviewFile()),
     ),
+    vscode.commands.registerCommand("rumpelpod.openActiveShell", () =>
+      runCommand(model, "opening a pod shell", async () => controller.openActiveShell()),
+    ),
+    vscode.commands.registerCommand("rumpelpod.restartAgent", () =>
+      runCommand(model, "restarting the active agent", () => controller.restartActiveAgent()),
+    ),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("rumpelpod.defaultAgent")) {
         controller.updateStatus();
@@ -53,6 +67,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   controller.updateStatus();
+  void vscode.commands.executeCommand("setContext", "rumpelpod.hasActivePod", false);
   void events.start().catch((error: unknown) => {
     model.logError("starting rumpelpod daemon events", error);
     events.restart();
@@ -60,7 +75,6 @@ export function activate(context: vscode.ExtensionContext): void {
   void runCommand(model, "removing obsolete review placeholders", () =>
     reviews.clearPlaceholders(),
   );
-  void runCommand(model, "restoring the active pod", () => controller.restoreLastPod());
 }
 
 export function deactivate(): void {}

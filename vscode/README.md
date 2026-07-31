@@ -1,17 +1,20 @@
 # Rumpelpod for VS Code
 
-This workspace extension shows the active rumpelpod agent in a persistent VS
-Code terminal, rendered by VS Code's xterm.js terminal frontend, and opens that
-pod's review in the adjacent editor group. It is built for desktop VS Code and
-browser-hosted VS Code servers whose extension host runs on the same machine as
-the `rumpel` command.
+This workspace extension adds a Rumpelpod mode to the VS Code Activity Bar.
+The mode renders the active agent in an xterm.js terminal shipped by the
+extension and keeps that terminal in the primary sidebar. The pod's review is a
+native VS Code diff in the main editor area. VS Code and the user's
+`diffEditor.renderSideBySide` preference decide whether that diff is inline or
+side by side.
 
-Click the Rumpelpod status item to switch pods. The same picker has a `+`
-button for creating a pod and a terminal button on each row for opening an
-ordinary shell in that pod. Selecting a pod shows its agent chat on the left
-and the first changed file on the right. Use the review editor's list action to
-choose another changed file. Only the last active agent chat is restored; agent
-assignments remain saved per pod.
+Click the Rumpelpod Activity Bar icon to enter the mode. The view toolbar
+switches pods, creates a pod, or opens an ordinary shell in the active pod;
+agent selection, refresh, and attachment restart commands are in its overflow
+menu. The pod picker also has a `+` button and a shell button on each row.
+Selecting a pod attaches the sidebar terminal to its configured agent and
+opens the first changed file on the right. Use the review editor's list action
+to choose another changed file. Agent assignments and the last active pod are
+saved across browser reloads.
 
 ## Development
 
@@ -45,6 +48,13 @@ until the browser service is healthy. `cargo vscode --check` performs the
 extension checks used by the Rust pipeline without updating either live
 service.
 
+The embedded terminal uses a native PTY binding. `npm run package` labels the
+VSIX for the current operating system and architecture and includes the binding
+built on that host. Development VSIX files are therefore current-host artifacts,
+not universal packages; Linux artifacts also require a compatible C library.
+Build the VSIX on the deployment host or in a release container whose C library
+is no newer than the supported deployment environments.
+
 The browser integration test launches an isolated code-server instance and a
 real rumpelpod daemon, then drives the packaged extension with Playwright. Run
 it through the normal test pipeline:
@@ -53,10 +63,10 @@ it through the normal test pipeline:
 cargo pipeline vscode_browser_lists_creates_and_reviews_pods
 ```
 
-Successful runs capture the pod switcher, agent picker, pod-name prompt, live
-Codex terminal, terminal-plus-review layout, restored terminal, and a
-Playwright trace under `target/vscode-integration/`. To refresh the checked-in
-reference images while running the same test, use:
+Successful runs capture the Activity Bar mode, pod switcher, agent picker,
+pod-name prompt, embedded Codex terminal, terminal-plus-review layout, restored
+terminal, and a Playwright trace under `target/vscode-integration/`. To refresh
+the checked-in reference images while running the same test, use:
 
 ```sh
 RUMPELPOD_VSCODE_REFERENCE_IMAGES="$PWD/vscode/docs/images" \
@@ -66,9 +76,9 @@ RUMPELPOD_VSCODE_REFERENCE_IMAGES="$PWD/vscode/docs/images" \
 The creation flow reaches a real Codex prompt while the daemon reports the new
 pod as running:
 
-![Created pod with a live Codex terminal](docs/images/06-created-chat.png)
+![Created pod with a live embedded Codex terminal](docs/images/06-created-chat.png)
 
 The test then makes a real commit inside the active pod. The daemon event
 updates both the status item and the review without a manual refresh:
 
-![Pod terminal and live review diff](docs/images/02-live-review.png)
+![Sidebar agent terminal and live review diff](docs/images/02-live-review.png)

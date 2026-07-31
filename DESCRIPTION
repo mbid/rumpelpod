@@ -10,7 +10,8 @@ Serve a separate anyhow demo repository so live test pods use a standard
 nested runtime. Keep the demo beside the rumpelpod checkout under
 `/workspaces` so it is easy to find from the development container.
 
-Make the active agent chat the primary VS Code surface and replace the
-persistent pod tree with a compact switcher. Stream typed daemon events
-to the extension so agent status and native review diffs update
-immediately when a pod commits.
+Restore a Rumpelpod Activity Bar mode with the active agent rendered by
+an extension-owned xterm.js terminal in the primary sidebar. Keep the
+native review diff in the main editor and let VS Code choose inline or
+side-by-side rendering. Preserve the compact pod switcher, creation and
+shell controls, and event-driven status and review updates.

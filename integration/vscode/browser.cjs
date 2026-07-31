@@ -60,9 +60,23 @@ async function waitForStatusItem(page, text) {
     return status;
 }
 
-async function openPodSwitcher(page, statusText) {
-    const status = await waitForStatusItem(page, statusText);
-    await status.click();
+async function openRumpelpodView(page) {
+    const action = page.locator('.activitybar a[aria-label="Rumpelpod"]');
+    await action.waitFor({ state: "visible", timeout: 30_000 });
+    await action.click();
+    const sidebar = page.locator(".part.sidebar:visible");
+    await sidebar.waitFor({ state: "visible", timeout: 30_000 });
+    await sidebar
+        .locator(".composite.title")
+        .filter({ hasText: "Rumpelpod" })
+        .waitFor({ state: "visible", timeout: 30_000 });
+    return sidebar;
+}
+
+async function openPodSwitcher(page) {
+    const switchPod = page.locator('.part.sidebar:visible [aria-label="Switch Pod"]').first();
+    await switchPod.waitFor({ state: "visible", timeout: 30_000 });
+    await switchPod.click();
     const widget = page.locator(".quick-input-widget:visible");
     await widget.waitFor({ state: "visible", timeout: 30_000 });
     return widget;
@@ -83,6 +97,10 @@ async function quickPickRow(page, label) {
 async function selectQuickPick(page, label) {
     const row = await quickPickRow(page, label);
     await row.click();
+    if (await row.isVisible()) {
+        await page.keyboard.press("Enter");
+    }
+    await row.waitFor({ state: "hidden", timeout: 30_000 });
 }
 
 async function waitForQuickPickLabels(page, labels) {
@@ -98,25 +116,10 @@ async function waitForQuickPickLabels(page, labels) {
     throw new Error(`quick pick omitted ${labels.join(", ")}: ${rendered}`);
 }
 
-function agentTerminalTab(page, podName) {
-    return page
-        .locator(".editor-group-container .tabs-container .tab:visible")
-        .filter({ hasText: "Rumpelpod:" })
-        .filter({ hasText: podName })
-        .filter({ hasText: "codex" });
-}
-
 function allAgentTerminalTabs(page) {
     return page
         .locator(".editor-group-container .tabs-container .tab:visible")
         .filter({ hasText: "Rumpelpod:" });
-}
-
-function shellTerminalTab(page, podName) {
-    return page
-        .locator(".editor-group-container .tabs-container .tab:visible")
-        .filter({ hasText: "Rumpelpod shell:" })
-        .filter({ hasText: podName });
 }
 
 async function terminalText(terminal) {
@@ -141,6 +144,35 @@ async function waitForTerminalText(page, terminal, needle, description, timeout 
     throw new Error(`${description} did not appear in the terminal; rendered text: ${rendered}`);
 }
 
+async function waitForTerminalTextAbsent(page, terminal, needle, description, timeout = 30_000) {
+    const deadline = Date.now() + timeout;
+    let rendered = "";
+    while (Date.now() < deadline) {
+        rendered = await terminalText(terminal);
+        if (!rendered.includes(needle)) {
+            return rendered;
+        }
+        await page.waitForTimeout(100);
+    }
+    throw new Error(`${description} remained in the terminal; rendered text: ${rendered}`);
+}
+
+async function focusTerminalInput(terminal) {
+    const input = terminal.locator("textarea.xterm-helper-textarea");
+    await input.waitFor({ state: "attached", timeout: 30_000 });
+    await input.focus();
+}
+
+async function typeInTerminal(page, terminal, value) {
+    await focusTerminalInput(terminal);
+    await page.keyboard.type(value);
+}
+
+async function pressInTerminal(page, terminal, key) {
+    await focusTerminalInput(terminal);
+    await page.keyboard.press(key);
+}
+
 async function waitForCodexPrompt(page, terminal, requireStartupOutput = true) {
     const marker = requireStartupOutput ? "WARNING: proceeding" : "OpenAI Codex";
     const description = requireStartupOutput ? "Codex startup output" : "restored Codex session";
@@ -153,26 +185,98 @@ async function waitForCodexPrompt(page, terminal, requireStartupOutput = true) {
         if (rendered.includes("\u203a")) {
             return;
         }
-        await terminal.click();
-        await page.keyboard.press("Enter");
+        await pressInTerminal(page, terminal, "Enter");
         await page.waitForTimeout(500);
     }
     const rendered = await terminalText(terminal);
     assert(rendered.includes("\u203a"), `Codex did not reach its input prompt: ${rendered}`);
 }
 
-async function waitForSingleAgentTerminal(page, podName) {
+async function waitForAgentFrame(page) {
     const deadline = Date.now() + 30_000;
-    let labels = [];
+    let frameUrls = [];
     while (Date.now() < deadline) {
-        labels = await allAgentTerminalTabs(page).allTextContents();
-        if (labels.length === 1 && labels[0].includes(podName)) {
-            return agentTerminalTab(page, podName).first();
+        const frames = page.frames();
+        frameUrls = frames.map((frame) => frame.url());
+        for (const frame of frames) {
+            if (!frame.url().includes("/fake.html")) {
+                continue;
+            }
+            const body = frame.locator("body[data-rumpelpod-agent-view='true']");
+            try {
+                if (await body.count()) {
+                    return frame;
+                }
+            } catch (_error) {
+                // The webview can navigate while VS Code restores the sidebar.
+            }
+        }
+        await page.waitForTimeout(100);
+    }
+    throw new Error(`Rumpelpod agent webview did not load; frames: ${JSON.stringify(frameUrls)}`);
+}
+
+async function waitForAgentView(page, podName, agent = "codex") {
+    const frame = await waitForAgentFrame(page);
+    const body = frame.locator("body[data-rumpelpod-agent-view='true']");
+    const deadline = Date.now() + 30_000;
+    let attributes = {};
+    while (Date.now() < deadline) {
+        attributes = {
+            agent: await body.getAttribute("data-rumpelpod-agent"),
+            pod: await body.getAttribute("data-rumpelpod-pod"),
+            state: await body.getAttribute("data-rumpelpod-state"),
+        };
+        if (
+            attributes.agent === agent &&
+            attributes.pod === podName &&
+            attributes.state === "running"
+        ) {
+            break;
+        }
+        await page.waitForTimeout(100);
+    }
+    assert.deepEqual(
+        attributes,
+        { agent, pod: podName, state: "running" },
+        `agent webview did not settle on ${podName}/${agent}`,
+    );
+    const terminals = frame.locator("#terminal .xterm:visible");
+    await terminals.first().waitFor({ state: "visible", timeout: 30_000 });
+    const session = await body.getAttribute("data-rumpelpod-session");
+    assert(session, "agent webview did not expose its active terminal session");
+    const renderedDeadline = Date.now() + 30_000;
+    let renderedSession = "";
+    while (Date.now() < renderedDeadline) {
+        renderedSession =
+            (await body.getAttribute("data-rumpelpod-rendered-session")) ?? "";
+        if (renderedSession === session) {
+            break;
+        }
+        await page.waitForTimeout(100);
+    }
+    assert.equal(renderedSession, session, `session ${session} produced no rendered output`);
+    assert.equal(await terminals.count(), 1, "agent webview rendered more than one xterm");
+    assert.equal(
+        await allAgentTerminalTabs(page).count(),
+        0,
+        "the embedded agent was also opened as a native editor terminal",
+    );
+    return { body, frame, terminal: terminals.first() };
+}
+
+async function waitForAgentRepositoryState(page, view, repositoryState) {
+    const deadline = Date.now() + 30_000;
+    let rendered = "";
+    while (Date.now() < deadline) {
+        rendered = (await view.body.getAttribute("data-rumpelpod-repository-state")) ?? "";
+        if (rendered === repositoryState) {
+            return;
         }
         await page.waitForTimeout(100);
     }
     throw new Error(
-        `active agent did not settle on one ${podName} terminal: ${JSON.stringify(labels)}`,
+        `agent view did not update repository state to ${repositoryState}; rendered: ${rendered}`,
     );
 }
 
@@ -282,20 +386,48 @@ async function waitForDiff(page, changedFile, originalContent, podContent) {
     return diffEditor;
 }
 
-async function assertChatAndDiffGeometry(page, terminal, diffEditor) {
+async function assertSidebarAndDiffGeometry(page, terminal, diffEditor) {
+    const sidebar = page.locator(".part.sidebar:visible");
+    const sidebarBounds = await sidebar.boundingBox();
     const terminalBounds = await terminal.boundingBox();
     const diffBounds = await diffEditor.boundingBox();
+    assert(sidebarBounds, "the Rumpelpod sidebar had no visible bounds");
     assert(terminalBounds, "the agent terminal had no visible bounds");
     assert(diffBounds, "the review diff had no visible bounds");
     assert(
-        terminalBounds.x < diffBounds.x,
-        `agent chat was not left of the review diff: ${JSON.stringify({ terminalBounds, diffBounds })}`,
+        sidebarBounds.x + sidebarBounds.width <= diffBounds.x + 1,
+        `the review diff overlapped the Rumpelpod sidebar: ${JSON.stringify({ sidebarBounds, diffBounds })}`,
     );
     assert(
-        terminalBounds.y < diffBounds.y + diffBounds.height &&
-            diffBounds.y < terminalBounds.y + terminalBounds.height,
-        `agent chat and review diff were not visible together: ${JSON.stringify({ terminalBounds, diffBounds })}`,
+        terminalBounds.x >= sidebarBounds.x &&
+            terminalBounds.x + terminalBounds.width <= sidebarBounds.x + sidebarBounds.width + 1,
+        `agent xterm was not contained by the sidebar: ${JSON.stringify({ sidebarBounds, terminalBounds })}`,
     );
+}
+
+async function waitForNativeShellPanel(page, podName) {
+    const panel = page.locator(".part.panel:visible");
+    await panel.waitFor({ state: "visible", timeout: 30_000 });
+    const terminal = panel.locator(".terminal-wrapper .xterm:visible").first();
+    await terminal.waitFor({ state: "visible", timeout: 30_000 });
+    await waitForTerminalText(
+        page,
+        terminal,
+        `Opening a shell in rumpelpod ${podName}`,
+        `native shell for ${podName}`,
+    );
+    assert.equal(
+        await page.locator(".terminal-editor .xterm:visible").count(),
+        0,
+        "pod shell opened as an editor instead of in the native terminal panel",
+    );
+    return terminal;
+}
+
+async function closeNativeShell(page, terminal) {
+    await typeInTerminal(page, terminal, "exit");
+    await pressInTerminal(page, terminal, "Enter");
+    await terminal.waitFor({ state: "hidden", timeout: 30_000 });
 }
 
 async function main() {
@@ -334,12 +466,9 @@ async function main() {
     try {
         await openCodeServer(page, url);
 
-        await openPodSwitcher(page, "Rumpelpod");
-        assert.equal(
-            await page.getByRole("treeitem").filter({ hasText: podName }).count(),
-            0,
-            "the old persistent pod tree was still visible",
-        );
+        await openRumpelpodView(page);
+        const initialSwitcher = page.locator(".quick-input-widget:visible");
+        await initialSwitcher.waitFor({ state: "visible", timeout: 30_000 });
         const initialRows = await quickPickRows(page).allTextContents();
         assert(
             initialRows.some((label) => label.includes(podName)),
@@ -347,11 +476,22 @@ async function main() {
         );
         await selectQuickPick(page, podName);
 
-        const initialTab = await waitForSingleAgentTerminal(page, podName);
-        await initialTab.click();
-        const initialTerminal = page.locator(".terminal-editor .xterm:visible").first();
-        await initialTerminal.waitFor({ state: "visible", timeout: 30_000 });
-        await waitForCodexPrompt(page, initialTerminal);
+        const initialView = await waitForAgentView(page, podName);
+        await waitForCodexPrompt(page, initialView.terminal);
+        await typeInTerminal(page, initialView.terminal, "browser-input-probe");
+        await waitForTerminalText(
+            page,
+            initialView.terminal,
+            "browser-input-probe",
+            "input sent through the embedded xterm",
+        );
+        await pressInTerminal(page, initialView.terminal, "Control+U");
+        await waitForTerminalTextAbsent(
+            page,
+            initialView.terminal,
+            "browser-input-probe",
+            "cleared input sent through the embedded xterm",
+        );
         assert.equal(
             await page.locator(".monaco-diff-editor:visible").count(),
             0,
@@ -367,18 +507,18 @@ async function main() {
         runPodCommit(rumpel, repoRoot, home, socket, podName, changedFile, podContent);
 
         await waitForStatusRepository(page, podName, "ahead 1");
+        await waitForAgentRepositoryState(page, initialView, "ahead 1");
         const liveDiff = await waitForDiff(page, changedFile, originalContent, podContent);
-        const activeTerminal = page.locator(".terminal-editor .xterm:visible").first();
-        await activeTerminal.waitFor({ state: "visible", timeout: 30_000 });
-        await assertChatAndDiffGeometry(page, activeTerminal, liveDiff);
+        const liveView = await waitForAgentView(page, podName);
+        await assertSidebarAndDiffGeometry(page, liveView.terminal, liveDiff);
         assert.equal(
-            await allAgentTerminalTabs(page).count(),
+            await liveView.frame.locator("#terminal .xterm:visible").count(),
             1,
-            "live review refresh created another agent terminal",
+            "live review refresh created another embedded agent terminal",
         );
         await capture(page, artifacts, "02-live-review.png");
 
-        await openPodSwitcher(page, podName);
+        await openPodSwitcher(page);
         const rowsAfterCommit = await quickPickRows(page).allTextContents();
         assert(
             rowsAfterCommit.some(
@@ -399,22 +539,17 @@ async function main() {
         });
         await openShell.waitFor({ state: "visible", timeout: 30_000 });
         await openShell.click();
-        const shellTab = shellTerminalTab(page, podName);
-        await shellTab.first().waitFor({ state: "visible", timeout: 30_000 });
-        const shellTerminal = page.locator(".terminal-editor .xterm:visible").first();
-        await shellTerminal.waitFor({ state: "visible", timeout: 30_000 });
+        const shellTerminal = await waitForNativeShellPanel(page, podName);
+        const viewWhileShellIsOpen = await waitForAgentView(page, podName);
+        await waitForCodexPrompt(page, viewWhileShellIsOpen.terminal, false);
         assert.equal(
-            await agentTerminalTab(page, podName).count(),
+            await viewWhileShellIsOpen.frame.locator("#terminal .xterm:visible").count(),
             1,
             "opening a pod shell replaced or duplicated its agent chat",
         );
-        await agentTerminalTab(page, podName).first().click();
+        await closeNativeShell(page, shellTerminal);
 
-        const createSwitcher = await openPodSwitcher(page, podName);
-        const createPod = createSwitcher.getByRole("button", {
-            name: "Create Pod",
-            exact: true,
-        });
+        const createPod = page.locator('.part.sidebar:visible [aria-label="Create Pod"]').first();
         await createPod.waitFor({ state: "visible", timeout: 30_000 });
         await createPod.click();
         const agentLabels = await waitForQuickPickLabels(page, ["Claude Code", "Codex"]);
@@ -434,16 +569,13 @@ async function main() {
         await capture(page, artifacts, "05-pod-name.png");
         await page.keyboard.press("Enter");
 
-        const createdTab = await waitForSingleAgentTerminal(page, createdPodName);
-        await createdTab.click();
-        const createdTerminal = page.locator(".terminal-editor .xterm:visible").first();
-        await createdTerminal.waitFor({ state: "visible", timeout: 30_000 });
-        await waitForCodexPrompt(page, createdTerminal);
+        const createdView = await waitForAgentView(page, createdPodName);
+        await waitForCodexPrompt(page, createdView.terminal);
         await waitForStatusItem(page, createdPodName);
         assert.equal(
-            await shellTerminalTab(page, podName).count(),
+            await page.locator(".part.panel:visible .terminal-wrapper .xterm:visible").count(),
             0,
-            "switching pods kept an auxiliary shell in the default chat layout",
+            "creating a pod kept the closed auxiliary shell alive",
         );
         assert.equal(
             await page.locator(".monaco-diff-editor:visible").count(),
@@ -457,7 +589,7 @@ async function main() {
         );
         await capture(page, artifacts, "06-created-chat.png");
 
-        await openPodSwitcher(page, createdPodName);
+        await openPodSwitcher(page);
         const listedPods = await quickPickRows(page).allTextContents();
         assert(
             listedPods.some((label) => label.includes(podName)),
@@ -469,34 +601,57 @@ async function main() {
         );
         await selectQuickPick(page, podName);
 
-        const switchedTab = await waitForSingleAgentTerminal(page, podName);
-        await switchedTab.click();
-        const switchedTerminal = page.locator(".terminal-editor .xterm:visible").first();
-        await switchedTerminal.waitFor({ state: "visible", timeout: 30_000 });
-        await waitForCodexPrompt(page, switchedTerminal, false);
+        const switchedView = await waitForAgentView(page, podName);
+        await waitForCodexPrompt(page, switchedView.terminal, false);
         const switchedDiff = await waitForDiff(page, changedFile, originalContent, podContent);
-        await assertChatAndDiffGeometry(page, switchedTerminal, switchedDiff);
+        await assertSidebarAndDiffGeometry(page, switchedView.terminal, switchedDiff);
         assert.equal(
-            await agentTerminalTab(page, createdPodName).count(),
-            0,
-            "switching pods kept the inactive agent chat open",
+            await switchedView.body.getAttribute("data-rumpelpod-pod"),
+            podName,
+            "switching pods left the inactive agent in the embedded terminal",
         );
         await capture(page, artifacts, "07-switched-review.png");
 
+        const reloadMarker = "reload-session-marker";
+        await typeInTerminal(page, switchedView.terminal, reloadMarker);
+        await waitForTerminalText(
+            page,
+            switchedView.terminal,
+            reloadMarker,
+            "unsent input before browser reload",
+        );
+
         await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
         await page.locator(".monaco-workbench").waitFor({ state: "visible", timeout: 60_000 });
+        await page
+            .locator(".part.sidebar:visible .composite.title")
+            .filter({ hasText: "Rumpelpod" })
+            .waitFor({ state: "visible", timeout: 30_000 });
+        await page
+            .locator('.activitybar a[aria-label="Rumpelpod"]')
+            .waitFor({ state: "visible", timeout: 30_000 });
         await waitForStatusItem(page, podName);
-        const restoredTab = await waitForSingleAgentTerminal(page, podName);
-        await restoredTab.click();
-        const restoredTerminal = page.locator(".terminal-editor .xterm:visible").first();
-        await restoredTerminal.waitFor({ state: "visible", timeout: 30_000 });
-        await waitForCodexPrompt(page, restoredTerminal, false);
+        const restoredView = await waitForAgentView(page, podName);
+        await waitForTerminalText(
+            page,
+            restoredView.terminal,
+            reloadMarker,
+            "the attached Codex session after browser reload",
+        );
+        await pressInTerminal(page, restoredView.terminal, "Control+U");
+        await waitForTerminalTextAbsent(
+            page,
+            restoredView.terminal,
+            reloadMarker,
+            "cleared input after browser reload",
+        );
+        await waitForCodexPrompt(page, restoredView.terminal, false);
         const restoredDiff = await waitForDiff(page, changedFile, originalContent, podContent);
-        await assertChatAndDiffGeometry(page, restoredTerminal, restoredDiff);
+        await assertSidebarAndDiffGeometry(page, restoredView.terminal, restoredDiff);
         assert.equal(
-            await agentTerminalTab(page, createdPodName).count(),
-            0,
-            "reload restored an inactive pod's agent chat",
+            await restoredView.frame.locator("#terminal .xterm:visible").count(),
+            1,
+            "reload restored more than one embedded agent terminal",
         );
         await capture(page, artifacts, "08-restored-chat.png");
         assert.equal(

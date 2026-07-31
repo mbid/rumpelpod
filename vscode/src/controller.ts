@@ -55,6 +55,7 @@ const OPEN_SHELL_BUTTON: vscode.QuickInputButton = {
 export class RumpelpodController implements vscode.Disposable {
   private readonly scheduledRefreshes = new Set<NodeJS.Timeout>();
   private active: ActivePod | undefined;
+  private modeEntries = Promise.resolve();
   private reviewUpdates = Promise.resolve();
   private selectionGeneration = 0;
   private statusUpdates = Promise.resolve();
@@ -113,6 +114,32 @@ export class RumpelpodController implements vscode.Disposable {
         );
         return;
     }
+  }
+
+  public enterMode(): Promise<void> {
+    const result = this.modeEntries.then(async () => {
+      if (this.active === undefined) {
+        const restored = await this.restoreLastPod();
+        if (restored) {
+          return;
+        }
+      }
+      const selected = this.active;
+      if (selected === undefined) {
+        await this.showPodSwitcher();
+        return;
+      }
+      await this.terminals.showActive(
+        selected.repository,
+        selected.pod,
+        selected.agent,
+        this.model.executable(),
+      );
+      this.updateStatus();
+      await this.refreshActiveReview(false);
+    });
+    this.modeEntries = result.catch(() => {});
+    return result;
   }
 
   public async refresh(): Promise<void> {
@@ -209,12 +236,16 @@ export class RumpelpodController implements vscode.Disposable {
     if (pod === undefined) {
       return;
     }
+    const generation = ++this.selectionGeneration;
     await this.model.setAgent(repository, pod, agent);
     await this.model.rememberPod(repository, pod);
+    if (generation !== this.selectionGeneration) {
+      return;
+    }
     this.active = {
       agent,
       currentFile: undefined,
-      generation: ++this.selectionGeneration,
+      generation,
       info: undefined,
       plan: undefined,
       pod,
@@ -227,18 +258,23 @@ export class RumpelpodController implements vscode.Disposable {
         await this.reviewDocuments.clear();
       }
     });
-    this.terminals.showActive(repository, pod, agent, this.model.executable());
+    await this.terminals.showActive(repository, pod, agent, this.model.executable());
+    this.updateStatus();
     this.scheduleRefreshes();
   }
 
   public async openPod(repository: Repository, pod: PodInfo): Promise<void> {
+    const generation = ++this.selectionGeneration;
     const agent = this.model.getAgent(repository, pod.name) ?? this.model.defaultAgent();
     await this.model.setAgent(repository, pod.name, agent);
     await this.model.rememberPod(repository, pod.name);
+    if (generation !== this.selectionGeneration) {
+      return;
+    }
     this.active = {
       agent,
       currentFile: undefined,
-      generation: ++this.selectionGeneration,
+      generation,
       info: pod,
       plan: undefined,
       pod: pod.name,
@@ -246,7 +282,8 @@ export class RumpelpodController implements vscode.Disposable {
     };
     const selected = this.active;
     this.updateStatus();
-    this.terminals.showActive(repository, pod.name, agent, this.model.executable());
+    await this.terminals.showActive(repository, pod.name, agent, this.model.executable());
+    this.updateStatus();
 
     try {
       await this.refreshActiveReview(false);
@@ -280,9 +317,6 @@ export class RumpelpodController implements vscode.Disposable {
     if (active === undefined) {
       return;
     }
-    if (agent !== active.agent) {
-      this.terminals.replace(active.repository, active.pod);
-    }
     await this.model.setAgent(active.repository, active.pod, agent);
     active = this.currentSelection(selected);
     if (active === undefined) {
@@ -290,12 +324,29 @@ export class RumpelpodController implements vscode.Disposable {
     }
     this.active = { ...active, agent };
     this.updateStatus();
-    this.terminals.showActive(
+    await this.terminals.showActive(
       active.repository,
       active.pod,
       agent,
       this.model.executable(),
     );
+    this.updateStatus();
+  }
+
+  public openActiveShell(): void {
+    const selected = this.active;
+    if (selected === undefined) {
+      throw new Error("select a pod before opening a shell");
+    }
+    this.terminals.showShell(
+      selected.repository,
+      selected.pod,
+      this.model.executable(),
+    );
+  }
+
+  public restartActiveAgent(): Promise<void> {
+    return this.terminals.restartActive();
   }
 
   public async pickReviewFile(): Promise<void> {
@@ -334,22 +385,31 @@ export class RumpelpodController implements vscode.Disposable {
     await this.refreshActiveReview(false);
   }
 
-  public async restoreLastPod(): Promise<void> {
+  public async restoreLastPod(): Promise<boolean> {
+    const generation = this.selectionGeneration;
+    if (this.active !== undefined) {
+      return false;
+    }
     const last = this.model.lastPod();
     if (last === undefined) {
-      return;
+      return false;
     }
-    await this.terminals.waitForRestoration();
     const repositories = await this.model.repositories();
     const repository = repositories.find((candidate) => candidate.root === last.repository);
     if (repository === undefined) {
-      return;
+      return false;
     }
     const pods = await this.model.listPods(repository);
     const pod = pods.find((candidate) => candidate.name === last.pod);
-    if (pod !== undefined) {
-      await this.openPod(repository, pod);
+    if (
+      pod === undefined ||
+      this.active !== undefined ||
+      generation !== this.selectionGeneration
+    ) {
+      return false;
     }
+    await this.openPod(repository, pod);
+    return true;
   }
 
   public updateStatus(): void {
@@ -371,6 +431,13 @@ export class RumpelpodController implements vscode.Disposable {
       `$(comment-discussion) ${selected.pod} / ${agentLabel(selected.agent)} / ${state}${repositoryState}`;
     this.status.tooltip = statusTooltip(selected, state);
     this.status.show();
+    this.terminals.updateActiveState(
+      selected.repository,
+      selected.pod,
+      selected.agent,
+      state,
+      selected.info?.repo_state ?? "",
+    );
   }
 
   public dispose(): void {

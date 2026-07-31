@@ -1,0 +1,78 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  padding: 0;
+  width: 100%;
+}
+
+body {
+  background: var(--vscode-sideBar-background);
+  color: var(--vscode-sideBar-foreground);
+  font-family: var(--vscode-font-family);
+}
+
+#app {
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  position: relative;
+}
+
+#terminal {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  padding: 4px 2px 2px 6px;
+}
+
+#terminal .xterm {
+  height: 100%;
+}
+
+#empty {
+  align-items: center;
+  box-sizing: border-box;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+}
+
+#empty p {
+  margin: 0;
+  max-width: 24em;
+}
+
+#restart {
+  background: var(--vscode-button-background);
+  border: 0;
+  color: var(--vscode-button-foreground);
+  cursor: pointer;
+  padding: 5px 12px;
+}
+
+#restart:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+body[data-rumpelpod-state="running"] #empty,
+body[data-rumpelpod-state="starting"] #empty {
+  display: none;
+}
+
+body:not([data-rumpelpod-state="running"]):not([data-rumpelpod-state="starting"]) #terminal {
+  display: none;
+}
+
+body:not([data-rumpelpod-state="exited"]) #restart {
+  display: none;
+}

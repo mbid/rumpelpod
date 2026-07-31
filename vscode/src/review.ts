@@ -56,7 +56,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       {
         preview: true,
         preserveFocus,
-        viewColumn: vscode.ViewColumn.Two,
+        viewColumn: vscode.ViewColumn.One,
       } satisfies vscode.TextDocumentShowOptions,
     );
   }
