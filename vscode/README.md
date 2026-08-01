@@ -1,7 +1,7 @@
 # Rumpelpod for VS Code
 
 This workspace extension adds a Rumpelpod mode to the VS Code Activity Bar.
-The mode renders the active agent and pod shell in xterm.js terminals shipped
+The mode renders agent sessions and a pod shell in xterm.js terminals shipped
 by the extension and keeps them in the primary sidebar. The pod's review is a
 native VS Code multi-diff in the main editor area. VS Code and the user's
 `diffEditor.renderSideBySide` preference decide whether that diff is inline or
@@ -9,18 +9,18 @@ side by side.
 
 Click the Rumpelpod Activity Bar icon to enter the mode. Click the pod name at
 the top of the view to switch pods. The icons beside it open a pod shell,
-change the active agent, create a pod, and expose refresh and restart actions.
+launch another agent, create a pod, and expose refresh and restart actions.
 Selectors and pod creation stay beside those controls in sidebar popovers.
-The agent uses the whole sidebar by default; agent and shell tabs appear only
-while a second terminal session is open.
-Selecting a pod attaches the sidebar terminal to its configured agent and
-opens every changed file on the right in one vertically stacked review. The
-review is pinned, and the extension restores it if an explicit pinned-editor
-close removes it. The extension does not change VS Code's editor-tab settings,
-so ordinary files keep the user's normal tab behavior. Pods without changed
-files still open a native empty review surface instead of leaving the previous
-editor visible. Agent assignments and the last active pod are saved across
-browser reloads.
+A single session uses the whole sidebar; named agent and shell tabs appear only
+while two or more sessions are open. Launching Claude while Codex is open keeps
+both independent PTYs alive instead of replacing one with the other. Selecting
+a pod restores its launched agents and opens every changed file on the right in
+one vertically stacked review. The review is pinned, and the extension restores
+it if an explicit pinned-editor close removes it. The extension does not change
+VS Code's editor-tab settings, so ordinary files keep the user's normal tab
+behavior. Pods without changed files still open a native empty review surface
+instead of leaving the previous editor visible. Launched agent sets and the last
+active pod are saved across browser reloads.
 
 ## Development
 
@@ -69,9 +69,9 @@ it through the normal test pipeline:
 cargo pipeline vscode_browser_lists_creates_and_reviews_pods
 ```
 
-Successful runs capture the Activity Bar mode, pod switcher, agent picker,
-pod-name prompt, embedded Codex and shell terminals, terminal-plus-review
-layout, restored terminal, and a Playwright trace under
+Successful runs capture the Activity Bar mode, pod switcher, agent launcher,
+pod-name prompt, concurrent Claude and Codex terminals, the embedded shell,
+terminal-plus-review layout, restored sessions, and a Playwright trace under
 `target/vscode-integration/`. To refresh the checked-in reference images while
 running the same test, use:
 

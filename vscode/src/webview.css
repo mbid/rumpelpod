@@ -17,6 +17,10 @@ body {
   font-family: var(--vscode-font-family);
 }
 
+[hidden] {
+  display: none !important;
+}
+
 #app {
   display: flex;
   flex-direction: column;
@@ -118,14 +122,10 @@ body {
 
 #terminal-tabs {
   border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, transparent);
-  display: none;
+  display: flex;
   flex: none;
   gap: 2px;
   padding: 0 8px;
-}
-
-body[data-rumpelpod-shell-open="true"] #terminal-tabs {
-  display: flex;
 }
 
 .terminal-tab {
@@ -142,8 +142,7 @@ body[data-rumpelpod-shell-open="true"] #terminal-tabs {
   color: var(--vscode-foreground);
 }
 
-body[data-rumpelpod-active-tab="agent"] #agent-tab,
-body[data-rumpelpod-active-tab="shell"] #shell-tab {
+.terminal-tab[aria-selected="true"] {
   border-bottom-color: var(--vscode-focusBorder);
   color: var(--vscode-foreground);
 }
@@ -158,11 +157,6 @@ body[data-rumpelpod-active-tab="shell"] #shell-tab {
 
 .surface {
   position: relative;
-}
-
-body[data-rumpelpod-active-tab="agent"] #shell-surface,
-body[data-rumpelpod-active-tab="shell"] #agent-surface {
-  display: none;
 }
 
 .terminal {
@@ -203,23 +197,6 @@ body[data-rumpelpod-active-tab="shell"] #agent-surface {
 
 .restart:hover {
   background: var(--vscode-button-hoverBackground);
-}
-
-body[data-rumpelpod-agent-state="running"] #agent-empty,
-body[data-rumpelpod-agent-state="starting"] #agent-empty,
-body[data-rumpelpod-shell-state="running"] #shell-empty,
-body[data-rumpelpod-shell-state="starting"] #shell-empty {
-  display: none;
-}
-
-body:not([data-rumpelpod-agent-state="running"]):not([data-rumpelpod-agent-state="starting"]) #agent-terminal,
-body:not([data-rumpelpod-shell-state="running"]):not([data-rumpelpod-shell-state="starting"]) #shell-terminal {
-  display: none;
-}
-
-body:not([data-rumpelpod-agent-state="exited"]) #agent-restart,
-body:not([data-rumpelpod-shell-state="exited"]) #shell-restart {
-  display: none;
 }
 
 #popover-layer {

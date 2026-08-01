@@ -39,7 +39,7 @@
       "rumpelpod": [
         {
           "id": "rumpelpod.agent",
-          "name": "Agent",
+          "name": "Sessions",
           "type": "webview"
         }
       ]
@@ -64,8 +64,8 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "rumpelpod.changeActiveAgent",
-        "title": "Change Active Agent",
+        "command": "rumpelpod.launchAgent",
+        "title": "Launch Agent",
         "category": "Rumpelpod",
         "icon": "$(person)"
       },
@@ -76,8 +76,8 @@
         "icon": "$(terminal)"
       },
       {
-        "command": "rumpelpod.restartAgent",
-        "title": "Restart Agent Attachment",
+        "command": "rumpelpod.restartSession",
+        "title": "Restart Current Session",
         "category": "Rumpelpod",
         "icon": "$(debug-restart)"
       }
@@ -94,7 +94,7 @@
             "pi"
           ],
           "default": "codex",
-          "description": "Agent assigned to a pod when no choice has been saved for it."
+          "description": "Agent preselected during pod creation and launched when opening a pod without saved sessions."
         },
         "rumpelpod.executable": {
           "type": "string",

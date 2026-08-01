@@ -8,7 +8,7 @@ import type { AgentKind, PodInfo, ReviewPlan } from "./generated/protocol";
 import { isAgentKind } from "./agents";
 import { runProcess } from "./process";
 
-const AGENT_ASSIGNMENTS_KEY = "rumpelpod.agentAssignments";
+const LAUNCHED_AGENTS_KEY = "rumpelpod.launchedAgents";
 const LAST_POD_KEY = "rumpelpod.lastPod";
 
 export interface Repository {
@@ -56,16 +56,29 @@ export class RumpelpodModel {
     return parsed;
   }
 
-  public getAgent(repository: Repository, pod: string): AgentKind | undefined {
-    const assignments = this.assignments();
-    const candidate = assignments[assignmentKey(repository, pod)];
-    return isAgentKind(candidate) ? candidate : undefined;
+  public launchedAgents(repository: Repository, pod: string): readonly AgentKind[] | undefined {
+    const sessions = this.savedAgentSessions();
+    const candidate = sessions[assignmentKey(repository, pod)];
+    if (candidate === undefined) {
+      return undefined;
+    }
+    if (!Array.isArray(candidate) || candidate.length === 0 || !candidate.every(isAgentKind)) {
+      throw new Error(`invalid saved agents for pod '${pod}'`);
+    }
+    return [...new Set(candidate)];
   }
 
-  public async setAgent(repository: Repository, pod: string, agent: AgentKind): Promise<void> {
-    const assignments = this.assignments();
-    assignments[assignmentKey(repository, pod)] = agent;
-    await this.workspaceState.update(AGENT_ASSIGNMENTS_KEY, assignments);
+  public async saveLaunchedAgents(
+    repository: Repository,
+    pod: string,
+    agents: readonly AgentKind[],
+  ): Promise<void> {
+    if (agents.length === 0) {
+      throw new Error(`cannot save an empty agent list for pod '${pod}'`);
+    }
+    const sessions = this.savedAgentSessions();
+    sessions[assignmentKey(repository, pod)] = [...new Set(agents)];
+    await this.workspaceState.update(LAUNCHED_AGENTS_KEY, sessions);
   }
 
   public defaultAgent(): AgentKind {
@@ -116,8 +129,8 @@ export class RumpelpodModel {
     this.output.appendLine(`${context}: ${message}`);
   }
 
-  private assignments(): Record<string, unknown> {
-    const value = this.workspaceState.get<unknown>(AGENT_ASSIGNMENTS_KEY);
+  private savedAgentSessions(): Record<string, unknown> {
+    const value = this.workspaceState.get<unknown>(LAUNCHED_AGENTS_KEY);
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       return {};
     }

@@ -15,7 +15,7 @@ import type {
 } from "./terminal";
 
 interface ActivePod {
-  readonly agent: AgentKind;
+  readonly agents: readonly AgentKind[];
   readonly generation: number;
   readonly info: PodInfo | undefined;
   readonly pod: string;
@@ -25,6 +25,7 @@ interface ActivePod {
 export class RumpelpodController implements vscode.Disposable {
   private readonly scheduledRefreshes = new Set<NodeJS.Timeout>();
   private active: ActivePod | undefined;
+  private agentLaunches = Promise.resolve();
   private modeEntries = Promise.resolve();
   private reviewUpdates = Promise.resolve();
   private selectionGeneration = 0;
@@ -76,7 +77,7 @@ export class RumpelpodController implements vscode.Disposable {
       await this.terminals.showActive(
         selected.repository,
         selected.pod,
-        selected.agent,
+        selected.agents,
         this.model.executable(),
       );
       this.updateStatus();
@@ -173,7 +174,7 @@ export class RumpelpodController implements vscode.Disposable {
           name: repository.name,
           root: repository.root,
         })),
-        this.agentOptions(this.model.defaultAgent()),
+        this.agentOptions(this.model.defaultAgent(), []),
         menuRequest,
       );
     } catch (error) {
@@ -184,8 +185,8 @@ export class RumpelpodController implements vscode.Disposable {
 
   public async handleViewAction(action: AgentViewAction): Promise<void> {
     switch (action.type) {
-      case "changeAgent":
-        await this.changeActiveAgent(action.request);
+      case "launchAgentMenu":
+        await this.launchAgentMenu(action.request);
         return;
       case "createPod":
         await this.createPodSelection(action.repository, action.agent, action.pod);
@@ -205,11 +206,11 @@ export class RumpelpodController implements vscode.Disposable {
       case "refresh":
         await this.refresh(true);
         return;
-      case "restartAgent":
-        await this.restartActiveAgent();
+      case "restartSession":
+        await this.restartCurrentSession();
         return;
-      case "setAgent":
-        await this.setActiveAgent(action.agent);
+      case "launchAgent":
+        await this.launchAgent(action.agent);
         return;
     }
   }
@@ -229,13 +230,14 @@ export class RumpelpodController implements vscode.Disposable {
     if (generation !== this.selectionGeneration) {
       return;
     }
-    await this.model.setAgent(repository, pod, agent);
+    const agents = [agent];
+    await this.model.saveLaunchedAgents(repository, pod, agents);
     await this.model.rememberPod(repository, pod);
     if (generation !== this.selectionGeneration) {
       return;
     }
     this.active = {
-      agent,
+      agents,
       generation,
       info: undefined,
       pod,
@@ -248,7 +250,7 @@ export class RumpelpodController implements vscode.Disposable {
         await this.reviewDocuments.openEmpty(repository, pod);
       }
     });
-    await this.terminals.showActive(repository, pod, agent, this.model.executable());
+    await this.terminals.showActive(repository, pod, agents, this.model.executable());
     this.updateStatus();
     this.scheduleRefreshes();
   }
@@ -259,14 +261,14 @@ export class RumpelpodController implements vscode.Disposable {
     if (generation !== this.selectionGeneration) {
       return;
     }
-    const agent = this.model.getAgent(repository, pod.name) ?? this.model.defaultAgent();
-    await this.model.setAgent(repository, pod.name, agent);
+    const agents = this.agentsForPod(repository, pod);
+    await this.model.saveLaunchedAgents(repository, pod.name, agents);
     await this.model.rememberPod(repository, pod.name);
     if (generation !== this.selectionGeneration) {
       return;
     }
     this.active = {
-      agent,
+      agents,
       generation,
       info: pod,
       pod: pod.name,
@@ -274,7 +276,7 @@ export class RumpelpodController implements vscode.Disposable {
     };
     const selected = this.active;
     this.updateStatus();
-    await this.terminals.showActive(repository, pod.name, agent, this.model.executable());
+    await this.terminals.showActive(repository, pod.name, agents, this.model.executable());
     this.updateStatus();
 
     try {
@@ -291,48 +293,60 @@ export class RumpelpodController implements vscode.Disposable {
         this.model.logError(`clearing review for ${pod.name}`, clearError);
       }
       await vscode.window.showWarningMessage(
-        `The ${pod.name} agent is open, but its review is not available: ${message}`,
+        `The ${pod.name} pod is open, but its review is not available: ${message}`,
       );
     }
   }
 
-  public async changeActiveAgent(request?: number): Promise<void> {
+  public async launchAgentMenu(request?: number): Promise<void> {
     const selected = this.active;
     if (selected === undefined) {
-      throw new Error("select a pod before changing its agent");
+      throw new Error("select a pod before launching an agent");
     }
     const menuRequest = await this.terminals.beginMenu("agent", request);
     try {
-      await this.terminals.showAgentMenu(this.agentOptions(selected.agent), menuRequest);
+      await this.terminals.showAgentMenu(
+        this.agentOptions(undefined, selected.agents),
+        menuRequest,
+      );
     } catch (error) {
       this.terminals.dismissMenu(menuRequest);
       throw error;
     }
   }
 
-  private async setActiveAgent(agent: AgentKind): Promise<void> {
+  private async launchAgent(agent: AgentKind): Promise<void> {
     const selected = this.active;
     if (selected === undefined) {
-      throw new Error("select a pod before changing its agent");
+      throw new Error("select a pod before launching an agent");
     }
+    const result = this.agentLaunches.then(() => this.launchAgentNow(selected, agent));
+    this.agentLaunches = result.catch(() => {});
+    await result;
+  }
+
+  private async launchAgentNow(selected: ActivePod, agent: AgentKind): Promise<void> {
     let active = this.currentSelection(selected);
     if (active === undefined) {
       return;
     }
-    await this.model.setAgent(active.repository, active.pod, agent);
-    active = this.currentSelection(selected);
-    if (active === undefined) {
-      return;
+    if (!active.agents.includes(agent)) {
+      const agents = [...active.agents, agent];
+      await this.model.saveLaunchedAgents(active.repository, active.pod, agents);
+      active = this.currentSelection(selected);
+      if (active === undefined) {
+        return;
+      }
+      this.active = { ...active, agents };
+      active = this.active;
+      this.updateStatus();
     }
-    this.active = { ...active, agent };
-    this.updateStatus();
-    await this.terminals.showActive(
+    await this.terminals.launchAgent(
       active.repository,
       active.pod,
       agent,
       this.model.executable(),
     );
-    this.updateStatus();
   }
 
   public openActiveShell(): void {
@@ -347,7 +361,7 @@ export class RumpelpodController implements vscode.Disposable {
     );
   }
 
-  public restartActiveAgent(): Promise<void> {
+  public restartCurrentSession(): Promise<void> {
     return this.terminals.restartActive();
   }
 
@@ -386,21 +400,17 @@ export class RumpelpodController implements vscode.Disposable {
       this.status.show();
       return;
     }
-    const state = selected.info === undefined
-      ? "starting"
-      : agentActivity(selected.info, selected.agent) ?? podStatusLabel(selected.info.status);
+    const state = selected.info === undefined ? "starting" : podStatusLabel(selected.info.status);
     const repositoryState =
       selected.info?.repo_state === null || selected.info?.repo_state === undefined
         ? ""
         : ` / ${selected.info.repo_state}`;
-    this.status.text =
-      `$(comment-discussion) ${selected.pod} / ${agentLabel(selected.agent)} / ${state}${repositoryState}`;
+    this.status.text = `$(comment-discussion) ${selected.pod} / ${state}${repositoryState}`;
     this.status.tooltip = statusTooltip(selected, state);
     this.status.show();
     this.terminals.updateActiveState(
       selected.repository,
       selected.pod,
-      selected.agent,
       state,
       selected.info?.repo_state ?? "",
     );
@@ -445,12 +455,16 @@ export class RumpelpodController implements vscode.Disposable {
     return result;
   }
 
-  private agentOptions(current: AgentKind): readonly AgentMenuOption[] {
+  private agentOptions(
+    selected: AgentKind | undefined,
+    launched: readonly AgentKind[],
+  ): readonly AgentMenuOption[] {
     return AGENTS.map((agent) => ({
       agent,
-      current: agent === current,
       description: agentDescription(agent),
       label: agentLabel(agent),
+      launched: launched.includes(agent),
+      selected: agent === selected,
     }));
   }
 
@@ -465,12 +479,17 @@ export class RumpelpodController implements vscode.Disposable {
   }
 
   private podPick(repository: Repository, pod: PodInfo, showRepository: boolean): PodMenuOption {
-    const agent = this.model.getAgent(repository, pod.name) ?? this.model.defaultAgent();
-    const activity = agentActivity(pod, agent);
+    const agents = this.agentsForPod(repository, pod);
+    const agentStates = agents.map((agent) => {
+      const activity = agentActivity(pod, agent);
+      return activity === undefined
+        ? agentLabel(agent)
+        : `${agentLabel(agent)}: ${activity}`;
+    });
     const descriptions = [
       showRepository ? repository.name : undefined,
-      agentLabel(agent),
-      activity ?? podStatusLabel(pod.status),
+      agentStates.join(", "),
+      podStatusLabel(pod.status),
       pod.repo_state ?? undefined,
     ].filter((value): value is string => value !== undefined);
     return {
@@ -490,6 +509,19 @@ export class RumpelpodController implements vscode.Disposable {
       throw new Error(`repository '${root}' is no longer open`);
     }
     return repository;
+  }
+
+  private agentsForPod(repository: Repository, pod: PodInfo): readonly AgentKind[] {
+    const saved = this.model.launchedAgents(repository, pod.name) ?? [];
+    const detected: AgentKind[] = [];
+    if (pod.claude_state !== null) {
+      detected.push("claude");
+    }
+    if (pod.codex_state !== null) {
+      detected.push("codex");
+    }
+    const agents = [...new Set([...saved, ...detected])];
+    return agents.length === 0 ? [this.model.defaultAgent()] : agents;
   }
 
   private scheduleRefreshes(): void {
@@ -561,7 +593,7 @@ function podStatusLabel(status: PodInfo["status"]): string {
 function statusTooltip(selected: ActivePod, state: string): vscode.MarkdownString {
   const tooltip = new vscode.MarkdownString(undefined, true);
   tooltip.appendMarkdown(`**${selected.pod}**\n\n`);
-  tooltip.appendMarkdown(`Agent: ${agentLabel(selected.agent)}\n\n`);
+  tooltip.appendMarkdown(`Agents: ${selected.agents.map(agentLabel).join(", ")}\n\n`);
   tooltip.appendMarkdown(`State: ${state}\n\n`);
   if (selected.info?.repo_state !== null && selected.info?.repo_state !== undefined) {
     tooltip.appendMarkdown(`Repository: ${selected.info.repo_state}\n\n`);

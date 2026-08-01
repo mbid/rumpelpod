@@ -7,7 +7,8 @@ import "./webview.css";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 
-type TerminalTab = "agent" | "shell";
+type AgentKind = "claude" | "codex" | "grok" | "pi";
+type TerminalTab = AgentKind | "shell";
 type ViewState = "empty" | "exited" | "running" | "starting";
 
 interface WebviewApi<State> {
@@ -20,24 +21,22 @@ declare function acquireVsCodeApi<State = unknown>(): WebviewApi<State>;
 
 interface PersistedState {
   readonly activeTab?: TerminalTab;
-  readonly agent?: string;
   readonly pod?: string;
   readonly repository?: string;
 }
 
 interface AgentStateMessage {
   readonly activeTab: TerminalTab;
-  readonly agent: string;
-  readonly agentMessage: string;
-  readonly agentSession: number;
-  readonly agentState: ViewState;
   readonly pod: string;
   readonly repository: string;
   readonly repositoryState: string;
-  readonly shellMessage: string;
-  readonly shellOpen: boolean;
-  readonly shellSession: number;
-  readonly shellState: ViewState;
+  readonly sessions: readonly {
+    readonly label: string;
+    readonly message: string;
+    readonly session: number;
+    readonly state: ViewState;
+    readonly tab: TerminalTab;
+  }[];
   readonly type: "state";
 }
 
@@ -66,9 +65,10 @@ interface BeginMenuMessage {
 
 interface AgentMenuOption {
   readonly agent: string;
-  readonly current: boolean;
   readonly description: string;
   readonly label: string;
+  readonly launched: boolean;
+  readonly selected: boolean;
 }
 
 interface AgentMenuMessage {
@@ -99,9 +99,12 @@ interface PodMenuMessage {
 
 interface TerminalSurface {
   readonly empty: HTMLElement;
+  readonly emptyContainer: HTMLElement;
   readonly fit: FitAddon;
   readonly restart: HTMLElement;
+  readonly surface: HTMLElement;
   readonly terminal: Terminal;
+  readonly terminalElement: HTMLElement;
 }
 
 type HostMessage =
@@ -118,24 +121,37 @@ const vscode = acquireVsCodeApi<PersistedState>();
 const body = document.body;
 const podSelector = requiredButton("pod-selector");
 const podName = requiredElement("pod-name");
-const agentTab = requiredButton("agent-tab");
-const shellTab = requiredButton("shell-tab");
-const changeAgent = requiredButton("change-agent");
+const launchAgent = requiredButton("launch-agent");
 const createPod = requiredButton("create-pod");
 const moreActions = requiredButton("more-actions");
 const openShell = requiredButton("open-shell");
 const popoverLayer = requiredElement("popover-layer");
+const terminalTabsElement = requiredElement("terminal-tabs");
+const noSessions = requiredElement("no-sessions");
 const surfaces: Record<TerminalTab, TerminalSurface> = {
-  agent: createSurface("agent"),
+  claude: createSurface("claude"),
+  codex: createSurface("codex"),
+  grok: createSurface("grok"),
+  pi: createSurface("pi"),
   shell: createSurface("shell"),
 };
 
-let activeTab: TerminalTab = "agent";
+let activeTab: TerminalTab = "codex";
+let openTabs: readonly TerminalTab[] = [];
 let resizeTimer: number | undefined;
-const sessions: Record<TerminalTab, number> = { agent: 0, shell: 0 };
+const sessions: Record<TerminalTab, number> = {
+  claude: 0,
+  codex: 0,
+  grok: 0,
+  pi: 0,
+  shell: 0,
+};
 
 for (const tab of terminalTabs()) {
   const surface = surfaces[tab];
+  const button = tabButton(tab);
+  button.addEventListener("click", () => selectTab(tab));
+  button.addEventListener("keydown", (event) => navigateTerminalTabs(event, tab));
   surface.terminal.onData((data) => {
     const session = sessions[tab];
     if (session !== 0) {
@@ -153,16 +169,14 @@ for (const tab of terminalTabs()) {
 podSelector.addEventListener("click", () => {
   requestPopover(podSelector, "Select pod", "podMenu");
 });
-changeAgent.addEventListener("click", () => {
-  requestPopover(changeAgent, "Select agent", "changeAgent");
+launchAgent.addEventListener("click", () => {
+  requestPopover(launchAgent, "Launch agent", "launchAgentMenu");
 });
 createPod.addEventListener("click", () => {
   requestPopover(createPod, "Create pod", "createPodMenu");
 });
 moreActions.addEventListener("click", () => renderMoreMenu());
 openShell.addEventListener("click", () => vscode.postMessage({ type: "openShell" }));
-agentTab.addEventListener("click", () => selectTab("agent"));
-shellTab.addEventListener("click", () => selectTab("shell"));
 
 window.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (!isHostMessage(event.data)) {
@@ -198,26 +212,38 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       return;
     case "state":
       activeTab = message.activeTab;
-      sessions.agent = message.agentSession;
-      sessions.shell = message.shellSession;
+      openTabs = message.sessions.map((session) => session.tab);
       body.dataset.rumpelpodActiveTab = activeTab;
-      body.dataset.rumpelpodAgent = message.agent;
+      body.dataset.rumpelpodAgents = message.sessions
+        .filter((session) => session.tab !== "shell")
+        .map((session) => session.tab)
+        .join(",");
       body.dataset.rumpelpodPod = message.pod;
       body.dataset.rumpelpodRepository = message.repository;
       body.dataset.rumpelpodRepositoryState = message.repositoryState;
-      body.dataset.rumpelpodShellOpen = String(message.shellOpen);
+      body.dataset.rumpelpodSessionCount = String(message.sessions.length);
       podName.textContent = message.pod.length === 0 ? "Select pod" : message.pod;
-      agentTab.textContent = message.agent.length === 0 ? "agent" : message.agent.toLowerCase();
       const hasPod = message.pod.length > 0;
-      changeAgent.disabled = !hasPod;
+      launchAgent.disabled = !hasPod;
       moreActions.disabled = !hasPod;
       openShell.disabled = !hasPod;
+      for (const tab of terminalTabs()) {
+        const session = message.sessions.find((candidate) => candidate.tab === tab);
+        const button = tabButton(tab);
+        button.hidden = session === undefined;
+        surfaces[tab].surface.hidden = session === undefined;
+        if (session === undefined) {
+          sessions[tab] = 0;
+          continue;
+        }
+        button.textContent = session.label;
+        updateSurface(tab, session.session, session.state, session.message);
+      }
+      terminalTabsElement.hidden = message.sessions.length <= 1;
+      noSessions.hidden = message.sessions.length > 0;
       updateSelectedTab();
-      updateSurface("agent", message.agentSession, message.agentState, message.agentMessage);
-      updateSurface("shell", message.shellSession, message.shellState, message.shellMessage);
       vscode.setState({
         activeTab,
-        agent: message.agent,
         pod: message.pod,
         repository: message.repository,
       });
@@ -229,9 +255,8 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       }
       surfaces[message.tab].terminal.write(message.data, () => {
         if (message.session === sessions[message.tab]) {
-          if (message.tab === "agent") {
-            body.dataset.rumpelpodRenderedSession = String(message.session);
-          }
+          body.dataset[`rumpelpod${capitalize(message.tab)}RenderedSession`] =
+            String(message.session);
           vscode.postMessage({
             sequence: message.sequence,
             session: message.session,
@@ -261,23 +286,18 @@ if (restored?.pod !== undefined) {
   body.dataset.rumpelpodPod = restored.pod;
   podName.textContent = restored.pod;
 }
-if (restored?.agent !== undefined) {
-  body.dataset.rumpelpodAgent = restored.agent;
-  agentTab.textContent = restored.agent.toLowerCase();
-}
 if (restored?.repository !== undefined) {
   body.dataset.rumpelpodRepository = restored.repository;
 }
-if (restored?.activeTab !== undefined) {
+if (restored?.activeTab !== undefined && isTerminalTab(restored.activeTab)) {
   activeTab = restored.activeTab;
 }
 body.dataset.rumpelpodActiveTab = activeTab;
 body.dataset.rumpelpodAgentView = "true";
-body.dataset.rumpelpodRenderedSession = "";
 body.dataset.rumpelpodSession = "0";
-body.dataset.rumpelpodShellOpen = "false";
+body.dataset.rumpelpodSessionCount = "0";
 body.dataset.rumpelpodState = "empty";
-changeAgent.disabled = true;
+launchAgent.disabled = true;
 moreActions.disabled = true;
 openShell.disabled = true;
 updateSelectedTab();
@@ -317,12 +337,21 @@ window.addEventListener("resize", () => {
     positionPopover(activePopover, activePopoverAnchor);
   }
 });
+window.addEventListener("blur", () => {
+  if (activePopover !== undefined) {
+    dismissPopover();
+  }
+});
 
 function requestPopover(
   anchor: HTMLButtonElement,
   label: string,
-  type: "changeAgent" | "createPodMenu" | "podMenu",
+  type: "createPodMenu" | "launchAgentMenu" | "podMenu",
 ): void {
+  if (activePopoverAnchor === anchor) {
+    dismissPopover();
+    return;
+  }
   const request = ++nextMenuRequest;
   showLoadingPopover(anchor, `${type}-loading`, label, request);
   vscode.postMessage({ request, type });
@@ -331,7 +360,7 @@ function requestPopover(
 function showHostMenuRequest(message: BeginMenuMessage): void {
   switch (message.menu) {
     case "agent":
-      showLoadingPopover(changeAgent, "changeAgent-loading", "Select agent", message.request);
+      showLoadingPopover(launchAgent, "launchAgentMenu-loading", "Launch agent", message.request);
       return;
     case "create":
       showLoadingPopover(createPod, "createPodMenu-loading", "Create pod", message.request);
@@ -362,72 +391,52 @@ function acceptMenuResponse(request: number): boolean {
 
 function renderPodMenu(pods: PodMenuMessage["pods"]): void {
   const popover = openPopover(podSelector, "pod-popover", "Select pod");
-  const search = document.createElement("input");
-  search.className = "popover-input";
-  search.placeholder = "Filter pods";
-  search.setAttribute("aria-label", "Filter pods");
   const list = document.createElement("div");
   list.className = "popover-options";
   list.setAttribute("role", "listbox");
-  popover.append(search, list);
+  popover.append(list);
   enableOptionKeyboardNavigation(list);
-
-  const render = (): void => {
-    list.replaceChildren();
-    const filter = search.value.trim().toLowerCase();
-    const visible = pods.filter((pod) =>
-      `${pod.name} ${pod.summary} ${pod.detail}`.toLowerCase().includes(filter)
-    );
-    if (visible.length === 0) {
-      list.append(textElement("p", "popover-empty", "No matching pods"));
-      return;
-    }
-    for (const pod of visible) {
-      const option = menuOption(pod.name, pod.summary, pod.detail);
-      option.dataset.status = pod.status;
-      option.setAttribute("aria-selected", String(pod.active));
-      option.addEventListener("click", () => {
-        dismissPopover();
-        vscode.postMessage({
-          pod: pod.name,
-          repository: pod.repository,
-          type: "openPod",
-        });
+  if (pods.length === 0) {
+    list.append(textElement("p", "popover-empty", "No pods available"));
+    return;
+  }
+  for (const pod of pods) {
+    const option = menuOption(pod.name, pod.summary, pod.detail);
+    option.dataset.status = pod.status;
+    option.setAttribute("aria-selected", String(pod.active));
+    option.addEventListener("click", () => {
+      dismissPopover();
+      vscode.postMessage({
+        pod: pod.name,
+        repository: pod.repository,
+        type: "openPod",
       });
-      list.append(option);
-    }
-  };
-  search.addEventListener("input", render);
-  search.addEventListener("keydown", (event) => {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      focusFirstOption(list);
-    }
-  });
-  render();
-  search.focus();
+    });
+    list.append(option);
+  }
+  focusSelectedOption(list);
 }
 
 function renderAgentMenu(agents: readonly AgentMenuOption[]): void {
-  const popover = openPopover(changeAgent, "agent-popover", "Select agent");
+  const popover = openPopover(launchAgent, "agent-popover", "Launch agent");
   const list = document.createElement("div");
   list.className = "popover-options";
-  list.setAttribute("role", "listbox");
+  list.setAttribute("role", "menu");
   for (const agent of agents) {
     const option = menuOption(
       agent.label,
-      agent.current ? "Current agent" : agent.description,
+      agent.launched ? "Open session" : agent.description,
     );
-    option.setAttribute("aria-selected", String(agent.current));
+    option.setAttribute("role", "menuitem");
     option.addEventListener("click", () => {
       dismissPopover();
-      vscode.postMessage({ agent: agent.agent, type: "setAgent" });
+      vscode.postMessage({ agent: agent.agent, type: "launchAgent" });
     });
     list.append(option);
   }
   popover.append(list);
   enableOptionKeyboardNavigation(list);
-  focusSelectedOption(list);
+  focusFirstOption(list);
 }
 
 function renderCreatePodMenu(
@@ -452,7 +461,7 @@ function renderCreatePodMenu(
     const element = document.createElement("option");
     element.value = option.agent;
     element.textContent = option.label;
-    element.selected = option.current;
+    element.selected = option.selected;
     agent.append(element);
   }
   form.append(field("Agent", agent));
@@ -504,13 +513,20 @@ function renderCreatePodMenu(
 }
 
 function renderMoreMenu(): void {
+  if (activePopoverAnchor === moreActions) {
+    dismissPopover();
+    return;
+  }
+  if (activePopover !== undefined) {
+    dismissPopover();
+  }
   const popover = openPopover(moreActions, "more-popover", "Pod actions");
   const list = document.createElement("div");
   list.className = "popover-options";
   list.setAttribute("role", "menu");
   for (const [label, type] of [
     ["Refresh pod", "refresh"],
-    ["Restart agent attachment", "restartAgent"],
+    ["Restart current session", "restartSession"],
   ] as const) {
     const option = menuOption(label);
     option.setAttribute("role", "menuitem");
@@ -655,6 +671,7 @@ function validatePodName(value: string): string | undefined {
 }
 
 function createSurface(tab: TerminalTab): TerminalSurface {
+  const terminalElement = requiredElement(`${tab}-terminal`);
   const terminal = new Terminal({
     allowProposedApi: false,
     convertEol: false,
@@ -673,17 +690,20 @@ function createSurface(tab: TerminalTab): TerminalSurface {
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
-  terminal.open(requiredElement(`${tab}-terminal`));
+  terminal.open(terminalElement);
   return {
     empty: requiredElement(`${tab}-empty-message`),
+    emptyContainer: requiredElement(`${tab}-empty`),
     fit,
     restart: requiredElement(`${tab}-restart`),
+    surface: requiredElement(`${tab}-surface`),
     terminal,
+    terminalElement,
   };
 }
 
 function selectTab(tab: TerminalTab): void {
-  if (activeTab === tab) {
+  if (activeTab === tab || !openTabs.includes(tab)) {
     return;
   }
   activeTab = tab;
@@ -694,8 +714,41 @@ function selectTab(tab: TerminalTab): void {
 }
 
 function updateSelectedTab(): void {
-  agentTab.setAttribute("aria-selected", String(activeTab === "agent"));
-  shellTab.setAttribute("aria-selected", String(activeTab === "shell"));
+  for (const tab of terminalTabs()) {
+    const selected = activeTab === tab;
+    const button = tabButton(tab);
+    button.setAttribute("aria-selected", String(selected));
+    button.tabIndex = selected ? 0 : -1;
+    surfaces[tab].surface.hidden = !selected || !openTabs.includes(tab);
+  }
+}
+
+function navigateTerminalTabs(event: KeyboardEvent, tab: TerminalTab): void {
+  const tabs = terminalTabs().filter((candidate) => openTabs.includes(candidate));
+  const current = tabs.indexOf(tab);
+  if (current < 0 || tabs.length < 2) {
+    return;
+  }
+  let target: TerminalTab;
+  switch (event.key) {
+    case "ArrowLeft":
+      target = tabs[(current - 1 + tabs.length) % tabs.length]!;
+      break;
+    case "ArrowRight":
+      target = tabs[(current + 1) % tabs.length]!;
+      break;
+    case "End":
+      target = tabs[tabs.length - 1]!;
+      break;
+    case "Home":
+      target = tabs[0]!;
+      break;
+    default:
+      return;
+  }
+  event.preventDefault();
+  selectTab(target);
+  tabButton(target).focus();
 }
 
 function updateSurface(tab: TerminalTab, session: number, state: ViewState, message: string): void {
@@ -704,6 +757,10 @@ function updateSurface(tab: TerminalTab, session: number, state: ViewState, mess
   body.dataset[`rumpelpod${capitalize(tab)}Session`] = String(session);
   body.dataset[`rumpelpod${capitalize(tab)}State`] = state;
   surfaces[tab].empty.textContent = message;
+  const running = state === "running" || state === "starting";
+  surfaces[tab].emptyContainer.hidden = running;
+  surfaces[tab].terminalElement.hidden = !running;
+  surfaces[tab].restart.hidden = state !== "exited";
   if (session !== previousSession && state === "starting") {
     surfaces[tab].terminal.reset();
   }
@@ -753,17 +810,27 @@ function reportTerminalFocus(): void {
   vscode.postMessage({ focused, type: "terminalFocus" });
 }
 
-function capitalize(tab: TerminalTab): "Agent" | "Shell" {
+function capitalize(tab: TerminalTab): "Claude" | "Codex" | "Grok" | "Pi" | "Shell" {
   switch (tab) {
-    case "agent":
-      return "Agent";
+    case "claude":
+      return "Claude";
+    case "codex":
+      return "Codex";
+    case "grok":
+      return "Grok";
+    case "pi":
+      return "Pi";
     case "shell":
       return "Shell";
   }
 }
 
 function terminalTabs(): readonly TerminalTab[] {
-  return ["agent", "shell"];
+  return ["claude", "codex", "grok", "pi", "shell"];
+}
+
+function tabButton(tab: TerminalTab): HTMLButtonElement {
+  return requiredButton(`${tab}-tab`);
 }
 
 function cssVariable(name: string): string {
@@ -844,28 +911,15 @@ function isHostMessage(value: unknown): value is HostMessage {
       return (
         "activeTab" in value &&
         isTerminalTab(value.activeTab) &&
-        "agent" in value &&
-        typeof value.agent === "string" &&
-        "agentMessage" in value &&
-        typeof value.agentMessage === "string" &&
-        "agentSession" in value &&
-        typeof value.agentSession === "number" &&
-        "agentState" in value &&
-        isViewState(value.agentState) &&
         "pod" in value &&
         typeof value.pod === "string" &&
         "repository" in value &&
         typeof value.repository === "string" &&
         "repositoryState" in value &&
         typeof value.repositoryState === "string" &&
-        "shellMessage" in value &&
-        typeof value.shellMessage === "string" &&
-        "shellOpen" in value &&
-        typeof value.shellOpen === "boolean" &&
-        "shellSession" in value &&
-        typeof value.shellSession === "number" &&
-        "shellState" in value &&
-        isViewState(value.shellState)
+        "sessions" in value &&
+        Array.isArray(value.sessions) &&
+        value.sessions.every(isTerminalSession)
       );
   }
   return false;
@@ -877,12 +931,31 @@ function isAgentOption(value: unknown): value is AgentMenuOption {
     value !== null &&
     "agent" in value &&
     typeof value.agent === "string" &&
-    "current" in value &&
-    typeof value.current === "boolean" &&
     "description" in value &&
     typeof value.description === "string" &&
     "label" in value &&
-    typeof value.label === "string"
+    typeof value.label === "string" &&
+    "launched" in value &&
+    typeof value.launched === "boolean" &&
+    "selected" in value &&
+    typeof value.selected === "boolean"
+  );
+}
+
+function isTerminalSession(value: unknown): value is AgentStateMessage["sessions"][number] {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "label" in value &&
+    typeof value.label === "string" &&
+    "message" in value &&
+    typeof value.message === "string" &&
+    "session" in value &&
+    typeof value.session === "number" &&
+    "state" in value &&
+    isViewState(value.state) &&
+    "tab" in value &&
+    isTerminalTab(value.tab)
   );
 }
 
@@ -935,7 +1008,10 @@ function isMenuKind(value: unknown): value is BeginMenuMessage["menu"] {
 
 function isTerminalTab(value: unknown): value is TerminalTab {
   switch (value) {
-    case "agent":
+    case "claude":
+    case "codex":
+    case "grok":
+    case "pi":
     case "shell":
       return true;
     default:

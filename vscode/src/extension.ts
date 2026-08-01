@@ -19,7 +19,7 @@ export function activate(context: vscode.ExtensionContext): void {
     model.logError(operation, error);
   });
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  status.name = "Rumpelpod Active Agent";
+  status.name = "Rumpelpod Active Pod";
   status.command = "rumpelpod.showPods";
   const controller = new RumpelpodController(model, terminals, reviews, status);
   const events = new DaemonEvents(model, controller);
@@ -54,19 +54,16 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("rumpelpod.createPod", () =>
       runCommand(model, "creating a pod", () => controller.createPod()),
     ),
-    vscode.commands.registerCommand("rumpelpod.changeActiveAgent", () =>
-      runCommand(model, "changing the active agent", () => controller.changeActiveAgent()),
+    vscode.commands.registerCommand("rumpelpod.launchAgent", () =>
+      runCommand(model, "launching an agent", () => controller.launchAgentMenu()),
     ),
     vscode.commands.registerCommand("rumpelpod.openActiveShell", () =>
       runCommand(model, "opening a pod shell", async () => controller.openActiveShell()),
     ),
-    vscode.commands.registerCommand("rumpelpod.restartAgent", () =>
-      runCommand(model, "restarting the active agent", () => controller.restartActiveAgent()),
+    vscode.commands.registerCommand("rumpelpod.restartSession", () =>
+      runCommand(model, "restarting the current session", () => controller.restartCurrentSession()),
     ),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("rumpelpod.defaultAgent")) {
-        controller.updateStatus();
-      }
       if (event.affectsConfiguration("rumpelpod.executable")) {
         events.restart();
       }
@@ -86,7 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 function dismissFailedMenu(terminals: AgentTerminals, action: AgentViewAction): void {
   switch (action.type) {
-    case "changeAgent":
+    case "launchAgentMenu":
     case "createPodMenu":
     case "podMenu":
       terminals.dismissMenu(action.request);
@@ -95,15 +92,15 @@ function dismissFailedMenu(terminals: AgentTerminals, action: AgentViewAction): 
     case "openPod":
     case "openShell":
     case "refresh":
-    case "restartAgent":
-    case "setAgent":
+    case "launchAgent":
+    case "restartSession":
       return;
   }
 }
 
 function viewActionContext(action: AgentViewAction): string {
   switch (action.type) {
-    case "changeAgent":
+    case "launchAgentMenu":
       return "opening the agent selector";
     case "createPod":
       return "creating a pod";
@@ -117,10 +114,10 @@ function viewActionContext(action: AgentViewAction): string {
       return "listing pods";
     case "refresh":
       return "refreshing the active pod";
-    case "restartAgent":
-      return "restarting the active agent";
-    case "setAgent":
-      return "changing the active agent";
+    case "launchAgent":
+      return "launching an agent";
+    case "restartSession":
+      return "restarting the current session";
   }
 }
 
