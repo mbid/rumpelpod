@@ -35,8 +35,8 @@ lifecycle behavior. Let users close it, keep background refreshes from
 stealing another editor's focus or resurrecting it, and expose a View
 diff action that focuses or reopens it.
 
-When selecting or creating a pod, focus its review and close the prior
-pod's review so stale diff tabs do not accumulate.
+When selecting or creating a pod, focus its existing review or open a
+new one. Leave other pod review tabs open for normal VS Code navigation.
 
 Keep VS Code's normal editor tabs and move pod, agent, and creation
 selectors into popovers anchored to the Rumpelpod sidebar header. Hide

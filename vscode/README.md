@@ -19,13 +19,13 @@ in one vertically stacked review. The review is pinned by default but remains a
 normal closable VS Code editor. Selecting the pod again or choosing `View diff`
 from the actions menu focuses the existing review, or reopens it if it was
 closed. Background daemon events refresh the active review without stealing
-focus from another editor or resurrecting a closed one. Switching pods closes
-the previous pod's review instead of leaving stale review tabs behind. The
-extension does not change VS Code's editor-tab settings, so ordinary files
-retain the user's normal tab behavior. Pods without changed files still open a
-native empty review surface instead of leaving the
-previous editor visible. Launched agent sets and the last active pod are saved
-across browser reloads.
+focus from another editor or resurrecting a closed one. Switching pods focuses
+that pod's existing review, or opens one if needed, while leaving other pod
+reviews open. The extension does not change VS Code's editor-tab settings, so
+ordinary files retain the user's normal tab behavior. Pods without changed
+files still open a native empty review surface instead of leaving the previous
+editor visible. Launched agent sets and the last active pod are saved across
+browser reloads.
 
 ## Development
 

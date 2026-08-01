@@ -737,7 +737,7 @@ async function verifyReviewFocusAndCloseLifecycle(
     const reviewTab = page.locator(".tab:visible").filter({ hasText: podName }).first();
     await reviewTab.click();
     await waitForReview(page, podName, changedFile, originalContent, inactivePodContent);
-    await assertOnlyOpenReview(page, podName);
+    await assertOpenReviews(page, podName, [podName]);
     await fileTab.waitFor({ state: "visible", timeout: 30_000 });
     await fileTab.click();
     await page.keyboard.press("Control+W");
@@ -774,7 +774,11 @@ async function verifyReviewFocusAndCloseLifecycle(
     await morePopover.waitFor({ state: "visible", timeout: 30_000 });
     await selectPopoverOption(morePopover, "View diff");
     await waitForReview(page, podName, changedFile, originalContent, closedPodContent);
-    await assertOnlyOpenReview(page, podName);
+    await assertOpenReviews(page, podName, [podName]);
+    const retainedReviewTab = page.locator(".tab:visible").filter({ hasText: podName }).first();
+    const retainedReviewTabHandle = await retainedReviewTab.elementHandle();
+    assert(retainedReviewTabHandle, "reopened review had no tab element handle");
+    return retainedReviewTabHandle;
 }
 
 async function waitForEmptyReview(page, podName) {
@@ -813,18 +817,13 @@ async function openEditorLabels(page, expectedLabel) {
     return labels;
 }
 
-async function assertOnlyOpenReview(page, podName, closedPodNames = []) {
-    const labels = await openEditorLabels(page, podName);
-    const matches = labels.filter((label) => label.includes(podName));
-    assert.equal(
-        matches.length,
-        1,
-        `opening ${podName} duplicated its review editor: ${JSON.stringify(labels)}`,
-    );
-    for (const closedPodName of closedPodNames) {
+async function assertOpenReviews(page, activePodName, openPodNames) {
+    const labels = await openEditorLabels(page, activePodName);
+    for (const openPodName of openPodNames) {
+        const matches = labels.filter((label) => label.includes(openPodName));
         assert(
-            labels.every((label) => !label.includes(closedPodName)),
-            `switching to ${podName} kept the ${closedPodName} review open: ${JSON.stringify(labels)}`,
+            matches.length === 1,
+            `expected one ${openPodName} review editor: ${JSON.stringify(labels)}`,
         );
     }
 }
@@ -982,7 +981,7 @@ async function main() {
             "review kept the redundant file selector",
         );
         await capture(page, artifacts, "02-live-review.png");
-        await verifyReviewFocusAndCloseLifecycle(
+        const retainedReviewTab = await verifyReviewFocusAndCloseLifecycle(
             page,
             liveView,
             podName,
@@ -1271,7 +1270,12 @@ async function main() {
             "creating a pod kept the closed auxiliary shell alive",
         );
         await waitForEmptyReview(page, createdPodName);
-        await assertOnlyOpenReview(page, createdPodName, [podName]);
+        await assertOpenReviews(page, createdPodName, [podName, createdPodName]);
+        assert(
+            await retainedReviewTab.evaluate((element) => element.isConnected),
+            "creating another pod replaced the existing review tab",
+        );
+        await retainedReviewTab.dispose();
         assert(
             !(await page.title()).includes("-review.txt"),
             "creating a pod opened a synthetic review document",
@@ -1284,7 +1288,7 @@ async function main() {
         const restoredCreatedView = await waitForAgentView(page, createdPodName);
         await waitForCodexPrompt(page, restoredCreatedView.terminal, false);
         await waitForEmptyReview(page, createdPodName);
-        await assertOnlyOpenReview(page, createdPodName, [podName]);
+        await assertOpenReviews(page, createdPodName, [podName, createdPodName]);
 
         const restoredPodSwitcher = await openPodSwitcher(page);
         const listedPods = await popoverRows(restoredPodSwitcher.popover).allTextContents();
@@ -1312,7 +1316,7 @@ async function main() {
             originalContent,
             finalPodContent,
         );
-        await assertOnlyOpenReview(page, podName, [createdPodName]);
+        await assertOpenReviews(page, podName, [podName, createdPodName]);
         await assertSidebarAndDiffGeometry(page, switchedView.terminal, switchedDiff);
         assert.equal(
             await switchedView.body.getAttribute("data-rumpelpod-pod"),
