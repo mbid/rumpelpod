@@ -9,18 +9,23 @@ side by side.
 
 Click the Rumpelpod Activity Bar icon to enter the mode. Click the pod name at
 the top of the view to switch pods. The icons beside it open a pod shell,
-launch another agent, create a pod, and expose refresh and restart actions.
+launch another agent, create a pod, and expose diff, refresh, and restart actions.
 Selectors and pod creation stay beside those controls in sidebar popovers.
 A single session uses the whole sidebar; named agent and shell tabs appear only
 while two or more sessions are open. Launching Claude while Codex is open keeps
 both independent PTYs alive instead of replacing one with the other. Selecting
-a pod restores its launched agents and opens every changed file on the right in
-one vertically stacked review. The review is pinned, and the extension restores
-it if an explicit pinned-editor close removes it. The extension does not change
-VS Code's editor-tab settings, so ordinary files keep the user's normal tab
-behavior. Pods without changed files still open a native empty review surface
-instead of leaving the previous editor visible. Launched agent sets and the last
-active pod are saved across browser reloads.
+a pod restores its launched agents and focuses every changed file on the right
+in one vertically stacked review. The review is pinned by default but remains a
+normal closable VS Code editor. Selecting the pod again or choosing `View diff`
+from the actions menu focuses the existing review, or reopens it if it was
+closed. Background daemon events refresh the active review without stealing
+focus from another editor or resurrecting a closed one. Switching pods closes
+the previous pod's review instead of leaving stale review tabs behind. The
+extension does not change VS Code's editor-tab settings, so ordinary files
+retain the user's normal tab behavior. Pods without changed files still open a
+native empty review surface instead of leaving the
+previous editor visible. Launched agent sets and the last active pod are saved
+across browser reloads.
 
 ## Development
 

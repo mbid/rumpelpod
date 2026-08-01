@@ -525,6 +525,7 @@ function renderMoreMenu(): void {
   list.className = "popover-options";
   list.setAttribute("role", "menu");
   for (const [label, type] of [
+    ["View diff", "viewDiff"],
     ["Refresh pod", "refresh"],
     ["Restart current session", "restartSession"],
   ] as const) {

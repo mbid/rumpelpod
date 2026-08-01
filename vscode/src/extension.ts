@@ -94,6 +94,7 @@ function dismissFailedMenu(terminals: AgentTerminals, action: AgentViewAction): 
     case "refresh":
     case "launchAgent":
     case "restartSession":
+    case "viewDiff":
       return;
   }
 }
@@ -118,6 +119,8 @@ function viewActionContext(action: AgentViewAction): string {
       return "launching an agent";
     case "restartSession":
       return "restarting the current session";
+    case "viewDiff":
+      return "opening the active pod diff";
   }
 }
 

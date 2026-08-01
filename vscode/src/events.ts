@@ -151,7 +151,7 @@ export class DaemonEvents {
       updates.push(this.controller.refreshPodStatus(false));
     }
     if (refreshReview) {
-      updates.push(this.controller.refreshActiveReview(true));
+      updates.push(this.controller.refreshActiveReview());
     }
     const failures = (await Promise.allSettled(updates))
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")

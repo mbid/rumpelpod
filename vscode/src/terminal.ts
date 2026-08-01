@@ -58,6 +58,7 @@ export type AgentViewAction =
   | { readonly request: number; readonly type: "podMenu" }
   | { readonly type: "refresh" }
   | { readonly type: "restartSession" }
+  | { readonly type: "viewDiff" }
   | { readonly agent: AgentKind; readonly type: "launchAgent" };
 
 interface AgentSelection {
@@ -722,6 +723,7 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       case "podMenu":
       case "refresh":
       case "restartSession":
+      case "viewDiff":
       case "launchAgent":
         this.didRequestActionEmitter.fire(value);
         return;
@@ -1260,6 +1262,7 @@ function isViewMessage(value: unknown): value is ViewMessage {
     case "openShell":
     case "refresh":
     case "restartSession":
+    case "viewDiff":
       return true;
     case "createPod":
       return (

@@ -580,6 +580,33 @@ function runPodCommit(rumpel, repoRoot, home, socket, podName, changedFile, podC
     assert.equal(hostRef.stdout.trim(), podHead, "host review ref did not match the pod commit");
 }
 
+function runPodFollowupCommit(rumpel, repoRoot, home, socket, podName, changedFile, podContent) {
+    const script = [
+        `printf '%s\\n' ${shellQuote(podContent)} > ${shellQuote(changedFile)}`,
+        `git add -- ${shellQuote(changedFile)}`,
+        "git commit --no-verify -m 'Update browser diff fixture'",
+    ].join(" && ");
+    const update = spawnSync(
+        rumpel,
+        ["enter", "--create", podName, "--", "sh", "-c", script],
+        {
+            cwd: repoRoot,
+            encoding: "utf8",
+            env: {
+                ...process.env,
+                HOME: home,
+                RUMPELPOD_DAEMON_SOCKET: socket,
+            },
+            maxBuffer: 10 * 1024 * 1024,
+        },
+    );
+    assert.equal(
+        update.status,
+        0,
+        `updating ${podName} failed:\nstdout:\n${update.stdout}\nstderr:\n${update.stderr}`,
+    );
+}
+
 async function waitForStatusRepository(page, podName, repositoryState) {
     const deadline = Date.now() + 30_000;
     let rendered = "";
@@ -659,7 +686,17 @@ async function assertEditorTabsVisible(page) {
     );
 }
 
-async function verifyReviewCannotDisappear(page, podName, changedFile, originalContent, podContent) {
+async function verifyReviewFocusAndCloseLifecycle(
+    page,
+    view,
+    podName,
+    changedFile,
+    originalContent,
+    inactivePodContent,
+    afterInactive,
+    closedPodContent,
+    afterClose,
+) {
     const pinnedReview = page.locator(".editor-instance:visible .multiDiffEditor");
     await pinnedReview.waitFor({ state: "visible", timeout: 30_000 });
     const pinnedReviewHandle = await pinnedReview.elementHandle();
@@ -673,6 +710,40 @@ async function verifyReviewCannotDisappear(page, podName, changedFile, originalC
     );
     await pinnedReviewHandle.dispose();
 
+    await page.keyboard.press("Control+P");
+    const fileInput = page.locator(".quick-input-widget:visible input");
+    await fileInput.waitFor({ state: "visible", timeout: 30_000 });
+    await fileInput.fill(changedFile);
+    await waitForQuickPickLabels(page, [changedFile]);
+    await selectQuickPick(page, changedFile);
+    const fileTab = page.locator(".tab:visible").filter({ hasText: changedFile }).first();
+    await fileTab.waitFor({ state: "visible", timeout: 30_000 });
+    assert(
+        (await fileTab.getAttribute("class"))?.split(" ").includes("active"),
+        "opening a normal file did not focus its editor tab",
+    );
+
+    await afterInactive();
+    assert(
+        (await fileTab.getAttribute("class"))?.split(" ").includes("active"),
+        "a daemon review refresh stole focus from a normal file",
+    );
+    assert.equal(
+        await page.locator(".editor-instance:visible .multiDiffEditor").count(),
+        0,
+        "a background review replaced the active normal file",
+    );
+
+    const reviewTab = page.locator(".tab:visible").filter({ hasText: podName }).first();
+    await reviewTab.click();
+    await waitForReview(page, podName, changedFile, originalContent, inactivePodContent);
+    await assertOnlyOpenReview(page, podName);
+    await fileTab.waitFor({ state: "visible", timeout: 30_000 });
+    await fileTab.click();
+    await page.keyboard.press("Control+W");
+    await fileTab.waitFor({ state: "hidden", timeout: 30_000 });
+    await waitForReview(page, podName, changedFile, originalContent, inactivePodContent);
+
     const explicitlyClosedReview = page.locator(".editor-instance:visible .multiDiffEditor");
     await explicitlyClosedReview.click();
     await page.keyboard.press("F1");
@@ -681,9 +752,29 @@ async function verifyReviewCannotDisappear(page, podName, changedFile, originalC
     await commandInput.fill(">Close Pinned Editor");
     await waitForQuickPickLabels(page, ["Close Pinned Editor"]);
     await selectQuickPick(page, "Close Pinned Editor");
-    await page.waitForTimeout(500);
-    await waitForReview(page, podName, changedFile, originalContent, podContent);
-    await assertSingleOpenReview(page, podName);
+    await page.locator(".editor-instance:visible .multiDiffEditor").waitFor({
+        state: "hidden",
+        timeout: 30_000,
+    });
+
+    await afterClose();
+    const closedDeadline = Date.now() + 1_000;
+    while (Date.now() < closedDeadline) {
+        assert.equal(
+            await page.locator(".editor-instance:visible .multiDiffEditor").count(),
+            0,
+            "a daemon review refresh reopened a review the user had closed",
+        );
+        await page.waitForTimeout(100);
+    }
+
+    const moreActions = view.frame.locator("#more-actions");
+    await moreActions.click();
+    const morePopover = view.frame.locator("#more-popover");
+    await morePopover.waitFor({ state: "visible", timeout: 30_000 });
+    await selectPopoverOption(morePopover, "View diff");
+    await waitForReview(page, podName, changedFile, originalContent, closedPodContent);
+    await assertOnlyOpenReview(page, podName);
 }
 
 async function waitForEmptyReview(page, podName) {
@@ -722,14 +813,20 @@ async function openEditorLabels(page, expectedLabel) {
     return labels;
 }
 
-async function assertSingleOpenReview(page, podName) {
+async function assertOnlyOpenReview(page, podName, closedPodNames = []) {
     const labels = await openEditorLabels(page, podName);
     const matches = labels.filter((label) => label.includes(podName));
     assert.equal(
         matches.length,
         1,
-        `restoring ${podName} duplicated its review editor: ${JSON.stringify(labels)}`,
+        `opening ${podName} duplicated its review editor: ${JSON.stringify(labels)}`,
     );
+    for (const closedPodName of closedPodNames) {
+        assert(
+            labels.every((label) => !label.includes(closedPodName)),
+            `switching to ${podName} kept the ${closedPodName} review open: ${JSON.stringify(labels)}`,
+        );
+    }
 }
 
 async function assertNoNativeAgentEditor(page, podName) {
@@ -783,6 +880,8 @@ async function main() {
     const changedFile = requiredEnvironment("RUMPELPOD_VSCODE_CHANGED_FILE");
     const originalContent = requiredEnvironment("RUMPELPOD_VSCODE_ORIGINAL_CONTENT");
     const podContent = requiredEnvironment("RUMPELPOD_VSCODE_POD_CONTENT");
+    const inactivePodContent = `${podContent} while file active`;
+    const finalPodContent = `${podContent} after close`;
     const repoRoot = requiredEnvironment("RUMPELPOD_VSCODE_REPO_ROOT");
     const rumpel = requiredEnvironment("RUMPELPOD_VSCODE_RUMPEL");
     const socket = requiredEnvironment("RUMPELPOD_DAEMON_SOCKET");
@@ -883,12 +982,40 @@ async function main() {
             "review kept the redundant file selector",
         );
         await capture(page, artifacts, "02-live-review.png");
-        await verifyReviewCannotDisappear(
+        await verifyReviewFocusAndCloseLifecycle(
             page,
+            liveView,
             podName,
             changedFile,
             originalContent,
-            podContent,
+            inactivePodContent,
+            async () => {
+                runPodFollowupCommit(
+                    rumpel,
+                    repoRoot,
+                    home,
+                    socket,
+                    podName,
+                    changedFile,
+                    inactivePodContent,
+                );
+                await waitForStatusRepository(page, podName, "ahead 2");
+                await waitForAgentRepositoryState(page, liveView, "ahead 2");
+            },
+            finalPodContent,
+            async () => {
+                runPodFollowupCommit(
+                    rumpel,
+                    repoRoot,
+                    home,
+                    socket,
+                    podName,
+                    changedFile,
+                    finalPodContent,
+                );
+                await waitForStatusRepository(page, podName, "ahead 3");
+                await waitForAgentRepositoryState(page, liveView, "ahead 3");
+            },
         );
 
         const podSwitcher = await openPodSwitcher(page);
@@ -898,7 +1025,7 @@ async function main() {
                 (label) =>
                     label.includes(podName) &&
                     label.includes("Codex") &&
-                    label.includes("ahead 1"),
+                    label.includes("ahead 3"),
             ),
             `pod switcher omitted live agent/repository state: ${JSON.stringify(rowsAfterCommit)}`,
         );
@@ -1101,7 +1228,8 @@ async function main() {
         await togglePopover(moreActions, morePopover);
         const moreLabels = await popoverRows(morePopover).allTextContents();
         assert(
-            moreLabels.some((label) => label.includes("Refresh pod")) &&
+            moreLabels.some((label) => label.includes("View diff")) &&
+                moreLabels.some((label) => label.includes("Refresh pod")) &&
                 moreLabels.some((label) => label.includes("Restart")),
             `pod action menu omitted commands: ${JSON.stringify(moreLabels)}`,
         );
@@ -1143,6 +1271,7 @@ async function main() {
             "creating a pod kept the closed auxiliary shell alive",
         );
         await waitForEmptyReview(page, createdPodName);
+        await assertOnlyOpenReview(page, createdPodName, [podName]);
         assert(
             !(await page.title()).includes("-review.txt"),
             "creating a pod opened a synthetic review document",
@@ -1155,7 +1284,7 @@ async function main() {
         const restoredCreatedView = await waitForAgentView(page, createdPodName);
         await waitForCodexPrompt(page, restoredCreatedView.terminal, false);
         await waitForEmptyReview(page, createdPodName);
-        await assertSingleOpenReview(page, createdPodName);
+        await assertOnlyOpenReview(page, createdPodName, [podName]);
 
         const restoredPodSwitcher = await openPodSwitcher(page);
         const listedPods = await popoverRows(restoredPodSwitcher.popover).allTextContents();
@@ -1181,8 +1310,9 @@ async function main() {
             podName,
             changedFile,
             originalContent,
-            podContent,
+            finalPodContent,
         );
+        await assertOnlyOpenReview(page, podName, [createdPodName]);
         await assertSidebarAndDiffGeometry(page, switchedView.terminal, switchedDiff);
         assert.equal(
             await switchedView.body.getAttribute("data-rumpelpod-pod"),
@@ -1235,7 +1365,7 @@ async function main() {
             podName,
             changedFile,
             originalContent,
-            podContent,
+            finalPodContent,
         );
         await assertSidebarAndDiffGeometry(page, restoredView.terminal, restoredDiff);
         assert.equal(

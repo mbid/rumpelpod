@@ -20,9 +20,17 @@ interface ReviewDocumentDescriptor {
 
 interface ReviewTab {
   readonly pod: string;
+  readonly repository: string;
   readonly resources: readonly MultiDiffResource[];
   readonly source: string;
   readonly tab: vscode.Tab;
+}
+
+interface ReviewSnapshot {
+  readonly pod: string;
+  readonly repository: string;
+  readonly resources: readonly MultiDiffResource[];
+  readonly source: string;
 }
 
 interface MultiDiffResource {
@@ -40,17 +48,19 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
   private readonly registration: vscode.Disposable;
   private readonly tabSubscription: vscode.Disposable;
   private readonly content = new Map<string, Promise<string>>();
-  private readonly restoreTimers = new Set<NodeJS.Timeout>();
   private disposed = false;
   private operations = Promise.resolve();
+  private pending: ReviewSnapshot | undefined;
   private review: ReviewTab | undefined;
 
   public constructor(
     private readonly reportError: (context: string, error: unknown) => void,
   ) {
     this.registration = vscode.workspace.registerTextDocumentContentProvider(REVIEW_SCHEME, this);
-    this.tabSubscription = vscode.window.tabGroups.onDidChangeTabs((event) => {
-      this.restoreClosedReview(event);
+    this.tabSubscription = vscode.window.tabGroups.onDidChangeTabs(() => {
+      void this.applyPendingReview().catch((error: unknown) => {
+        this.reportError("refreshing the activated pod review", error);
+      });
     });
   }
 
@@ -66,29 +76,60 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     return loaded;
   }
 
-  public async open(
+  public async reveal(
     repository: Repository,
     pod: string,
     plan: ReviewPlan,
-    preserveFocus = false,
   ): Promise<void> {
-    return this.enqueue(() => this.openNow(repository, pod, plan, preserveFocus));
+    return this.enqueue(() => this.openNow(repository, pod, plan, false));
+  }
+
+  public async refresh(
+    repository: Repository,
+    pod: string,
+    plan: ReviewPlan,
+  ): Promise<void> {
+    return this.enqueue(() => this.openNow(repository, pod, plan, true));
   }
 
   private async openNow(
     repository: Repository,
     pod: string,
     plan: ReviewPlan,
-    preserveFocus: boolean,
+    refreshOnly: boolean,
   ): Promise<void> {
     const source = populatedReviewUri(repository, pod, plan);
     const sourceKey = source.toString();
     const resources = plan.files.map((file) => reviewResource(repository, plan, file));
     const current = this.review;
-    const currentIsOpen = current !== undefined && this.isOpen(current.tab);
-    if (current?.source === sourceKey && currentIsOpen && preserveFocus) {
-      return;
+    const snapshot = {
+      pod,
+      repository: repository.root,
+      resources,
+      source: sourceKey,
+    } satisfies ReviewSnapshot;
+    const openTab = current === undefined ? undefined : this.findOpenTab(current);
+    const currentIsOpen = openTab !== undefined;
+    if (current !== undefined && openTab !== undefined && openTab !== current.tab) {
+      this.review = { ...current, tab: openTab };
     }
+    if (refreshOnly) {
+      if (!samePod(current, repository, pod)) {
+        return;
+      }
+      if (!currentIsOpen) {
+        return;
+      }
+      if (current.source === sourceKey) {
+        this.pending = undefined;
+        return;
+      }
+      if (!this.isActive(current)) {
+        this.pending = snapshot;
+        return;
+      }
+    }
+    this.pending = undefined;
     if (current?.source !== sourceKey || !currentIsOpen) {
       await this.clearNow();
     }
@@ -96,29 +137,59 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     if (this.disposed) {
       await this.closeDisposedTab(tab);
     }
-    this.review = { pod, resources, source: sourceKey, tab };
+    this.review = { ...snapshot, tab };
   }
 
-  public async openEmpty(
+  public async revealEmpty(
     repository: Repository,
     pod: string,
-    preserveFocus = false,
   ): Promise<void> {
-    return this.enqueue(() => this.openEmptyNow(repository, pod, preserveFocus));
+    return this.enqueue(() => this.openEmptyNow(repository, pod, false));
+  }
+
+  public async refreshEmpty(
+    repository: Repository,
+    pod: string,
+  ): Promise<void> {
+    return this.enqueue(() => this.openEmptyNow(repository, pod, true));
   }
 
   private async openEmptyNow(
     repository: Repository,
     pod: string,
-    preserveFocus: boolean,
+    refreshOnly: boolean,
   ): Promise<void> {
     const source = emptyReviewUri(repository, pod);
     const sourceKey = source.toString();
     const current = this.review;
-    const currentIsOpen = current !== undefined && this.isOpen(current.tab);
-    if (current?.source === sourceKey && currentIsOpen && preserveFocus) {
-      return;
+    const snapshot = {
+      pod,
+      repository: repository.root,
+      resources: [],
+      source: sourceKey,
+    } satisfies ReviewSnapshot;
+    const openTab = current === undefined ? undefined : this.findOpenTab(current);
+    const currentIsOpen = openTab !== undefined;
+    if (current !== undefined && openTab !== undefined && openTab !== current.tab) {
+      this.review = { ...current, tab: openTab };
     }
+    if (refreshOnly) {
+      if (!samePod(current, repository, pod)) {
+        return;
+      }
+      if (!currentIsOpen) {
+        return;
+      }
+      if (current.source === sourceKey) {
+        this.pending = undefined;
+        return;
+      }
+      if (!this.isActive(current)) {
+        this.pending = snapshot;
+        return;
+      }
+    }
+    this.pending = undefined;
     if (current?.source !== sourceKey || !currentIsOpen) {
       await this.clearNow();
     }
@@ -126,7 +197,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     if (this.disposed) {
       await this.closeDisposedTab(tab);
     }
-    this.review = { pod, resources: [], source: sourceKey, tab };
+    this.review = { ...snapshot, tab };
   }
 
   public async reclaimEmpty(repositoryRoot: string, pod: string): Promise<void> {
@@ -135,11 +206,15 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
 
   private async reclaimEmptyNow(repositoryRoot: string, pod: string): Promise<void> {
     const current = this.review;
-    if (current !== undefined && this.isOpen(current.tab)) {
+    if (current !== undefined && this.findOpenTab(current) !== undefined) {
       return;
     }
     this.review = undefined;
-    if (!vscode.window.tabGroups.all.some((group) => group.tabs.some(isEmptyMultiDiffTab))) {
+    if (
+      !vscode.window.tabGroups.all.some((group) =>
+        group.tabs.some((tab) => isEmptyMultiDiffTab(tab, pod))
+      )
+    ) {
       return;
     }
     const source = emptyReviewUri(repositoryRoot, pod);
@@ -149,6 +224,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     }
     this.review = {
       pod,
+      repository: repositoryRoot,
       resources: [],
       source: source.toString(),
       tab,
@@ -183,6 +259,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
 
   private async clearNow(): Promise<void> {
     const review = this.review;
+    this.pending = undefined;
     this.review = undefined;
     const tabs = vscode.window.tabGroups.all.flatMap((group) =>
       group.tabs.filter((tab) =>
@@ -210,45 +287,46 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
 
   public dispose(): void {
     this.disposed = true;
+    this.pending = undefined;
     this.review = undefined;
-    for (const timeout of this.restoreTimers) {
-      clearTimeout(timeout);
-    }
-    this.restoreTimers.clear();
     this.registration.dispose();
     this.tabSubscription.dispose();
     this.content.clear();
   }
 
-  private restoreClosedReview(event: vscode.TabChangeEvent): void {
-    const review = this.review;
-    if (
-      review === undefined ||
-      !event.closed.some((tab) => isSameReviewTab(tab, review))
-    ) {
-      return;
-    }
-    const timeout = setTimeout(() => {
-      this.restoreTimers.delete(timeout);
-      void this.enqueue(async () => {
-        if (this.disposed || this.review !== review || this.isOpen(review.tab)) {
-          return;
-        }
+  private async applyPendingReview(): Promise<void> {
+    return this.enqueue(async () => {
+      const pending = this.pending;
+      const current = this.review;
+      if (
+        pending === undefined ||
+        current === undefined ||
+        pending.repository !== current.repository ||
+        pending.pod !== current.pod ||
+        this.findOpenTab(current) === undefined ||
+        !this.isActive(current)
+      ) {
+        return;
+      }
+      this.pending = undefined;
+      try {
+        await this.clearNow();
         const tab = await this.show(
-          vscode.Uri.parse(review.source),
-          review.pod,
-          review.resources,
+          vscode.Uri.parse(pending.source),
+          pending.pod,
+          pending.resources,
         );
-        if (this.disposed || this.review !== review) {
-          await vscode.window.tabGroups.close(tab, true);
-          return;
+        if (this.disposed) {
+          await this.closeDisposedTab(tab);
         }
-        this.review = { ...review, tab };
-      }).catch((error: unknown) => {
-        this.reportError("restoring the active pod review", error);
-      });
-    }, 0);
-    this.restoreTimers.add(timeout);
+        this.review = { ...pending, tab };
+      } catch (error) {
+        if (this.pending === undefined) {
+          this.pending = pending;
+        }
+        throw error;
+      }
+    });
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -284,10 +362,15 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     return result.stdout.toString("utf8");
   }
 
-  private isOpen(tab: vscode.Tab): boolean {
-    return vscode.window.tabGroups.all.some((group) =>
-      group.tabs.some((candidate) => candidate === tab),
-    );
+  private findOpenTab(review: ReviewTab): vscode.Tab | undefined {
+    return vscode.window.tabGroups.all
+      .flatMap((group) => group.tabs)
+      .find((tab) => isSameReviewTab(tab, review));
+  }
+
+  private isActive(review: ReviewTab): boolean {
+    const active = vscode.window.tabGroups.activeTabGroup.activeTab;
+    return active !== undefined && isSameReviewTab(active, review);
   }
 }
 
@@ -328,8 +411,16 @@ function isReviewPlaceholderTab(tab: vscode.Tab): boolean {
   return input instanceof vscode.TabInputText && input.uri.scheme === REVIEW_SCHEME;
 }
 
-function isEmptyMultiDiffTab(tab: vscode.Tab): boolean {
-  return multiDiffs(tab.input)?.length === 0;
+function isEmptyMultiDiffTab(tab: vscode.Tab, pod: string): boolean {
+  return tab.label === pod && multiDiffs(tab.input)?.length === 0;
+}
+
+function samePod(
+  review: ReviewTab | undefined,
+  repository: Repository,
+  pod: string,
+): review is ReviewTab {
+  return review?.repository === repository.root && review.pod === pod;
 }
 
 function isMultiDiffTab(tab: vscode.Tab, resourceCount: number): boolean {

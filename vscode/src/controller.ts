@@ -81,7 +81,7 @@ export class RumpelpodController implements vscode.Disposable {
         this.model.executable(),
       );
       this.updateStatus();
-      await this.refreshActiveReview(false);
+      await this.revealActiveReview();
     });
     this.modeEntries = result.catch(() => {});
     return result;
@@ -91,7 +91,7 @@ export class RumpelpodController implements vscode.Disposable {
     const failures = (
       await Promise.allSettled([
         this.refreshPodStatus(sync),
-        this.refreshActiveReview(true),
+        this.refreshActiveReview(),
       ])
     )
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -124,7 +124,15 @@ export class RumpelpodController implements vscode.Disposable {
     });
   }
 
-  public refreshActiveReview(preserveFocus = true): Promise<void> {
+  public refreshActiveReview(): Promise<void> {
+    return this.updateActiveReview(false);
+  }
+
+  public revealActiveReview(): Promise<void> {
+    return this.updateActiveReview(true);
+  }
+
+  private updateActiveReview(reveal: boolean): Promise<void> {
     const selected = this.active;
     return this.enqueueReviewUpdate(async () => {
       if (selected === undefined) {
@@ -138,18 +146,21 @@ export class RumpelpodController implements vscode.Disposable {
       if (active === undefined) {
         return;
       }
-      const restoreTerminalFocus = preserveFocus && this.terminals.hasFocus();
+      const restoreTerminalFocus = !reveal && this.terminals.hasFocus();
       try {
         if (plan.files.length === 0) {
-          await this.reviewDocuments.openEmpty(selected.repository, selected.pod, preserveFocus);
+          if (reveal) {
+            await this.reviewDocuments.revealEmpty(selected.repository, selected.pod);
+          } else {
+            await this.reviewDocuments.refreshEmpty(selected.repository, selected.pod);
+          }
           return;
         }
-        await this.reviewDocuments.open(
-          selected.repository,
-          selected.pod,
-          plan,
-          preserveFocus,
-        );
+        if (reveal) {
+          await this.reviewDocuments.reveal(selected.repository, selected.pod, plan);
+        } else {
+          await this.reviewDocuments.refresh(selected.repository, selected.pod, plan);
+        }
       } finally {
         if (restoreTerminalFocus) {
           await this.terminals.restoreFocus();
@@ -206,6 +217,9 @@ export class RumpelpodController implements vscode.Disposable {
       case "refresh":
         await this.refresh(true);
         return;
+      case "viewDiff":
+        await this.revealActiveReview();
+        return;
       case "restartSession":
         await this.restartCurrentSession();
         return;
@@ -244,14 +258,14 @@ export class RumpelpodController implements vscode.Disposable {
       repository,
     };
     this.updateStatus();
+    await this.terminals.showActive(repository, pod, agents, this.model.executable());
+    this.updateStatus();
     const selected = this.active;
     await this.enqueueReviewUpdate(async () => {
       if (this.currentSelection(selected) !== undefined) {
-        await this.reviewDocuments.openEmpty(repository, pod);
+        await this.reviewDocuments.revealEmpty(repository, pod);
       }
     });
-    await this.terminals.showActive(repository, pod, agents, this.model.executable());
-    this.updateStatus();
     this.scheduleRefreshes();
   }
 
@@ -280,7 +294,7 @@ export class RumpelpodController implements vscode.Disposable {
     this.updateStatus();
 
     try {
-      await this.refreshActiveReview(false);
+      await this.revealActiveReview();
     } catch (error) {
       this.model.logError(`opening review for ${pod.name}`, error);
       if (this.currentSelection(selected) === undefined) {

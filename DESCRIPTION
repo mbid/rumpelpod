@@ -30,8 +30,13 @@ alive. Show every changed file in one native vertically stacked VS Code
 review with concise pod and file-path labels. Keep terminal focus intact
 when daemon events refresh that review.
 
-Pin the active review and recreate it after an explicit pinned-editor
-close so the main Rumpelpod surface cannot disappear.
+Pin the active review by default while preserving normal VS Code editor
+lifecycle behavior. Let users close it, keep background refreshes from
+stealing another editor's focus or resurrecting it, and expose a View
+diff action that focuses or reopens it.
+
+When selecting or creating a pod, focus its review and close the prior
+pod's review so stale diff tabs do not accumulate.
 
 Keep VS Code's normal editor tabs and move pod, agent, and creation
 selectors into popovers anchored to the Rumpelpod sidebar header. Hide
