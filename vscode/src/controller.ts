@@ -397,9 +397,7 @@ export class RumpelpodController implements vscode.Disposable {
         },
         () => this.model.mergePod(selected.repository, selected.pod),
       );
-      if (this.currentSelection(selected) !== undefined) {
-        await this.refresh(false);
-      }
+      await this.clearPodSelection(selected, false);
       void vscode.window.showInformationMessage(`Merged pod '${selected.pod}'.`);
     });
   }
@@ -414,9 +412,7 @@ export class RumpelpodController implements vscode.Disposable {
         },
         () => this.model.stopPod(selected.repository, selected.pod),
       );
-      if (this.currentSelection(selected) !== undefined) {
-        await this.refresh(false);
-      }
+      await this.clearPodSelection(selected, false);
     });
   }
 
@@ -441,25 +437,7 @@ export class RumpelpodController implements vscode.Disposable {
         },
         () => this.model.deletePod(selected.repository, selected.pod),
       );
-      const cleanup: Promise<unknown>[] = [
-        this.model.forgetPod(selected.repository, selected.pod),
-        this.reviewDocuments.close(selected.repository, selected.pod),
-      ];
-      if (this.currentSelection(selected) !== undefined) {
-        this.selectionGeneration += 1;
-        this.active = undefined;
-        this.updateStatus();
-        cleanup.push(this.terminals.clearActive(selected.repository, selected.pod));
-      }
-      const failures = (await Promise.allSettled(cleanup))
-        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-        .map((result) => result.reason);
-      if (failures.length === 1) {
-        throw failures[0];
-      }
-      if (failures.length > 1) {
-        throw new AggregateError(failures, "cleaning up the deleted pod UI failed");
-      }
+      await this.clearPodSelection(selected, true);
     });
   }
 
@@ -596,6 +574,33 @@ export class RumpelpodController implements vscode.Disposable {
       throw new Error(`select a pod before ${operation} it`);
     }
     return selected;
+  }
+
+  private async clearPodSelection(
+    selected: ActivePod,
+    forgetSessions: boolean,
+  ): Promise<void> {
+    const cleanup: Promise<unknown>[] = [
+      forgetSessions
+        ? this.model.forgetPod(selected.repository, selected.pod)
+        : this.model.forgetRememberedPod(selected.repository, selected.pod),
+      this.reviewDocuments.close(selected.repository, selected.pod),
+    ];
+    if (this.currentSelection(selected) !== undefined) {
+      this.selectionGeneration += 1;
+      this.active = undefined;
+      this.updateStatus();
+      cleanup.push(this.terminals.clearActive(selected.repository, selected.pod));
+    }
+    const failures = (await Promise.allSettled(cleanup))
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason);
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, "clearing the inactive pod UI failed");
+    }
   }
 
   private enqueuePodOperation(operation: () => Promise<void>): Promise<void> {

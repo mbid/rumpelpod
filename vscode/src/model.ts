@@ -164,6 +164,10 @@ export class RumpelpodModel {
     const sessions = this.savedAgentSessions();
     delete sessions[assignmentKey(repository, pod)];
     await this.workspaceState.update(LAUNCHED_AGENTS_KEY, sessions);
+    await this.forgetRememberedPod(repository, pod);
+  }
+
+  public async forgetRememberedPod(repository: Repository, pod: string): Promise<void> {
     const last = this.lastPod();
     if (last?.repository === repository.root && last.pod === pod) {
       await this.workspaceState.update(LAST_POD_KEY, undefined);

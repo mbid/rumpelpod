@@ -147,15 +147,12 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     const record = this.reviews.get(key);
     let current = record?.current;
     let openTab = current === undefined ? undefined : this.findOpenTab(current);
-    let inheritedPin: boolean | undefined;
     if (!refreshOnly && openTab === undefined) {
-      inheritedPin = await this.takeRestoredEmpty(snapshot);
+      await this.takeRestoredEmpty(snapshot);
       const restoredTabs = this.findPodTabs(snapshot);
       const exact = restoredTabs.find((tab) => isSnapshotReviewTab(tab, snapshot));
       const staleTabs = restoredTabs.filter((tab) => tab !== exact);
       if (staleTabs.length > 0) {
-        const active = staleTabs.find((tab) => tab.isActive) ?? staleTabs[0];
-        inheritedPin ??= active?.isPinned;
         await vscode.window.tabGroups.close(staleTabs, true);
         for (const tab of staleTabs) {
           this.evictTab(tab);
@@ -186,25 +183,17 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       }
     }
 
-    const pinNew = inheritedPin ??
-      (current === undefined || !currentIsOpen || current.tab.isPinned);
     if (current !== undefined && (current.source !== snapshot.source || !currentIsOpen)) {
       await this.closeReviewNow(key, current);
     }
-    const tab = await this.show(snapshot, pinNew);
+    const tab = await this.show(snapshot);
     if (this.disposed) {
       await this.closeDisposedTab(tab);
     }
     this.reviews.set(key, { current: { ...snapshot, tab }, pending: undefined });
   }
 
-  private async show(
-    snapshot: ReviewSnapshot,
-    pinNew: boolean,
-  ): Promise<vscode.Tab> {
-    const tabsBefore = new Set(
-      vscode.window.tabGroups.all.flatMap((group) => group.tabs),
-    );
+  private async show(snapshot: ReviewSnapshot): Promise<vscode.Tab> {
     // vscode.changes uses a random identity, which duplicates a restored review.
     await vscode.commands.executeCommand(
       "_workbench.openMultiDiffEditor",
@@ -214,15 +203,14 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
         title: snapshot.pod,
       } satisfies OpenMultiDiffEditorOptions,
     );
-    const opened = vscode.window.tabGroups.activeTabGroup.activeTab;
-    const isNew = opened !== undefined && !tabsBefore.has(opened);
-    if (opened !== undefined && isNew && pinNew) {
-      await vscode.commands.executeCommand("workbench.action.pinEditor");
+    let tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+    if (tab?.isPinned === true) {
+      await vscode.commands.executeCommand("workbench.action.unpinEditor");
+      tab = vscode.window.tabGroups.activeTabGroup.activeTab;
     }
-    const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
     if (
       tab === undefined ||
-      (isNew && pinNew && !tab.isPinned) ||
+      tab.isPinned ||
       !isSnapshotReviewTab(tab, snapshot)
     ) {
       throw new Error(`VS Code did not open the review for pod '${snapshot.pod}'`);
@@ -289,11 +277,10 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       if (pending === undefined) {
         return;
       }
-      const pinNew = active.isPinned;
       this.reviews.set(key, { current: record.current, pending: undefined });
       try {
         await this.closeReviewNow(key, record.current);
-        const tab = await this.show(pending, pinNew);
+        const tab = await this.show(pending);
         if (this.disposed) {
           await this.closeDisposedTab(tab);
         }
@@ -367,18 +354,15 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     }
   }
 
-  private async takeRestoredEmpty(snapshot: ReviewSnapshot): Promise<boolean | undefined> {
+  private async takeRestoredEmpty(snapshot: ReviewSnapshot): Promise<void> {
     if (
       snapshot.resources.length === 0 ||
       !vscode.window.tabGroups.all.some((group) =>
         group.tabs.some((tab) => isEmptyReviewTab(tab, snapshot.pod))
       )
     ) {
-      return undefined;
+      return;
     }
-    const tabsBefore = new Set(
-      vscode.window.tabGroups.all.flatMap((group) => group.tabs),
-    );
     await vscode.commands.executeCommand(
       "_workbench.openMultiDiffEditor",
       {
@@ -391,11 +375,8 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     if (tab === undefined || !isEmptyReviewTab(tab, snapshot.pod)) {
       throw new Error(`VS Code did not resolve the empty review for pod '${snapshot.pod}'`);
     }
-    const existed = tabsBefore.has(tab);
-    const wasPinned = tab.isPinned;
     await vscode.window.tabGroups.close(tab, true);
     this.evictTab(tab);
-    return existed ? wasPinned : undefined;
   }
 
   private findOpenTab(review: ReviewTab): vscode.Tab | undefined {

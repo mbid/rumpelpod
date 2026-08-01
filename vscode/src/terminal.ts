@@ -441,12 +441,12 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       this.enqueueSwitch(async () => {
         for (const agent of AGENTS) {
           const channel = this.agentChannel(agent);
-          await this.stopRunning(channel, `closing the deleted pod's ${agent} attachment`);
+          await this.stopRunning(channel, `closing the inactive pod's ${agent} attachment`);
           this.resetChannel(channel);
         }
       }),
       this.enqueueShellSwitch(async () => {
-        await this.stopRunning(this.shellChannel, "closing the deleted pod shell");
+        await this.stopRunning(this.shellChannel, "closing the inactive pod shell");
         this.resetChannel(this.shellChannel);
       }),
     ]);
@@ -1174,32 +1174,32 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       <button id="shell-tab" class="terminal-tab" type="button" role="tab" aria-controls="shell-surface" aria-selected="false" hidden>shell</button>
     </nav>
     <div id="surfaces">
-      <div id="no-sessions" class="empty">Select or create a pod.</div>
+      <div id="no-sessions" class="empty">Create or select a pod.</div>
       <section id="claude-surface" class="surface" hidden>
         <div id="claude-terminal" class="terminal" aria-label="Rumpelpod Claude terminal"></div>
         <div id="claude-empty" class="empty">
-          <p id="claude-empty-message">Select or create a pod.</p>
+          <p id="claude-empty-message">Create or select a pod.</p>
           <button id="claude-restart" class="restart" type="button">Restart Claude</button>
         </div>
       </section>
       <section id="codex-surface" class="surface" hidden>
         <div id="codex-terminal" class="terminal" aria-label="Rumpelpod Codex terminal"></div>
         <div id="codex-empty" class="empty">
-          <p id="codex-empty-message">Select or create a pod.</p>
+          <p id="codex-empty-message">Create or select a pod.</p>
           <button id="codex-restart" class="restart" type="button">Restart Codex</button>
         </div>
       </section>
       <section id="grok-surface" class="surface" hidden>
         <div id="grok-terminal" class="terminal" aria-label="Rumpelpod Grok terminal"></div>
         <div id="grok-empty" class="empty">
-          <p id="grok-empty-message">Select or create a pod.</p>
+          <p id="grok-empty-message">Create or select a pod.</p>
           <button id="grok-restart" class="restart" type="button">Restart Grok</button>
         </div>
       </section>
       <section id="pi-surface" class="surface" hidden>
         <div id="pi-terminal" class="terminal" aria-label="Rumpelpod pi terminal"></div>
         <div id="pi-empty" class="empty">
-          <p id="pi-empty-message">Select or create a pod.</p>
+          <p id="pi-empty-message">Create or select a pod.</p>
           <button id="pi-restart" class="restart" type="button">Restart pi</button>
         </div>
       </section>
@@ -1226,7 +1226,7 @@ function emptyMessage(
 ): string {
   switch (state) {
     case "empty":
-      return "Select or create a pod above.";
+      return "Create or select a pod above.";
     case "exited":
       return `${agentLabel(agent)} is not attached.`;
     case "running":

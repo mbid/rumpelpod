@@ -79,22 +79,6 @@ async function waitForStatusItem(page, text) {
     return status;
 }
 
-async function waitForStatusState(page, podName, state) {
-    const status = await waitForStatusItem(page, podName);
-    await page.waitForFunction(
-        ({ pod, expected }) => {
-            const items = Array.from(document.querySelectorAll(".statusbar-item"));
-            return items.some((item) => {
-                const text = item.textContent ?? "";
-                return text.includes(pod) && text.includes(`/ ${expected}`);
-            });
-        },
-        { pod: podName, expected: state },
-        { timeout: 90_000 },
-    );
-    return status;
-}
-
 async function waitForPersistedPodStatus(page, podName) {
     const status = await waitForStatusItem(page, podName);
     const deadline = Date.now() + 90_000;
@@ -518,6 +502,46 @@ async function waitForAgentView(page, podName, agent = "codex", expectedAgents =
     };
 }
 
+async function waitForNoSelectedPod(page, view, closedPodName) {
+    const body = await view.body.elementHandle();
+    assert(body, "pod view body disappeared before the selection was cleared");
+    try {
+        await page.waitForFunction(
+            (element) => element.dataset.rumpelpodPod === "",
+            body,
+            { timeout: 30_000 },
+        );
+    } finally {
+        await body.dispose();
+    }
+    assert.equal(
+        (await view.frame.locator("#pod-name").textContent())?.trim(),
+        "Select pod",
+        "inactive pod view did not show the selector label",
+    );
+    const empty = view.frame.locator("#no-sessions");
+    await empty.waitFor({ state: "visible", timeout: 30_000 });
+    assert.equal(
+        (await empty.textContent())?.trim(),
+        "Create or select a pod.",
+        "inactive pod view did not explain how to continue",
+    );
+    for (const action of ["#open-shell", "#launch-agent", "#merge-pod", "#more-actions"]) {
+        assert(
+            await view.frame.locator(action).isDisabled(),
+            `inactive pod view left ${action} enabled`,
+        );
+    }
+    await page
+        .locator(".tab:visible")
+        .filter({ hasText: closedPodName })
+        .waitFor({ state: "hidden", timeout: 30_000 });
+    await page
+        .locator(".statusbar-item:visible")
+        .filter({ hasText: closedPodName })
+        .waitFor({ state: "hidden", timeout: 30_000 });
+}
+
 async function waitForAgentRepositoryState(page, view, repositoryState) {
     const deadline = Date.now() + 30_000;
     let rendered = "";
@@ -771,19 +795,9 @@ async function verifyReviewFocusAndCloseLifecycle(
     closedPodContent,
     afterClose,
 ) {
-    const pinnedReview = page.locator(".editor-instance:visible .multiDiffEditor");
-    await pinnedReview.waitFor({ state: "visible", timeout: 30_000 });
-    const pinnedReviewHandle = await pinnedReview.elementHandle();
-    assert(pinnedReviewHandle, "active review had no element handle");
-    await pinnedReview.click();
-    await page.keyboard.press("Control+W");
-    await page.waitForTimeout(300);
-    assert(
-        await pinnedReviewHandle.evaluate((element) => element.isConnected),
-        "Ctrl+W closed the pinned review",
-    );
-    await pinnedReviewHandle.dispose();
-
+    const activeReview = page.locator(".editor-instance:visible .multiDiffEditor");
+    await activeReview.waitFor({ state: "visible", timeout: 30_000 });
+    await activeReview.click();
     await page.keyboard.press("Control+P");
     const fileInput = page.locator(".quick-input-widget:visible input");
     await fileInput.waitFor({ state: "visible", timeout: 30_000 });
@@ -808,24 +822,17 @@ async function verifyReviewFocusAndCloseLifecycle(
         "a background review replaced the active normal file",
     );
 
-    const reviewTab = page.locator(".tab:visible").filter({ hasText: podName }).first();
-    await reviewTab.click();
+    const moreActions = view.frame.locator("#more-actions");
+    await moreActions.click();
+    const morePopover = view.frame.locator("#more-popover");
+    await morePopover.waitFor({ state: "visible", timeout: 30_000 });
+    await selectPopoverOption(morePopover, "View diff");
     await waitForReview(page, podName, changedFile, originalContent, inactivePodContent);
     await assertOpenReviews(page, podName, [podName]);
-    await fileTab.waitFor({ state: "visible", timeout: 30_000 });
-    await fileTab.click();
-    await page.keyboard.press("Control+W");
-    await fileTab.waitFor({ state: "hidden", timeout: 30_000 });
-    await waitForReview(page, podName, changedFile, originalContent, inactivePodContent);
 
     const explicitlyClosedReview = page.locator(".editor-instance:visible .multiDiffEditor");
     await explicitlyClosedReview.click();
-    await page.keyboard.press("F1");
-    const commandInput = page.locator(".quick-input-widget:visible input");
-    await commandInput.waitFor({ state: "visible", timeout: 30_000 });
-    await commandInput.fill(">Close Pinned Editor");
-    await waitForQuickPickLabels(page, ["Close Pinned Editor"]);
-    await selectQuickPick(page, "Close Pinned Editor");
+    await page.keyboard.press("Control+W");
     await page.locator(".editor-instance:visible .multiDiffEditor").waitFor({
         state: "hidden",
         timeout: 30_000,
@@ -842,17 +849,13 @@ async function verifyReviewFocusAndCloseLifecycle(
         await page.waitForTimeout(100);
     }
 
-    const moreActions = view.frame.locator("#more-actions");
     await moreActions.click();
-    const morePopover = view.frame.locator("#more-popover");
     await morePopover.waitFor({ state: "visible", timeout: 30_000 });
     await selectPopoverOption(morePopover, "View diff");
     await waitForReview(page, podName, changedFile, originalContent, closedPodContent);
     await assertOpenReviews(page, podName, [podName]);
-    const retainedReviewTab = page.locator(".tab:visible").filter({ hasText: podName }).first();
-    const retainedReviewTabHandle = await retainedReviewTab.elementHandle();
-    assert(retainedReviewTabHandle, "reopened review had no tab element handle");
-    return retainedReviewTabHandle;
+    const reopenedReviewTab = page.locator(".tab:visible").filter({ hasText: podName }).first();
+    await reopenedReviewTab.waitFor({ state: "visible", timeout: 30_000 });
 }
 
 async function waitForEmptyReview(page, podName) {
@@ -910,7 +913,7 @@ async function assertNoNativeAgentEditor(page, podName) {
     );
 }
 
-async function verifyNormalFileUsesTabs(page, fileName, podName) {
+async function verifyNormalFileUsesTabs(page, view, fileName) {
     await page.keyboard.press("Control+P");
     const input = page.locator(".quick-input-widget:visible input");
     await input.waitFor({ state: "visible", timeout: 30_000 });
@@ -919,12 +922,13 @@ async function verifyNormalFileUsesTabs(page, fileName, podName) {
     await selectQuickPick(page, fileName);
     const fileTab = page.locator(".tab:visible").filter({ hasText: fileName }).first();
     await fileTab.waitFor({ state: "visible", timeout: 30_000 });
-    assert(
-        await page.locator(".tab:visible").filter({ hasText: podName }).count(),
-        "opening a normal file removed the pinned pod review tab",
-    );
     await page.keyboard.press("Control+W");
     await fileTab.waitFor({ state: "hidden", timeout: 30_000 });
+    const moreActions = view.frame.locator("#more-actions");
+    await moreActions.click();
+    const morePopover = view.frame.locator("#more-popover");
+    await morePopover.waitFor({ state: "visible", timeout: 30_000 });
+    await selectPopoverOption(morePopover, "View diff");
 }
 
 async function assertSidebarAndDiffGeometry(page, terminal, diffEditor) {
@@ -1021,7 +1025,7 @@ async function main() {
             !(await page.title()).includes("-review.txt"),
             "a clean pod opened a synthetic review document",
         );
-        await verifyNormalFileUsesTabs(page, changedFile, podName);
+        await verifyNormalFileUsesTabs(page, initialView, changedFile);
         await waitForEmptyReview(page, podName);
         await capture(page, artifacts, "01-default-chat.png");
 
@@ -1056,7 +1060,7 @@ async function main() {
             "review kept the redundant file selector",
         );
         await capture(page, artifacts, "02-live-review.png");
-        const retainedReviewTab = await verifyReviewFocusAndCloseLifecycle(
+        await verifyReviewFocusAndCloseLifecycle(
             page,
             liveView,
             podName,
@@ -1355,12 +1359,7 @@ async function main() {
             "creating a pod kept the closed auxiliary shell alive",
         );
         await waitForEmptyReview(page, createdPodName);
-        await assertOpenReviews(page, createdPodName, [podName, createdPodName]);
-        assert(
-            await retainedReviewTab.evaluate((element) => element.isConnected),
-            "creating another pod replaced the existing review tab",
-        );
-        await retainedReviewTab.dispose();
+        await assertOpenReviews(page, createdPodName, [createdPodName]);
         assert(
             !(await page.title()).includes("-review.txt"),
             "creating a pod opened a synthetic review document",
@@ -1373,7 +1372,7 @@ async function main() {
         const restoredCreatedView = await waitForAgentView(page, createdPodName);
         await waitForCodexPrompt(page, restoredCreatedView.terminal, false);
         await waitForEmptyReview(page, createdPodName);
-        await assertOpenReviews(page, createdPodName, [podName, createdPodName]);
+        await assertOpenReviews(page, createdPodName, [createdPodName]);
 
         const restoredPodSwitcher = await openPodSwitcher(page);
         const listedPods = await popoverRows(restoredPodSwitcher.popover).allTextContents();
@@ -1401,7 +1400,7 @@ async function main() {
             originalContent,
             finalPodContent,
         );
-        await assertOpenReviews(page, podName, [podName, createdPodName]);
+        await assertOpenReviews(page, podName, [podName]);
         await assertSidebarAndDiffGeometry(page, switchedView.terminal, switchedDiff);
         assert.equal(
             await switchedView.body.getAttribute("data-rumpelpod-pod"),
@@ -1493,6 +1492,7 @@ async function main() {
         await restoredView.frame.locator("#merge-pod").click();
         await confirmModal(page, `Merge pod '${podName}'`, "Merge Pod");
         await waitForAction(actionLog, `merge ${podName} --no-edit`);
+        await waitForNoSelectedPod(page, restoredView, podName);
 
         const lifecycleSwitcher = await openPodSwitcher(page);
         await selectPopoverOption(lifecycleSwitcher.popover, createdPodName);
@@ -1503,21 +1503,27 @@ async function main() {
         await lifecyclePopover.waitFor({ state: "visible", timeout: 30_000 });
         await selectPopoverOption(lifecyclePopover, "Stop pod");
         await waitForAction(actionLog, `stop --wait ${createdPodName}`);
-        await waitForStatusState(page, createdPodName, "stopped");
+        await waitForNoSelectedPod(page, lifecycleView, createdPodName);
 
-        await lifecycleMore.click();
-        await lifecyclePopover.waitFor({ state: "visible", timeout: 30_000 });
-        await selectPopoverOption(lifecyclePopover, "Delete pod...");
+        const stoppedPodSwitcher = await openPodSwitcher(page);
+        const stoppedPodLabels = await popoverRows(stoppedPodSwitcher.popover).allTextContents();
+        assert(
+            stoppedPodLabels.some(
+                (label) =>
+                    label.includes(createdPodName) && label.toLowerCase().includes("stopped"),
+            ),
+            `stopped pod state was not reflected in the selector: ${JSON.stringify(stoppedPodLabels)}`,
+        );
+        await selectPopoverOption(stoppedPodSwitcher.popover, createdPodName);
+        const deleteView = await waitForAgentView(page, createdPodName);
+        const deleteMore = deleteView.frame.locator("#more-actions");
+        await deleteMore.click();
+        const deletePopover = deleteView.frame.locator("#more-popover");
+        await deletePopover.waitFor({ state: "visible", timeout: 30_000 });
+        await selectPopoverOption(deletePopover, "Delete pod...");
         await confirmModal(page, `Permanently delete pod '${createdPodName}'`, "Delete Pod");
         await waitForAction(actionLog, `delete --wait --force ${createdPodName}`);
-        const lifecycleBody = await lifecycleView.body.elementHandle();
-        assert(lifecycleBody !== null, "deleted pod view body disappeared before it was cleared");
-        await page.waitForFunction(
-            (body) => body.dataset.rumpelpodPod === "",
-            lifecycleBody,
-            { timeout: 30_000 },
-        );
-        await lifecycleBody.dispose();
+        await waitForNoSelectedPod(page, deleteView, createdPodName);
         const remainingPods = await openPodSwitcher(page);
         const remainingPodLabels = await popoverRows(remainingPods.popover).allTextContents();
         assert(
