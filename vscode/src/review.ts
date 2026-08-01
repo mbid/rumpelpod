@@ -185,7 +185,9 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     const review = this.review;
     this.review = undefined;
     const tabs = vscode.window.tabGroups.all.flatMap((group) =>
-      group.tabs.filter((tab) => tab === review?.tab || isReviewTab(tab)),
+      group.tabs.filter((tab) =>
+        (review !== undefined && isSameReviewTab(tab, review)) || isReviewTab(tab)
+      ),
     );
     if (tabs.length > 0) {
       await vscode.window.tabGroups.close(tabs, true);

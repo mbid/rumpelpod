@@ -7,21 +7,12 @@ import type { AgentKind, PodInfo } from "./generated/protocol";
 import { AGENTS, agentDescription, agentLabel } from "./agents";
 import type { Repository, RumpelpodModel } from "./model";
 import type { ReviewDocuments } from "./review";
-import type { AgentTerminals } from "./terminal";
-
-interface AgentPick extends vscode.QuickPickItem {
-  readonly agent: AgentKind;
-}
-
-interface RepositoryPick extends vscode.QuickPickItem {
-  readonly repository: Repository;
-}
-
-interface PodPick extends vscode.QuickPickItem {
-  readonly agent: AgentKind;
-  readonly pod: PodInfo;
-  readonly repository: Repository;
-}
+import type {
+  AgentMenuOption,
+  AgentTerminals,
+  AgentViewAction,
+  PodMenuOption,
+} from "./terminal";
 
 interface ActivePod {
   readonly agent: AgentKind;
@@ -30,15 +21,6 @@ interface ActivePod {
   readonly pod: string;
   readonly repository: Repository;
 }
-
-type SwitcherAction =
-  | { readonly kind: "create" }
-  | { readonly kind: "open"; readonly pick: PodPick };
-
-const CREATE_POD_BUTTON: vscode.QuickInputButton = {
-  iconPath: new vscode.ThemeIcon("add"),
-  tooltip: "Create Pod",
-};
 
 export class RumpelpodController implements vscode.Disposable {
   private readonly scheduledRefreshes = new Set<NodeJS.Timeout>();
@@ -55,45 +37,26 @@ export class RumpelpodController implements vscode.Disposable {
     private readonly status: vscode.StatusBarItem,
   ) {}
 
-  public async showPodSwitcher(): Promise<void> {
-    const repositories = await this.model.repositories();
-    if (repositories.length === 0) {
-      throw new Error("open a Git repository before selecting a pod");
-    }
+  public async showPodSwitcher(request?: number): Promise<void> {
+    const menuRequest = await this.terminals.beginMenu("pod", request);
+    try {
+      const repositories = await this.model.repositories();
+      if (repositories.length === 0) {
+        throw new Error("open a Git repository before selecting a pod");
+      }
 
-    const picks = (
-      await Promise.all(
-        repositories.map(async (repository) => {
-          const pods = await this.model.listPods(repository, false);
-          return pods.map((pod) => this.podPick(repository, pod, repositories.length > 1));
-        }),
-      )
-    ).flat();
-    const picker = vscode.window.createQuickPick<PodPick>();
-    picker.title = this.active === undefined ? "Rumpelpod" : `Rumpelpod: ${this.active.pod}`;
-    picker.placeholder =
-      picks.length === 0 ? "No pods yet. Use + to create one." : "Select a pod";
-    picker.matchOnDescription = true;
-    picker.matchOnDetail = true;
-    picker.buttons = [CREATE_POD_BUTTON];
-    picker.items = picks;
-    const activePick = picks.find((pick) => this.isActivePod(pick.repository.root, pick.pod.name));
-    if (activePick !== undefined) {
-      picker.activeItems = [activePick];
-    }
-
-    const action = await waitForSwitcherAction(picker);
-    picker.dispose();
-    if (action === undefined) {
-      return;
-    }
-    switch (action.kind) {
-      case "create":
-        await this.createPod();
-        return;
-      case "open":
-        await this.openPod(action.pick.repository, action.pick.pod);
-        return;
+      const picks = (
+        await Promise.all(
+          repositories.map(async (repository) => {
+            const pods = await this.model.listPods(repository, false);
+            return pods.map((pod) => this.podPick(repository, pod, repositories.length > 1));
+          }),
+        )
+      ).flat();
+      await this.terminals.showPodMenu(picks, menuRequest);
+    } catch (error) {
+      this.terminals.dismissMenu(menuRequest);
+      throw error;
     }
   }
 
@@ -198,24 +161,69 @@ export class RumpelpodController implements vscode.Disposable {
     return this.active?.repository.root === repositoryRoot && this.active.pod === pod;
   }
 
-  public async createPod(): Promise<void> {
-    const repository = await this.pickRepository();
-    if (repository === undefined) {
-      return;
+  public async createPod(request?: number): Promise<void> {
+    const menuRequest = await this.terminals.beginMenu("create", request);
+    try {
+      const repositories = await this.model.repositories();
+      if (repositories.length === 0) {
+        throw new Error("open a Git repository before creating a pod");
+      }
+      await this.terminals.showCreatePodMenu(
+        repositories.map((repository) => ({
+          name: repository.name,
+          root: repository.root,
+        })),
+        this.agentOptions(this.model.defaultAgent()),
+        menuRequest,
+      );
+    } catch (error) {
+      this.terminals.dismissMenu(menuRequest);
+      throw error;
     }
-    const agent = await this.pickAgent(this.model.defaultAgent(), "Select the agent for the pod");
-    if (agent === undefined) {
-      return;
+  }
+
+  public async handleViewAction(action: AgentViewAction): Promise<void> {
+    switch (action.type) {
+      case "changeAgent":
+        await this.changeActiveAgent(action.request);
+        return;
+      case "createPod":
+        await this.createPodSelection(action.repository, action.agent, action.pod);
+        return;
+      case "createPodMenu":
+        await this.createPod(action.request);
+        return;
+      case "openPod":
+        await this.openPodSelection(action.repository, action.pod);
+        return;
+      case "openShell":
+        this.openActiveShell();
+        return;
+      case "podMenu":
+        await this.showPodSwitcher(action.request);
+        return;
+      case "refresh":
+        await this.refresh(true);
+        return;
+      case "restartAgent":
+        await this.restartActiveAgent();
+        return;
+      case "setAgent":
+        await this.setActiveAgent(action.agent);
+        return;
     }
-    const pod = await vscode.window.showInputBox({
-      prompt: "Name the new rumpelpod",
-      placeHolder: "feature-name",
-      ignoreFocusOut: true,
-      validateInput: validatePodName,
-    });
-    if (pod === undefined) {
-      return;
+  }
+
+  private async createPodSelection(
+    repositoryRoot: string,
+    agent: AgentKind,
+    pod: string,
+  ): Promise<void> {
+    const validationError = validatePodName(pod);
+    if (validationError !== undefined) {
+      throw new Error(validationError);
     }
+    const repository = await this.repositoryByRoot(repositoryRoot);
     const generation = ++this.selectionGeneration;
     await this.reclaimRestoredReview();
     if (generation !== this.selectionGeneration) {
@@ -288,14 +296,24 @@ export class RumpelpodController implements vscode.Disposable {
     }
   }
 
-  public async changeActiveAgent(): Promise<void> {
+  public async changeActiveAgent(request?: number): Promise<void> {
     const selected = this.active;
     if (selected === undefined) {
       throw new Error("select a pod before changing its agent");
     }
-    const agent = await this.pickAgent(selected.agent, `Select the agent for ${selected.pod}`);
-    if (agent === undefined) {
-      return;
+    const menuRequest = await this.terminals.beginMenu("agent", request);
+    try {
+      await this.terminals.showAgentMenu(this.agentOptions(selected.agent), menuRequest);
+    } catch (error) {
+      this.terminals.dismissMenu(menuRequest);
+      throw error;
+    }
+  }
+
+  private async setActiveAgent(agent: AgentKind): Promise<void> {
+    const selected = this.active;
+    if (selected === undefined) {
+      throw new Error("select a pod before changing its agent");
     }
     let active = this.currentSelection(selected);
     if (active === undefined) {
@@ -427,7 +445,26 @@ export class RumpelpodController implements vscode.Disposable {
     return result;
   }
 
-  private podPick(repository: Repository, pod: PodInfo, showRepository: boolean): PodPick {
+  private agentOptions(current: AgentKind): readonly AgentMenuOption[] {
+    return AGENTS.map((agent) => ({
+      agent,
+      current: agent === current,
+      description: agentDescription(agent),
+      label: agentLabel(agent),
+    }));
+  }
+
+  private async openPodSelection(repositoryRoot: string, podName: string): Promise<void> {
+    const repository = await this.repositoryByRoot(repositoryRoot);
+    const pods = await this.model.listPods(repository, false);
+    const pod = pods.find((candidate) => candidate.name === podName);
+    if (pod === undefined) {
+      throw new Error(`pod '${podName}' is no longer available`);
+    }
+    await this.openPod(repository, pod);
+  }
+
+  private podPick(repository: Repository, pod: PodInfo, showRepository: boolean): PodMenuOption {
     const agent = this.model.getAgent(repository, pod.name) ?? this.model.defaultAgent();
     const activity = agentActivity(pod, agent);
     const descriptions = [
@@ -437,50 +474,22 @@ export class RumpelpodController implements vscode.Disposable {
       pod.repo_state ?? undefined,
     ].filter((value): value is string => value !== undefined);
     return {
-      agent,
-      description: descriptions.join(" - "),
+      active: this.isActivePod(repository.root, pod.name),
       detail: `Host: ${pod.host} - Created: ${pod.created}`,
-      iconPath: podStatusIcon(pod.status),
-      label: pod.name,
-      pod,
-      repository,
+      name: pod.name,
+      repository: repository.root,
+      status: podStatusLabel(pod.status),
+      summary: descriptions.join(" - "),
     };
   }
 
-  private async pickRepository(): Promise<Repository | undefined> {
+  private async repositoryByRoot(root: string): Promise<Repository> {
     const repositories = await this.model.repositories();
-    if (repositories.length === 0) {
-      throw new Error("open a Git repository before creating a pod");
+    const repository = repositories.find((candidate) => candidate.root === root);
+    if (repository === undefined) {
+      throw new Error(`repository '${root}' is no longer open`);
     }
-    if (repositories.length === 1) {
-      return repositories[0];
-    }
-    const picks: RepositoryPick[] = repositories.map((repository) => ({
-      label: repository.name,
-      description: repository.root,
-      repository,
-    }));
-    return (await vscode.window.showQuickPick(picks, {
-      placeHolder: "Select a repository",
-      ignoreFocusOut: true,
-    }))?.repository;
-  }
-
-  private async pickAgent(
-    current: AgentKind,
-    placeHolder: string,
-  ): Promise<AgentKind | undefined> {
-    const picks: AgentPick[] = AGENTS.map((agent) => ({
-      label: agentLabel(agent),
-      description: agent === current ? "Current" : undefined,
-      detail: agentDescription(agent),
-      agent,
-      picked: agent === current,
-    }));
-    return (await vscode.window.showQuickPick(picks, {
-      placeHolder,
-      ignoreFocusOut: true,
-    }))?.agent;
+    return repository;
   }
 
   private scheduleRefreshes(): void {
@@ -494,28 +503,6 @@ export class RumpelpodController implements vscode.Disposable {
       this.scheduledRefreshes.add(timeout);
     }
   }
-}
-
-function waitForSwitcherAction(
-  picker: vscode.QuickPick<PodPick>,
-): Promise<SwitcherAction | undefined> {
-  return new Promise((resolve) => {
-    picker.onDidAccept(() => {
-      const pick = picker.selectedItems[0];
-      if (pick !== undefined) {
-        resolve({ kind: "open", pick });
-        picker.hide();
-      }
-    });
-    picker.onDidTriggerButton((button) => {
-      if (button === CREATE_POD_BUTTON) {
-        resolve({ kind: "create" });
-        picker.hide();
-      }
-    });
-    picker.onDidHide(() => resolve(undefined));
-    picker.show();
-  });
 }
 
 function agentActivity(pod: PodInfo, agent: AgentKind): string | undefined {
@@ -568,25 +555,6 @@ function podStatusLabel(status: PodInfo["status"]): string {
       return "deleting";
     case "Broken":
       return "broken";
-  }
-}
-
-function podStatusIcon(status: PodInfo["status"]): vscode.ThemeIcon {
-  switch (status) {
-    case "Running":
-      return new vscode.ThemeIcon("vm-running", new vscode.ThemeColor("testing.iconPassed"));
-    case "Stopped":
-      return new vscode.ThemeIcon("debug-stop");
-    case "Gone":
-      return new vscode.ThemeIcon("circle-slash");
-    case "Disconnected":
-      return new vscode.ThemeIcon("debug-disconnect");
-    case "Stopping":
-      return new vscode.ThemeIcon("loading~spin");
-    case "Deleting":
-      return new vscode.ThemeIcon("trash");
-    case "Broken":
-      return new vscode.ThemeIcon("error", new vscode.ThemeColor("problemsErrorIcon.foreground"));
   }
 }
 

@@ -26,9 +26,6 @@
     "onView:rumpelpod.agent"
   ],
   "contributes": {
-    "configurationDefaults": {
-      "workbench.editor.showTabs": "none"
-    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -105,30 +102,6 @@
           "description": "Path to the rumpel command used by the extension."
         }
       }
-    },
-    "menus": {
-      "view/title": [
-        {
-          "command": "rumpelpod.createPod",
-          "when": "view == rumpelpod.agent",
-          "group": "navigation@1"
-        },
-        {
-          "command": "rumpelpod.changeActiveAgent",
-          "when": "view == rumpelpod.agent && rumpelpod.hasActivePod",
-          "group": "rumpelpod@1"
-        },
-        {
-          "command": "rumpelpod.refresh",
-          "when": "view == rumpelpod.agent && rumpelpod.hasActivePod",
-          "group": "rumpelpod@2"
-        },
-        {
-          "command": "rumpelpod.restartAgent",
-          "when": "view == rumpelpod.agent && rumpelpod.hasActivePod",
-          "group": "rumpelpod@3"
-        }
-      ]
     }
   },
   "scripts": {

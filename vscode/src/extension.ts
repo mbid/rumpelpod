@@ -7,7 +7,7 @@ import { RumpelpodController } from "./controller";
 import { DaemonEvents } from "./events";
 import { RumpelpodModel } from "./model";
 import { ReviewDocuments } from "./review";
-import { AGENT_VIEW_ID, AgentTerminals } from "./terminal";
+import { AGENT_VIEW_ID, AgentTerminals, type AgentViewAction } from "./terminal";
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Rumpelpod", { log: true });
@@ -33,6 +33,14 @@ export function activate(context: vscode.ExtensionContext): void {
     events,
     terminals.onDidShow(() => {
       void runCommand(model, "opening the Rumpelpod view", () => controller.enterMode());
+    }),
+    terminals.onDidRequestAction((action) => {
+      void runCommand(
+        model,
+        viewActionContext(action),
+        () => controller.handleViewAction(action),
+        () => dismissFailedMenu(terminals, action),
+      );
     }),
     vscode.window.registerWebviewViewProvider(AGENT_VIEW_ID, terminals, {
       webviewOptions: { retainContextWhenHidden: true },
@@ -76,16 +84,58 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
+function dismissFailedMenu(terminals: AgentTerminals, action: AgentViewAction): void {
+  switch (action.type) {
+    case "changeAgent":
+    case "createPodMenu":
+    case "podMenu":
+      terminals.dismissMenu(action.request);
+      return;
+    case "createPod":
+    case "openPod":
+    case "openShell":
+    case "refresh":
+    case "restartAgent":
+    case "setAgent":
+      return;
+  }
+}
+
+function viewActionContext(action: AgentViewAction): string {
+  switch (action.type) {
+    case "changeAgent":
+      return "opening the agent selector";
+    case "createPod":
+      return "creating a pod";
+    case "createPodMenu":
+      return "opening pod creation";
+    case "openPod":
+      return "selecting a pod";
+    case "openShell":
+      return "opening a pod shell";
+    case "podMenu":
+      return "listing pods";
+    case "refresh":
+      return "refreshing the active pod";
+    case "restartAgent":
+      return "restarting the active agent";
+    case "setAgent":
+      return "changing the active agent";
+  }
+}
+
 export function deactivate(): void {}
 
 async function runCommand(
   model: RumpelpodModel,
   context: string,
   command: () => Promise<void>,
+  onError?: () => void,
 ): Promise<void> {
   try {
     await command();
   } catch (error) {
+    onError?.();
     model.logError(context, error);
     await vscode.window.showErrorMessage(`Rumpelpod failed while ${context}: ${errorMessage(error)}`);
   }

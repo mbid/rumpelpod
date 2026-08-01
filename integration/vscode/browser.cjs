@@ -96,9 +96,62 @@ async function openPodSwitcher(page) {
     const podSelector = frame.locator("#pod-selector");
     await podSelector.waitFor({ state: "visible", timeout: 30_000 });
     await podSelector.click();
-    const widget = page.locator(".quick-input-widget:visible");
-    await widget.waitFor({ state: "visible", timeout: 30_000 });
-    return widget;
+    const popover = frame.locator("#pod-popover");
+    await popover.waitFor({ state: "visible", timeout: 30_000 });
+    await assertPopoverAnchored(podSelector, popover);
+    assert.equal(
+        await page.locator(".quick-input-widget:visible").count(),
+        0,
+        "pod selection opened VS Code Quick Access",
+    );
+    return { frame, popover };
+}
+
+async function waitForInitialPodSwitcher(page) {
+    const frame = await waitForAgentFrame(page);
+    const podSelector = frame.locator("#pod-selector");
+    const popover = frame.locator("#pod-popover");
+    await popover.waitFor({ state: "visible", timeout: 30_000 });
+    await assertPopoverAnchored(podSelector, popover);
+    assert.equal(
+        await page.locator(".quick-input-widget:visible").count(),
+        0,
+        "initial pod selection opened VS Code Quick Access",
+    );
+    return { frame, popover };
+}
+
+function popoverRows(popover) {
+    return popover.locator('[role="option"], [role="menuitem"]');
+}
+
+async function selectPopoverOption(popover, label) {
+    const row = popoverRows(popover).filter({ hasText: label }).first();
+    await row.waitFor({ state: "visible", timeout: 30_000 });
+    await row.click();
+    await popover.waitFor({ state: "hidden", timeout: 30_000 });
+}
+
+async function assertPopoverAnchored(trigger, popover) {
+    const triggerBounds = await trigger.boundingBox();
+    const popoverBounds = await popover.boundingBox();
+    const viewportWidth = await popover.evaluate(() => window.innerWidth);
+    assert(triggerBounds, "popover trigger had no bounds");
+    assert(popoverBounds, "popover had no bounds");
+    assert(
+        Math.max(triggerBounds.x, popoverBounds.x) <=
+            Math.min(triggerBounds.x + triggerBounds.width, popoverBounds.x + popoverBounds.width),
+        `popover was not horizontally aligned with its trigger: ${JSON.stringify({ triggerBounds, popoverBounds })}`,
+    );
+    assert(
+        popoverBounds.y >= triggerBounds.y + triggerBounds.height - 1 &&
+            popoverBounds.y - (triggerBounds.y + triggerBounds.height) <= 8,
+        `popover did not open below its trigger: ${JSON.stringify({ triggerBounds, popoverBounds })}`,
+    );
+    assert(
+        popoverBounds.width <= viewportWidth - 8,
+        `popover escaped the sidebar webview: ${JSON.stringify({ viewportWidth, popoverBounds })}`,
+    );
 }
 
 function quickPickRows(page) {
@@ -267,16 +320,12 @@ async function waitForAgentView(page, podName, agent = "codex") {
         "agent view header did not show only the active pod name",
     );
     await frame.locator("#pod-chevron").waitFor({ state: "visible", timeout: 30_000 });
-    assert.equal(
-        await page.locator('.part.sidebar:visible [aria-label="Switch Pod"]').count(),
-        0,
-        "sidebar kept the separate pod-switch toolbar button",
-    );
-    assert.equal(
-        await page.locator('.part.sidebar:visible [aria-label="Open Pod Shell"]').count(),
-        0,
-        "sidebar kept the separate shell toolbar button",
-    );
+    for (const label of ["Open shell", "Change agent", "Create pod", "More pod actions"]) {
+        await frame.locator(`[aria-label="${label}"]`).waitFor({
+            state: "visible",
+            timeout: 30_000,
+        });
+    }
     assert.equal(
         (await frame.locator("#agent-tab").textContent())?.trim(),
         agent,
@@ -286,6 +335,16 @@ async function waitForAgentView(page, podName, agent = "codex") {
         (await frame.locator("#shell-tab").textContent())?.trim(),
         "shell",
         "shell terminal tab was not rendered",
+    );
+    assert.equal(
+        await frame.locator("#terminal-tabs:visible").count(),
+        0,
+        "the session tab strip was visible before a second session opened",
+    );
+    assert.equal(
+        await frame.locator("#agent-tab:visible, #shell-tab:visible").count(),
+        0,
+        "single-session mode retained a visible terminal tab",
     );
     const terminals = frame.locator("#agent-terminal .xterm:visible");
     await terminals.first().waitFor({ state: "visible", timeout: 30_000 });
@@ -334,7 +393,7 @@ async function waitForAgentRepositoryState(page, view, repositoryState) {
 }
 
 async function openShellTab(page, view) {
-    await view.shellTab.click();
+    await view.frame.locator("#open-shell").click();
     const deadline = Date.now() + 30_000;
     let attributes = {};
     while (Date.now() < deadline) {
@@ -352,6 +411,10 @@ async function openShellTab(page, view) {
         { activeTab: "shell", state: "running" },
         "embedded pod shell did not become active",
     );
+    await view.frame.locator("#terminal-tabs").waitFor({ state: "visible", timeout: 30_000 });
+    await view.agentTab.waitFor({ state: "visible", timeout: 30_000 });
+    await view.shellTab.waitFor({ state: "visible", timeout: 30_000 });
+    assert.equal(await view.shellTab.getAttribute("aria-selected"), "true");
     const terminal = view.frame.locator("#shell-terminal .xterm:visible");
     await terminal.waitFor({ state: "visible", timeout: 30_000 });
     assert.equal(
@@ -507,23 +570,20 @@ async function waitForReview(page, podName, changedFile, originalContent, podCon
         !title.includes("Rumpelpod review:"),
         `review retained the verbose title: ${title}`,
     );
-    await assertEditorTabsHidden(page);
+    await assertEditorTabsVisible(page);
     const editorText = await page.locator(".editor-instance:visible").last().textContent();
     assert(editorText?.includes(changedFile), `review did not label ${changedFile}`);
     assert(editorText?.includes(ADDED_FILE), `review did not label ${ADDED_FILE}`);
     return diffEditors.first();
 }
 
-async function assertEditorTabsHidden(page) {
-    assert.equal(
-        await page.locator(".editor-group-container .tabs-and-actions-container:visible").count(),
-        0,
-        "the single review retained VS Code's editor tab strip",
-    );
-    assert.equal(
-        await page.locator(".editor-group-container .tabs-container .tab:visible").count(),
-        0,
-        "the single review retained a visible editor tab",
+async function assertEditorTabsVisible(page) {
+    await page
+        .locator(".editor-group-container .tabs-and-actions-container:visible")
+        .waitFor({ state: "visible", timeout: 30_000 });
+    assert(
+        (await page.locator(".editor-group-container .tabs-container .tab:visible").count()) > 0,
+        "the extension hid VS Code's editor tabs for the entire window",
     );
 }
 
@@ -567,7 +627,7 @@ async function waitForEmptyReview(page, podName) {
         .locator(".editor-instance:visible .multiDiffEditor .placeholder.visible")
         .filter({ hasText: "No Changed Files" });
     await emptyReview.waitFor({ state: "visible", timeout: 30_000 });
-    await assertEditorTabsHidden(page);
+    await assertEditorTabsVisible(page);
     assert.equal(
         await page.locator(".monaco-diff-editor:visible").count(),
         0,
@@ -606,6 +666,23 @@ async function assertNoNativeAgentEditor(page, podName) {
         labels.every((label) => !label.includes("Rumpelpod:")),
         `the embedded agent was also opened as a native editor: ${JSON.stringify(labels)}`,
     );
+}
+
+async function verifyNormalFileUsesTabs(page, fileName, podName) {
+    await page.keyboard.press("Control+P");
+    const input = page.locator(".quick-input-widget:visible input");
+    await input.waitFor({ state: "visible", timeout: 30_000 });
+    await input.fill(fileName);
+    await waitForQuickPickLabels(page, [fileName]);
+    await selectQuickPick(page, fileName);
+    const fileTab = page.locator(".tab:visible").filter({ hasText: fileName }).first();
+    await fileTab.waitFor({ state: "visible", timeout: 30_000 });
+    assert(
+        await page.locator(".tab:visible").filter({ hasText: podName }).count(),
+        "opening a normal file removed the pinned pod review tab",
+    );
+    await page.keyboard.press("Control+W");
+    await fileTab.waitFor({ state: "hidden", timeout: 30_000 });
 }
 
 async function assertSidebarAndDiffGeometry(page, terminal, diffEditor) {
@@ -664,14 +741,13 @@ async function main() {
         await openCodeServer(page, url);
 
         await openRumpelpodView(page);
-        const initialSwitcher = page.locator(".quick-input-widget:visible");
-        await initialSwitcher.waitFor({ state: "visible", timeout: 30_000 });
-        const initialRows = await quickPickRows(page).allTextContents();
+        const initialSwitcher = await waitForInitialPodSwitcher(page);
+        const initialRows = await popoverRows(initialSwitcher.popover).allTextContents();
         assert(
             initialRows.some((label) => label.includes(podName)),
             `pod switcher omitted ${podName}: ${JSON.stringify(initialRows)}`,
         );
-        await selectQuickPick(page, podName);
+        await selectPopoverOption(initialSwitcher.popover, podName);
 
         const initialView = await waitForAgentView(page, podName);
         await waitForCodexPrompt(page, initialView.terminal);
@@ -695,6 +771,8 @@ async function main() {
             !(await page.title()).includes("-review.txt"),
             "a clean pod opened a synthetic review document",
         );
+        await verifyNormalFileUsesTabs(page, changedFile, podName);
+        await waitForEmptyReview(page, podName);
         await capture(page, artifacts, "01-default-chat.png");
 
         await focusTerminalInput(initialView.terminal);
@@ -736,8 +814,8 @@ async function main() {
             podContent,
         );
 
-        await openPodSwitcher(page);
-        const rowsAfterCommit = await quickPickRows(page).allTextContents();
+        const podSwitcher = await openPodSwitcher(page);
+        const rowsAfterCommit = await popoverRows(podSwitcher.popover).allTextContents();
         assert(
             rowsAfterCommit.some(
                 (label) =>
@@ -749,9 +827,7 @@ async function main() {
         );
         await capture(page, artifacts, "03-pod-switcher.png");
         await page.keyboard.press("Escape");
-        await page
-            .locator(".quick-input-widget:visible")
-            .waitFor({ state: "hidden", timeout: 30_000 });
+        await podSwitcher.popover.waitFor({ state: "hidden", timeout: 30_000 });
 
         const viewWhileShellIsOpen = await waitForAgentView(page, podName);
         const agentSessionBeforeSwitch = await viewWhileShellIsOpen.body.getAttribute(
@@ -842,18 +918,80 @@ async function main() {
         await typeInTerminal(page, restoredShell, "exit");
         await pressInTerminal(page, restoredShell, "Enter");
         await restoredShell.waitFor({ state: "hidden", timeout: 30_000 });
-        await openAgentTab(page, viewWhileShellIsOpen);
+        const agentBodyHandle = await viewWhileShellIsOpen.body.elementHandle();
+        assert(agentBodyHandle, "agent view body was missing after the shell exited");
+        await page.waitForFunction(
+            (body) => body.dataset.rumpelpodActiveTab === "agent",
+            agentBodyHandle,
+            { timeout: 30_000 },
+        );
+        await agentBodyHandle.dispose();
+        await viewWhileShellIsOpen.frame
+            .locator("#terminal-tabs")
+            .waitFor({ state: "hidden", timeout: 30_000 });
+        await viewWhileShellIsOpen.terminal.waitFor({ state: "visible", timeout: 30_000 });
 
-        const createPod = page.locator('.part.sidebar:visible [aria-label="Create Pod"]').first();
-        await createPod.waitFor({ state: "visible", timeout: 30_000 });
-        await createPod.click();
-        const agentLabels = await waitForQuickPickLabels(page, ["Claude Code", "Codex"]);
-        assert(agentLabels.includes("Claude Code"), `agent picker omitted Claude: ${agentLabels}`);
-        assert(agentLabels.includes("Codex"), `agent picker omitted Codex: ${agentLabels}`);
+        const moreActions = viewWhileShellIsOpen.frame.locator("#more-actions");
+        await moreActions.click();
+        const morePopover = viewWhileShellIsOpen.frame.locator("#more-popover");
+        await morePopover.waitFor({ state: "visible", timeout: 30_000 });
+        await assertPopoverAnchored(moreActions, morePopover);
+        const moreLabels = await popoverRows(morePopover).allTextContents();
+        assert(
+            moreLabels.some((label) => label.includes("Refresh pod")) &&
+                moreLabels.some((label) => label.includes("Restart agent attachment")),
+            `pod action menu omitted commands: ${JSON.stringify(moreLabels)}`,
+        );
+        await page.keyboard.press("Escape");
+        await morePopover.waitFor({ state: "hidden", timeout: 30_000 });
+
+        const changeAgent = viewWhileShellIsOpen.frame.locator("#change-agent");
+        await changeAgent.click();
+        const agentPopover = viewWhileShellIsOpen.frame.locator("#agent-popover");
+        await agentPopover.waitFor({ state: "visible", timeout: 30_000 });
+        await assertPopoverAnchored(changeAgent, agentPopover);
+        const agentLabels = await popoverRows(agentPopover).allTextContents();
+        assert(
+            agentLabels.some((label) => label.includes("Claude Code")),
+            `agent picker omitted Claude: ${JSON.stringify(agentLabels)}`,
+        );
+        assert(
+            agentLabels.some((label) => label.includes("Codex")),
+            `agent picker omitted Codex: ${JSON.stringify(agentLabels)}`,
+        );
+        assert(
+            (await agentPopover.locator(":focus").textContent())?.includes("Codex"),
+            "agent picker did not focus the current agent",
+        );
+        await page.keyboard.press("ArrowDown");
+        assert(
+            (await agentPopover.locator(":focus").textContent())?.includes("Grok"),
+            "agent picker did not move focus with ArrowDown",
+        );
+        await page.keyboard.press("ArrowUp");
+        assert.equal(
+            await page.locator(".quick-input-widget:visible").count(),
+            0,
+            "agent selection opened VS Code Quick Access",
+        );
         await capture(page, artifacts, "04-agent-picker.png");
-        await selectQuickPick(page, "Codex");
+        await page.keyboard.press("Escape");
+        await agentPopover.waitFor({ state: "hidden", timeout: 30_000 });
 
-        const podNameInput = page.locator(".quick-input-widget:visible input");
+        const createPod = viewWhileShellIsOpen.frame.locator("#create-pod");
+        await createPod.click();
+        const createPopover = viewWhileShellIsOpen.frame.locator("#create-popover");
+        await createPopover.waitFor({ state: "visible", timeout: 30_000 });
+        await assertPopoverAnchored(createPod, createPopover);
+        assert.equal(
+            await page.locator(".quick-input-widget:visible").count(),
+            0,
+            "pod creation opened VS Code Quick Access",
+        );
+        const agentOptions = await createPopover.locator("#pod-agent-input option").allTextContents();
+        assert(agentOptions.includes("Claude Code"), `pod creation omitted Claude: ${agentOptions}`);
+        assert(agentOptions.includes("Codex"), `pod creation omitted Codex: ${agentOptions}`);
+        const podNameInput = createPopover.locator("#pod-name-input");
         await podNameInput.waitFor({ state: "visible", timeout: 30_000 });
         assert.equal(
             await podNameInput.getAttribute("placeholder"),
@@ -862,7 +1000,8 @@ async function main() {
         );
         await podNameInput.fill(createdPodName);
         await capture(page, artifacts, "05-pod-name.png");
-        await page.keyboard.press("Enter");
+        await createPopover.locator('button[type="submit"]').click();
+        await createPopover.waitFor({ state: "hidden", timeout: 30_000 });
 
         const createdView = await waitForAgentView(page, createdPodName);
         await waitForCodexPrompt(page, createdView.terminal);
@@ -887,8 +1026,8 @@ async function main() {
         await waitForEmptyReview(page, createdPodName);
         await assertSingleOpenReview(page, createdPodName);
 
-        await openPodSwitcher(page);
-        const listedPods = await quickPickRows(page).allTextContents();
+        const restoredPodSwitcher = await openPodSwitcher(page);
+        const listedPods = await popoverRows(restoredPodSwitcher.popover).allTextContents();
         assert(
             listedPods.some((label) => label.includes(podName)),
             `existing pod disappeared from the switcher: ${JSON.stringify(listedPods)}`,
@@ -897,7 +1036,7 @@ async function main() {
             listedPods.some((label) => label.includes(createdPodName)),
             `created pod was not listed in the switcher: ${JSON.stringify(listedPods)}`,
         );
-        await selectQuickPick(page, podName);
+        await selectPopoverOption(restoredPodSwitcher.popover, podName);
 
         const switchedView = await waitForAgentView(page, podName);
         await waitForCodexPrompt(page, switchedView.terminal, false);
