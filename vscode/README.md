@@ -8,9 +8,13 @@ native VS Code multi-diff in the main editor area. VS Code and the user's
 side by side.
 
 Click the Rumpelpod Activity Bar icon to enter the mode. Click the pod name at
-the top of the view to switch pods. The icons beside it open a pod shell,
-launch another agent, create a pod, and expose diff, refresh, and restart actions.
-Selectors and pod creation stay beside those controls in sidebar popovers.
+the top of the view to switch pods. The `+` in the native view title creates a
+pod, separate from the controls that operate on the selected pod. The icons in
+the pod header open a shell, launch another agent, and merge the pod. Its
+overflow menu groups review actions, SSH key access, and the stop and delete
+lifecycle actions. Adding an SSH key opens VS Code's extension-host file picker;
+encrypted keys prompt for their passphrase without storing it.
+Selectors and pod creation stay beside their controls in sidebar popovers.
 A single session uses the whole sidebar; named agent and shell tabs appear only
 while two or more sessions are open. Launching Claude while Codex is open keeps
 both independent PTYs alive instead of replacing one with the other. Selecting

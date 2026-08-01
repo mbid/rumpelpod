@@ -76,12 +76,39 @@
         "icon": "$(terminal)"
       },
       {
-        "command": "rumpelpod.restartSession",
-        "title": "Restart Current Session",
+        "command": "rumpelpod.mergeActivePod",
+        "title": "Merge Active Pod",
         "category": "Rumpelpod",
-        "icon": "$(debug-restart)"
+        "icon": "$(git-merge)"
+      },
+      {
+        "command": "rumpelpod.addSshKey",
+        "title": "Add SSH Key to Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(key)"
+      },
+      {
+        "command": "rumpelpod.stopActivePod",
+        "title": "Stop Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "rumpelpod.deleteActivePod",
+        "title": "Delete Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(trash)"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "rumpelpod.createPod",
+          "when": "view == rumpelpod.agent",
+          "group": "navigation@1"
+        }
+      ]
+    },
     "configuration": {
       "title": "Rumpelpod",
       "properties": {

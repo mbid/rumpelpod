@@ -31,6 +31,21 @@ function requiredEnvironment(name) {
     return value;
 }
 
+async function waitForAction(actionLog, expected, occurrences = 1) {
+    const deadline = Date.now() + 30_000;
+    let content = "";
+    while (Date.now() < deadline) {
+        if (fs.existsSync(actionLog)) {
+            content = fs.readFileSync(actionLog, "utf8");
+            if (content.split("\n").filter((line) => line === expected).length >= occurrences) {
+                return;
+            }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error(`action log omitted ${JSON.stringify(expected)}: ${JSON.stringify(content)}`);
+}
+
 async function capture(page, artifacts, name) {
     fs.mkdirSync(artifacts, { recursive: true });
     const artifactPath = path.join(artifacts, name);
@@ -61,6 +76,22 @@ function statusItem(page, text) {
 async function waitForStatusItem(page, text) {
     const status = statusItem(page, text);
     await status.waitFor({ state: "visible", timeout: 30_000 });
+    return status;
+}
+
+async function waitForStatusState(page, podName, state) {
+    const status = await waitForStatusItem(page, podName);
+    await page.waitForFunction(
+        ({ pod, expected }) => {
+            const items = Array.from(document.querySelectorAll(".statusbar-item"));
+            return items.some((item) => {
+                const text = item.textContent ?? "";
+                return text.includes(pod) && text.includes(`/ ${expected}`);
+            });
+        },
+        { pod: podName, expected: state },
+        { timeout: 90_000 },
+    );
     return status;
 }
 
@@ -153,6 +184,14 @@ async function togglePopover(trigger, popover) {
     await assertPopoverAnchored(trigger, popover);
 }
 
+async function toggleNativeCreatePopover(trigger, popover) {
+    await trigger.click();
+    await popover.waitFor({ state: "hidden", timeout: 30_000 });
+    await trigger.click();
+    await popover.waitFor({ state: "visible", timeout: 30_000 });
+    await assertNativePopoverAnchored(trigger, popover);
+}
+
 function popoverRows(popover) {
     return popover.locator('[role="option"], [role="menuitem"]');
 }
@@ -184,6 +223,32 @@ async function assertPopoverAnchored(trigger, popover) {
         popoverBounds.width <= viewportWidth - 8,
         `popover escaped the sidebar webview: ${JSON.stringify({ viewportWidth, popoverBounds })}`,
     );
+}
+
+async function assertNativePopoverAnchored(trigger, popover) {
+    const triggerBounds = await trigger.boundingBox();
+    const popoverBounds = await popover.boundingBox();
+    assert(triggerBounds, "native create action had no bounds");
+    assert(popoverBounds, "create popover had no bounds");
+    assert(
+        Math.max(triggerBounds.x, popoverBounds.x) <=
+            Math.min(triggerBounds.x + triggerBounds.width, popoverBounds.x + popoverBounds.width),
+        `create popover was not aligned with the native action: ${JSON.stringify({ triggerBounds, popoverBounds })}`,
+    );
+    assert(
+        popoverBounds.y >= triggerBounds.y + triggerBounds.height - 1 &&
+            popoverBounds.y - (triggerBounds.y + triggerBounds.height) <= 24,
+        `create popover did not open below the native action: ${JSON.stringify({ triggerBounds, popoverBounds })}`,
+    );
+}
+
+async function confirmModal(page, message, action) {
+    const dialog = page.locator(".monaco-dialog-box:visible").filter({ hasText: message });
+    await dialog.waitFor({ state: "visible", timeout: 30_000 });
+    const button = dialog.getByRole("button", { name: action, exact: true });
+    await button.waitFor({ state: "visible", timeout: 30_000 });
+    await button.click();
+    await dialog.waitFor({ state: "hidden", timeout: 30_000 });
 }
 
 function quickPickRows(page) {
@@ -371,12 +436,21 @@ async function waitForAgentView(page, podName, agent = "codex", expectedAgents =
         "agent view header did not show only the active pod name",
     );
     await frame.locator("#pod-chevron").waitFor({ state: "visible", timeout: 30_000 });
-    for (const label of ["Open shell", "Launch agent", "Create pod", "More pod actions"]) {
+    for (const label of ["Open shell", "Launch agent", "Merge pod", "More pod actions"]) {
         await frame.locator(`[aria-label="${label}"]`).waitFor({
             state: "visible",
             timeout: 30_000,
         });
     }
+    assert.equal(
+        await frame.locator("#create-pod").count(),
+        0,
+        "pod-local actions still contained Create Pod",
+    );
+    await page
+        .locator('.part.sidebar:visible [aria-label="Create Pod"]')
+        .first()
+        .waitFor({ state: "visible", timeout: 30_000 });
     const agentTab = frame.locator(`#${agent}-tab`);
     assert.equal((await agentTab.textContent())?.trim(), agent, "agent terminal tab was mislabeled");
     assert.equal(
@@ -887,6 +961,7 @@ async function main() {
     const home = requiredEnvironment("RUMPELPOD_VSCODE_HOME");
     const executablePath = requiredEnvironment("RUMPELPOD_CHROMIUM");
     const artifacts = requiredEnvironment("RUMPELPOD_VSCODE_ARTIFACTS");
+    const actionLog = requiredEnvironment("RUMPELPOD_VSCODE_ACTION_LOG");
     const referenceImages = process.env.RUMPELPOD_VSCODE_REFERENCE_IMAGES;
 
     const browser = await chromium.launch({
@@ -1229,18 +1304,28 @@ async function main() {
         assert(
             moreLabels.some((label) => label.includes("View diff")) &&
                 moreLabels.some((label) => label.includes("Refresh pod")) &&
-                moreLabels.some((label) => label.includes("Restart")),
+                moreLabels.some((label) => label.includes("Add SSH key")) &&
+                moreLabels.some((label) => label.includes("Stop pod")) &&
+                moreLabels.some((label) => label.includes("Delete pod")) &&
+                moreLabels.every((label) => !label.includes("Restart")),
             `pod action menu omitted commands: ${JSON.stringify(moreLabels)}`,
+        );
+        assert.equal(
+            await morePopover.locator('[role="separator"]').count(),
+            2,
+            "pod action menu did not group secondary and lifecycle actions",
         );
         await page.keyboard.press("Escape");
         await morePopover.waitFor({ state: "hidden", timeout: 30_000 });
 
-        const createPod = viewWhileShellIsOpen.frame.locator("#create-pod");
+        const createPod = page
+            .locator('.part.sidebar:visible [aria-label="Create Pod"]')
+            .first();
         await createPod.click();
         const createPopover = viewWhileShellIsOpen.frame.locator("#create-popover");
         await createPopover.waitFor({ state: "visible", timeout: 30_000 });
-        await assertPopoverAnchored(createPod, createPopover);
-        await togglePopover(createPod, createPopover);
+        await assertNativePopoverAnchored(createPod, createPopover);
+        await toggleNativeCreatePopover(createPod, createPopover);
         assert.equal(
             await page.locator(".quick-input-widget:visible").count(),
             0,
@@ -1378,6 +1463,69 @@ async function main() {
             "reload restored more than one embedded agent terminal",
         );
         await capture(page, artifacts, "08-restored-chat.png");
+
+        const restoredMoreActions = restoredView.frame.locator("#more-actions");
+        await restoredMoreActions.click();
+        const restoredMorePopover = restoredView.frame.locator("#more-popover");
+        await restoredMorePopover.waitFor({ state: "visible", timeout: 30_000 });
+        await selectPopoverOption(restoredMorePopover, "Add SSH key...");
+        const keyPicker = page.locator(".quick-input-widget:visible");
+        await keyPicker.waitFor({ state: "visible", timeout: 30_000 });
+        assert(
+            ((await keyPicker.textContent()) ?? "").includes("Add SSH key") ||
+                ((await keyPicker.getAttribute("aria-label")) ?? "").includes("Add SSH key"),
+            "SSH key action did not open a file-selection dialog",
+        );
+        const sshKeyName = "id-vscode-test";
+        const sshKeyPath = path.join(home, ".ssh", sshKeyName);
+        const sshKeyRow = quickPickRows(page).filter({ hasText: sshKeyName }).first();
+        await sshKeyRow.waitFor({ state: "visible", timeout: 30_000 });
+        await sshKeyRow.click();
+        await keyPicker.waitFor({ state: "hidden", timeout: 30_000 });
+        const passphraseDialog = page.locator(".quick-input-widget:visible");
+        const passphraseInput = passphraseDialog.locator('input[type="password"]');
+        await passphraseInput.waitFor({ state: "visible", timeout: 30_000 });
+        await passphraseInput.fill("vscode-passphrase");
+        await page.keyboard.press("Enter");
+        await passphraseDialog.waitFor({ state: "hidden", timeout: 30_000 });
+        await waitForAction(actionLog, `ssh-add ${podName} ${sshKeyPath}`, 2);
+
+        await restoredView.frame.locator("#merge-pod").click();
+        await confirmModal(page, `Merge pod '${podName}'`, "Merge Pod");
+        await waitForAction(actionLog, `merge ${podName} --no-edit`);
+
+        const lifecycleSwitcher = await openPodSwitcher(page);
+        await selectPopoverOption(lifecycleSwitcher.popover, createdPodName);
+        const lifecycleView = await waitForAgentView(page, createdPodName);
+        const lifecycleMore = lifecycleView.frame.locator("#more-actions");
+        await lifecycleMore.click();
+        const lifecyclePopover = lifecycleView.frame.locator("#more-popover");
+        await lifecyclePopover.waitFor({ state: "visible", timeout: 30_000 });
+        await selectPopoverOption(lifecyclePopover, "Stop pod");
+        await waitForAction(actionLog, `stop --wait ${createdPodName}`);
+        await waitForStatusState(page, createdPodName, "stopped");
+
+        await lifecycleMore.click();
+        await lifecyclePopover.waitFor({ state: "visible", timeout: 30_000 });
+        await selectPopoverOption(lifecyclePopover, "Delete pod...");
+        await confirmModal(page, `Permanently delete pod '${createdPodName}'`, "Delete Pod");
+        await waitForAction(actionLog, `delete --wait --force ${createdPodName}`);
+        const lifecycleBody = await lifecycleView.body.elementHandle();
+        assert(lifecycleBody !== null, "deleted pod view body disappeared before it was cleared");
+        await page.waitForFunction(
+            (body) => body.dataset.rumpelpodPod === "",
+            lifecycleBody,
+            { timeout: 30_000 },
+        );
+        await lifecycleBody.dispose();
+        const remainingPods = await openPodSwitcher(page);
+        const remainingPodLabels = await popoverRows(remainingPods.popover).allTextContents();
+        assert(
+            remainingPodLabels.every((label) => !label.includes(createdPodName)),
+            `deleted pod remained in selector: ${JSON.stringify(remainingPodLabels)}`,
+        );
+        await page.keyboard.press("Escape");
+        await remainingPods.popover.waitFor({ state: "hidden", timeout: 30_000 });
         assert.equal(
             browserErrors.length,
             0,

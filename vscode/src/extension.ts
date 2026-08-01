@@ -11,7 +11,7 @@ import { AGENT_VIEW_ID, AgentTerminals, type AgentViewAction } from "./terminal"
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Rumpelpod", { log: true });
-  const model = new RumpelpodModel(context.workspaceState, output);
+  const model = new RumpelpodModel(context.workspaceState, output, context.extensionUri);
   const terminals = new AgentTerminals(context.extensionUri, (operation, error) => {
     model.logError(operation, error);
   });
@@ -60,8 +60,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("rumpelpod.openActiveShell", () =>
       runCommand(model, "opening a pod shell", async () => controller.openActiveShell()),
     ),
-    vscode.commands.registerCommand("rumpelpod.restartSession", () =>
-      runCommand(model, "restarting the current session", () => controller.restartCurrentSession()),
+    vscode.commands.registerCommand("rumpelpod.mergeActivePod", () =>
+      runCommand(model, "merging the active pod", () => controller.mergeActivePod()),
+    ),
+    vscode.commands.registerCommand("rumpelpod.addSshKey", () =>
+      runCommand(model, "adding an SSH key", () => controller.addSshKey()),
+    ),
+    vscode.commands.registerCommand("rumpelpod.stopActivePod", () =>
+      runCommand(model, "stopping the active pod", () => controller.stopActivePod()),
+    ),
+    vscode.commands.registerCommand("rumpelpod.deleteActivePod", () =>
+      runCommand(model, "deleting the active pod", () => controller.deleteActivePod()),
     ),
     vscode.workspace.onDidChangeConfiguration((event) => {
       if (event.affectsConfiguration("rumpelpod.executable")) {
@@ -89,11 +98,14 @@ function dismissFailedMenu(terminals: AgentTerminals, action: AgentViewAction): 
       terminals.dismissMenu(action.request);
       return;
     case "createPod":
+    case "addSshKey":
     case "openPod":
     case "openShell":
     case "refresh":
     case "launchAgent":
-    case "restartSession":
+    case "deletePod":
+    case "mergePod":
+    case "stopPod":
     case "viewDiff":
       return;
   }
@@ -103,10 +115,16 @@ function viewActionContext(action: AgentViewAction): string {
   switch (action.type) {
     case "launchAgentMenu":
       return "opening the agent selector";
+    case "addSshKey":
+      return "adding an SSH key";
     case "createPod":
       return "creating a pod";
     case "createPodMenu":
       return "opening pod creation";
+    case "deletePod":
+      return "deleting the active pod";
+    case "mergePod":
+      return "merging the active pod";
     case "openPod":
       return "selecting a pod";
     case "openShell":
@@ -117,8 +135,8 @@ function viewActionContext(action: AgentViewAction): string {
       return "refreshing the active pod";
     case "launchAgent":
       return "launching an agent";
-    case "restartSession":
-      return "restarting the current session";
+    case "stopPod":
+      return "stopping the active pod";
     case "viewDiff":
       return "opening the active pod diff";
   }

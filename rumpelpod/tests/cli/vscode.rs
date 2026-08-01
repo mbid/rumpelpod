@@ -201,6 +201,7 @@ fn start_code_server(
     user_data_dir: &Path,
     extensions_dir: &Path,
     sync_violation: &Path,
+    action_log: &Path,
 ) -> (CodeServer, u16) {
     let ambient_path = std::env::var("PATH").expect("PATH is not set");
     let daemon_bin = daemon.bin_dir.display();
@@ -232,6 +233,7 @@ fn start_code_server(
                 daemon.bin_dir.join("rumpel"),
             )
             .env("RUMPELPOD_VSCODE_SYNC_VIOLATION", sync_violation)
+            .env("RUMPELPOD_VSCODE_ACTION_LOG", action_log)
             .stdin(Stdio::null());
         let child = command
             .spawn_with_logging("CODE-SERVER")
@@ -278,6 +280,14 @@ fn write_extension_rumpel_wrapper(directory: &Path) -> PathBuf {
                     fi
                 done
             fi
+            case "$1" in
+                merge|stop|delete|ssh-add)
+                    printf '%s\n' "$*" >> "$RUMPELPOD_VSCODE_ACTION_LOG"
+                    ;;
+            esac
+            if [ "$1" = "merge" ]; then
+                exit 0
+            fi
             exec "$RUMPELPOD_VSCODE_REAL_RUMPEL" "$@"
         "#},
     )
@@ -297,6 +307,7 @@ fn run_browser_assertions(
     artifacts: &Path,
     repo: &TestRepo,
     daemon: &TestDaemon,
+    action_log: &Path,
 ) {
     fs::create_dir_all(artifacts).expect("create browser artifact directory");
     let script = root.join("integration/vscode/browser.cjs");
@@ -316,6 +327,7 @@ fn run_browser_assertions(
         .env("RUMPELPOD_VSCODE_HOME", &daemon.home_path)
         .env("RUMPELPOD_CHROMIUM", chromium)
         .env("RUMPELPOD_VSCODE_ARTIFACTS", artifacts)
+        .env("RUMPELPOD_VSCODE_ACTION_LOG", action_log)
         .status()
         .expect("run Playwright browser assertions");
     assert!(status.success(), "Playwright browser assertions failed");
@@ -550,6 +562,7 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
 
     let home = TestHome::new();
     crate::codex::common::setup_controlled_home(&home);
+    home.link_local_bins(&["ssh-agent", "ssh-add"]);
     let executor = ExecutorResources::setup(&home);
     let daemon = TestDaemon::start_with_local_llm_clis(&home);
     write_test_devcontainer(&repo, "", "");
@@ -566,6 +579,16 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     fs::create_dir_all(&extensions_dir).expect("create code-server extension directory");
     let extension_rumpel = write_extension_rumpel_wrapper(browser_home.path());
     let sync_violation = browser_home.path().join("unexpected-list-sync");
+    let action_log = browser_home.path().join("actions.log");
+    let ssh_directory = daemon.home_path.join(".ssh");
+    fs::create_dir_all(&ssh_directory).expect("create SSH key directory");
+    let ssh_key = ssh_directory.join("id-vscode-test");
+    Command::new("ssh-keygen")
+        .args(["-t", "ed25519", "-f"])
+        .arg(&ssh_key)
+        .args(["-N", "vscode-passphrase", "-q"])
+        .success()
+        .expect("generate SSH key picker fixture");
     write_code_server_settings(&user_data_dir, &extension_rumpel);
     install_extension(&code_server, &vsix, &user_data_dir, &extensions_dir);
 
@@ -576,11 +599,28 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
         &user_data_dir,
         &extensions_dir,
         &sync_violation,
+        &action_log,
     );
     let artifacts = root
         .join("target/vscode-integration")
         .join(std::process::id().to_string());
-    run_browser_assertions(&root, port, &chromium, &artifacts, &repo, &daemon);
+    run_browser_assertions(
+        &root,
+        port,
+        &chromium,
+        &artifacts,
+        &repo,
+        &daemon,
+        &action_log,
+    );
+    let ssh_identities = pod_command(&repo, &daemon)
+        .args(["ssh-add", POD_NAME, "-l"])
+        .success()
+        .expect("list identities added by the VS Code extension");
+    assert!(
+        String::from_utf8_lossy(&ssh_identities).contains("ED25519"),
+        "VS Code did not add the selected SSH identity"
+    );
     assert!(
         !sync_violation.exists(),
         "an ordinary VS Code UI operation invoked rumpel list --sync"

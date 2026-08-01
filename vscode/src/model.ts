@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 
 import type { AgentKind, PodInfo, ReviewPlan } from "./generated/protocol";
 import { isAgentKind } from "./agents";
-import { runProcess } from "./process";
+import { ProcessError, runProcess } from "./process";
 
 const LAUNCHED_AGENTS_KEY = "rumpelpod.launchedAgents";
 const LAST_POD_KEY = "rumpelpod.lastPod";
@@ -21,12 +21,20 @@ interface LastPod {
   readonly pod: string;
 }
 
+export class SshPassphraseRequiredError extends Error {
+  public constructor(cause: unknown) {
+    super("the selected SSH key requires a passphrase", { cause });
+    this.name = "SshPassphraseRequiredError";
+  }
+}
+
 export class RumpelpodModel {
   private repositoriesPromise: Promise<readonly Repository[]> | undefined;
 
   public constructor(
     private readonly workspaceState: vscode.Memento,
     private readonly output: vscode.OutputChannel,
+    private readonly extensionUri: vscode.Uri,
   ) {}
 
   public async repositories(): Promise<readonly Repository[]> {
@@ -54,6 +62,49 @@ export class RumpelpodModel {
       throw new Error("rumpel review --json returned an unexpected payload");
     }
     return parsed;
+  }
+
+  public async mergePod(repository: Repository, pod: string): Promise<void> {
+    await this.runRumpel(repository, ["merge", pod, "--no-edit"]);
+  }
+
+  public async stopPod(repository: Repository, pod: string): Promise<void> {
+    await this.runRumpel(repository, ["stop", "--wait", pod]);
+  }
+
+  public async deletePod(repository: Repository, pod: string): Promise<void> {
+    await this.runRumpel(repository, ["delete", "--wait", "--force", pod]);
+  }
+
+  public async addSshKey(
+    repository: Repository,
+    pod: string,
+    keyPath: string,
+    passphrase?: string,
+  ): Promise<void> {
+    const environment = passphrase === undefined
+      ? undefined
+      : {
+        DISPLAY: process.env.DISPLAY ?? "rumpelpod-vscode",
+        RUMPELPOD_VSCODE_SSH_PASSPHRASE: passphrase,
+        SSH_ASKPASS: vscode.Uri.joinPath(
+          this.extensionUri,
+          "media",
+          "ssh-askpass.sh",
+        ).fsPath,
+        SSH_ASKPASS_REQUIRE: "force",
+      };
+    try {
+      await this.runRumpel(repository, ["ssh-add", pod, keyPath], environment);
+    } catch (error) {
+      if (
+        error instanceof ProcessError &&
+        error.stderr.toLowerCase().includes("passphrase")
+      ) {
+        throw new SshPassphraseRequiredError(error);
+      }
+      throw error;
+    }
   }
 
   public launchedAgents(repository: Repository, pod: string): readonly AgentKind[] | undefined {
@@ -109,6 +160,16 @@ export class RumpelpodModel {
     } satisfies LastPod);
   }
 
+  public async forgetPod(repository: Repository, pod: string): Promise<void> {
+    const sessions = this.savedAgentSessions();
+    delete sessions[assignmentKey(repository, pod)];
+    await this.workspaceState.update(LAUNCHED_AGENTS_KEY, sessions);
+    const last = this.lastPod();
+    if (last?.repository === repository.root && last.pod === pod) {
+      await this.workspaceState.update(LAST_POD_KEY, undefined);
+    }
+  }
+
   public lastPod(): LastPod | undefined {
     const value = this.workspaceState.get<unknown>(LAST_POD_KEY);
     if (
@@ -137,10 +198,14 @@ export class RumpelpodModel {
     return { ...value };
   }
 
-  private async runRumpel(repository: Repository, args: readonly string[]): Promise<string> {
+  private async runRumpel(
+    repository: Repository,
+    args: readonly string[],
+    environment?: NodeJS.ProcessEnv,
+  ): Promise<string> {
     const executable = this.executable();
     this.output.appendLine(`$ ${[executable, ...args].join(" ")}`);
-    const result = await runProcess(executable, args, repository.root);
+    const result = await runProcess(executable, args, repository.root, { environment });
     const stderr = result.stderr.toString("utf8").trim();
     if (stderr.length > 0) {
       this.output.appendLine(stderr);

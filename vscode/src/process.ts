@@ -10,6 +10,11 @@ export interface ProcessOutput {
   stderr: Buffer;
 }
 
+export interface RunProcessOptions {
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly maxOutput?: number;
+}
+
 export class ProcessError extends Error {
   public constructor(
     public readonly program: string,
@@ -28,11 +33,15 @@ export function runProcess(
   program: string,
   args: readonly string[],
   cwd: string,
-  maxOutput = DEFAULT_MAX_OUTPUT,
+  options: RunProcessOptions = {},
 ): Promise<ProcessOutput> {
+  const maxOutput = options.maxOutput ?? DEFAULT_MAX_OUTPUT;
   return new Promise((resolve, reject) => {
     const child = spawn(program, args, {
       cwd,
+      env: options.environment === undefined
+        ? undefined
+        : { ...process.env, ...options.environment },
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });

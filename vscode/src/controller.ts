@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import * as os from "node:os";
+import * as path from "node:path";
 import * as vscode from "vscode";
 
 import type { AgentKind, PodInfo } from "./generated/protocol";
 import { AGENTS, agentDescription, agentLabel } from "./agents";
-import type { Repository, RumpelpodModel } from "./model";
+import { SshPassphraseRequiredError, type Repository, type RumpelpodModel } from "./model";
 import type { ReviewDocuments } from "./review";
 import type {
   AgentMenuOption,
@@ -27,6 +29,7 @@ export class RumpelpodController implements vscode.Disposable {
   private active: ActivePod | undefined;
   private agentLaunches = Promise.resolve();
   private modeEntries = Promise.resolve();
+  private podOperations = Promise.resolve();
   private reviewUpdates = Promise.resolve();
   private selectionGeneration = 0;
   private statusUpdates = Promise.resolve();
@@ -196,11 +199,20 @@ export class RumpelpodController implements vscode.Disposable {
       case "launchAgentMenu":
         await this.launchAgentMenu(action.request);
         return;
+      case "addSshKey":
+        await this.addSshKey();
+        return;
       case "createPod":
         await this.createPodSelection(action.repository, action.agent, action.pod);
         return;
       case "createPodMenu":
         await this.createPod(action.request);
+        return;
+      case "deletePod":
+        await this.deleteActivePod();
+        return;
+      case "mergePod":
+        await this.mergeActivePod();
         return;
       case "openPod":
         await this.openPodSelection(action.repository, action.pod);
@@ -214,11 +226,11 @@ export class RumpelpodController implements vscode.Disposable {
       case "refresh":
         await this.refresh(true);
         return;
+      case "stopPod":
+        await this.stopActivePod();
+        return;
       case "viewDiff":
         await this.revealActiveReview();
-        return;
-      case "restartSession":
-        await this.restartCurrentSession();
         return;
       case "launchAgent":
         await this.launchAgent(action.agent);
@@ -364,8 +376,148 @@ export class RumpelpodController implements vscode.Disposable {
     );
   }
 
-  public restartCurrentSession(): Promise<void> {
-    return this.terminals.restartActive();
+  public mergeActivePod(): Promise<void> {
+    return this.enqueuePodOperation(async () => {
+      const selected = this.requireActivePod("merging");
+      const confirmation = await vscode.window.showWarningMessage(
+        `Merge pod '${selected.pod}' into the current branch?`,
+        {
+          detail: "A successful merge updates this checkout and stops the pod.",
+          modal: true,
+        },
+        "Merge Pod",
+      );
+      if (confirmation !== "Merge Pod" || this.currentSelection(selected) === undefined) {
+        return;
+      }
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Merging pod ${selected.pod}`,
+        },
+        () => this.model.mergePod(selected.repository, selected.pod),
+      );
+      if (this.currentSelection(selected) !== undefined) {
+        await this.refresh(false);
+      }
+      void vscode.window.showInformationMessage(`Merged pod '${selected.pod}'.`);
+    });
+  }
+
+  public stopActivePod(): Promise<void> {
+    return this.enqueuePodOperation(async () => {
+      const selected = this.requireActivePod("stopping");
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Stopping pod ${selected.pod}`,
+        },
+        () => this.model.stopPod(selected.repository, selected.pod),
+      );
+      if (this.currentSelection(selected) !== undefined) {
+        await this.refresh(false);
+      }
+    });
+  }
+
+  public deleteActivePod(): Promise<void> {
+    return this.enqueuePodOperation(async () => {
+      const selected = this.requireActivePod("deleting");
+      const confirmation = await vscode.window.showWarningMessage(
+        `Permanently delete pod '${selected.pod}'?`,
+        {
+          detail: "The container and any unmerged work in this pod will be removed.",
+          modal: true,
+        },
+        "Delete Pod",
+      );
+      if (confirmation !== "Delete Pod" || this.currentSelection(selected) === undefined) {
+        return;
+      }
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Deleting pod ${selected.pod}`,
+        },
+        () => this.model.deletePod(selected.repository, selected.pod),
+      );
+      const cleanup: Promise<unknown>[] = [
+        this.model.forgetPod(selected.repository, selected.pod),
+        this.reviewDocuments.close(selected.repository, selected.pod),
+      ];
+      if (this.currentSelection(selected) !== undefined) {
+        this.selectionGeneration += 1;
+        this.active = undefined;
+        this.updateStatus();
+        cleanup.push(this.terminals.clearActive(selected.repository, selected.pod));
+      }
+      const failures = (await Promise.allSettled(cleanup))
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason);
+      if (failures.length === 1) {
+        throw failures[0];
+      }
+      if (failures.length > 1) {
+        throw new AggregateError(failures, "cleaning up the deleted pod UI failed");
+      }
+    });
+  }
+
+  public addSshKey(): Promise<void> {
+    return this.enqueuePodOperation(async () => {
+      const selected = this.requireActivePod("adding an SSH key to");
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        defaultUri: vscode.Uri.file(path.join(os.homedir(), ".ssh")),
+        openLabel: "Add SSH Key",
+        title: `Add SSH key to ${selected.pod}`,
+      });
+      const key = picked?.[0];
+      if (key === undefined || this.currentSelection(selected) === undefined) {
+        return;
+      }
+      if (key.scheme !== "file") {
+        throw new Error("select an SSH key from the extension host filesystem");
+      }
+      if (key.fsPath.endsWith(".pub")) {
+        throw new Error("select the private SSH key, not its .pub file");
+      }
+      let passphrase: string | undefined;
+      for (;;) {
+        try {
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: `Adding SSH key to ${selected.pod}`,
+            },
+            () => this.model.addSshKey(
+              selected.repository,
+              selected.pod,
+              key.fsPath,
+              passphrase,
+            ),
+          );
+          break;
+        } catch (error) {
+          if (!(error instanceof SshPassphraseRequiredError)) {
+            throw error;
+          }
+          passphrase = await vscode.window.showInputBox({
+            ignoreFocusOut: true,
+            password: true,
+            prompt: `Passphrase for ${path.basename(key.fsPath)}`,
+            title: `Add SSH key to ${selected.pod}`,
+            validateInput: (value) => value.length === 0 ? "Passphrase must not be empty" : undefined,
+          });
+          if (passphrase === undefined) {
+            return;
+          }
+        }
+      }
+      void vscode.window.showInformationMessage(`Added SSH key to pod '${selected.pod}'.`);
+    });
   }
 
   public async restoreLastPod(): Promise<boolean> {
@@ -436,6 +588,20 @@ export class RumpelpodController implements vscode.Disposable {
       return active;
     }
     return undefined;
+  }
+
+  private requireActivePod(operation: string): ActivePod {
+    const selected = this.active;
+    if (selected === undefined) {
+      throw new Error(`select a pod before ${operation} it`);
+    }
+    return selected;
+  }
+
+  private enqueuePodOperation(operation: () => Promise<void>): Promise<void> {
+    const result = this.podOperations.then(operation);
+    this.podOperations = result.catch(() => {});
+    return result;
   }
 
   private enqueueReviewUpdate(update: () => Promise<void>): Promise<void> {

@@ -10,6 +10,10 @@ import { Terminal } from "@xterm/xterm";
 type AgentKind = "claude" | "codex" | "grok" | "pi";
 type TerminalTab = AgentKind | "shell";
 type ViewState = "empty" | "exited" | "running" | "starting";
+type PopoverAnchor = HTMLButtonElement | "createPod";
+
+const CREATE_POD_ANCHOR = "createPod" satisfies PopoverAnchor;
+const BLUR_DISMISS_DELAY_MS = 250;
 
 interface WebviewApi<State> {
   getState(): State | undefined;
@@ -122,7 +126,7 @@ const body = document.body;
 const podSelector = requiredButton("pod-selector");
 const podName = requiredElement("pod-name");
 const launchAgent = requiredButton("launch-agent");
-const createPod = requiredButton("create-pod");
+const mergePod = requiredButton("merge-pod");
 const moreActions = requiredButton("more-actions");
 const openShell = requiredButton("open-shell");
 const popoverLayer = requiredElement("popover-layer");
@@ -172,9 +176,7 @@ podSelector.addEventListener("click", () => {
 launchAgent.addEventListener("click", () => {
   requestPopover(launchAgent, "Launch agent", "launchAgentMenu");
 });
-createPod.addEventListener("click", () => {
-  requestPopover(createPod, "Create pod", "createPodMenu");
-});
+mergePod.addEventListener("click", () => vscode.postMessage({ type: "mergePod" }));
 moreActions.addEventListener("click", () => renderMoreMenu());
 openShell.addEventListener("click", () => vscode.postMessage({ type: "openShell" }));
 
@@ -225,6 +227,7 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
       podName.textContent = message.pod.length === 0 ? "Select pod" : message.pod;
       const hasPod = message.pod.length > 0;
       launchAgent.disabled = !hasPod;
+      mergePod.disabled = !hasPod;
       moreActions.disabled = !hasPod;
       openShell.disabled = !hasPod;
       for (const tab of terminalTabs()) {
@@ -298,6 +301,7 @@ body.dataset.rumpelpodSession = "0";
 body.dataset.rumpelpodSessionCount = "0";
 body.dataset.rumpelpodState = "empty";
 launchAgent.disabled = true;
+mergePod.disabled = true;
 moreActions.disabled = true;
 openShell.disabled = true;
 updateSelectedTab();
@@ -310,7 +314,8 @@ vscode.postMessage({
 });
 
 let activePopover: HTMLElement | undefined;
-let activePopoverAnchor: HTMLButtonElement | undefined;
+let activePopoverAnchor: PopoverAnchor | undefined;
+let blurDismissal: number | undefined;
 let expectedMenuRequest = 0;
 let nextMenuRequest = 0;
 
@@ -320,7 +325,7 @@ document.addEventListener("pointerdown", (event) => {
     activePopover === undefined ||
     !(target instanceof Node) ||
     activePopover.contains(target) ||
-    activePopoverAnchor?.contains(target) === true
+    (activePopoverAnchor instanceof HTMLButtonElement && activePopoverAnchor.contains(target))
   ) {
     return;
   }
@@ -339,14 +344,18 @@ window.addEventListener("resize", () => {
 });
 window.addEventListener("blur", () => {
   if (activePopover !== undefined) {
-    dismissPopover();
+    cancelBlurDismissal();
+    blurDismissal = window.setTimeout(() => {
+      blurDismissal = undefined;
+      dismissPopover();
+    }, BLUR_DISMISS_DELAY_MS);
   }
 });
 
 function requestPopover(
   anchor: HTMLButtonElement,
   label: string,
-  type: "createPodMenu" | "launchAgentMenu" | "podMenu",
+  type: "launchAgentMenu" | "podMenu",
 ): void {
   if (activePopoverAnchor === anchor) {
     dismissPopover();
@@ -363,7 +372,17 @@ function showHostMenuRequest(message: BeginMenuMessage): void {
       showLoadingPopover(launchAgent, "launchAgentMenu-loading", "Launch agent", message.request);
       return;
     case "create":
-      showLoadingPopover(createPod, "createPodMenu-loading", "Create pod", message.request);
+      if (activePopoverAnchor === CREATE_POD_ANCHOR) {
+        cancelBlurDismissal();
+        dismissPopover();
+        return;
+      }
+      showLoadingPopover(
+        CREATE_POD_ANCHOR,
+        "createPodMenu-loading",
+        "Create pod",
+        message.request,
+      );
       return;
     case "pod":
       showLoadingPopover(podSelector, "podMenu-loading", "Select pod", message.request);
@@ -372,7 +391,7 @@ function showHostMenuRequest(message: BeginMenuMessage): void {
 }
 
 function showLoadingPopover(
-  anchor: HTMLButtonElement,
+  anchor: PopoverAnchor,
   id: string,
   label: string,
   request: number,
@@ -443,7 +462,7 @@ function renderCreatePodMenu(
   repositories: CreatePodMenuMessage["repositories"],
   agents: readonly AgentMenuOption[],
 ): void {
-  const popover = openPopover(createPod, "create-popover", "Create pod");
+  const popover = openPopover(CREATE_POD_ANCHOR, "create-popover", "Create pod");
   const form = document.createElement("form");
   form.className = "create-form";
   const name = document.createElement("input");
@@ -524,26 +543,35 @@ function renderMoreMenu(): void {
   const list = document.createElement("div");
   list.className = "popover-options";
   list.setAttribute("role", "menu");
-  for (const [label, type] of [
-    ["View diff", "viewDiff"],
-    ["Refresh pod", "refresh"],
-    ["Restart current session", "restartSession"],
-  ] as const) {
-    const option = menuOption(label);
-    option.setAttribute("role", "menuitem");
-    option.addEventListener("click", () => {
-      dismissPopover();
-      vscode.postMessage({ type });
-    });
-    list.append(option);
-  }
+  const groups = [
+    [["View diff", "viewDiff"], ["Refresh pod", "refresh"]],
+    [["Add SSH key...", "addSshKey"]],
+    [["Stop pod", "stopPod"], ["Delete pod...", "deletePod"]],
+  ] as const;
+  groups.forEach((group, index) => {
+    if (index > 0) {
+      const separator = document.createElement("div");
+      separator.className = "popover-separator";
+      separator.setAttribute("role", "separator");
+      list.append(separator);
+    }
+    for (const [label, type] of group) {
+      const option = menuOption(label);
+      option.setAttribute("role", "menuitem");
+      option.addEventListener("click", () => {
+        dismissPopover();
+        vscode.postMessage({ type });
+      });
+      list.append(option);
+    }
+  });
   popover.append(list);
   enableOptionKeyboardNavigation(list);
   focusFirstOption(list);
 }
 
 function openPopover(
-  anchor: HTMLButtonElement,
+  anchor: PopoverAnchor,
   id: string,
   label: string,
 ): HTMLElement {
@@ -556,14 +584,22 @@ function openPopover(
   popoverLayer.append(popover);
   activePopover = popover;
   activePopoverAnchor = anchor;
-  anchor.setAttribute("aria-expanded", "true");
+  if (anchor instanceof HTMLButtonElement) {
+    anchor.setAttribute("aria-expanded", "true");
+  }
   positionPopover(popover, anchor);
   return popover;
 }
 
-function positionPopover(popover: HTMLElement, anchor: HTMLButtonElement): void {
-  const bounds = anchor.getBoundingClientRect();
+function positionPopover(popover: HTMLElement, anchor: PopoverAnchor): void {
   const margin = 6;
+  if (anchor === CREATE_POD_ANCHOR) {
+    popover.style.top = "3px";
+    popover.style.left = "auto";
+    popover.style.right = `${margin}px`;
+    return;
+  }
+  const bounds = anchor.getBoundingClientRect();
   popover.style.top = `${bounds.bottom + 3}px`;
   if (anchor === podSelector) {
     popover.style.left = `${margin}px`;
@@ -575,6 +611,7 @@ function positionPopover(popover: HTMLElement, anchor: HTMLButtonElement): void 
 }
 
 function dismissPopover(restoreFocus = false, invalidateRequest = true): void {
+  cancelBlurDismissal();
   const anchor = activePopoverAnchor;
   activePopover?.remove();
   activePopover = undefined;
@@ -582,9 +619,18 @@ function dismissPopover(restoreFocus = false, invalidateRequest = true): void {
   if (invalidateRequest) {
     expectedMenuRequest = ++nextMenuRequest;
   }
-  anchor?.setAttribute("aria-expanded", "false");
-  if (restoreFocus) {
-    anchor?.focus();
+  if (anchor instanceof HTMLButtonElement) {
+    anchor.setAttribute("aria-expanded", "false");
+    if (restoreFocus) {
+      anchor.focus();
+    }
+  }
+}
+
+function cancelBlurDismissal(): void {
+  if (blurDismissal !== undefined) {
+    window.clearTimeout(blurDismissal);
+    blurDismissal = undefined;
   }
 }
 

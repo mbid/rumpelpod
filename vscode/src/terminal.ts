@@ -53,11 +53,14 @@ export type AgentViewAction =
       readonly type: "createPod";
     }
   | { readonly request: number; readonly type: "createPodMenu" }
+  | { readonly type: "addSshKey" }
+  | { readonly type: "deletePod" }
+  | { readonly type: "mergePod" }
   | { readonly type: "openShell" }
   | { readonly pod: string; readonly repository: string; readonly type: "openPod" }
   | { readonly request: number; readonly type: "podMenu" }
   | { readonly type: "refresh" }
-  | { readonly type: "restartSession" }
+  | { readonly type: "stopPod" }
   | { readonly type: "viewDiff" }
   | { readonly agent: AgentKind; readonly type: "launchAgent" };
 
@@ -423,6 +426,32 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     this.updateView();
   }
 
+  public async clearActive(repository: Repository, pod: string): Promise<void> {
+    const selected = this.selection;
+    if (selected?.repository.root !== repository.root || selected.pod !== pod) {
+      return;
+    }
+    this.generation += 1;
+    this.selection = undefined;
+    this.shellKey = undefined;
+    this.tabBeforeShell = undefined;
+    this.activeTab = "codex";
+    this.updateView();
+    await Promise.all([
+      this.enqueueSwitch(async () => {
+        for (const agent of AGENTS) {
+          const channel = this.agentChannel(agent);
+          await this.stopRunning(channel, `closing the deleted pod's ${agent} attachment`);
+          this.resetChannel(channel);
+        }
+      }),
+      this.enqueueShellSwitch(async () => {
+        await this.stopRunning(this.shellChannel, "closing the deleted pod shell");
+        this.resetChannel(this.shellChannel);
+      }),
+    ]);
+  }
+
   public async restartActive(): Promise<void> {
     const selected = this.selection;
     if (selected === undefined) {
@@ -716,13 +745,16 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
         });
         return;
       case "launchAgentMenu":
+      case "addSshKey":
       case "createPod":
       case "createPodMenu":
+      case "deletePod":
+      case "mergePod":
       case "openPod":
       case "openShell":
       case "podMenu":
       case "refresh":
-      case "restartSession":
+      case "stopPod":
       case "viewDiff":
       case "launchAgent":
         this.didRequestActionEmitter.fire(value);
@@ -1126,8 +1158,8 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
         <button id="launch-agent" class="icon-action" type="button" aria-label="Launch agent" title="Launch agent" aria-expanded="false" aria-haspopup="menu">
           <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="10" cy="6" r="3"/><path d="M4.5 16c.7-3 2.5-4.5 5.5-4.5s4.8 1.5 5.5 4.5"/></svg>
         </button>
-        <button id="create-pod" class="icon-action" type="button" aria-label="Create pod" title="Create pod" aria-expanded="false" aria-haspopup="dialog">
-          <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 3v14M3 10h14"/></svg>
+        <button id="merge-pod" class="icon-action" type="button" aria-label="Merge pod" title="Merge pod">
+          <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="5" cy="4" r="2"/><circle cx="5" cy="16" r="2"/><circle cx="15" cy="10" r="2"/><path d="M5 6v3c0 1.7 1.3 3 3 3h5M5 14v-2"/></svg>
         </button>
         <button id="more-actions" class="icon-action" type="button" aria-label="More pod actions" title="More pod actions" aria-expanded="false" aria-haspopup="menu">
           <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="4" cy="10" r="1"/><circle cx="10" cy="10" r="1"/><circle cx="16" cy="10" r="1"/></svg>
@@ -1260,8 +1292,11 @@ function isViewMessage(value: unknown): value is ViewMessage {
     case "podMenu":
       return "request" in value && isRequest(value.request);
     case "openShell":
+    case "addSshKey":
+    case "deletePod":
+    case "mergePod":
     case "refresh":
-    case "restartSession":
+    case "stopPod":
     case "viewDiff":
       return true;
     case "createPod":
