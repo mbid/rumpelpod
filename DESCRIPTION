@@ -77,3 +77,8 @@ the installer downloads only the binary needed for the current Linux or
 macOS host instead of the aggregate release archive. Document
 installing the VSIX without a marketplace and using it with the Linux
 daemon in WSL.
+
+Preserve daemon-local Codex reattachment when carrying the editor
+transport onto current main. Resolve editor terminal proxies from the
+daemon's live pod connection, and serialize shell termination through
+the same PTY lifecycle guard used by pod cleanup.

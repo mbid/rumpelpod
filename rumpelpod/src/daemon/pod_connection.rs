@@ -850,7 +850,7 @@ fn wait_for_host(
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::mpsc;
+    use tokio::sync::{broadcast, mpsc};
 
     use super::*;
     use crate::config::ContainerEngine;
@@ -859,7 +859,8 @@ mod tests {
     fn removing_pod_connection_discards_cached_codex_state() {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let host_connections = Arc::new(HostConnectionRegistry::new(events_tx));
-        let registry = PodConnectionRegistry::new(host_connections);
+        let (daemon_events_tx, _daemon_events_rx) = broadcast::channel(1);
+        let registry = PodConnectionRegistry::new(host_connections, daemon_events_tx);
         let repo_path = Path::new("/repo");
         let host = Host::Localhost {
             engine: ContainerEngine::Docker,

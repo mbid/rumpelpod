@@ -155,14 +155,23 @@ pub async fn shell_session_handler(
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect();
             env.sort();
+            let session_name = "vscode-shell".to_string();
             serve_ws_session_with_params(
                 socket,
                 state.pty_sessions,
-                SessionSpec {
-                    name: "vscode-shell".to_string(),
-                    cmd,
-                    workdir: Some(workdir),
-                    env,
+                session_name.clone(),
+                move |extra_args| {
+                    if !extra_args.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "the editor shell does not accept additional arguments"
+                        ));
+                    }
+                    Ok(Some(SessionSpec {
+                        name: session_name,
+                        cmd,
+                        workdir: Some(workdir),
+                        env,
+                    }))
                 },
             )
             .await;

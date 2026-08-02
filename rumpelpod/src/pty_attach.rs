@@ -665,6 +665,7 @@ async fn read_loop(
                 Ok(PtyControl::Session { .. })
                 | Ok(PtyControl::Attach { .. })
                 | Ok(PtyControl::Resize { .. })
+                | Ok(PtyControl::Terminate)
                 | Err(_) => {}
             },
             Message::Close(_) => break,

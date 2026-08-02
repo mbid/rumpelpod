@@ -260,12 +260,9 @@ async fn proxy_pod_terminal(
     pod: &str,
     kind: &str,
 ) -> Result<()> {
-    let token = daemon
-        .pod_token(repo_path, pod)?
-        .with_context(|| format!("no token for pod '{pod}'"))?;
-    let container_url = daemon
-        .pod_container_url(repo_path, pod)
-        .with_context(|| format!("no container URL for pod '{pod}' (pod not running?)"))?;
+    let (container_url, token) = daemon
+        .connected_pod_endpoint(repo_path, pod)
+        .with_context(|| format!("no live terminal endpoint for pod '{pod}'"))?;
     let request = build_pod_ws_request(&container_url, &token, &format!("/{kind}"))?;
     let (mut server, _) = tokio_tungstenite::connect_async(request)
         .await

@@ -230,6 +230,10 @@ impl PtySessions {
             Err(e) => Err(anyhow::anyhow!("terminating pty session '{name}': {e}")),
         }
     }
+
+    pub(crate) async fn terminate(&self, name: &str) -> Result<()> {
+        self.terminate_with_cleanup(name, || {}).await
+    }
 }
 
 // ---------------------------------------------------------------------------
