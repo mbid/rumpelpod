@@ -7,11 +7,7 @@
     },
     {
       "role": "user",
-      "content": "<user_info>\nOS Version: linux\nShell: /bin/sh\nWorkspace Path: /home/testuser/workspace\nToday's date: 2026-07-20\nNote: Prefer using relative paths over absolute paths as tool call args when possible.\n</user_info>\n\n<git_status>\nThis is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\nOn branch test\nYour branch is up to date with 'host/master'.\n\nnothing to commit, working tree clean\n\n</git_status>\n"
-    },
-    {
-      "role": "user",
-      "content": "<system-reminder>\nThe following skills are available for use:\n\n- check-work: Check your work with a verification subagent that reviews diffs, runs builds and tests, and evaluates correctness. Read this file for instructions\n  Use when: asked to \"check work\", \"verify changes\", \"self-verify\", \"/check-work\", \"/check\", \"/verify\", or \"/self-verify\".\n  Absolute path: /home/testuser/.grok/skills/check-work/SKILL.md\n- create-skill: Interactively create a new Grok skill (SKILL.md + optional scripts/references)\n  Use when: the user wants to create a skill, scaffold a skill, or runs /create-skill.\n  Absolute path: /home/testuser/.grok/skills/create-skill/SKILL.md\n- help: Grok documentation and configuration help\n  Use when: users ask about setup, configuration, MCP servers, authentication, skills, slash commands, keyboard shortcuts, or any Grok feature. Also use proactively when you detect a user is having trouble with setup or onboarding.\n  Absolute path: /home/testuser/.grok/skills/help/SKILL.md\n- imagine: How to use the image_gen and image_edit tool calls in Grok Build: when to build a visual with code instead of generating it, prompt-craft, reference-first handling of real people, factual grounding, and asset-consistency. Load this whenever generating or editing an image is on the table, i.e. when an image_gen or image_edit call is being considered or about to be made. Tool-usage-driven, not tr…\n  Absolute path: /home/testuser/.grok/skills/imagine/SKILL.md\n</system-reminder>"
+      "content": "<user_info>\nOS Version: linux\nShell: /bin/sh\nWorkspace Path: /home/testuser/workspace\nToday's date: 2026-07-24\nNote: Prefer using relative paths over absolute paths as tool call args when possible.\n</user_info>\n\n<git_status>\nThis is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\n## test...host/master\n</git_status>\n"
     },
     {
       "role": "user",
@@ -23,7 +19,7 @@
       "type": "function",
       "function": {
         "name": "run_terminal_command",
-        "description": "Run a bash command and return its output.\n\nUsage notes:\n  - You can specify an optional timeout in milliseconds (up to 36000000ms). If not specified, commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task_id to check output later.\n  - Timeout enforcement: when the timeout fires, the wrapper kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed. `timeout: 0` in `background: true` mode disables the wrapper timeout entirely; the child's lifetime is owned by the model via kill_command_or_subagent.\n  - If the output exceeds 40000 characters, output will be truncated before being returned to you.\n  - You can use the background parameter to run the command in the background (e.g., dev servers, long builds): it returns a task_id immediately and keeps running in the background. You are notified on completion, so do not poll or sleep-wait for it. You do not need to use '&' at the end of the command when using this parameter.",
+        "description": "Run a bash command and return its output.\n\nUsage notes:\n  - You can specify an optional timeout in milliseconds (up to 36000000ms). If not specified, commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.\n  - Timeout enforcement: when the timeout fires, the wrapper kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed. `timeout: 0` in `background: true` mode disables the wrapper timeout entirely; the child's lifetime is owned by the model via kill_command_or_subagent.\n  - If the output exceeds 40000 characters, output will be truncated before being returned to you.\n  - You can use the background parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background. You are notified on completion, so do not poll or sleep-wait for it. You do not need to use '&' at the end of the command when using this parameter.",
         "parameters": {
           "$schema": "http://json-schema.org/draft-07/schema#",
           "title": "BashToolInput",
@@ -42,6 +38,7 @@
               ],
               "format": "uint64",
               "minimum": 0,
+              "default": 120000,
               "maximum": 36000000
             },
             "description": {
@@ -49,7 +46,7 @@
               "type": "string"
             },
             "background": {
-              "description": "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task_id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it.",
+              "description": "Set to true for long-running commands that should run in the background (e.g., dev servers, long builds). Returns a task id immediately while the command keeps running in the background; you are notified on completion, so do not poll or sleep-wait for it.",
               "type": "boolean",
               "default": false
             }
@@ -77,7 +74,8 @@
             },
             "offset": {
               "description": "The line number to start reading from. Only provide if the file is too large to read at once.",
-              "type": "integer"
+              "type": "integer",
+              "default": 1
             },
             "limit": {
               "description": "The number of lines to read. Only provide if the file is too large to read at once.",
@@ -203,12 +201,9 @@
               "type": "integer"
             },
             "-i": {
-              "description": "Case insensitive search (rg -i). Defaults to false.",
-              "type": [
-                "boolean",
-                "null"
-              ],
-              "default": null
+              "description": "Case insensitive search (rg -i).",
+              "type": "boolean",
+              "default": false
             },
             "type": {
               "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than glob for standard file types.",
@@ -222,11 +217,9 @@
               "type": "integer"
             },
             "multiline": {
-              "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.",
-              "type": [
-                "boolean",
-                "null"
-              ]
+              "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall).",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -549,22 +542,19 @@
               "type": "string"
             },
             "timeout_ms": {
-              "description": "Kill the monitor after this deadline (ms). Default: 36000000 (10 hr).",
+              "description": "Kill the monitor after this deadline (ms). Default: 36000000 (10 hr). Max: 36000000 (10 hr).",
               "type": [
                 "integer",
                 "null"
               ],
               "format": "uint64",
               "minimum": 0,
-              "default": null
+              "default": 36000000
             },
             "persistent": {
               "description": "Run for the lifetime of the session (no timeout). Stop with kill_command_or_subagent.",
-              "type": [
-                "boolean",
-                "null"
-              ],
-              "default": null
+              "type": "boolean",
+              "default": false
             }
           },
           "required": [
@@ -638,36 +628,64 @@
     {
       "type": "function",
       "function": {
-        "name": "update_goal",
-        "description": "Report progress on the active goal. Use the parameters to log a status message, mark the goal completed, or flag that you're blocked.",
+        "name": "workflow",
+        "description": "Launch a workflow: a Rhai script that orchestrates subagents as one background run. Provide exactly one source: `name` (a registered workflow — built-in, or from the project `.grok/workflows/` or user `~/.grok/workflows/`), an inline `script`, or a `script_path`. Optionally pass `args` (bound to the script's `args`) and `agent_budget`, an absolute cap on cumulative child-agent calls: every agent() and parallel() item consumes one slot (schema retries do not); default 128. The call returns immediately; progress appears in `/workflows` and completion is reported automatically — do not poll or sleep-wait.\n\nPrefer a registered workflow when one fits; author a script for bounded fan-out over a known work list, staged research and verification, or several independent perspectives, and confirm unusually large fan-out first. Before writing or editing a script, read the `create-workflow` skill's SKILL.md. `validate_only: true` runs a path-specific smoke check (metadata, compile, one canned-host path) — not proof that every branch or live tool works.\n\nA started run gets a session-unique display name (e.g. `review-changes`, `review-changes-2`) — the handle to show the user and use with `/workflow pause|resume|stop <name>`; keep run IDs internal. Each launch persists an editable `script_path`; edit it and launch as a new run to iterate. Use `resume_from_run_id` only for a same-process paused run (process restarts are terminal); a budget-limited run resumes only with a higher `agent_budget`. Save reusable scripts to `.grok/workflows/<name>.rhai`.",
         "parameters": {
           "$schema": "http://json-schema.org/draft-07/schema#",
-          "title": "UpdateGoalInput",
+          "title": "WorkflowToolInput",
           "type": "object",
           "properties": {
-            "completed": {
-              "description": "Set to true ONLY when the goal is fully achieved. This ends goal mode. Use together with `message` to include a completion summary.",
+            "agent_budget": {
+              "description": "Absolute cumulative cap on logical child-agent calls for this run. Every agent() and every parallel() item consumes one slot; schema retries do not. Defaults to 128 and may be set from 1 through 1,024. A panel that would exceed the remaining budget is rejected before any of its children launch.",
               "type": [
-                "boolean",
+                "integer",
                 "null"
               ],
+              "format": "uint64",
+              "minimum": 1,
+              "maximum": 1024,
               "default": null
             },
-            "message": {
-              "description": "Optional short message logged as progress (visible in tool response, not surfaced to the pager dashboard). Use with `completed: true` for a completion summary.",
+            "name": {
+              "description": "Name of a registered workflow (built-in, or discovered from the project `.grok/workflows/` or user `~/.grok/workflows/`). Exactly one of `name`, `script`, or `script_path` must be set.",
               "type": [
                 "string",
                 "null"
               ],
               "default": null
             },
-            "blocked_reason": {
-              "description": "Set only when truly stuck after 3+ consecutive failed attempts at the same problem. If set, the goal is paused as blocked. This is a FAILURE signal — never put success text here. For success, use `completed: true` with `message`.",
+            "script": {
+              "description": "Inline Rhai workflow script. It must start with a pure-literal `let meta = #{ name: ..., description: ... };` map. Before authoring, read the `create-workflow` skill's SKILL.md. Run the path-specific `validate_only` smoke check with representative args.",
               "type": [
                 "string",
                 "null"
               ],
               "default": null
+            },
+            "script_path": {
+              "description": "Path to a .rhai workflow script on disk.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "args": {
+              "description": "JSON value bound to the script's `args` global. Use an object for named arguments.",
+              "default": null
+            },
+            "resume_from_run_id": {
+              "description": "Resume a same-process paused run, continuing its original immutable script and args; do not also pass name, script, script_path, or args. A budget-limited run resumes only when agent_budget is passed with a higher cap. Process-restart interruptions are terminal.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "validate_only": {
+              "description": "Run a path-specific smoke check without launching: validate metadata, compile the full script, and execute the single path selected by the supplied args and canned host results. It does not exercise every branch or prove live tools and agent outputs work.",
+              "type": "boolean",
+              "default": false
             }
           },
           "required": []

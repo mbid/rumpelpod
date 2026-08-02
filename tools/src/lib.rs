@@ -29,6 +29,12 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+/// Cap automatic xtest parallelism without increasing it on smaller hosts.
+/// Explicit CLI and environment overrides are applied after this default.
+pub fn default_xtest_jobs(available: usize) -> usize {
+    available.min(16)
+}
+
 /// Build a `cargo` Command with Cargo-injected env vars stripped.
 ///
 /// `cargo run` injects CARGO_PKG_*, CARGO_MANIFEST_DIR, OUT_DIR, etc.
@@ -177,7 +183,15 @@ pub fn is_xtest_prelude_line(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::split_xtest_directive_line;
+    use super::{default_xtest_jobs, split_xtest_directive_line};
+
+    #[test]
+    fn default_xtest_jobs_caps_only_large_hosts() {
+        assert_eq!(default_xtest_jobs(1), 1);
+        assert_eq!(default_xtest_jobs(8), 8);
+        assert_eq!(default_xtest_jobs(16), 16);
+        assert_eq!(default_xtest_jobs(64), 16);
+    }
 
     #[test]
     fn split_xtest_directive_line_accepts_plain_directive() {

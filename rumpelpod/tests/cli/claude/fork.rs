@@ -3,7 +3,7 @@
 
 //! Verify that `rumpel fork` carries Claude Code conversation state
 //! across to the new pod: start a session with a known UUID in pod A,
-//! ask a memorable question, detach, fork to pod B, then resume the
+//! ask a memorable question, exit, fork to pod B, then resume the
 //! same UUID in B and confirm the prior turn is in the history.
 
 use std::time::{Duration, Instant};
@@ -13,11 +13,17 @@ use rumpelpod::CommandExt;
 use super::common::{setup_claude_test_repo, ClaudeSession};
 use crate::common::{pod_command, TestDaemon, TestRepo};
 
-/// Ctrl-a then 'd' detaches without ending the session.
-const CTRL_A: u8 = 0x01;
-
 /// Pre-chosen session UUID; --resume picks the same JSONL file.
 const SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
+
+/// End Claude after its response so the resumable session is flushed before
+/// the pod state is copied or another process resumes it.
+fn end_claude_session(session: &mut ClaudeSession) {
+    session.write_raw(&[0x04]);
+    std::thread::sleep(Duration::from_millis(500));
+    session.write_raw(&[0x04]);
+    session.wait_for_exit();
+}
 
 /// Block until `rumpel list` shows the pod's CLAUDE column is no
 /// longer "processing".  The Stop hook runs asynchronously after the
@@ -66,9 +72,7 @@ fn fork_carries_claude_session() {
     session.send("What is the capital of France? Reply with just the city name, nothing else.");
     session.wait_for("Paris");
 
-    // Detach so the in-pod claude process keeps the JSONL on disk.
-    session.write_raw(&[CTRL_A, b'd']);
-    session.wait_for_exit();
+    end_claude_session(&mut session);
 
     // 2. Fork the source pod.
     // The Stop hook lands at the pod server slightly after the
@@ -122,8 +126,7 @@ fn fork_test_baseline_resume_works_in_place() {
     session.wait_for("~/workspace");
     session.send("What is the capital of France? Reply with just the city name, nothing else.");
     session.wait_for("Paris");
-    session.write_raw(&[CTRL_A, b'd']);
-    session.wait_for_exit();
+    end_claude_session(&mut session);
 
     // Make sure the JSONL is on disk inside the pod before we resume,
     // so a failure of the fork test cannot be mistaken for a baseline

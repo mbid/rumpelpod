@@ -6,37 +6,31 @@
 //! not the one the daemon happens to find on its own PATH.
 
 use std::fs;
-use std::io::Read;
 use std::process::Command;
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-
-use crate::common::{write_test_devcontainer, TestDaemon, TestHome, TestRepo};
+use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::ExecutorResources;
+use rumpelpod::CommandExt;
 
 /// The client resolves the codex binary path and sends it to the
 /// daemon, so the prepared image includes Codex CLI even though the
 /// daemon itself cannot find the binary on its own PATH.
 ///
-/// Mirrors `image_includes_claude_from_client_path` but actually
-/// launches codex inside the container and waits for the welcome
-/// banner: that proves the binary not only got installed but also
-/// runs end-to-end.
+/// The installed binary must have the same version as the client-resolved
+/// binary; selecting the moving `latest` release would make prepared images
+/// depend on when and where they were built.
 #[test]
 fn image_includes_codex_from_client_path() {
     println!("xtest:timeout=145");
-    assert!(
-        Command::new("codex")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success()),
-        "codex must be in PATH to run this test",
-    );
+    let host_output = Command::new("codex")
+        .arg("--version")
+        .output()
+        .expect("codex must be in PATH to run this test");
+    assert!(host_output.status.success(), "host codex --version failed");
+    let host_version = String::from_utf8(host_output.stdout)
+        .expect("host codex version should be UTF-8")
+        .trim()
+        .to_string();
 
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
@@ -52,79 +46,24 @@ fn image_includes_codex_from_client_path() {
     let client_only = home.client_only_bin_dir(&["codex"]);
     let client_path = format!("{}:{}", client_only.display(), daemon.bin_dir.display());
 
-    let pty = native_pty_system()
-        .openpty(PtySize {
-            rows: 50,
-            cols: 120,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .expect("openpty");
-
-    let mut cmd = CommandBuilder::new("rumpel");
-    cmd.env_clear();
-    cmd.cwd(repo.path());
-    cmd.env("PATH", &client_path);
-    cmd.env("HOME", home.path().to_str().unwrap());
-    cmd.env(
-        "RUMPELPOD_DAEMON_SOCKET",
-        daemon.socket_path.to_str().unwrap(),
-    );
-    cmd.args([
-        "enter",
-        "--create",
-        "codex-install-test",
-        "--",
-        "/opt/rumpelpod/bin/codex",
-    ]);
-    let mut child = pty.slave.spawn_command(cmd).expect("spawn rumpel enter");
-
-    let mut reader = pty.master.try_clone_reader().expect("clone PTY reader");
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            if tx.send(buf[..n].to_vec()).is_err() {
-                break;
-            }
-        }
-    });
-
-    // The TUI lays text out via cursor-positioning escapes, so the
-    // rendered screen contents are the only reliable place to look
-    // for the welcome banner -- the words never appear contiguously
-    // in the raw byte stream.  "Press enter to continue" is the
-    // last line rendered, so seeing it means the welcome screen
-    // has fully painted.
-    let mut parser = vt100::Parser::new(50, 120, 0);
-    let needle = "Press enter to continue";
-    let deadline = Instant::now() + Duration::from_secs(140);
-    let found = loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break false;
-        }
-        match rx.recv_timeout(remaining.min(Duration::from_secs(2))) {
-            Ok(bytes) => {
-                parser.process(&bytes);
-                if parser.screen().contents().contains(needle) {
-                    break true;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
-        }
-    };
-
-    let _ = child.kill();
-    let _ = child.wait();
-
-    assert!(
-        found,
-        "codex did not display {needle:?} within the timeout. Rendered screen:\n{}",
-        parser.screen().contents(),
+    let stdout = pod_command(&repo, &daemon)
+        .env("PATH", client_path)
+        .args([
+            "enter",
+            "--create",
+            "codex-install-test",
+            "--",
+            "/opt/rumpelpod/bin/codex",
+            "--version",
+        ])
+        .success()
+        .expect("codex binary should run in the container");
+    let pod_version = String::from_utf8(stdout)
+        .expect("pod codex version should be UTF-8")
+        .trim()
+        .to_string();
+    assert_eq!(
+        pod_version, host_version,
+        "pod Codex version should match the host version",
     );
 }

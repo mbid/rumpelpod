@@ -788,9 +788,9 @@ pub struct PrepareImageCommand {
     #[arg(long)]
     pub pi_version: Option<String>,
 
-    /// Install the Codex CLI into the prepared image
+    /// Codex CLI version to install (skip if not provided)
     #[arg(long)]
-    pub install_codex: bool,
+    pub codex_version: Option<String>,
 
     /// Install the Grok CLI into the prepared image
     #[arg(long)]
