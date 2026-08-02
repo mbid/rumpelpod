@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Build a "prepared" Docker image that pre-installs the rumpel binary,
-//! a repo clone, and (optionally) the Claude CLI on top of the resolved
-//! devcontainer image.  This avoids repeating expensive setup steps every
-//! time a container is created.
+//! a repo clone, and locally available coding agent CLIs on top of the
+//! resolved devcontainer image. This avoids repeating expensive setup steps
+//! every time a container is created.
 
 use std::fs;
 use std::io::Write;
@@ -57,6 +57,12 @@ struct LocalClaudeInfo {
     version: String,
 }
 
+/// Information about the Codex CLI on the local machine, used to pin the
+/// exact version inside the prepared image.
+struct LocalCodexInfo {
+    version: String,
+}
+
 /// Information about the pi CLI on the local machine, used to pin the
 /// exact version inside the prepared image.
 struct LocalPiInfo {
@@ -69,22 +75,59 @@ const PI_NPM_PACKAGE: &str = "@earendil-works/pi-coding-agent";
 /// Minimum Node.js version pi requires (major, minor, patch).
 const PI_MIN_NODE: (u64, u64, u64) = (22, 19, 0);
 
-/// Whether the Codex CLI on the local machine works.
+/// Try to detect the Codex CLI on the local machine and return its version.
 ///
 /// Uses the client-provided path so the daemon does not depend on its
-/// own PATH.  None means the client could not find codex and we
-/// should not pre-install it into the prepared image.
-fn local_has_codex(codex_cli_path: Option<&Path>) -> bool {
-    let bin = match codex_cli_path {
-        Some(path) => path,
-        None => return false,
+/// own PATH. `codex --version` outputs e.g. `codex-cli 0.145.0`.
+fn detect_local_codex(codex_cli_path: Option<&Path>) -> Result<Option<LocalCodexInfo>> {
+    let Some(bin) = codex_cli_path else {
+        return Ok(None);
     };
-    Command::new(bin)
+    let output = Command::new(bin)
         .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("running {} --version", bin.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "{} --version failed with {}: {}",
+            bin.display(),
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let Some(version) = parse_codex_version(&raw) else {
+        return Err(anyhow::anyhow!(
+            "unsupported Codex version output from {}: {:?}",
+            bin.display(),
+            raw.trim()
+        ));
+    };
+    Ok(Some(LocalCodexInfo {
+        version: version.to_string(),
+    }))
+}
+
+/// Extract the release version while rejecting output that cannot safely be
+/// embedded in the generated Dockerfile and GitHub release URL.
+fn parse_codex_version(raw: &str) -> Option<&str> {
+    let mut tokens = raw.split_whitespace();
+    if tokens.next() != Some("codex-cli") {
+        return None;
+    }
+    let version = tokens.next()?;
+    if tokens.next().is_some()
+        || !version.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        || !version
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+    {
+        return None;
+    }
+    Some(version)
 }
 
 /// Whether a Codex CLI is already available inside the build container.
@@ -250,7 +293,7 @@ fn find_rumpel_binaries() -> Result<Vec<(String, PathBuf)>> {
 /// Compute a deterministic tag for the prepared image.
 ///
 /// Inputs hashed: base image tag, rumpel version, container repo path,
-/// user, Claude CLI version (if available), codex install flag,
+/// user, coding agent CLI versions (if available),
 /// user-configured remotes, schema version, and the resolved
 /// `containerEnv` key set (names only, not values, so changing a value
 /// in `--env-file` does not force a rebuild).
@@ -261,7 +304,7 @@ fn compute_prepared_tag(
     container_user: &str,
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
-    install_codex: bool,
+    codex_info: Option<&LocalCodexInfo>,
     install_grok: bool,
     host_remotes: &[GitRemote],
     mount_targets: &[String],
@@ -281,7 +324,11 @@ fn compute_prepared_tag(
     if let Some(info) = pi_info {
         hasher.update(info.version.as_bytes());
     }
-    hasher.update([u8::from(install_codex)]);
+    hasher.update(b"codex\0");
+    if let Some(info) = codex_info {
+        hasher.update(info.version.as_bytes());
+    }
+    hasher.update(b"\0");
     hasher.update([u8::from(install_grok)]);
     for remote in host_remotes {
         if MANAGED_REMOTES.contains(&remote.name.as_str()) {
@@ -324,8 +371,8 @@ fn compute_prepared_tag(
 /// Podman's remote API does not transfer additional build contexts, so
 /// all engines share the in-context layout instead.
 ///
-/// After the rumpel binary is installed, remaining setup (repo clone,
-/// Claude CLI) is delegated to `rumpel prepare-image` so the logic
+/// After the rumpel binary is installed, remaining setup (repo clone and
+/// coding agent CLIs) is delegated to `rumpel prepare-image` so the logic
 /// lives in Rust instead of shell.
 #[allow(clippy::too_many_arguments)]
 fn generate_dockerfile(
@@ -334,7 +381,7 @@ fn generate_dockerfile(
     container_user: &str,
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
-    install_codex: bool,
+    codex_info: Option<&LocalCodexInfo>,
     install_grok: bool,
     host_remotes: &[GitRemote],
     mount_targets: &[String],
@@ -354,10 +401,9 @@ fn generate_dockerfile(
         None => String::new(),
     };
 
-    let codex_flag = if install_codex {
-        " \\\n      --install-codex"
-    } else {
-        ""
+    let codex_flag = match codex_info {
+        Some(info) => format!(" \\\n      --codex-version '{}'", info.version),
+        None => String::new(),
     };
 
     let grok_flag = if install_grok {
@@ -436,7 +482,7 @@ fn assemble_build_context(
     container_user: &str,
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
-    install_codex: bool,
+    codex_info: Option<&LocalCodexInfo>,
     install_grok: bool,
     host_remotes: &[GitRemote],
     mount_targets: &[String],
@@ -451,7 +497,7 @@ fn assemble_build_context(
         container_user,
         claude_info,
         pi_info,
-        install_codex,
+        codex_info,
         install_grok,
         host_remotes,
         mount_targets,
@@ -595,7 +641,7 @@ pub fn build_prepared_image(
 ) -> Result<BuildResult> {
     let claude_info = detect_local_claude(claude_cli_path);
     let pi_info = detect_local_pi(pi_cli_path);
-    let install_codex = local_has_codex(codex_cli_path);
+    let codex_info = detect_local_codex(codex_cli_path)?;
     let install_grok = local_has_grok(grok_cli_path);
 
     let mode = BuildxMode::from_host(docker_host, docker_socket);
@@ -637,7 +683,7 @@ pub fn build_prepared_image(
         container_user,
         claude_info.as_ref(),
         pi_info.as_ref(),
-        install_codex,
+        codex_info.as_ref(),
         install_grok,
         host_remotes,
         mount_targets,
@@ -681,7 +727,7 @@ pub fn build_prepared_image(
         container_user,
         claude_info.as_ref(),
         pi_info.as_ref(),
-        install_codex,
+        codex_info.as_ref(),
         install_grok,
         host_remotes,
         mount_targets,
@@ -800,8 +846,8 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         install_pi_cli(version)?;
     }
 
-    if cmd.install_codex {
-        install_codex_cli()?;
+    if let Some(ref version) = cmd.codex_version {
+        install_codex_cli(version)?;
     }
 
     if cmd.install_grok {
@@ -1195,15 +1241,19 @@ fn install_claude_cli(version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Download and install the Codex CLI from the GitHub release matching
-/// the host architecture.
+/// Download and install the specified Codex CLI release for this architecture.
 ///
-/// Skips if a `codex` binary is already present.
-fn install_codex_cli() -> Result<()> {
-    if container_has_codex() {
+/// Skips only when the requested version is already present. A different Codex
+/// supplied by the base image must not change the prepared pod's version.
+fn install_codex_cli(version: &str) -> Result<()> {
+    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
+    if bin_path.exists() {
+        if codex_version_at(bin_path).as_deref() == Some(version) {
+            return Ok(());
+        }
+    } else if codex_version_at(Path::new("codex")).as_deref() == Some(version) {
         return Ok(());
     }
-    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
 
     // musl build is static, so it runs on any base image.
     let arch = match std::env::consts::ARCH {
@@ -1212,8 +1262,9 @@ fn install_codex_cli() -> Result<()> {
         other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
     };
 
-    let url =
-        format!("https://github.com/openai/codex/releases/latest/download/codex-{arch}.tar.gz");
+    let url = format!(
+        "https://github.com/openai/codex/releases/download/rust-v{version}/codex-{arch}.tar.gz"
+    );
     let data = download_cli_asset(&url, "Codex CLI tarball")?;
 
     // The tarball contains a single file named codex-<arch>.
@@ -1238,6 +1289,20 @@ fn install_codex_cli() -> Result<()> {
         .context("making codex binary executable")?;
 
     Ok(())
+}
+
+fn codex_version_at(bin: &Path) -> Option<String> {
+    let output = Command::new(bin)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Some(parse_codex_version(&raw)?.to_string())
 }
 
 /// Install the pi coding agent CLI at a specific version via npm.
@@ -1545,6 +1610,68 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn codex_version_changes_prepared_image_tag() {
+        let first = LocalCodexInfo {
+            version: "0.145.0".to_string(),
+        };
+        let second = LocalCodexInfo {
+            version: "0.146.0".to_string(),
+        };
+        let tag = |codex_info| {
+            compute_prepared_tag(
+                "example:latest",
+                Path::new("/workspace"),
+                "root",
+                None,
+                None,
+                Some(codex_info),
+                false,
+                &[],
+                &[],
+                false,
+                None,
+                "{}",
+                &[],
+            )
+        };
+
+        assert_ne!(tag(&first), tag(&second));
+    }
+
+    #[test]
+    fn codex_version_parser_accepts_release_versions_only() {
+        assert_eq!(parse_codex_version("codex-cli 0.146.0\n"), Some("0.146.0"));
+        assert_eq!(
+            parse_codex_version("codex-cli 0.147.0-alpha.2\n"),
+            Some("0.147.0-alpha.2")
+        );
+        assert_eq!(parse_codex_version("0.146.0\n"), None);
+        assert_eq!(parse_codex_version("codex-cli 0.146.0 extra\n"), None);
+        assert_eq!(parse_codex_version("codex-cli ../../latest\n"), None);
+    }
+
+    #[test]
+    fn codex_detection_rejects_unrecognized_version_output() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin = dir.path().join("codex");
+        fs::write(&bin, "#!/bin/sh\necho 'unexpected output'\n").expect("write fake codex");
+        let mut permissions = fs::metadata(&bin).expect("stat fake codex").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bin, permissions).expect("chmod fake codex");
+
+        let result = detect_local_codex(Some(&bin));
+        let Err(error) = result else {
+            panic!("unrecognized Codex version output should fail detection");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Codex version output"),
+            "unexpected error: {error:#}"
+        );
+    }
 
     fn serve_slow_active_body(mut stream: TcpStream) -> std::io::Result<()> {
         let mut request = [0_u8; 1024];
