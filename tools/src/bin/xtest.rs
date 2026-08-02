@@ -50,7 +50,7 @@
 //! cargo xtest [flags] [filter] [-- [test-binary-flags]]
 //!
 //! Flags:
-//!   --test-threads N   parallel test processes (env: XTEST_JOBS, default: ncpus)
+//!   --test-threads N   parallel tests (env: XTEST_JOBS, default: min(ncpus, 16))
 //!   --timeout SECS     per-test kill deadline  (env: XTEST_TIMEOUT, default: 120)
 //!   --retries N        retry count on failure  (env: XTEST_RETRIES, default: 1)
 //!   --executor NAME    run against podman or a k8s cluster (podman|eks|hetzner|k3d)
@@ -77,6 +77,11 @@ use tools::CommandExt;
 /// Maximum number of retries across all tests in a single run.
 /// Keeps flaky-test workarounds from masking systemic problems.
 const RETRY_BUDGET: usize = 10;
+
+/// Avoid overwhelming Docker on hosts that expose very large CPU counts.
+/// Explicit CLI and environment overrides remain uncapped for callers that
+/// have enough independent executor capacity.
+const DEFAULT_JOB_LIMIT: usize = 16;
 
 /// (cargo target triple, binary name in flat layout)
 const LINUX_TARGETS: &[(&str, &str)] = &[
@@ -108,7 +113,7 @@ struct Cli {
     #[arg(long)]
     runtime: Option<String>,
 
-    /// Maximum number of tests to run in parallel (default: ncpus, env: XTEST_JOBS).
+    /// Maximum parallel tests (default: min(ncpus, 16), env: XTEST_JOBS).
     #[arg(long = "test-threads")]
     jobs: Option<usize>,
 
@@ -1169,12 +1174,16 @@ fn main() -> ExitCode {
     }
 }
 
+fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(|jobs| jobs.get().min(DEFAULT_JOB_LIMIT))
+        .unwrap_or(4)
+}
+
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
-    let default_jobs = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let default_jobs = default_jobs();
     let jobs = cli
         .jobs
         .unwrap_or_else(|| env_var_or("XTEST_JOBS", default_jobs));

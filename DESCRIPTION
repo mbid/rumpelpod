@@ -3,3 +3,7 @@ Pin prepared Codex images to the host version
 Install the host Codex CLI version in prepared pods. Add the version to
 image identity so rebuilding a pod cannot silently reuse a different
 Codex release.
+
+Cap automatic xtest workers at 16 so high-core-count machines do not
+overwhelm their container runtime. Machines with fewer CPUs retain their
+lower natural parallelism. Explicit overrides remain available.
