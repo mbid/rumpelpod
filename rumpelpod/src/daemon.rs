@@ -3861,22 +3861,22 @@ impl DaemonServer {
         self.pty_sessions.clone()
     }
 
-    /// Look up a pod's bearer token by (repo_path, pod_name).
-    /// Returns Ok(None) if the pod is not in the database.
-    pub(crate) fn pod_token(&self, repo_path: &Path, pod_name: &str) -> Result<Option<String>> {
-        let conn = self.db.lock().unwrap();
-        let record = db::get_pod(&conn, repo_path, pod_name)?;
-        Ok(record.map(|r| r.token))
-    }
-
-    /// Build a `http://127.0.0.1:N` URL to reach the pod server via
-    /// the running exec proxy for this pod.  Returns None if no proxy
-    /// is registered (pod was never launched in this daemon's
-    /// lifetime).
-    pub(crate) fn pod_container_url(&self, repo_path: &Path, pod_name: &str) -> Option<String> {
-        self.pod_connections
-            .endpoint(repo_path, pod_name)
-            .map(|endpoint| endpoint.url)
+    /// Return the Codex inputs owned by a live pod connection without
+    /// contacting its backend or probing the pod again.
+    pub(crate) fn connected_codex_pod(
+        &self,
+        repo_path: &Path,
+        pod_name: &str,
+    ) -> Option<(String, String, Option<CodexState>)> {
+        let connection = self.pod_connections.get(repo_path, pod_name)?;
+        match connection.status() {
+            PodConnectionStatus::Connected | PodConnectionStatus::Connecting => {}
+            PodConnectionStatus::HostDisconnected
+            | PodConnectionStatus::PodDisconnected
+            | PodConnectionStatus::Stopped => return None,
+        }
+        let endpoint = connection.endpoint()?;
+        Some((endpoint.url, endpoint.token, connection.codex_state()))
     }
 
     fn cleanup_codex_runtime(&self, repo_path: &Path, pod_name: &str) {

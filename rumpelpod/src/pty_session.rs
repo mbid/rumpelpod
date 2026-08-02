@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
@@ -46,15 +46,31 @@ struct PtySession {
     output_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 }
 
+type AttachedSession = (
+    OwnedFd,
+    Arc<Mutex<vt100::Parser>>,
+    tokio::sync::broadcast::Receiver<Vec<u8>>,
+);
+
+type SessionCreationLocks = HashMap<String, Weak<Mutex<()>>>;
+
+enum SessionAcquire {
+    Attached(AttachedSession),
+    Missing,
+    Unavailable,
+}
+
 #[derive(Clone)]
 pub struct PtySessions {
     inner: Arc<Mutex<HashMap<String, PtySession>>>,
+    creation_locks: Arc<Mutex<SessionCreationLocks>>,
 }
 
 impl Default for PtySessions {
     fn default() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            creation_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -64,61 +80,96 @@ impl PtySessions {
         Self::default()
     }
 
-    /// Spawn a new session or reuse an existing one.  Returns a dup'd
-    /// write fd, the screen buffer for replay, and a broadcast receiver.
-    /// Returns `Ok(None)` when `create` is false and the session does
-    /// not exist (used by reconnecting clients to avoid spawning a
-    /// fresh session after the original child exited).
-    #[allow(clippy::too_many_arguments)]
-    async fn spawn_or_attach(
+    /// Attach without constructing spawn parameters when a live child exists.
+    /// Cold preparation is serialized per session so it cannot delay warm
+    /// attachments to unrelated sessions.
+    async fn spawn_or_attach<F>(
         &self,
         name: String,
-        cmd: Vec<String>,
-        workdir: Option<PathBuf>,
-        env: Vec<String>,
         cols: u16,
         rows: u16,
         create: bool,
-    ) -> Result<
-        Option<(
-            OwnedFd,
-            Arc<Mutex<vt100::Parser>>,
-            tokio::sync::broadcast::Receiver<Vec<u8>>,
-        )>,
-    > {
+        build_spec: F,
+    ) -> Result<SessionAcquire>
+    where
+        F: FnOnce() -> Result<Option<SessionSpec>> + Send,
+    {
+        if let Some(attached) = self.attach_existing(&name, cols, rows).await? {
+            return Ok(SessionAcquire::Attached(attached));
+        }
+        if !create {
+            return Ok(SessionAcquire::Missing);
+        }
+
+        let creation_lock = self.creation_lock(&name).await;
+        let _creation_guard = creation_lock.lock().await;
+
+        // Another request may have created the session while this one waited.
+        if let Some(attached) = self.attach_existing(&name, cols, rows).await? {
+            return Ok(SessionAcquire::Attached(attached));
+        }
+
+        let Some(spec) = build_spec()? else {
+            return Ok(SessionAcquire::Unavailable);
+        };
+        if spec.name != name {
+            return Err(anyhow::anyhow!(
+                "session spec name {:?} does not match requested name {name:?}",
+                spec.name
+            ));
+        }
+
+        let session = spawn_session(&name, &spec.cmd, spec.workdir, &spec.env, cols, rows, self)?;
+        self.inner.lock().await.insert(name.clone(), session);
+
+        match self.attach_existing(&name, cols, rows).await? {
+            Some(attached) => Ok(SessionAcquire::Attached(attached)),
+            None => Ok(SessionAcquire::Missing),
+        }
+    }
+
+    async fn attach_existing(
+        &self,
+        name: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Option<AttachedSession>> {
         let mut sessions = self.inner.lock().await;
 
-        // Reap dead sessions so we start fresh if the child exited.
-        if let Some(s) = sessions.get(&name) {
-            if !child_is_alive(s.child_pid) {
-                sessions.remove(&name);
+        // Reap dead sessions so a later create request starts fresh.
+        if let Some(session) = sessions.get(name) {
+            if !child_is_alive(session.child_pid) {
+                sessions.remove(name);
             }
         }
 
-        if !sessions.contains_key(&name) {
-            if !create {
-                return Ok(None);
-            }
-            let session = spawn_session(&name, &cmd, workdir, &env, cols, rows, self)?;
-            sessions.insert(name.clone(), session);
-        }
-
-        let session = sessions.get(&name).unwrap();
+        let Some(session) = sessions.get(name) else {
+            return Ok(None);
+        };
 
         // Resize to match the attaching client's terminal, so
         // reattaching after a window resize (or reconnection) shows
         // the right dimensions.
         set_winsize(session.master_fd.as_raw_fd(), cols, rows)?;
-        session
-            .screen
-            .lock()
-            .await
-            .screen_mut()
-            .set_size(rows, cols);
-
         let duped = nix::unistd::dup(&session.master_fd).context("dup master fd")?;
+        let screen = Arc::clone(&session.screen);
         let rx = session.output_tx.subscribe();
-        Ok(Some((duped, Arc::clone(&session.screen), rx)))
+        drop(sessions);
+
+        screen.lock().await.screen_mut().set_size(rows, cols);
+        Ok(Some((duped, screen, rx)))
+    }
+
+    async fn creation_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.creation_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(name).and_then(Weak::upgrade) {
+            return lock;
+        }
+
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(name.to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     async fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
@@ -144,6 +195,10 @@ impl PtySessions {
     /// Pod lifecycle cleanup calls this because a detached TUI keeps
     /// its original `--remote` URL even after the pod behind it is gone.
     pub async fn terminate(&self, name: &str) -> Result<()> {
+        // Serialize with cold preparation so lifecycle cleanup cannot return
+        // while a frontend for the old pod is still being spawned.
+        let creation_lock = self.creation_lock(name).await;
+        let _creation_guard = creation_lock.lock().await;
         let session = self.inner.lock().await.remove(name);
         let Some(session) = session else {
             return Ok(());
@@ -404,6 +459,11 @@ pub enum PtyControl {
     Resize { cols: u16, rows: u16 },
     /// Sent by the server when the PTY child process has exited.
     SessionEnded,
+    /// The session is absent and its server-owned spawn parameters cannot be
+    /// constructed from current cached state.
+    SessionUnavailable,
+    /// The server failed while preparing or spawning the session.
+    SessionError { error: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -464,40 +524,40 @@ pub async fn serve_ws_session(
         None => return,
     };
 
-    // Skipped on reattach: the existing session's cmd is reused.
+    // Preserve the client-owned protocol's existing transform timing. Codex
+    // uses the server-owned path below for lazy preparation.
     if create {
         if let Some(transform) = cmd_transform {
-            if let Err(e) = transform(&mut cmd) {
-                eprintln!("pty: cmd transform failed: {e:#}");
+            if let Err(error) = transform(&mut cmd) {
+                eprintln!("pty: cmd transform failed: {error:#}");
                 return;
             }
         }
     }
 
-    run_bridge(
-        socket,
-        sessions,
-        SessionSpec {
-            name,
+    let requested_name = name.clone();
+    run_bridge(socket, sessions, name, cols, rows, create, move || {
+        Ok(Some(SessionSpec {
+            name: requested_name,
             cmd,
             workdir,
             env,
-        },
-        cols,
-        rows,
-        create,
-    )
+        }))
+    })
     .await
 }
 
 /// Server-owned entry point: read `PtyControl::Attach` from the wire,
-/// append `extra_args` to the server-supplied `spec.cmd`, then drive
-/// the bridge.  Used by the daemon's `/pod/codex/{name}` route.
-pub async fn serve_ws_session_with_params(
+/// then construct spawn parameters only if the requested session is absent.
+/// Used by the daemon's `/pod/codex/{name}` route.
+pub async fn serve_ws_session_with_params<F>(
     mut socket: WebSocket,
     sessions: PtySessions,
-    mut spec: SessionSpec,
-) {
+    session_name: String,
+    build_spec: F,
+) where
+    F: FnOnce(Vec<String>) -> Result<Option<SessionSpec>> + Send,
+{
     let (cols, rows, create, extra_args) = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
             Ok(PtyControl::Attach {
@@ -526,37 +586,38 @@ pub async fn serve_ws_session_with_params(
         None => return,
     };
 
-    if create {
-        spec.cmd.extend(extra_args);
-    }
-
-    run_bridge(socket, sessions, spec, cols, rows, create).await
+    run_bridge(
+        socket,
+        sessions,
+        session_name,
+        cols,
+        rows,
+        create,
+        move || build_spec(extra_args),
+    )
+    .await
 }
 
 /// Spawn or attach the screen session, replay its current screen state
 /// to the new client, then bridge stdin/stdout until the client
 /// disconnects or the session ends.
-async fn run_bridge(
+async fn run_bridge<F>(
     mut socket: WebSocket,
     sessions: PtySessions,
-    spec: SessionSpec,
+    name: String,
     cols: u16,
     rows: u16,
     create: bool,
-) {
-    let SessionSpec {
-        name,
-        cmd,
-        workdir,
-        env,
-    } = spec;
-
+    build_spec: F,
+) where
+    F: FnOnce() -> Result<Option<SessionSpec>> + Send,
+{
     let (write_fd, screen, mut output_rx) = match sessions
-        .spawn_or_attach(name.clone(), cmd, workdir, env, cols, rows, create)
+        .spawn_or_attach(name.clone(), cols, rows, create, build_spec)
         .await
     {
-        Ok(Some(tuple)) => tuple,
-        Ok(None) => {
+        Ok(SessionAcquire::Attached(tuple)) => tuple,
+        Ok(SessionAcquire::Missing) => {
             // Session does not exist and create=false (reconnection
             // to a session that already exited).
             let msg = serde_json::to_string(&PtyControl::SessionEnded)
@@ -564,8 +625,19 @@ async fn run_bridge(
             let _ = socket.send(Message::Text(msg.into())).await;
             return;
         }
+        Ok(SessionAcquire::Unavailable) => {
+            let msg = serde_json::to_string(&PtyControl::SessionUnavailable)
+                .expect("SessionUnavailable is always serializable");
+            let _ = socket.send(Message::Text(msg.into())).await;
+            return;
+        }
         Err(e) => {
             eprintln!("pty session failed for '{name}': {e:#}");
+            let msg = serde_json::to_string(&PtyControl::SessionError {
+                error: format!("{e:#}"),
+            })
+            .expect("SessionError is always serializable");
+            let _ = socket.send(Message::Text(msg.into())).await;
             return;
         }
     };
@@ -624,7 +696,9 @@ async fn run_bridge(
                             Ok(PtyControl::Session { .. }) | Ok(PtyControl::Attach { .. }) => {
                                 // Handshake messages after handshake are nonsensical
                             }
-                            Ok(PtyControl::SessionEnded) => {
+                            Ok(PtyControl::SessionEnded)
+                            | Ok(PtyControl::SessionUnavailable)
+                            | Ok(PtyControl::SessionError { .. }) => {
                                 // Server-to-client only, ignore if received
                             }
                             Err(e) => {

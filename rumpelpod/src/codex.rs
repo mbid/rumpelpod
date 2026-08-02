@@ -5,20 +5,19 @@
 //! handler that owns the per-pod codex screen session.
 //!
 //! Flow:
-//!   - Host runs `rumpel codex foo`: resolves the local codex binary,
-//!     launches the pod, writes codex credentials into it, then opens
-//!     one WebSocket against the daemon's `/pod/codex/foo` route via
-//!     the existing Unix socket, passing the resolved codex path as a
-//!     query parameter.
-//!   - Daemon's handler starts a per-pod loopback proxy to the pod
-//!     server's /codex (the codex TUI's `--remote` arg dials it), and
-//!     spawns or attaches a screen session whose child is the codex
-//!     TUI.  The TUI survives Ctrl-a d, so subsequent invocations
+//!   - Host runs `rumpel codex foo` and immediately opens one WebSocket
+//!     against the daemon's `/pod/codex/foo` route via its Unix socket.
+//!   - The daemon attaches to an existing frontend without consulting pod
+//!     state. If no frontend exists, it builds the spawn parameters from its
+//!     live cached pod connection and starts the frontend.
+//!   - Pod launch or reconnect happens only when neither path is available.
+//!     The TUI survives Ctrl-a d, so subsequent invocations
 //!     reattach and replay the previous conversation instead of
 //!     landing on the welcome screen.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::extract::ws::WebSocketUpgrade;
@@ -27,6 +26,7 @@ use axum::response::Response;
 use axum::routing::any;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
+use log::trace;
 use serde::Deserialize;
 use tokio_tungstenite::tungstenite;
 use url::Url;
@@ -46,57 +46,81 @@ type WsServerErrorResponse = tungstenite::handshake::server::ErrorResponse;
 
 pub fn codex(cmd: &CodexCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
-    let host_override = cmd.host_args.resolve()?;
-    let json_config = load_json_config(&repo_root)?;
-
-    // Resolve the local codex binary on the client side: the daemon
-    // (often a systemd user service) may not have codex on its own
-    // PATH.  The path is forwarded to the daemon both for image
-    // preparation (via launch_pod) and for the TUI launch (via the
-    // /pod/codex query string below).
-    let codex_bin = find_local_codex_cli().ok_or_else(|| {
-        anyhow::anyhow!(
-            "codex CLI not found in PATH. Install it from https://github.com/openai/codex"
-        )
-    })?;
-
-    confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
-
-    let result = launch_pod(&cmd.name, host_override)?;
-
-    let pod = crate::pod::PodClient::connect(&result.container_url, &result.container_token)?;
-    write_codex_credentials(&pod)?;
-
-    // CLI --no-dangerously-bypass-approvals-and-sandbox wins over the config setting.
-    let bypass = !cmd.no_dangerously_bypass_approvals_and_sandbox
-        && json_config.codex.dangerously_bypass_approvals_and_sandbox;
-    let mut extra_args: Vec<String> = Vec::new();
-    if bypass {
-        extra_args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
-    }
-    extra_args.extend(cmd.args.iter().cloned());
-
     let socket_path = daemon::socket_path()?;
+    let codex_bin = find_local_codex_cli();
+
     // form_urlencoded escapes the repo path so absolute paths with
     // slashes survive the URL.  Pod names are ASCII-only per the
     // PodName validator, so the path segment does not need escaping.
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("repo_path", &repo_root.to_string_lossy())
-        .append_pair("codex_cli_path", &codex_bin.to_string_lossy())
-        .finish();
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    query.append_pair("repo_path", &repo_root.to_string_lossy());
+    if let Some(codex_bin) = &codex_bin {
+        query.append_pair("codex_cli_path", &codex_bin.to_string_lossy());
+    }
+    query.append_pair(
+        "no_dangerously_bypass_approvals_and_sandbox",
+        if cmd.no_dangerously_bypass_approvals_and_sandbox {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    let query = query.finish();
     let path = format!("/pod/codex/{}?{query}", cmd.name);
 
-    let outcome = pty_attach::attach(
+    match attach_codex(&socket_path, &path, cmd.args.clone()) {
+        Ok(outcome) => return finish_codex_attachment(outcome),
+        Err(error)
+            if error
+                .downcast_ref::<pty_attach::SessionUnavailable>()
+                .is_some() =>
+        {
+            trace!("Codex frontend needs pod preparation");
+        }
+        Err(error) => return Err(error),
+    }
+
+    if codex_bin.is_none() {
+        return Err(anyhow::anyhow!(
+            "codex CLI not found in PATH. Install it from https://github.com/openai/codex"
+        ));
+    }
+
+    let host_override = cmd.host_args.resolve()?;
+    confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
+    launch_pod(&cmd.name, host_override)?;
+
+    let outcome = attach_codex(&socket_path, &path, cmd.args.clone()).map_err(|error| {
+        if error
+            .downcast_ref::<pty_attach::SessionUnavailable>()
+            .is_some()
+        {
+            anyhow::anyhow!("pod connection remained unavailable after launch")
+        } else {
+            error
+        }
+    })?;
+    finish_codex_attachment(outcome)
+}
+
+fn attach_codex(
+    socket_path: &std::path::Path,
+    path: &str,
+    extra_args: Vec<String>,
+) -> Result<pty_attach::AttachOutcome> {
+    pty_attach::attach(
         pty_attach::PtyTransport::Unix {
-            socket: socket_path,
+            socket: socket_path.to_path_buf(),
         },
-        &path,
+        path,
         // Daemon's Unix socket does not validate Authorization.
         "",
         pty_attach::WireParams::Attach { extra_args },
         None,
-    )?;
+    )
+}
 
+fn finish_codex_attachment(outcome: pty_attach::AttachOutcome) -> Result<()> {
     match outcome {
         pty_attach::AttachOutcome::Detached => {
             eprintln!("[detached from session]");
@@ -126,7 +150,8 @@ struct CodexQuery {
     /// Absolute path to the local codex binary, resolved by the
     /// client.  Forwarded so the daemon does not have to find codex
     /// on its own (typically narrower) PATH.
-    codex_cli_path: PathBuf,
+    codex_cli_path: Option<PathBuf>,
+    no_dangerously_bypass_approvals_and_sandbox: bool,
 }
 
 async fn codex_ws_handler(
@@ -136,55 +161,86 @@ async fn codex_ws_handler(
     Query(q): Query<CodexQuery>,
 ) -> Response {
     ws.on_upgrade(move |socket| async move {
-        let spec = match build_codex_spec(&daemon, &q.repo_path, &name, &q.codex_cli_path).await {
-            Ok(spec) => spec,
-            Err(e) => {
-                eprintln!("codex ws handler: {e:#}");
-                return;
-            }
-        };
-        serve_ws_session_with_params(socket, daemon.pty_sessions(), spec).await
+        let session_name = codex_session_name(&q.repo_path, &name);
+        let sessions = daemon.pty_sessions();
+        serve_ws_session_with_params(socket, sessions, session_name, move |extra_args| {
+            tokio::task::block_in_place(|| {
+                build_codex_spec(
+                    &daemon,
+                    &q.repo_path,
+                    &name,
+                    q.codex_cli_path.as_deref(),
+                    q.no_dangerously_bypass_approvals_and_sandbox,
+                    extra_args,
+                )
+            })
+        })
+        .await
     })
 }
 
-async fn build_codex_spec(
+fn build_codex_spec(
     daemon: &Arc<DaemonServer>,
     repo_path: &std::path::Path,
     pod_name: &str,
-    codex_bin: &std::path::Path,
-) -> Result<SessionSpec> {
-    // Look up token + container URL from the daemon's existing pod
-    // state.  The host calls launch_pod before opening the WS, so
-    // both must be populated.
-    let token = daemon
-        .pod_token(repo_path, pod_name)?
-        .with_context(|| format!("no token for pod '{pod_name}'"))?;
-    let container_url = daemon
-        .pod_container_url(repo_path, pod_name)
-        .with_context(|| format!("no container URL for pod '{pod_name}' (pod not running?)"))?;
+    codex_bin: Option<&std::path::Path>,
+    no_dangerously_bypass_approvals_and_sandbox: bool,
+    extra_args: Vec<String>,
+) -> Result<Option<SessionSpec>> {
+    let Some((container_url, container_token, codex_state)) =
+        daemon.connected_codex_pod(repo_path, pod_name)
+    else {
+        return Ok(None);
+    };
+    let codex_bin = codex_bin.ok_or_else(|| {
+        anyhow::anyhow!(
+            "codex CLI not found in PATH. Install it from https://github.com/openai/codex"
+        )
+    })?;
+
+    let json_config = load_json_config(repo_path)?;
+    let bypass = !no_dangerously_bypass_approvals_and_sandbox
+        && json_config.codex.dangerously_bypass_approvals_and_sandbox;
+    let mut codex_args = Vec::new();
+    if bypass {
+        codex_args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    }
+    codex_args.extend(extra_args);
+
+    // A non-empty state came from the pod's live event connection and means
+    // its Codex app server already ran with the credentials copied before the
+    // first frontend was created. A live local frontend bypasses this builder
+    // entirely, even when its pod connection is temporarily unavailable.
+    if codex_state.is_none() {
+        let pod = crate::pod::PodClient::new_with_timeout(
+            &container_url,
+            &container_token,
+            Duration::from_secs(30),
+        )?;
+        write_codex_credentials(&pod)?;
+    }
 
     // Bind a per-pod loopback proxy that forwards to the pod's /codex.
     // The codex TUI dials it via `--remote`; we cannot use a Unix
     // socket here because we do not control the codex CLI.
-    let proxy = tokio::task::block_in_place(|| {
-        daemon.ensure_codex_proxy(repo_path, pod_name, container_url, token)
-    })?;
+    let proxy = daemon.ensure_codex_proxy(repo_path, pod_name, container_url, container_token)?;
 
     let remote_url = format!("ws://127.0.0.1:{}", proxy.port);
-    let cmd = vec![
+    let mut cmd = vec![
         codex_bin.to_string_lossy().into_owned(),
         "--remote".to_string(),
         remote_url,
         "--remote-auth-token-env".to_string(),
         CODEX_PROXY_TOKEN_ENV.to_string(),
     ];
+    cmd.extend(codex_args);
 
-    Ok(SessionSpec {
+    Ok(Some(SessionSpec {
         name: codex_session_name(repo_path, pod_name),
         cmd,
         workdir: None,
         env: vec![format!("{CODEX_PROXY_TOKEN_ENV}={}", proxy.token)],
-    })
+    }))
 }
 
 pub(crate) fn codex_session_name(repo_path: &std::path::Path, pod_name: &str) -> String {

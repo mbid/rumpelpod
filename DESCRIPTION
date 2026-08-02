@@ -1,0 +1,8 @@
+Make Codex reattachment daemon-local
+
+Use the existing Codex daemon endpoint before pod preparation.
+Build frontend spawn parameters lazily from cached connection state,
+and upload credentials only when no prior Codex state is known.
+
+Keep frontends attachable even when repository configuration,
+host credentials, or the host Codex binary are unavailable.
