@@ -199,6 +199,8 @@ ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_ID}/bus
 
 # Ensure the user and group exist, handling the case where the base image
 # already provides them (possibly with a different uid/gid/shell).
+# A lingering user manager starts the development services without an
+# interactive login or an external devcontainer lifecycle runner.
 RUN if ! getent group ${USER} > /dev/null 2>&1; then \
         groupadd -g ${GROUP_ID} ${USER} || groupadd ${USER}; \
     fi && \
@@ -353,9 +355,13 @@ COPY --chown=${USER}:${USER} .devcontainer/rumpelpod.socket .devcontainer/rumpel
 USER ${USER}
 RUN /home/${USER}/.local/lib/rumpelpod/prepare-vscode-demo.sh
 USER root
-RUN mkdir -p "/home/${USER}/.config/systemd/user/sockets.target.wants" \
+RUN mkdir -p \
+        "/home/${USER}/.config/systemd/user/default.target.wants" \
+        "/home/${USER}/.config/systemd/user/sockets.target.wants" \
     && ln -s ../rumpelpod.socket \
         "/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket" \
+    && ln -s ../rumpelpod-vscode.service \
+        "/home/${USER}/.config/systemd/user/default.target.wants/rumpelpod-vscode.service" \
     && chown -R ${USER}:${USER} "/home/${USER}/.config"
 
 # Pre-download container images so services start without network access.

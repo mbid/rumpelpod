@@ -59,3 +59,8 @@ without a filter field.
 
 Keep the existing terminal spacing and scrollbar behavior unchanged.
 Theme only xterm's black fallback viewport to match the VS Code sidebar.
+
+Start the baked development daemon socket and browser VS Code service
+from a lingering systemd user session during container boot. Keep
+startup independent of devcontainer lifecycle commands so rumpel-created
+pods expose their editor without a background post-create build race.

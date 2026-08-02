@@ -47,13 +47,15 @@ installs both, and restarts the browser workspace:
 cargo vscode
 ```
 
-The devcontainer runs `cargo vscode` after creation and serves a dedicated
-`anyhow` 1.0.102 demo repository from
-`/workspaces/anyhow-demo` at port 3000. This keeps the live editor
-outside the rumpelpod source checkout: pods created through the extension use
-the demo's ordinary Rust devcontainer and do not try to nest Sysbox inside
-Sysbox. The demo is seeded from Cargo's pinned registry source on first use;
-later `cargo vscode` runs preserve its pods and working tree.
+The devcontainer image installs the development daemon and extension, then a
+lingering systemd user session starts the daemon socket and browser service as
+part of container boot. It serves a dedicated `anyhow` 1.0.102 demo repository
+from `/workspaces/anyhow-demo` at port 3000 without depending on devcontainer
+lifecycle commands. This keeps the live editor outside the rumpelpod source
+checkout: pods created through the extension use the demo's ordinary Rust
+devcontainer and do not try to nest Sysbox inside Sysbox. The demo is seeded
+from Cargo's pinned registry source during the image build; later `cargo
+vscode` runs preserve its pods and working tree.
 
 The server is unauthenticated and its address is fixed to the container
 loopback interface, so it cannot be exposed on a container network interface.

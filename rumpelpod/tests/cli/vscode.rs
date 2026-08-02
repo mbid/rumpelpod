@@ -382,6 +382,45 @@ fn vscode_agent_environment_is_systemd_safe() {
 }
 
 #[test]
+fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
+    let root = workspace_root();
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join(".devcontainer/devcontainer.json"))
+            .expect("read development container configuration"),
+    )
+    .expect("parse development container configuration");
+    assert!(
+        config.get("postCreateCommand").is_none(),
+        "development services depended on a post-create lifecycle command"
+    );
+
+    let dockerfile = fs::read_to_string(root.join(".devcontainer/Dockerfile"))
+        .expect("read development container Dockerfile");
+    assert!(
+        dockerfile.contains("touch /var/lib/systemd/linger/${USER}"),
+        "the image did not arrange a user manager at container boot"
+    );
+    assert!(
+        dockerfile
+            .contains("/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket"),
+        "the image did not enable the development daemon socket"
+    );
+    assert!(
+        dockerfile.contains(
+            "/home/${USER}/.config/systemd/user/default.target.wants/rumpelpod-vscode.service"
+        ),
+        "the image did not enable browser VS Code"
+    );
+
+    let entrypoint = fs::read_to_string(root.join(".devcontainer/entrypoint.sh"))
+        .expect("read development container entrypoint");
+    assert!(
+        entrypoint.trim_end().ends_with("exec /sbin/init"),
+        "the container entrypoint did not start systemd"
+    );
+}
+
+#[test]
 fn vscode_server_is_unauthenticated_and_loopback_only() {
     let root = workspace_root();
     let temporary = tempfile::tempdir().expect("create VS Code service test directory");

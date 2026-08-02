@@ -17,7 +17,6 @@
         "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
         "XAI_API_KEY": "${localEnv:XAI_API_KEY}"
     },
-    "postCreateCommand": "cargo vscode",
     "containerUser": "user",
     "forwardPorts": [3000],
     "portsAttributes": {
