@@ -2816,6 +2816,7 @@ impl DaemonServer {
                     ReconnectPodResult::Connected(result) => return Ok(*result),
                     ReconnectPodResult::Gone(e) => {
                         log::warn!("existing pod is gone, will recreate: {e:#}");
+                        self.pod_connections.remove(&repo_path, &pod_name.0);
                         self.cleanup_codex_runtime(&repo_path, &pod_name.0);
                         self.container_ids
                             .lock()
@@ -3880,12 +3881,19 @@ impl DaemonServer {
     }
 
     fn cleanup_codex_runtime(&self, repo_path: &Path, pod_name: &str) {
-        if let Some(connection) = self.pod_connections.get(repo_path, pod_name) {
-            connection.remove_codex_proxy();
-        }
-
-        let session_name = crate::codex::codex_session_name(repo_path, pod_name);
-        if let Err(e) = block_on(self.pty_sessions.terminate(&session_name)) {
+        let pod_connections = self.pod_connections.clone();
+        let repo_path = repo_path.to_path_buf();
+        let pod_name = pod_name.to_string();
+        let session_name = crate::codex::codex_session_name(&repo_path, &pod_name);
+        let result = block_on(
+            self.pty_sessions
+                .terminate_with_cleanup(&session_name, move || {
+                    if let Some(connection) = pod_connections.get(&repo_path, &pod_name) {
+                        connection.remove_codex_proxy();
+                    }
+                }),
+        );
+        if let Err(e) = result {
             error!("{e:#}");
         }
     }
@@ -4062,8 +4070,8 @@ impl Daemon for DaemonServer {
         };
         drop(conn);
 
-        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
         self.pod_connections.remove(&repo_path, &pod_name.0);
+        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
 
         let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
         let is_k8s = matches!(host, Host::Kubernetes { .. });

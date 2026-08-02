@@ -767,3 +767,35 @@ fn wait_for_host(
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::config::ContainerEngine;
+
+    #[test]
+    fn removing_pod_connection_discards_cached_codex_state() {
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let host_connections = Arc::new(HostConnectionRegistry::new(events_tx));
+        let registry = PodConnectionRegistry::new(host_connections);
+        let repo_path = Path::new("/repo");
+        let host = Host::Localhost {
+            engine: ContainerEngine::Docker,
+        };
+
+        let old = registry
+            .get_or_create(repo_path, "test", host.clone(), "old-token".to_string())
+            .unwrap();
+        *old.codex_state.lock().unwrap() = Some(CodexState::Idle);
+
+        registry.remove(repo_path, "test").unwrap();
+        let replacement = registry
+            .get_or_create(repo_path, "test", host, "new-token".to_string())
+            .unwrap();
+
+        assert!(!Arc::ptr_eq(&old, &replacement));
+        assert_eq!(replacement.codex_state(), None);
+    }
+}

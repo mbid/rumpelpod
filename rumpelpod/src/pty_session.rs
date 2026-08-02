@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
@@ -36,6 +37,7 @@ use tokio::sync::Mutex;
 // ---------------------------------------------------------------------------
 
 struct PtySession {
+    session_id: u64,
     master_fd: OwnedFd,
     child_pid: Pid,
     /// Virtual terminal buffer tracking the screen state for replay
@@ -64,6 +66,7 @@ enum SessionAcquire {
 pub struct PtySessions {
     inner: Arc<Mutex<HashMap<String, PtySession>>>,
     creation_locks: Arc<Mutex<SessionCreationLocks>>,
+    next_session_id: Arc<AtomicU64>,
 }
 
 impl Default for PtySessions {
@@ -71,6 +74,7 @@ impl Default for PtySessions {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             creation_locks: Arc::new(Mutex::new(HashMap::new())),
+            next_session_id: Arc::new(AtomicU64::new(1)),
         }
     }
 }
@@ -172,6 +176,12 @@ impl PtySessions {
         lock
     }
 
+    fn next_session_id(&self) -> u64 {
+        self.next_session_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("PTY session IDs exhausted")
+    }
+
     async fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
         let sessions = self.inner.lock().await;
         let session = sessions
@@ -187,18 +197,28 @@ impl PtySessions {
         Ok(())
     }
 
-    /// Remove a session from the registry unconditionally.
-    async fn remove_session(&self, name: &str) {
-        self.inner.lock().await.remove(name);
+    /// Remove a session only while its generation still owns the name.
+    async fn remove_session(&self, name: &str, session_id: u64) {
+        let mut sessions = self.inner.lock().await;
+        if sessions
+            .get(name)
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            sessions.remove(name);
+        }
     }
 
-    /// Pod lifecycle cleanup calls this because a detached TUI keeps
-    /// its original `--remote` URL even after the pod behind it is gone.
-    pub async fn terminate(&self, name: &str) -> Result<()> {
+    /// Run use-case cleanup and terminate the named child without allowing a
+    /// cold builder to publish resources between those operations.
+    pub(crate) async fn terminate_with_cleanup<F>(&self, name: &str, cleanup: F) -> Result<()>
+    where
+        F: FnOnce() + Send,
+    {
         // Serialize with cold preparation so lifecycle cleanup cannot return
         // while a frontend for the old pod is still being spawned.
         let creation_lock = self.creation_lock(name).await;
         let _creation_guard = creation_lock.lock().await;
+        cleanup();
         let session = self.inner.lock().await.remove(name);
         let Some(session) = session else {
             return Ok(());
@@ -278,6 +298,7 @@ fn spawn_session(
 
             let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
             let (output_tx, _) = tokio::sync::broadcast::channel(256);
+            let session_id = sessions.next_session_id();
 
             // Spawn persistent reader: continuously drains PTY output,
             // updates the screen buffer, and broadcasts to clients.
@@ -290,9 +311,11 @@ fn spawn_session(
                 output_tx.clone(),
                 sessions.clone(),
                 name.to_string(),
+                session_id,
             );
 
             Ok(PtySession {
+                session_id,
                 master_fd: master,
                 child_pid: child,
                 screen,
@@ -314,12 +337,14 @@ fn spawn_persistent_reader(
     tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     sessions: PtySessions,
     name: String,
+    session_id: u64,
 ) {
     tokio::spawn(async move {
         let async_fd = match AsyncFd::new(fd) {
             Ok(fd) => fd,
             Err(e) => {
                 eprintln!("pty: persistent reader AsyncFd::new failed: {e}");
+                sessions.remove_session(&name, session_id).await;
                 return;
             }
         };
@@ -328,7 +353,10 @@ fn spawn_persistent_reader(
         loop {
             let mut ready = match async_fd.readable().await {
                 Ok(r) => r,
-                Err(_) => break,
+                Err(e) => {
+                    eprintln!("pty: persistent reader readiness failed: {e}");
+                    break;
+                }
             };
 
             match ready.try_io(|inner| {
@@ -354,14 +382,12 @@ fn spawn_persistent_reader(
                 }
                 // EOF (read returned 0) or EIO (PTY slave closed on
                 // Linux) -- the session is over.
-                Ok(Err(_)) => {
-                    sessions.remove_session(&name).await;
-                    break;
-                }
+                Ok(Err(_)) => break,
                 // WouldBlock -- AsyncFd will re-poll
                 Err(_) => continue,
             }
         }
+        sessions.remove_session(&name, session_id).await;
     });
 }
 
@@ -717,4 +743,56 @@ async fn run_bridge<F>(
 
     // The dup'd write_fd is dropped here; the session's master_fd and
     // the persistent reader's fd keep the PTY alive for future reattach.
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    fn test_session(session_id: u64) -> PtySession {
+        let master_fd = File::open("/dev/null").expect("open /dev/null").into();
+        let (output_tx, _) = tokio::sync::broadcast::channel(1);
+        PtySession {
+            session_id,
+            master_fd,
+            child_pid: Pid::from_raw(1),
+            screen: Arc::new(Mutex::new(vt100::Parser::new(1, 1, 0))),
+            output_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_reader_does_not_remove_replacement_session() {
+        let sessions = PtySessions::new();
+        sessions
+            .inner
+            .lock()
+            .await
+            .insert("same-name".to_string(), test_session(2));
+
+        sessions.remove_session("same-name", 1).await;
+
+        let registered_id = sessions
+            .inner
+            .lock()
+            .await
+            .get("same-name")
+            .map(|session| session.session_id);
+        assert_eq!(registered_id, Some(2));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cleanup_holds_session_creation_lock() {
+        let sessions = PtySessions::new();
+        let creation_lock = sessions.creation_lock("locked-cleanup").await;
+
+        sessions
+            .terminate_with_cleanup("locked-cleanup", || {
+                assert!(creation_lock.try_lock().is_err());
+            })
+            .await
+            .unwrap();
+    }
 }
