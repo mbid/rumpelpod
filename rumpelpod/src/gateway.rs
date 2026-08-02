@@ -197,7 +197,7 @@ pub fn setup_gateway(repo_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Install the host-repo pre-receive hook for access control.
+/// Install host-repo hooks for access control and UI invalidation.
 ///
 /// Must be called AFTER the devcontainer image is built so the hook is
 /// not baked into the image via COPY (it references a host-side binary
@@ -211,6 +211,8 @@ pub fn install_host_hooks(repo_path: &Path) -> Result<()> {
         .context("resolving rumpel binary path")?
         .to_string_lossy()
         .to_string();
+    let rumpel_exe = crate::devcontainer::shell_escape(&rumpel_exe);
+    let escaped_repo_path = crate::devcontainer::shell_escape(&repo_path.to_string_lossy());
 
     let hooks_dir = repo_path.join(".git").join("hooks");
 
@@ -219,8 +221,19 @@ pub fn install_host_hooks(repo_path: &Path) -> Result<()> {
     install_host_hook(
         &hooks_dir,
         "pre-receive",
-        HOST_PRE_RECEIVE_COMMENT,
         &pre_receive_block,
+        HostHookPlacement::AfterUser,
+    )?;
+
+    let post_receive_block = format!(
+        "{HOST_POST_RECEIVE_COMMENT}\n\
+         {rumpel_exe} git-hook host-post-receive --repo-path {escaped_repo_path}\n"
+    );
+    install_host_hook(
+        &hooks_dir,
+        "post-receive",
+        &post_receive_block,
+        HostHookPlacement::BeforeUser,
     )?;
 
     Ok(())
@@ -235,6 +248,13 @@ const HOST_HOOK_COMMENT_PREFIX: &str = "# Installed by rumpelpod (host";
 
 /// Comment identifying the host pre-receive hook block.
 const HOST_PRE_RECEIVE_COMMENT: &str = "# Installed by rumpelpod (host pre-receive)";
+const HOST_POST_RECEIVE_COMMENT: &str = "# Installed by rumpelpod (host post-receive)";
+
+#[derive(Clone, Copy)]
+enum HostHookPlacement {
+    BeforeUser,
+    AfterUser,
+}
 
 /// Remove host hook blocks from a hook file's content, preserving any
 /// other code (e.g. user hooks).  Each host block is identified by its
@@ -258,12 +278,13 @@ pub fn strip_host_hooks(content: &str) -> String {
     out
 }
 
-/// Install a host-repo hook by appending the given block to the hook
-/// file.  If the hook file does not exist, creates it with a shebang.
-/// If a block with the same comment line is already present, does nothing.
-/// Strips any previously installed host hook block for this hook name
-/// (identified by HOST_HOOK_COMMENT_PREFIX) before appending the new one.
-fn install_host_hook(hooks_dir: &Path, hook_name: &str, comment: &str, block: &str) -> Result<()> {
+/// Install a managed block without preventing an existing user hook from running.
+fn install_host_hook(
+    hooks_dir: &Path,
+    hook_name: &str,
+    block: &str,
+    placement: HostHookPlacement,
+) -> Result<()> {
     fs::create_dir_all(hooks_dir).with_context(|| {
         let hooks_dir = hooks_dir.display();
         format!("Failed to create hooks directory: {hooks_dir}")
@@ -271,12 +292,17 @@ fn install_host_hook(hooks_dir: &Path, hook_name: &str, comment: &str, block: &s
 
     let hook_path = hooks_dir.join(hook_name);
 
-    if let Ok(existing) = fs::read_to_string(&hook_path) {
-        if existing.contains(comment) {
-            return Ok(());
+    let existing = match fs::read_to_string(&hook_path) {
+        Ok(existing) => Some(existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            let hook_path = hook_path.display();
+            return Err(error).with_context(|| format!("Failed to read hook: {hook_path}"));
         }
+    };
+    if let Some(existing) = existing {
         let cleaned = strip_host_hooks(&existing);
-        let combined = format!("{}\n\n{block}", cleaned.trim_end());
+        let combined = combine_host_hook(&cleaned, block, placement);
         fs::write(&hook_path, combined).with_context(|| {
             let hook_path = hook_path.display();
             format!("Failed to update hook: {hook_path}")
@@ -294,4 +320,100 @@ fn install_host_hook(hooks_dir: &Path, hook_name: &str, comment: &str, block: &s
     fs::set_permissions(&hook_path, perms)?;
 
     Ok(())
+}
+
+fn combine_host_hook(existing: &str, block: &str, placement: HostHookPlacement) -> String {
+    match placement {
+        HostHookPlacement::BeforeUser => {
+            let block = block.trim_end();
+            if let Some((shebang, body)) = existing.split_once('\n') {
+                if shebang.starts_with("#!") {
+                    return format!("{shebang}\n{block}\n{body}");
+                }
+            }
+            if existing.starts_with("#!") {
+                return format!("{existing}\n{block}\n");
+            }
+            format!("#!/bin/sh\n{block}\n{existing}")
+        }
+        HostHookPlacement::AfterUser => {
+            let separator = if existing.ends_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            format!("{existing}{separator}{block}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installing_post_receive_preserves_existing_hook() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let hook = hooks.join("post-receive");
+        let user_hook = "#!/bin/sh\nprintf 'user hook\\n'\n";
+        fs::write(&hook, user_hook).expect("write user hook");
+        let block =
+            "# Installed by rumpelpod (host post-receive)\nrumpel git-hook host-post-receive\n";
+
+        install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
+            .expect("install rumpelpod post-receive hook");
+        install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
+            .expect("reinstall rumpelpod post-receive hook");
+
+        let installed = fs::read_to_string(&hook).expect("read installed hook");
+        assert!(installed.starts_with("#!/bin/sh\n"));
+        let notification_position = installed
+            .find(HOST_POST_RECEIVE_COMMENT)
+            .expect("installed notification");
+        let user_hook_position = installed
+            .find("printf 'user hook\\n'")
+            .expect("preserved user hook");
+        assert!(notification_position < user_hook_position);
+        assert_eq!(installed.matches(HOST_POST_RECEIVE_COMMENT).count(), 1);
+        let stripped = strip_host_hooks(&installed);
+        assert!(stripped.contains("printf 'user hook\\n'"));
+        assert!(!stripped.contains(HOST_POST_RECEIVE_COMMENT));
+    }
+
+    #[test]
+    fn post_receive_notification_runs_before_user_exit() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let hook = hooks.join("post-receive");
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write user hook");
+        let notification = temporary.path().join("notification-ran");
+        let notification = crate::devcontainer::shell_escape(&notification.to_string_lossy());
+        let block = format!("{HOST_POST_RECEIVE_COMMENT}\nprintf notification > {notification}\n");
+
+        install_host_hook(hooks, "post-receive", &block, HostHookPlacement::BeforeUser)
+            .expect("install rumpelpod post-receive hook");
+        Command::new(&hook)
+            .success()
+            .expect("run installed post-receive hook");
+
+        assert!(temporary.path().join("notification-ran").exists());
+    }
+
+    #[test]
+    fn installing_host_hook_does_not_replace_non_utf8_user_hook() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let hook = hooks.join("post-receive");
+        let original = b"#!/bin/sh\n# \xff\n";
+        fs::write(&hook, original).expect("write non-UTF-8 user hook");
+        let block =
+            "# Installed by rumpelpod (host post-receive)\nrumpel git-hook host-post-receive\n";
+
+        let error = install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
+            .expect_err("non-UTF-8 hook must be preserved");
+
+        assert!(format!("{error:#}").contains("Failed to read hook"));
+        assert_eq!(fs::read(&hook).expect("read preserved hook"), original);
+    }
 }

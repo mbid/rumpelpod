@@ -1,0 +1,152 @@
+{
+  "name": "rumpelpod-vscode",
+  "displayName": "Rumpelpod",
+  "description": "Switch between rumpelpod agents and review their changes.",
+  "version": "0.4.0",
+  "publisher": "nvidia",
+  "license": "Apache-2.0",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/NVIDIA/rumpelpod.git",
+    "directory": "vscode"
+  },
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:rumpelpod.agent"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "rumpelpod",
+          "title": "Rumpelpod",
+          "icon": "media/rumpelpod.svg"
+        }
+      ]
+    },
+    "views": {
+      "rumpelpod": [
+        {
+          "id": "rumpelpod.agent",
+          "name": "Sessions",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "rumpelpod.showPods",
+        "title": "Switch Pod",
+        "category": "Rumpelpod",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "rumpelpod.createPod",
+        "title": "Create Pod",
+        "category": "Rumpelpod",
+        "icon": "$(add)"
+      },
+      {
+        "command": "rumpelpod.refresh",
+        "title": "Refresh Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "rumpelpod.launchAgent",
+        "title": "Launch Agent",
+        "category": "Rumpelpod",
+        "icon": "$(person)"
+      },
+      {
+        "command": "rumpelpod.openActiveShell",
+        "title": "Open Pod Shell",
+        "category": "Rumpelpod",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "rumpelpod.mergeActivePod",
+        "title": "Merge Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(git-merge)"
+      },
+      {
+        "command": "rumpelpod.addSshKey",
+        "title": "Add SSH Key to Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(key)"
+      },
+      {
+        "command": "rumpelpod.stopActivePod",
+        "title": "Stop Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "rumpelpod.deleteActivePod",
+        "title": "Delete Active Pod",
+        "category": "Rumpelpod",
+        "icon": "$(trash)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "rumpelpod.createPod",
+          "when": "view == rumpelpod.agent",
+          "group": "navigation@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Rumpelpod",
+      "properties": {
+        "rumpelpod.defaultAgent": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "grok",
+            "pi"
+          ],
+          "default": "codex",
+          "description": "Agent preselected during pod creation and launched when opening a pod without saved sessions."
+        },
+        "rumpelpod.executable": {
+          "type": "string",
+          "default": "rumpel",
+          "description": "Path to the rumpel command used by the extension."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "check": "tsc --noEmit",
+    "package": "npm run check && npm run build && node package.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "@types/node": "22.15.3",
+    "@types/ws": "8.18.1",
+    "@types/vscode": "1.109.0",
+    "@vscode/vsce": "3.9.2",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3",
+    "ws": "8.18.3"
+  }
+}

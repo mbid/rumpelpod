@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, watch};
 use crate::async_runtime::RUNTIME;
 use crate::config::Host;
 use crate::daemon::host_connection::{HostConnection, HostConnectionRegistry, HostKey, HostStatus};
+use crate::daemon::protocol::DaemonEvent;
 use crate::daemon::reconnect::ReconnectEvent;
 use crate::daemon::{ssh_agent_dir, CodexProxyEndpoint, CodexProxyHandle, SshAgentHandle};
 use crate::pod::types::{ClaudeState, CodexState};
@@ -52,6 +53,31 @@ impl PodConnectionKey {
 
     pub fn pod_name(&self) -> &str {
         &self.pod_name
+    }
+}
+
+fn replace_and_emit<T>(
+    value: &Mutex<T>,
+    replacement: T,
+    events_tx: &broadcast::Sender<DaemonEvent>,
+    key: &PodConnectionKey,
+) where
+    T: PartialEq,
+{
+    let changed = {
+        let mut current = value.lock().unwrap();
+        if *current == replacement {
+            false
+        } else {
+            *current = replacement;
+            true
+        }
+    };
+    if changed {
+        let _ = events_tx.send(DaemonEvent::PodStatusChanged {
+            repository: key.repo_path.to_string_lossy().into_owned(),
+            pod: key.pod_name.clone(),
+        });
     }
 }
 
@@ -108,11 +134,13 @@ pub struct PodConnection {
     resources: Mutex<PodConnectionResources>,
     event_loop: Mutex<Option<EventLoopHandle>>,
     host_connections: Arc<HostConnectionRegistry>,
+    events_tx: broadcast::Sender<DaemonEvent>,
 }
 
 impl PodConnection {
     fn new(
         host_connections: Arc<HostConnectionRegistry>,
+        events_tx: broadcast::Sender<DaemonEvent>,
         key: PodConnectionKey,
         host: Host,
         token: String,
@@ -138,6 +166,7 @@ impl PodConnection {
             resources: Mutex::new(PodConnectionResources::new()),
             event_loop: Mutex::new(None),
             host_connections,
+            events_tx,
         })
     }
 
@@ -240,9 +269,16 @@ impl PodConnection {
         let status = self.status.clone();
         let claude_state = self.claude_state.clone();
         let codex_state = self.codex_state.clone();
-        let pod_name = self.key.pod_name.clone();
+        let key = self.key.clone();
+        let events_tx = self.events_tx.clone();
+        let pod_name = key.pod_name.clone();
 
-        *self.status.lock().unwrap() = PodConnectionStatus::Connecting;
+        replace_and_emit(
+            &self.status,
+            PodConnectionStatus::Connecting,
+            &self.events_tx,
+            &self.key,
+        );
         let thread = std::thread::Builder::new()
             .name(format!("pod-connection-{pod_name}"))
             .spawn(move || {
@@ -255,6 +291,8 @@ impl PodConnection {
                     status,
                     claude_state,
                     codex_state,
+                    events_tx,
+                    key,
                 });
             })
             .expect("failed to spawn pod connection event loop");
@@ -423,7 +461,12 @@ impl PodConnection {
         if self.status() == PodConnectionStatus::Stopped {
             return;
         }
-        *self.status.lock().unwrap() = PodConnectionStatus::Connecting;
+        replace_and_emit(
+            &self.status,
+            PodConnectionStatus::Connecting,
+            &self.events_tx,
+            &self.key,
+        );
         let _ = self.tx.send(ReconnectEvent::HostConnected);
     }
 
@@ -431,13 +474,23 @@ impl PodConnection {
         if self.status() == PodConnectionStatus::Stopped {
             return;
         }
-        *self.status.lock().unwrap() = PodConnectionStatus::HostDisconnected;
+        replace_and_emit(
+            &self.status,
+            PodConnectionStatus::HostDisconnected,
+            &self.events_tx,
+            &self.key,
+        );
         let _ = self.tx.send(ReconnectEvent::Attempting);
     }
 
     pub fn stop_events(&self) {
         self.stop_event_loop();
-        *self.status.lock().unwrap() = PodConnectionStatus::Stopped;
+        replace_and_emit(
+            &self.status,
+            PodConnectionStatus::Stopped,
+            &self.events_tx,
+            &self.key,
+        );
         let _ = self.tx.send(ReconnectEvent::Stopped);
     }
 
@@ -463,13 +516,18 @@ impl PodConnection {
 pub struct PodConnectionRegistry {
     host_connections: Arc<HostConnectionRegistry>,
     pods: Mutex<HashMap<PodConnectionKey, Arc<PodConnection>>>,
+    events_tx: broadcast::Sender<DaemonEvent>,
 }
 
 impl PodConnectionRegistry {
-    pub fn new(host_connections: Arc<HostConnectionRegistry>) -> Self {
+    pub fn new(
+        host_connections: Arc<HostConnectionRegistry>,
+        events_tx: broadcast::Sender<DaemonEvent>,
+    ) -> Self {
         Self {
             host_connections,
             pods: Mutex::new(HashMap::new()),
+            events_tx,
         }
     }
 
@@ -488,6 +546,7 @@ impl PodConnectionRegistry {
         }
         let connection = Arc::new(PodConnection::new(
             self.host_connections.clone(),
+            self.events_tx.clone(),
             key.clone(),
             host,
             token,
@@ -651,6 +710,8 @@ struct PodEventLoop {
     status: Arc<Mutex<PodConnectionStatus>>,
     claude_state: Arc<Mutex<Option<ClaudeState>>>,
     codex_state: Arc<Mutex<Option<CodexState>>>,
+    events_tx: broadcast::Sender<DaemonEvent>,
+    key: PodConnectionKey,
 }
 
 fn pod_event_loop(ctx: PodEventLoop) {
@@ -663,11 +724,13 @@ fn pod_event_loop(ctx: PodEventLoop) {
         status,
         claude_state,
         codex_state,
+        events_tx,
+        key,
     } = ctx;
 
     let apply_greeting = |g: GreetingState| {
-        *claude_state.lock().unwrap() = g.claude;
-        *codex_state.lock().unwrap() = g.codex;
+        replace_and_emit(&claude_state, g.claude, &events_tx, &key);
+        replace_and_emit(&codex_state, g.codex, &events_tx, &key);
     };
 
     let mut host_rx = host_conn.subscribe();
@@ -680,23 +743,28 @@ fn pod_event_loop(ctx: PodEventLoop) {
 
         let _ = tx.send(ReconnectEvent::Attempting);
         host_conn.request_probe();
-        if !wait_for_host(&mut host_rx, &stop, &status) {
+        if !wait_for_host(&mut host_rx, &stop, &status, &events_tx, &key) {
             return;
         }
-        *status.lock().unwrap() = PodConnectionStatus::Connecting;
+        replace_and_emit(&status, PodConnectionStatus::Connecting, &events_tx, &key);
         let _ = tx.send(ReconnectEvent::HostConnected);
 
         let mut reader = match connect_pod_events(&container_url, &token) {
             Ok((reader, greeting)) => {
                 apply_greeting(greeting);
-                *status.lock().unwrap() = PodConnectionStatus::Connected;
+                replace_and_emit(&status, PodConnectionStatus::Connected, &events_tx, &key);
                 let _ = tx.send(ReconnectEvent::Connected);
                 backoff = INITIAL_DELAY;
                 reader
             }
             Err(e) => {
                 debug!("pod event connection failed: {e:#}");
-                *status.lock().unwrap() = PodConnectionStatus::PodDisconnected;
+                replace_and_emit(
+                    &status,
+                    PodConnectionStatus::PodDisconnected,
+                    &events_tx,
+                    &key,
+                );
                 let _ = tx.send(ReconnectEvent::Failed {
                     error: format!("{e:#}"),
                 });
@@ -713,7 +781,12 @@ fn pod_event_loop(ctx: PodEventLoop) {
                 return;
             }
             if host_conn.status() == HostStatus::Disconnected {
-                *status.lock().unwrap() = PodConnectionStatus::HostDisconnected;
+                replace_and_emit(
+                    &status,
+                    PodConnectionStatus::HostDisconnected,
+                    &events_tx,
+                    &key,
+                );
                 let _ = tx.send(ReconnectEvent::Attempting);
                 break;
             }
@@ -728,12 +801,12 @@ fn pod_event_loop(ctx: PodEventLoop) {
                         match pending_event.as_deref() {
                             Some("claude_state") => {
                                 if let Ok(cs) = serde_json::from_str::<Option<ClaudeState>>(data) {
-                                    *claude_state.lock().unwrap() = cs;
+                                    replace_and_emit(&claude_state, cs, &events_tx, &key);
                                 }
                             }
                             Some("codex_state") => {
                                 if let Ok(xs) = serde_json::from_str::<Option<CodexState>>(data) {
-                                    *codex_state.lock().unwrap() = xs;
+                                    replace_and_emit(&codex_state, xs, &events_tx, &key);
                                 }
                             }
                             Some("state") | None => {}
@@ -753,6 +826,8 @@ fn wait_for_host(
     host_rx: &mut watch::Receiver<HostStatus>,
     stop: &AtomicBool,
     status: &Mutex<PodConnectionStatus>,
+    events_tx: &broadcast::Sender<DaemonEvent>,
+    key: &PodConnectionKey,
 ) -> bool {
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -761,7 +836,12 @@ fn wait_for_host(
         if *host_rx.borrow() == HostStatus::Connected {
             return true;
         }
-        *status.lock().unwrap() = PodConnectionStatus::HostDisconnected;
+        replace_and_emit(
+            status,
+            PodConnectionStatus::HostDisconnected,
+            events_tx,
+            key,
+        );
         let _ = RUNTIME.block_on(async {
             tokio::time::timeout(Duration::from_secs(1), host_rx.changed()).await
         });

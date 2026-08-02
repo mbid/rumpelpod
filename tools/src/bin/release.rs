@@ -21,6 +21,7 @@ const LINUX_TARGETS: &[(&str, &str)] = &[
 
 const DARWIN_TRIPLE: &str = "aarch64-apple-darwin";
 const DARWIN_NAME: &str = "rumpel-darwin-arm64";
+const VSCODE_NAME: &str = "rumpelpod-vscode.vsix";
 
 fn main() -> ExitCode {
     match run() {
@@ -147,6 +148,14 @@ fn run() -> Result<ExitCode> {
 
     // -- Package and upload ---------------------------------------------------
 
+    eprintln!("==> Building universal VS Code extension...");
+    tools::run(Command::new("cargo").args(["vscode", "--check"]))?;
+    std::fs::copy(
+        Path::new("vscode/dist").join(VSCODE_NAME),
+        staging.path().join(VSCODE_NAME),
+    )
+    .context("staging VS Code extension")?;
+
     let tarball_name = format!("rumpel-{tag}.tar.gz");
     let tarball = staging.path().join(&tarball_name);
     eprintln!("==> Packaging {tarball_name}...");
@@ -162,11 +171,22 @@ fn run() -> Result<ExitCode> {
     )?;
 
     eprintln!("==> Creating GitHub release {tag}...");
+    let vscode_name = format!("rumpelpod-vscode-{tag}.vsix");
+    let vscode = staging.path().join(&vscode_name);
+    std::fs::rename(staging.path().join(VSCODE_NAME), &vscode)
+        .context("naming VS Code release artifact")?;
+    let linux_amd64 = staging.path().join("rumpel-linux-amd64");
+    let linux_arm64 = staging.path().join("rumpel-linux-arm64");
+    let darwin_arm64 = staging.path().join(DARWIN_NAME);
     tools::run(Command::new("gh").args([
         "release",
         "create",
         &tag,
         tarball.to_str().unwrap(),
+        vscode.to_str().unwrap(),
+        linux_amd64.to_str().unwrap(),
+        linux_arm64.to_str().unwrap(),
+        darwin_arm64.to_str().unwrap(),
         "--title",
         &tag,
     ]))?;

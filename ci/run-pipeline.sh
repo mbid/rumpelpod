@@ -15,8 +15,8 @@
 # branch tip always is.
 #
 # When STAGING_DIR is set, the release rumpel binary the pipeline built
-# and tested is copied there afterwards so CI can publish it -- the
-# published binary is exactly the one the tests ran against.
+# and tested is copied there afterwards. The amd64 run also copies the
+# universal VSIX exercised by the browser test.
 
 set -euo pipefail
 
@@ -33,7 +33,10 @@ repo_root=$(cd "$script_dir/.." && pwd)
 
 # The base image is pinned by digest in the Dockerfile itself, so the
 # build needs no --build-arg to stay reproducible.
-docker build --tag rumpelpod-dev "$repo_root/.devcontainer"
+docker build \
+  --file "$repo_root/.devcontainer/Dockerfile" \
+  --tag rumpelpod-dev \
+  "$repo_root"
 
 # Sysbox lets the container run systemd and nested containers (docker,
 # podman, k3d) without --privileged, the same as local development.
@@ -93,4 +96,8 @@ if [ -n "$STAGING_DIR" ]; then
   docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
     cat "target/$triple/release/rumpel" >"$STAGING_DIR/$name"
   chmod +x "$STAGING_DIR/$name"
+  if [ "$(dpkg --print-architecture)" = amd64 ]; then
+    docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
+      cat vscode/dist/rumpelpod-vscode.vsix >"$STAGING_DIR/rumpelpod-vscode.vsix"
+  fi
 fi

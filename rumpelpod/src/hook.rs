@@ -8,6 +8,8 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use crate::cli::{PreCommitDescriptionCommand, ReferenceTransactionCommand};
+use crate::daemon;
+use crate::daemon::protocol::{Daemon, DaemonClient};
 use crate::pod::server::TOKEN_FILE;
 use crate::pod::types::{ClaudeState, NotifyClaudeStateRequest};
 use crate::CommandExt;
@@ -253,6 +255,17 @@ pub fn host_pre_receive() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Notify the daemon after receive-pack committed refs in the host repo.
+///
+/// This hook does not consume stdin so an existing post-receive hook can
+/// inspect the updates before rumpelpod's appended invocation runs.
+pub fn host_post_receive(repo_path: &Path) -> Result<()> {
+    let pod_name = std::env::var("POD_NAME").context("POD_NAME is not set")?;
+    let socket_path = daemon::socket_path()?;
+    let client = DaemonClient::new_unix(&socket_path);
+    client.notify_pod_review_changed(repo_path, &pod_name)
 }
 
 fn check_push_access(refname: &str, pod_name: Option<&str>) -> Result<()> {

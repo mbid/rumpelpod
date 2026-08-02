@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[Unit]
+Description=Rumpelpod browser VS Code
+After=rumpelpod.socket
+Requires=rumpelpod.socket
+ConditionPathIsDirectory=/workspaces/anyhow-demo/.git
+
+[Service]
+Type=simple
+WorkingDirectory=/workspaces/anyhow-demo
+EnvironmentFile=-%h/.config/rumpelpod/agent-environment
+ExecStart=%h/.local/lib/rumpelpod/start-vscode.sh
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

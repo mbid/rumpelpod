@@ -259,6 +259,41 @@ fn review_shows_new_files() {
 }
 
 #[test]
+fn review_json_preserves_utf8_file_names() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+    let pod_name = "review-utf8-file";
+    let file_name = "review-\u{00e4}.txt";
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run rumpel enter");
+
+    let command = format!(
+        "printf '%s\\n' 'utf8 review content' > '{file_name}' && git add '{file_name}' && git commit --no-verify -m 'Add UTF-8 review file'"
+    );
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "sh", "-c", &command])
+        .success()
+        .expect("Failed to commit UTF-8 file in pod");
+
+    let output = pod_command(&repo, &daemon)
+        .args(["review", pod_name, "--json"])
+        .success()
+        .expect("rumpel review --json failed for UTF-8 file");
+    let plan: serde_json::Value =
+        serde_json::from_slice(&output).expect("review plan was not JSON");
+    assert_eq!(plan["files"][0]["path"], file_name);
+    assert_eq!(plan["files"][0]["base_exists"], false);
+    assert_eq!(plan["files"][0]["target_exists"], true);
+}
+
+#[test]
 fn review_multiple_files() {
     let repo = TestRepo::new();
 

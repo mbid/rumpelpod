@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[Unit]
+Description=Rumpelpod development daemon
+Requires=rumpelpod.socket
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/rumpelpod/agent-environment
+ExecStart=%h/.local/bin/rumpel daemon
+Restart=on-failure
+RestartSec=2

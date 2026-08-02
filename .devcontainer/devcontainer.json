@@ -1,15 +1,31 @@
 {
     "build": {
         "dockerfile": "Dockerfile",
+        "context": "..",
         "args": {
             "BASE_IMAGE": "${localEnv:BASE_IMAGE}"
         }
     },
     "runArgs": [
-        "--runtime=sysbox-runc",
-        "--env-file", ".env"
+        "--runtime=sysbox-runc"
     ],
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/rumpelpod,type=bind",
+    "workspaceFolder": "/workspaces/rumpelpod",
+    "containerEnv": {
+        "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+        "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
+        "OPENAI_API_KEY": "${localEnv:OPENAI_API_KEY}",
+        "XAI_API_KEY": "${localEnv:XAI_API_KEY}"
+    },
     "containerUser": "user",
+    "forwardPorts": [3000],
+    "portsAttributes": {
+        "3000": {
+            "label": "Rumpelpod VS Code",
+            "onAutoForward": "openBrowser",
+            "protocol": "http"
+        }
+    },
     "mounts": [
         {
             "type": "bind",

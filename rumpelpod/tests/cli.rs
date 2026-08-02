@@ -23,6 +23,8 @@ mod devcontainer;
 mod enter;
 #[path = "cli/env_probe_hang.rs"]
 mod env_probe_hang;
+#[path = "cli/events.rs"]
+mod events;
 #[path = "cli/executor.rs"]
 mod executor;
 #[path = "cli/fork.rs"]
@@ -62,3 +64,6 @@ mod stop;
 mod systemd;
 #[path = "cli/version.rs"]
 mod version;
+#[cfg(target_os = "linux")]
+#[path = "cli/vscode.rs"]
+mod vscode;

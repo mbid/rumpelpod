@@ -59,7 +59,9 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: rumpel-linux-amd64
-          path: staging/rumpel-linux-amd64
+          path: |
+            staging/rumpel-linux-amd64
+            staging/rumpelpod-vscode.vsix
 
   linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -136,14 +138,24 @@ jobs:
 
       - name: Create tarball
         run: |
-          chmod +x staging/*
+          chmod +x \
+            staging/rumpel-linux-amd64 \
+            staging/rumpel-linux-arm64 \
+            staging/rumpel-darwin-arm64
           tar -C staging -czf "rumpel-${{ github.ref_name }}.tar.gz" \
             rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64
+          mv staging/rumpelpod-vscode.vsix \
+            "rumpelpod-vscode-${{ github.ref_name }}.vsix"
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" "rumpel-${{ github.ref_name }}.tar.gz" \
+          gh release create "${{ github.ref_name }}" \
+            "rumpel-${{ github.ref_name }}.tar.gz" \
+            "rumpelpod-vscode-${{ github.ref_name }}.vsix" \
+            staging/rumpel-linux-amd64 \
+            staging/rumpel-linux-arm64 \
+            staging/rumpel-darwin-arm64 \
             --title "${{ github.ref_name }}" \
             --repo "${{ github.repository }}"

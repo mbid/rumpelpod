@@ -1,0 +1,6 @@
+.git
+.env
+cloud
+target
+vscode/dist
+vscode/node_modules

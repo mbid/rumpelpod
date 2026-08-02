@@ -3,7 +3,7 @@
 
 //! Integration tests for the `rumpel codex` subcommand.
 
-mod common;
+pub(crate) mod common;
 mod detach;
 mod host_network;
 mod install;

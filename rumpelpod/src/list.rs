@@ -47,6 +47,12 @@ pub fn list(cmd: &ListCommand) -> Result<()> {
         )
     });
 
+    if cmd.json {
+        let json = serde_json::to_string(&pods)?;
+        println!("{json}");
+        return Ok(());
+    }
+
     let show_claude = pods.iter().any(|pod| pod.claude_state.is_some());
     let show_codex = pods.iter().any(|pod| pod.codex_state.is_some());
     let show_host = pods.iter().any(|pod| pod.host != pods[0].host);

@@ -130,6 +130,17 @@ pub struct ListCommand {
     /// Refresh live pod state before printing.
     #[arg(long)]
     pub sync: bool,
+
+    /// Print the daemon response as JSON for editor integrations.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct EventsCommand {
+    /// Print one JSON object per line for editor integrations.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -151,6 +162,9 @@ pub enum Command {
     /// Shows pod name, status (running/stopped), and creation time.
     #[command(verbatim_doc_comment)]
     List(ListCommand),
+
+    /// Stream pod status and review invalidations from the daemon.
+    Events(EventsCommand),
 
     /// Stop one or more pod containers without removing them.
     ///
@@ -338,6 +352,10 @@ pub enum Command {
     #[command(hide = true)]
     Daemon,
 
+    /// Prepare a terminal session for an editor integration (internal)
+    #[command(name = "editor-session", hide = true)]
+    EditorSession(EditorSessionCommand),
+
     /// Run the in-pod tunnel server (internal, started by daemon via kubectl exec)
     #[command(hide = true)]
     TunnelServer,
@@ -476,6 +494,24 @@ pub struct EnterCommand {
     pub command: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EditorTerminalKind {
+    Claude,
+    Codex,
+    Grok,
+    Pi,
+    Shell,
+}
+
+#[derive(Args, Debug)]
+pub struct EditorSessionCommand {
+    #[arg(value_enum)]
+    pub kind: EditorTerminalKind,
+
+    #[arg(value_parser = validate_pod_name)]
+    pub name: String,
+}
+
 #[derive(Args)]
 pub struct StopCommand {
     /// Names of pods to stop
@@ -607,6 +643,10 @@ pub struct ReviewCommand {
     /// Skip prompting before opening each file
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
+
+    /// Print the review revisions and files as JSON without opening a difftool.
+    #[arg(long)]
+    pub json: bool,
 
     /// Restrict review to specific paths (like git difftool -- <path>...)
     #[arg(last = true, value_name = "PATH")]
@@ -857,8 +897,18 @@ pub enum GitHookSubcommand {
     /// Handle git pre-receive hook events (host repo)
     HostPreReceive,
 
+    /// Notify the daemon after host repository refs were updated
+    HostPostReceive(HostPostReceiveCommand),
+
     /// Handle git pre-commit hook events: validate the DESCRIPTION file
     PreCommitDescription(PreCommitDescriptionCommand),
+}
+
+#[derive(Args)]
+pub struct HostPostReceiveCommand {
+    /// Host repository whose pod refs were updated.
+    #[arg(long)]
+    pub repo_path: PathBuf,
 }
 
 #[derive(Subcommand)]

@@ -8,6 +8,7 @@ release = "run -p tools --bin release --"
 eks = "run -p tools --bin eks --"
 provision-hetzner-k3s = "run -p tools --bin provision-hetzner-k3s --"
 provision-mac-scaleway = "run -p tools --bin provision-mac-scaleway --"
+vscode = "run -p tools --bin vscode --"
 
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-linux-musl-gcc"

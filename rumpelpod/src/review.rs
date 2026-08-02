@@ -12,12 +12,32 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use tempfile::TempDir;
+use ts_rs::TS;
 
 use crate::cli::ReviewCommand;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient};
 use crate::git::get_repo_root;
+
+/// One path shown by a pod review.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export_to = "ReviewFile.ts")]
+pub struct ReviewFile {
+    pub path: String,
+    pub base_exists: bool,
+    pub target_exists: bool,
+}
+
+/// Revisions and files required to reproduce `rumpel review` in an editor.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export_to = "ReviewPlan.ts")]
+pub struct ReviewPlan {
+    pub base: String,
+    pub target: String,
+    pub files: Vec<ReviewFile>,
+}
 
 /// Translate a difftool name to its executable path.
 /// This mirrors Git's `translate_merge_tool_path()` logic from the mergetools/ directory.
@@ -150,7 +170,7 @@ fn get_changed_files(
     paths: &[String],
 ) -> Result<Vec<String>> {
     let mut cmd = Command::new("git");
-    cmd.args(["diff", "--name-only", base, target]);
+    cmd.args(["diff", "--name-only", "-z", base, target]);
     if !paths.is_empty() {
         cmd.arg("--");
         cmd.args(paths);
@@ -166,22 +186,121 @@ fn get_changed_files(
         return Err(anyhow::anyhow!("failed to get changed files: {stderr}"));
     }
 
-    let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
-        .collect();
+    let mut files = Vec::new();
+    for path in output.stdout.split(|byte| *byte == 0) {
+        if path.is_empty() {
+            continue;
+        }
+        let path = std::str::from_utf8(path)
+            .context("changed file path is not valid UTF-8")?
+            .to_string();
+        files.push(path);
+    }
 
     Ok(files)
 }
 
-/// Get the content of a file at a specific commit.
-/// Returns Ok(None) if the file doesn't exist at that commit.
+fn file_exists_at_revision(
+    repo_root: &std::path::Path,
+    revision: &str,
+    file_path: &str,
+) -> Result<bool> {
+    let pathspec = format!(":(literal){file_path}");
+    let output = Command::new("git")
+        .args(["ls-tree", "-z", "--name-only", revision, "--", &pathspec])
+        .current_dir(repo_root)
+        .output()
+        .context("failed to check file content at revision")?;
+
+    if output.status.success() {
+        return Ok(!output.stdout.is_empty());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    Err(anyhow::anyhow!(
+        "failed to check '{file_path}' at '{revision}': {stderr}"
+    ))
+}
+
+/// Compute the exact review inputs shared by the CLI and editor integrations.
+pub fn build_review_plan(
+    repo_root: &std::path::Path,
+    pod_name: &str,
+    paths: &[String],
+) -> Result<ReviewPlan> {
+    let target_ref = format!("refs/rumpelpod/{pod_name}");
+    let target_commit = format!("{target_ref}^{{commit}}");
+    let ref_check = Command::new("git")
+        .args(["rev-parse", "--verify", &target_commit])
+        .current_dir(repo_root)
+        .output()
+        .context("failed to check pod ref")?;
+
+    if !ref_check.status.success() {
+        return Err(anyhow::anyhow!(
+            "pod ref '{target_ref}' not found in host repository (pod has no commits yet)"
+        ));
+    }
+    let target = String::from_utf8_lossy(&ref_check.stdout)
+        .trim()
+        .to_string();
+
+    let head_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .context("failed to get HEAD commit")?;
+
+    if !head_output.status.success() {
+        let stderr = String::from_utf8_lossy(&head_output.stderr);
+        let stderr = stderr.trim();
+        return Err(anyhow::anyhow!("failed to get HEAD commit: {stderr}"));
+    }
+
+    let host_head = String::from_utf8_lossy(&head_output.stdout)
+        .trim()
+        .to_string();
+    let merge_base_output = Command::new("git")
+        .args(["merge-base", &target, &host_head])
+        .current_dir(repo_root)
+        .output()
+        .context("failed to compute merge base")?;
+
+    if !merge_base_output.status.success() {
+        let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
+        let stderr = stderr.trim();
+        return Err(anyhow::anyhow!(
+            "failed to compute merge base between '{target}' and HEAD:\n{stderr}"
+        ));
+    }
+
+    let base = String::from_utf8_lossy(&merge_base_output.stdout)
+        .trim()
+        .to_string();
+    let changed_files = get_changed_files(repo_root, &base, &target, paths)?;
+    let mut files = Vec::with_capacity(changed_files.len());
+    for path in changed_files {
+        files.push(ReviewFile {
+            base_exists: file_exists_at_revision(repo_root, &base, &path)?,
+            target_exists: file_exists_at_revision(repo_root, &target, &path)?,
+            path,
+        });
+    }
+
+    Ok(ReviewPlan {
+        base,
+        target,
+        files,
+    })
+}
+
+/// Get the content of a file known to exist at a specific commit.
 fn get_file_at_commit(
     repo_root: &std::path::Path,
     commit: &str,
     file_path: &str,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .args(["show", &format!("{commit}:{file_path}")])
         .current_dir(repo_root)
@@ -189,11 +308,14 @@ fn get_file_at_commit(
         .context("failed to get file content from commit")?;
 
     if !output.status.success() {
-        // File doesn't exist at this commit (new or deleted file)
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        return Err(anyhow::anyhow!(
+            "failed to read '{file_path}' at '{commit}': {stderr}"
+        ));
     }
 
-    Ok(Some(output.stdout))
+    Ok(output.stdout)
 }
 
 /// Write content to a temporary file.
@@ -314,55 +436,16 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         return Err(anyhow::anyhow!("pod '{name}' does not exist"));
     }
 
-    let name = &cmd.name;
-    let pod_ref = format!("refs/rumpelpod/{name}");
-    let ref_check = Command::new("git")
-        .args(["rev-parse", "--verify", &pod_ref])
-        .current_dir(&repo_root)
-        .output()
-        .context("failed to check pod ref")?;
-
-    if !ref_check.status.success() {
-        return Err(anyhow::anyhow!(
-            "pod ref '{pod_ref}' not found in host repository (pod has no commits yet)"
-        ));
+    let plan = build_review_plan(&repo_root, &cmd.name, &cmd.paths)?;
+    if cmd.json {
+        let json = serde_json::to_string(&plan)?;
+        println!("{json}");
+        return Ok(());
     }
 
-    // Get the current HEAD commit on the host
-    let head_output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&repo_root)
-        .output()
-        .context("failed to get HEAD commit")?;
-
-    if !head_output.status.success() {
-        let stderr = String::from_utf8_lossy(&head_output.stderr);
-        let stderr = stderr.trim();
-        return Err(anyhow::anyhow!("failed to get HEAD commit: {stderr}"));
+    if plan.files.is_empty() {
+        return Ok(());
     }
-
-    let host_head = String::from_utf8_lossy(&head_output.stdout)
-        .trim()
-        .to_string();
-
-    // Compute the merge base between the pod branch and the host HEAD
-    let merge_base_output = Command::new("git")
-        .args(["merge-base", &pod_ref, &host_head])
-        .current_dir(&repo_root)
-        .output()
-        .context("failed to compute merge base")?;
-
-    if !merge_base_output.status.success() {
-        let stderr = String::from_utf8_lossy(&merge_base_output.stderr);
-        let stderr = stderr.trim();
-        return Err(anyhow::anyhow!(
-            "failed to compute merge base between '{pod_ref}' and HEAD:\n{stderr}"
-        ));
-    }
-
-    let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)
-        .trim()
-        .to_string();
 
     // Get the configured difftool, or fall back to VS Code.
     let (tool, cmd_template, tool_path) = match get_difftool_name(&repo_root)? {
@@ -399,14 +482,6 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
         }
     };
 
-    // Get the list of changed files
-    let changed_files = get_changed_files(&repo_root, &merge_base, &pod_ref, &cmd.paths)?;
-
-    if changed_files.is_empty() {
-        // No changes to review
-        return Ok(());
-    }
-
     // Create a temporary directory for the diff files (cleaned up on drop)
     let temp_dir = TempDir::with_prefix("rumpelpod-review-")?;
     let local_dir = temp_dir.path().join("local");
@@ -415,18 +490,27 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     fs::create_dir_all(&remote_dir).context("failed to create remote temp dir")?;
 
     // Process each changed file
-    let total_files = changed_files.len();
-    for (file_index, file_path) in changed_files.iter().enumerate() {
+    let total_files = plan.files.len();
+    for (file_index, review_file) in plan.files.iter().enumerate() {
+        let file_path = &review_file.path;
         // Prompt before opening each file (unless --yes flag is set)
         if !cmd.yes && !prompt_for_file(file_path, file_index, total_files, &tool)? {
             continue;
         }
 
         // Get file content at merge base (local/old version)
-        let local_content = get_file_at_commit(&repo_root, &merge_base, file_path)?;
+        let local_content = if review_file.base_exists {
+            Some(get_file_at_commit(&repo_root, &plan.base, file_path)?)
+        } else {
+            None
+        };
 
         // Get file content at pod ref (remote/new version)
-        let remote_content = get_file_at_commit(&repo_root, &pod_ref, file_path)?;
+        let remote_content = if review_file.target_exists {
+            Some(get_file_at_commit(&repo_root, &plan.target, file_path)?)
+        } else {
+            None
+        };
 
         // Write temp files
         let local_file = write_temp_file(&local_dir, file_path, local_content.as_deref())?;

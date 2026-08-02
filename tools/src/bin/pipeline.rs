@@ -217,6 +217,9 @@ fn run() -> Result<ExitCode> {
             .env("RUSTFLAGS", "-D warnings"),
     )?;
 
+    eprintln!("\n=== Checking VS Code extension ===");
+    run_cmd(tools::cargo_cmd().args(["vscode", "--check"]))?;
+
     // Only xtest output is recorded to the log file.  The other
     // pipeline steps are cheap and deterministic; the log exists so
     // --continue can identify which tests already passed.

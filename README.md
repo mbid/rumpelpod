@@ -12,6 +12,11 @@ rumpel system-install
 
 Requirements: git, Docker or Podman, optionally ssh and kubectl.
 
+Tagged releases also provide a platform-independent VSIX for the Rumpelpod
+workspace extension. Install it without a marketplace account using `code
+--install-extension rumpelpod-vscode-VERSION.vsix`. In a WSL window the
+extension runs beside the Linux `rumpel` executable in WSL.
+
 ## What Is This?
 
 Rumpelpod manages named, independent workspaces ("pods") of a repository inside containers.
