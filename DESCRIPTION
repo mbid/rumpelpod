@@ -1,0 +1,5 @@
+Pin prepared Codex images to the host version
+
+Install the host Codex CLI version in prepared pods. Add the version to
+image identity so rebuilding a pod cannot silently reuse a different
+Codex release.
