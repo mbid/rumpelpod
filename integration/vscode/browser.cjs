@@ -829,6 +829,8 @@ async function verifyReviewFocusAndCloseLifecycle(
     await selectPopoverOption(morePopover, "View diff");
     await waitForReview(page, podName, changedFile, originalContent, inactivePodContent);
     await assertOpenReviews(page, podName, [podName]);
+    await fileTab.click({ button: "middle" });
+    await fileTab.waitFor({ state: "hidden", timeout: 30_000 });
 
     const explicitlyClosedReview = page.locator(".editor-instance:visible .multiDiffEditor");
     await explicitlyClosedReview.click();
@@ -856,6 +858,9 @@ async function verifyReviewFocusAndCloseLifecycle(
     await assertOpenReviews(page, podName, [podName]);
     const reopenedReviewTab = page.locator(".tab:visible").filter({ hasText: podName }).first();
     await reopenedReviewTab.waitFor({ state: "visible", timeout: 30_000 });
+    const reopenedReviewTabHandle = await reopenedReviewTab.elementHandle();
+    assert(reopenedReviewTabHandle, "reopened review had no tab element handle");
+    return reopenedReviewTabHandle;
 }
 
 async function waitForEmptyReview(page, podName) {
@@ -1060,7 +1065,7 @@ async function main() {
             "review kept the redundant file selector",
         );
         await capture(page, artifacts, "02-live-review.png");
-        await verifyReviewFocusAndCloseLifecycle(
+        const retainedReviewTab = await verifyReviewFocusAndCloseLifecycle(
             page,
             liveView,
             podName,
@@ -1359,23 +1364,19 @@ async function main() {
             "creating a pod kept the closed auxiliary shell alive",
         );
         await waitForEmptyReview(page, createdPodName);
-        await assertOpenReviews(page, createdPodName, [createdPodName]);
+        await assertOpenReviews(page, createdPodName, [podName, createdPodName]);
+        assert(
+            await retainedReviewTab.evaluate((element) => element.isConnected),
+            "creating another pod replaced the existing review tab",
+        );
         assert(
             !(await page.title()).includes("-review.txt"),
             "creating a pod opened a synthetic review document",
         );
         await capture(page, artifacts, "06-created-chat.png");
 
-        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-        await page.locator(".monaco-workbench").waitFor({ state: "visible", timeout: 60_000 });
-        await waitForStatusItem(page, createdPodName);
-        const restoredCreatedView = await waitForAgentView(page, createdPodName);
-        await waitForCodexPrompt(page, restoredCreatedView.terminal, false);
-        await waitForEmptyReview(page, createdPodName);
-        await assertOpenReviews(page, createdPodName, [createdPodName]);
-
-        const restoredPodSwitcher = await openPodSwitcher(page);
-        const listedPods = await popoverRows(restoredPodSwitcher.popover).allTextContents();
+        const switchedPodSwitcher = await openPodSwitcher(page);
+        const listedPods = await popoverRows(switchedPodSwitcher.popover).allTextContents();
         assert(
             listedPods.some((label) => label.includes(podName)),
             `existing pod disappeared from the switcher: ${JSON.stringify(listedPods)}`,
@@ -1384,8 +1385,7 @@ async function main() {
             listedPods.some((label) => label.includes(createdPodName)),
             `created pod was not listed in the switcher: ${JSON.stringify(listedPods)}`,
         );
-        await selectPopoverOption(restoredPodSwitcher.popover, podName);
-
+        await selectPopoverOption(switchedPodSwitcher.popover, podName);
         const switchedView = await waitForAgentView(
             page,
             podName,
@@ -1400,7 +1400,12 @@ async function main() {
             originalContent,
             finalPodContent,
         );
-        await assertOpenReviews(page, podName, [podName]);
+        assert(
+            (await retainedReviewTab.getAttribute("class"))?.split(" ").includes("active"),
+            "switching pods did not focus its existing review tab",
+        );
+        await assertOpenReviews(page, podName, [podName, createdPodName]);
+        await retainedReviewTab.dispose();
         await assertSidebarAndDiffGeometry(page, switchedView.terminal, switchedDiff);
         assert.equal(
             await switchedView.body.getAttribute("data-rumpelpod-pod"),
@@ -1455,6 +1460,7 @@ async function main() {
             originalContent,
             finalPodContent,
         );
+        await assertOpenReviews(page, podName, [podName, createdPodName]);
         await assertSidebarAndDiffGeometry(page, restoredView.terminal, restoredDiff);
         assert.equal(
             await restoredView.frame.locator("#codex-terminal .xterm:visible").count(),
@@ -1463,11 +1469,11 @@ async function main() {
         );
         await capture(page, artifacts, "08-restored-chat.png");
 
-        const restoredMoreActions = restoredView.frame.locator("#more-actions");
-        await restoredMoreActions.click();
-        const restoredMorePopover = restoredView.frame.locator("#more-popover");
-        await restoredMorePopover.waitFor({ state: "visible", timeout: 30_000 });
-        await selectPopoverOption(restoredMorePopover, "Add SSH key...");
+        const selectedMoreActions = restoredView.frame.locator("#more-actions");
+        await selectedMoreActions.click();
+        const selectedMorePopover = restoredView.frame.locator("#more-popover");
+        await selectedMorePopover.waitFor({ state: "visible", timeout: 30_000 });
+        await selectPopoverOption(selectedMorePopover, "Add SSH key...");
         const keyPicker = page.locator(".quick-input-widget:visible");
         await keyPicker.waitFor({ state: "visible", timeout: 30_000 });
         assert(
@@ -1487,6 +1493,8 @@ async function main() {
         await passphraseInput.fill("vscode-passphrase");
         await page.keyboard.press("Enter");
         await passphraseDialog.waitFor({ state: "hidden", timeout: 30_000 });
+        const sshAdded = page.getByText(`Added SSH key to pod '${podName}'.`, { exact: true });
+        await sshAdded.waitFor({ state: "visible", timeout: 30_000 });
         await waitForAction(actionLog, `ssh-add ${podName} ${sshKeyPath}`, 2);
 
         await restoredView.frame.locator("#merge-pod").click();

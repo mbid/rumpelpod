@@ -82,18 +82,18 @@ export class RumpelpodModel {
     keyPath: string,
     passphrase?: string,
   ): Promise<void> {
-    const environment = passphrase === undefined
-      ? undefined
-      : {
-        DISPLAY: process.env.DISPLAY ?? "rumpelpod-vscode",
-        RUMPELPOD_VSCODE_SSH_PASSPHRASE: passphrase,
-        SSH_ASKPASS: vscode.Uri.joinPath(
-          this.extensionUri,
-          "media",
-          "ssh-askpass.sh",
-        ).fsPath,
-        SSH_ASKPASS_REQUIRE: "force",
-      };
+    const environment = {
+      DISPLAY: process.env.DISPLAY ?? "rumpelpod-vscode",
+      SSH_ASKPASS: vscode.Uri.joinPath(
+        this.extensionUri,
+        "media",
+        "ssh-askpass.sh",
+      ).fsPath,
+      SSH_ASKPASS_REQUIRE: "force",
+      ...(passphrase === undefined
+        ? {}
+        : { RUMPELPOD_VSCODE_SSH_PASSPHRASE: passphrase }),
+    };
     try {
       await this.runRumpel(repository, ["ssh-add", pod, keyPath], environment);
     } catch (error) {

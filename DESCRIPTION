@@ -30,19 +30,22 @@ alive. Show every changed file in one native vertically stacked VS Code
 review with concise pod and file-path labels. Keep terminal focus intact
 when daemon events refresh that review.
 
-Keep the active review unpinned so normal VS Code editor lifecycle
-behavior applies. Keep background refreshes from stealing another
-editor's focus or resurrecting a closed review, and expose a View diff
-action that focuses or reopens it.
+Keep reviews unpinned and closable, but out of preview mode so opening a
+different pod does not replace them. Keep background refreshes from
+stealing another editor's focus or resurrecting a closed review, and
+expose a View diff action that focuses or reopens it.
 
 When selecting or creating a pod, focus its existing review or open a
-new one. Do not explicitly close unrelated reviews; let VS Code apply
-its normal preview-tab replacement behavior.
+new one. Leave unrelated pod reviews open and avoid duplicate tabs when
+returning to a pod.
 
 Separate workspace-wide pod creation into VS Code's native view toolbar.
 Add merge, stop, delete, and SSH key actions for the selected pod, while
 keeping destructive and secondary operations in a grouped overflow menu.
 Remove the redundant global session restart action.
+
+Force SSH key loading through the extension askpass helper so encrypted
+keys prompt in VS Code instead of reading the extension host terminal.
 
 Clear the active pod after merge, stop, or delete and close its review.
 

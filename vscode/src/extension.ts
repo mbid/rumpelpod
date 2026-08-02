@@ -15,7 +15,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const terminals = new AgentTerminals(context.extensionUri, (operation, error) => {
     model.logError(operation, error);
   });
-  const reviews = new ReviewDocuments((operation, error) => {
+  const reviews = new ReviewDocuments(context.workspaceState, (operation, error) => {
     model.logError(operation, error);
   });
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);

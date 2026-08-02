@@ -24,13 +24,14 @@ closable VS Code editor. Selecting the pod again or choosing `View diff`
 from the actions menu focuses the existing review, or reopens it if it was
 closed. Background daemon events refresh the active review without stealing
 focus from another editor or resurrecting a closed one. Switching pods focuses
-that pod's existing review, or opens one if needed. The extension does not
-explicitly close unrelated reviews, but VS Code may replace an unpinned preview
-tab according to its normal editor behavior. The extension does not change
-VS Code's editor-tab settings, so ordinary files retain the user's normal tab
-behavior. Pods without changed files still open a native empty review surface
-instead of leaving the previous editor visible. Launched agent sets and the
-last active pod are saved across browser reloads.
+that pod's existing review, or opens one if needed, while leaving other pod
+reviews open. Review editors are ordinary non-preview tabs, so they remain
+closable without being replaced when another pod opens. The extension does not
+change VS Code's editor-tab settings, so ordinary files retain the user's
+normal tab behavior. Pods without changed files still open a native empty
+review surface instead of leaving the previous editor visible. Open reviews,
+launched agent sets, and the last active pod are restored across browser
+reloads.
 
 Merging, stopping, or deleting the selected pod clears the sidebar selection,
 detaches its sessions, forgets it as the last active pod, and closes its review
