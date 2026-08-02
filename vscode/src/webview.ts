@@ -726,23 +726,12 @@ function createSurface(tab: TerminalTab): TerminalSurface {
     cursorStyle: "block",
     fontFamily: cssVariable("--vscode-editor-font-family"),
     fontSize: 13,
-    // xterm reserves its scrollbar beside the grid, so use it as the right inset
-    // instead of stacking the default 14-pixel gutter on our own spacing.
-    overviewRuler: { width: 6 },
     screenReaderMode: true,
     scrollback: 10_000,
     theme: {
       background: cssVariable("--vscode-sideBar-background"),
       foreground: cssVariable("--vscode-sideBar-foreground"),
       cursor: cssVariable("--vscode-terminalCursor-foreground"),
-      overviewRulerBorder: cssVariable("--vscode-sideBar-background"),
-      scrollbarSliderActiveBackground: cssVariable(
-        "--vscode-scrollbarSlider-activeBackground",
-      ),
-      scrollbarSliderBackground: "rgba(0, 0, 0, 0)",
-      scrollbarSliderHoverBackground: cssVariable(
-        "--vscode-scrollbarSlider-hoverBackground",
-      ),
       selectionBackground: cssVariable("--vscode-terminal-selectionBackground"),
     },
   });
