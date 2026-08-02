@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -60,6 +60,20 @@ pub enum AttachOutcome {
     SessionEnded,
 }
 
+/// The daemon has no live local session and cannot construct one from its
+/// current cached pod connection. Callers may perform targeted preparation
+/// and retry the same endpoint.
+#[derive(Debug)]
+pub struct SessionUnavailable;
+
+impl std::fmt::Display for SessionUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PTY session is unavailable from cached state")
+    }
+}
+
+impl std::error::Error for SessionUnavailable {}
+
 /// RAII guard that restores the original terminal settings on drop,
 /// ensuring cleanup even on panic or early return.
 struct TerminalGuard {
@@ -106,15 +120,21 @@ fn make_no_echo(termios: &mut nix::sys::termios::Termios) {
 /// unwinding -- leaving the tty in no-echo mode for whatever runs
 /// next if the user Ctrl-C's during the pre-render window.
 fn install_sigint_restore_handler(original: nix::sys::termios::Termios) -> Result<()> {
-    ctrlc::set_handler(move || {
-        let _ = nix::sys::termios::tcsetattr(
-            io::stdin(),
-            nix::sys::termios::SetArg::TCSANOW,
-            &original,
-        );
-        std::process::exit(130);
-    })
-    .context("installing SIGINT handler")
+    static INSTALL_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+    match INSTALL_RESULT.get_or_init(move || {
+        ctrlc::set_handler(move || {
+            let _ = nix::sys::termios::tcsetattr(
+                io::stdin(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &original,
+            );
+            std::process::exit(130);
+        })
+        .map_err(|error| error.to_string())
+    }) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(anyhow::anyhow!("installing SIGINT handler: {error}")),
+    }
 }
 
 nix::ioctl_read_bad!(tiocgwinsz, libc::TIOCGWINSZ, libc::winsize);
@@ -265,6 +285,8 @@ pub fn attach(
 enum BridgeOutcome {
     Detached,
     SessionEnded,
+    SessionUnavailable,
+    SessionError(String),
     ConnectionLost,
 }
 
@@ -408,6 +430,12 @@ async fn attach_async(
     match bridge(ws, Some(raw_termios)).await {
         BridgeOutcome::Detached => return Ok(AttachOutcome::Detached),
         BridgeOutcome::SessionEnded => return Ok(AttachOutcome::SessionEnded),
+        BridgeOutcome::SessionUnavailable => {
+            return Err(anyhow::Error::new(SessionUnavailable));
+        }
+        BridgeOutcome::SessionError(error) => {
+            return Err(anyhow::anyhow!(error));
+        }
         BridgeOutcome::ConnectionLost => {}
     }
 
@@ -453,6 +481,12 @@ async fn attach_async(
         match bridge(ws, None).await {
             BridgeOutcome::Detached => return Ok(AttachOutcome::Detached),
             BridgeOutcome::SessionEnded => return Ok(AttachOutcome::SessionEnded),
+            BridgeOutcome::SessionUnavailable => {
+                return Err(anyhow::Error::new(SessionUnavailable));
+            }
+            BridgeOutcome::SessionError(error) => {
+                return Err(anyhow::anyhow!(error));
+            }
             BridgeOutcome::ConnectionLost => continue,
         }
     }
@@ -551,6 +585,8 @@ async fn bridge(ws: WsStream, raw_termios: Option<&nix::sys::termios::Termios>) 
             match result {
                 Ok(BridgeOutcome::Detached) => BridgeOutcome::Detached,
                 Ok(BridgeOutcome::SessionEnded) => BridgeOutcome::SessionEnded,
+                Ok(BridgeOutcome::SessionUnavailable) => BridgeOutcome::SessionUnavailable,
+                Ok(BridgeOutcome::SessionError(error)) => BridgeOutcome::SessionError(error),
                 // WebSocket send error = connection lost
                 Ok(BridgeOutcome::ConnectionLost) | Err(_) => BridgeOutcome::ConnectionLost,
             }
@@ -663,11 +699,17 @@ async fn read_loop(
                     break;
                 }
             }
-            Message::Text(text) => {
-                if let Ok(PtyControl::SessionEnded) = serde_json::from_str(&text) {
-                    return BridgeOutcome::SessionEnded;
+            Message::Text(text) => match serde_json::from_str(&text) {
+                Ok(PtyControl::SessionEnded) => return BridgeOutcome::SessionEnded,
+                Ok(PtyControl::SessionUnavailable) => return BridgeOutcome::SessionUnavailable,
+                Ok(PtyControl::SessionError { error }) => {
+                    return BridgeOutcome::SessionError(error);
                 }
-            }
+                Ok(PtyControl::Session { .. })
+                | Ok(PtyControl::Attach { .. })
+                | Ok(PtyControl::Resize { .. })
+                | Err(_) => {}
+            },
             Message::Close(_) => break,
             // tungstenite handles Ping internally (auto-pongs before
             // returning a message to the caller).

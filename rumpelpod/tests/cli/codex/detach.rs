@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Test detach (Ctrl-a d) and reattach for the host-side codex screen
-//! session: have a short conversation, detach, reattach, and verify the
-//! screen replay restores the conversation immediately (no welcome
+//! session: type into the prompt, detach, reattach, and verify the
+//! screen replay restores the pending input immediately (no welcome
 //! dialog, no need to re-dismiss model selection).
 
 use super::common::{setup_codex_test_repo, CodexSession};
@@ -15,15 +15,24 @@ const CTRL_A: u8 = 0x01;
 fn codex_detach_reattach() {
     let (home, repo, _executor, daemon) = setup_codex_test_repo();
 
-    // -- First session: dummy conversation, then detach -----------------
+    // -- First session: type a marker, then detach ----------------------
 
     let mut session = CodexSession::spawn(&repo, &daemon, home.path(), &[]);
     session.dismiss_dialogs();
-    session.send("What is the capital of France? Reply with just the city name, nothing else.");
-    session.wait_for("Paris");
+    let replay_marker = "warm-reattach-replay-marker";
+    session.write_raw(replay_marker.as_bytes());
+    session.wait_for(replay_marker);
 
     session.write_raw(&[CTRL_A, b'd']);
     session.wait_for_exit();
+
+    // A live daemon-owned frontend must reattach before configuration or
+    // credentials needed only for spawning a new frontend are consulted.
+    std::fs::write(repo.path().join(".rumpelpod.json"), "not valid json")
+        .expect("invalidate rumpelpod config");
+    std::fs::remove_file(home.path().join(".codex/auth.json"))
+        .expect("remove host Codex credentials");
+    std::fs::remove_file(daemon.bin_dir.join("codex")).expect("remove host Codex binary");
 
     // -- Second session: reattach and verify screen replay --------------
     //
@@ -33,5 +42,5 @@ fn codex_detach_reattach() {
     // immediately, with no dismiss_dialogs() needed.
 
     let mut session2 = CodexSession::spawn(&repo, &daemon, home.path(), &[]);
-    session2.wait_for("Paris");
+    session2.wait_for(replay_marker);
 }

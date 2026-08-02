@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
 use axum::extract::ws::{Message, WebSocket};
@@ -36,6 +37,7 @@ use tokio::sync::Mutex;
 // ---------------------------------------------------------------------------
 
 struct PtySession {
+    session_id: u64,
     master_fd: OwnedFd,
     child_pid: Pid,
     /// Virtual terminal buffer tracking the screen state for replay
@@ -46,15 +48,33 @@ struct PtySession {
     output_tx: tokio::sync::broadcast::Sender<Vec<u8>>,
 }
 
+type AttachedSession = (
+    OwnedFd,
+    Arc<Mutex<vt100::Parser>>,
+    tokio::sync::broadcast::Receiver<Vec<u8>>,
+);
+
+type SessionCreationLocks = HashMap<String, Weak<Mutex<()>>>;
+
+enum SessionAcquire {
+    Attached(AttachedSession),
+    Missing,
+    Unavailable,
+}
+
 #[derive(Clone)]
 pub struct PtySessions {
     inner: Arc<Mutex<HashMap<String, PtySession>>>,
+    creation_locks: Arc<Mutex<SessionCreationLocks>>,
+    next_session_id: Arc<AtomicU64>,
 }
 
 impl Default for PtySessions {
     fn default() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            creation_locks: Arc::new(Mutex::new(HashMap::new())),
+            next_session_id: Arc::new(AtomicU64::new(1)),
         }
     }
 }
@@ -64,61 +84,102 @@ impl PtySessions {
         Self::default()
     }
 
-    /// Spawn a new session or reuse an existing one.  Returns a dup'd
-    /// write fd, the screen buffer for replay, and a broadcast receiver.
-    /// Returns `Ok(None)` when `create` is false and the session does
-    /// not exist (used by reconnecting clients to avoid spawning a
-    /// fresh session after the original child exited).
-    #[allow(clippy::too_many_arguments)]
-    async fn spawn_or_attach(
+    /// Attach without constructing spawn parameters when a live child exists.
+    /// Cold preparation is serialized per session so it cannot delay warm
+    /// attachments to unrelated sessions.
+    async fn spawn_or_attach<F>(
         &self,
         name: String,
-        cmd: Vec<String>,
-        workdir: Option<PathBuf>,
-        env: Vec<String>,
         cols: u16,
         rows: u16,
         create: bool,
-    ) -> Result<
-        Option<(
-            OwnedFd,
-            Arc<Mutex<vt100::Parser>>,
-            tokio::sync::broadcast::Receiver<Vec<u8>>,
-        )>,
-    > {
+        build_spec: F,
+    ) -> Result<SessionAcquire>
+    where
+        F: FnOnce() -> Result<Option<SessionSpec>> + Send,
+    {
+        if let Some(attached) = self.attach_existing(&name, cols, rows).await? {
+            return Ok(SessionAcquire::Attached(attached));
+        }
+        if !create {
+            return Ok(SessionAcquire::Missing);
+        }
+
+        let creation_lock = self.creation_lock(&name).await;
+        let _creation_guard = creation_lock.lock().await;
+
+        // Another request may have created the session while this one waited.
+        if let Some(attached) = self.attach_existing(&name, cols, rows).await? {
+            return Ok(SessionAcquire::Attached(attached));
+        }
+
+        let Some(spec) = build_spec()? else {
+            return Ok(SessionAcquire::Unavailable);
+        };
+        if spec.name != name {
+            return Err(anyhow::anyhow!(
+                "session spec name {:?} does not match requested name {name:?}",
+                spec.name
+            ));
+        }
+
+        let session = spawn_session(&name, &spec.cmd, spec.workdir, &spec.env, cols, rows, self)?;
+        self.inner.lock().await.insert(name.clone(), session);
+
+        match self.attach_existing(&name, cols, rows).await? {
+            Some(attached) => Ok(SessionAcquire::Attached(attached)),
+            None => Ok(SessionAcquire::Missing),
+        }
+    }
+
+    async fn attach_existing(
+        &self,
+        name: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Option<AttachedSession>> {
         let mut sessions = self.inner.lock().await;
 
-        // Reap dead sessions so we start fresh if the child exited.
-        if let Some(s) = sessions.get(&name) {
-            if !child_is_alive(s.child_pid) {
-                sessions.remove(&name);
+        // Reap dead sessions so a later create request starts fresh.
+        if let Some(session) = sessions.get(name) {
+            if !child_is_alive(session.child_pid) {
+                sessions.remove(name);
             }
         }
 
-        if !sessions.contains_key(&name) {
-            if !create {
-                return Ok(None);
-            }
-            let session = spawn_session(&name, &cmd, workdir, &env, cols, rows, self)?;
-            sessions.insert(name.clone(), session);
-        }
-
-        let session = sessions.get(&name).unwrap();
+        let Some(session) = sessions.get(name) else {
+            return Ok(None);
+        };
 
         // Resize to match the attaching client's terminal, so
         // reattaching after a window resize (or reconnection) shows
         // the right dimensions.
         set_winsize(session.master_fd.as_raw_fd(), cols, rows)?;
-        session
-            .screen
-            .lock()
-            .await
-            .screen_mut()
-            .set_size(rows, cols);
-
         let duped = nix::unistd::dup(&session.master_fd).context("dup master fd")?;
+        let screen = Arc::clone(&session.screen);
         let rx = session.output_tx.subscribe();
-        Ok(Some((duped, Arc::clone(&session.screen), rx)))
+        drop(sessions);
+
+        screen.lock().await.screen_mut().set_size(rows, cols);
+        Ok(Some((duped, screen, rx)))
+    }
+
+    async fn creation_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.creation_locks.lock().await;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(name).and_then(Weak::upgrade) {
+            return lock;
+        }
+
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(name.to_string(), Arc::downgrade(&lock));
+        lock
+    }
+
+    fn next_session_id(&self) -> u64 {
+        self.next_session_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            .expect("PTY session IDs exhausted")
     }
 
     async fn resize(&self, name: &str, cols: u16, rows: u16) -> Result<()> {
@@ -136,14 +197,28 @@ impl PtySessions {
         Ok(())
     }
 
-    /// Remove a session from the registry unconditionally.
-    async fn remove_session(&self, name: &str) {
-        self.inner.lock().await.remove(name);
+    /// Remove a session only while its generation still owns the name.
+    async fn remove_session(&self, name: &str, session_id: u64) {
+        let mut sessions = self.inner.lock().await;
+        if sessions
+            .get(name)
+            .is_some_and(|session| session.session_id == session_id)
+        {
+            sessions.remove(name);
+        }
     }
 
-    /// Pod lifecycle cleanup calls this because a detached TUI keeps
-    /// its original `--remote` URL even after the pod behind it is gone.
-    pub async fn terminate(&self, name: &str) -> Result<()> {
+    /// Run use-case cleanup and terminate the named child without allowing a
+    /// cold builder to publish resources between those operations.
+    pub(crate) async fn terminate_with_cleanup<F>(&self, name: &str, cleanup: F) -> Result<()>
+    where
+        F: FnOnce() + Send,
+    {
+        // Serialize with cold preparation so lifecycle cleanup cannot return
+        // while a frontend for the old pod is still being spawned.
+        let creation_lock = self.creation_lock(name).await;
+        let _creation_guard = creation_lock.lock().await;
+        cleanup();
         let session = self.inner.lock().await.remove(name);
         let Some(session) = session else {
             return Ok(());
@@ -223,6 +298,7 @@ fn spawn_session(
 
             let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
             let (output_tx, _) = tokio::sync::broadcast::channel(256);
+            let session_id = sessions.next_session_id();
 
             // Spawn persistent reader: continuously drains PTY output,
             // updates the screen buffer, and broadcasts to clients.
@@ -235,9 +311,11 @@ fn spawn_session(
                 output_tx.clone(),
                 sessions.clone(),
                 name.to_string(),
+                session_id,
             );
 
             Ok(PtySession {
+                session_id,
                 master_fd: master,
                 child_pid: child,
                 screen,
@@ -259,12 +337,14 @@ fn spawn_persistent_reader(
     tx: tokio::sync::broadcast::Sender<Vec<u8>>,
     sessions: PtySessions,
     name: String,
+    session_id: u64,
 ) {
     tokio::spawn(async move {
         let async_fd = match AsyncFd::new(fd) {
             Ok(fd) => fd,
             Err(e) => {
                 eprintln!("pty: persistent reader AsyncFd::new failed: {e}");
+                sessions.remove_session(&name, session_id).await;
                 return;
             }
         };
@@ -273,7 +353,10 @@ fn spawn_persistent_reader(
         loop {
             let mut ready = match async_fd.readable().await {
                 Ok(r) => r,
-                Err(_) => break,
+                Err(e) => {
+                    eprintln!("pty: persistent reader readiness failed: {e}");
+                    break;
+                }
             };
 
             match ready.try_io(|inner| {
@@ -299,14 +382,12 @@ fn spawn_persistent_reader(
                 }
                 // EOF (read returned 0) or EIO (PTY slave closed on
                 // Linux) -- the session is over.
-                Ok(Err(_)) => {
-                    sessions.remove_session(&name).await;
-                    break;
-                }
+                Ok(Err(_)) => break,
                 // WouldBlock -- AsyncFd will re-poll
                 Err(_) => continue,
             }
         }
+        sessions.remove_session(&name, session_id).await;
     });
 }
 
@@ -404,6 +485,11 @@ pub enum PtyControl {
     Resize { cols: u16, rows: u16 },
     /// Sent by the server when the PTY child process has exited.
     SessionEnded,
+    /// The session is absent and its server-owned spawn parameters cannot be
+    /// constructed from current cached state.
+    SessionUnavailable,
+    /// The server failed while preparing or spawning the session.
+    SessionError { error: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -464,40 +550,40 @@ pub async fn serve_ws_session(
         None => return,
     };
 
-    // Skipped on reattach: the existing session's cmd is reused.
+    // Preserve the client-owned protocol's existing transform timing. Codex
+    // uses the server-owned path below for lazy preparation.
     if create {
         if let Some(transform) = cmd_transform {
-            if let Err(e) = transform(&mut cmd) {
-                eprintln!("pty: cmd transform failed: {e:#}");
+            if let Err(error) = transform(&mut cmd) {
+                eprintln!("pty: cmd transform failed: {error:#}");
                 return;
             }
         }
     }
 
-    run_bridge(
-        socket,
-        sessions,
-        SessionSpec {
-            name,
+    let requested_name = name.clone();
+    run_bridge(socket, sessions, name, cols, rows, create, move || {
+        Ok(Some(SessionSpec {
+            name: requested_name,
             cmd,
             workdir,
             env,
-        },
-        cols,
-        rows,
-        create,
-    )
+        }))
+    })
     .await
 }
 
 /// Server-owned entry point: read `PtyControl::Attach` from the wire,
-/// append `extra_args` to the server-supplied `spec.cmd`, then drive
-/// the bridge.  Used by the daemon's `/pod/codex/{name}` route.
-pub async fn serve_ws_session_with_params(
+/// then construct spawn parameters only if the requested session is absent.
+/// Used by the daemon's `/pod/codex/{name}` route.
+pub async fn serve_ws_session_with_params<F>(
     mut socket: WebSocket,
     sessions: PtySessions,
-    mut spec: SessionSpec,
-) {
+    session_name: String,
+    build_spec: F,
+) where
+    F: FnOnce(Vec<String>) -> Result<Option<SessionSpec>> + Send,
+{
     let (cols, rows, create, extra_args) = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
             Ok(PtyControl::Attach {
@@ -526,37 +612,38 @@ pub async fn serve_ws_session_with_params(
         None => return,
     };
 
-    if create {
-        spec.cmd.extend(extra_args);
-    }
-
-    run_bridge(socket, sessions, spec, cols, rows, create).await
+    run_bridge(
+        socket,
+        sessions,
+        session_name,
+        cols,
+        rows,
+        create,
+        move || build_spec(extra_args),
+    )
+    .await
 }
 
 /// Spawn or attach the screen session, replay its current screen state
 /// to the new client, then bridge stdin/stdout until the client
 /// disconnects or the session ends.
-async fn run_bridge(
+async fn run_bridge<F>(
     mut socket: WebSocket,
     sessions: PtySessions,
-    spec: SessionSpec,
+    name: String,
     cols: u16,
     rows: u16,
     create: bool,
-) {
-    let SessionSpec {
-        name,
-        cmd,
-        workdir,
-        env,
-    } = spec;
-
+    build_spec: F,
+) where
+    F: FnOnce() -> Result<Option<SessionSpec>> + Send,
+{
     let (write_fd, screen, mut output_rx) = match sessions
-        .spawn_or_attach(name.clone(), cmd, workdir, env, cols, rows, create)
+        .spawn_or_attach(name.clone(), cols, rows, create, build_spec)
         .await
     {
-        Ok(Some(tuple)) => tuple,
-        Ok(None) => {
+        Ok(SessionAcquire::Attached(tuple)) => tuple,
+        Ok(SessionAcquire::Missing) => {
             // Session does not exist and create=false (reconnection
             // to a session that already exited).
             let msg = serde_json::to_string(&PtyControl::SessionEnded)
@@ -564,8 +651,19 @@ async fn run_bridge(
             let _ = socket.send(Message::Text(msg.into())).await;
             return;
         }
+        Ok(SessionAcquire::Unavailable) => {
+            let msg = serde_json::to_string(&PtyControl::SessionUnavailable)
+                .expect("SessionUnavailable is always serializable");
+            let _ = socket.send(Message::Text(msg.into())).await;
+            return;
+        }
         Err(e) => {
             eprintln!("pty session failed for '{name}': {e:#}");
+            let msg = serde_json::to_string(&PtyControl::SessionError {
+                error: format!("{e:#}"),
+            })
+            .expect("SessionError is always serializable");
+            let _ = socket.send(Message::Text(msg.into())).await;
             return;
         }
     };
@@ -624,7 +722,9 @@ async fn run_bridge(
                             Ok(PtyControl::Session { .. }) | Ok(PtyControl::Attach { .. }) => {
                                 // Handshake messages after handshake are nonsensical
                             }
-                            Ok(PtyControl::SessionEnded) => {
+                            Ok(PtyControl::SessionEnded)
+                            | Ok(PtyControl::SessionUnavailable)
+                            | Ok(PtyControl::SessionError { .. }) => {
                                 // Server-to-client only, ignore if received
                             }
                             Err(e) => {
@@ -643,4 +743,56 @@ async fn run_bridge(
 
     // The dup'd write_fd is dropped here; the session's master_fd and
     // the persistent reader's fd keep the PTY alive for future reattach.
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+
+    use super::*;
+
+    fn test_session(session_id: u64) -> PtySession {
+        let master_fd = File::open("/dev/null").expect("open /dev/null").into();
+        let (output_tx, _) = tokio::sync::broadcast::channel(1);
+        PtySession {
+            session_id,
+            master_fd,
+            child_pid: Pid::from_raw(1),
+            screen: Arc::new(Mutex::new(vt100::Parser::new(1, 1, 0))),
+            output_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_reader_does_not_remove_replacement_session() {
+        let sessions = PtySessions::new();
+        sessions
+            .inner
+            .lock()
+            .await
+            .insert("same-name".to_string(), test_session(2));
+
+        sessions.remove_session("same-name", 1).await;
+
+        let registered_id = sessions
+            .inner
+            .lock()
+            .await
+            .get("same-name")
+            .map(|session| session.session_id);
+        assert_eq!(registered_id, Some(2));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_cleanup_holds_session_creation_lock() {
+        let sessions = PtySessions::new();
+        let creation_lock = sessions.creation_lock("locked-cleanup").await;
+
+        sessions
+            .terminate_with_cleanup("locked-cleanup", || {
+                assert!(creation_lock.try_lock().is_err());
+            })
+            .await
+            .unwrap();
+    }
 }
