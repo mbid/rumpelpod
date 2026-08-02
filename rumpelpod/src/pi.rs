@@ -18,13 +18,21 @@ use crate::cli::PiCommand;
 use crate::config::load_json_config;
 use crate::daemon;
 use crate::daemon::protocol::{ContainerId, Daemon, DaemonClient, EnsurePiConfigRequest, PodName};
-use crate::enter::{confirm_pod_creation, launch_pod};
+use crate::enter::{confirm_pod_creation, launch_pod, launch_pod_for_terminal};
 use crate::git::get_repo_root;
 use crate::pty_attach;
 
 const PTY_SESSION_NAME: &str = "pi";
 
 pub fn pi(cmd: &PiCommand) -> Result<()> {
+    prepare(cmd, false)?.attach()
+}
+
+pub(crate) fn prepare_terminal(cmd: &PiCommand) -> Result<crate::terminal::PreparedTerminal> {
+    prepare(cmd, true)
+}
+
+fn prepare(cmd: &PiCommand, reserve_stdout: bool) -> Result<crate::terminal::PreparedTerminal> {
     let t_total = Instant::now();
 
     let repo_root = get_repo_root()?;
@@ -34,7 +42,11 @@ pub fn pi(cmd: &PiCommand) -> Result<()> {
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
 
     let t = Instant::now();
-    let result = launch_pod(&cmd.name, host_override)?;
+    let result = if reserve_stdout {
+        launch_pod_for_terminal(&cmd.name, host_override)?
+    } else {
+        launch_pod(&cmd.name, host_override)?
+    };
     let elapsed = t.elapsed();
     trace!("launch_pod: {elapsed:?}");
     let workdir = result.container_repo_path.clone();
@@ -67,27 +79,17 @@ pub fn pi(cmd: &PiCommand) -> Result<()> {
         pod_name: cmd.name.clone(),
     });
 
-    let outcome = pty_attach::attach(
-        pty_attach::PtyTransport::Tcp {
-            url: result.container_url.clone(),
-        },
-        "/pi",
-        &result.container_token,
-        pty_attach::WireParams::Session(pty_attach::SessionParams {
+    Ok(crate::terminal::PreparedTerminal {
+        kind: crate::terminal::TerminalKind::Pi,
+        pod: cmd.name.clone(),
+        repo_path: repo_root,
+        params: pty_attach::WireParams::Session(pty_attach::SessionParams {
             name: PTY_SESSION_NAME.to_string(),
             cmd: pi_cmd,
             workdir: Some(workdir_str),
             env: vec![],
         }),
+        codex_cli_path: None,
         reconnect,
-    )?;
-
-    match outcome {
-        pty_attach::AttachOutcome::Detached => {
-            eprintln!("[detached from session]");
-        }
-        pty_attach::AttachOutcome::SessionEnded => {}
-    }
-
-    Ok(())
+    })
 }

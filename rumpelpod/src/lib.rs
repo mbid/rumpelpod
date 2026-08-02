@@ -49,6 +49,7 @@ mod ssh;
 mod stop;
 mod switch_user;
 mod tcp_proxy;
+mod terminal;
 mod tunnel;
 pub mod vscode;
 
@@ -114,6 +115,9 @@ pub fn run() -> Result<()> {
     match cli.command {
         Command::Daemon => {
             daemon::run_daemon()?;
+        }
+        Command::EditorSession(ref cmd) => {
+            terminal::prepare_editor_session(cmd)?;
         }
         Command::TunnelServer => {
             tunnel::run_tunnel_server();

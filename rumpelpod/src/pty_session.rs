@@ -402,6 +402,8 @@ pub enum PtyControl {
     },
     /// Terminal resize (client -> server).
     Resize { cols: u16, rows: u16 },
+    /// Terminate the persistent session instead of merely detaching.
+    Terminate,
     /// Sent by the server when the PTY child process has exited.
     SessionEnded,
 }
@@ -620,6 +622,11 @@ async fn run_bridge(
                         match serde_json::from_str::<PtyControl>(&text) {
                             Ok(PtyControl::Resize { cols, rows }) => {
                                 let _ = sessions.resize(&name, cols, rows).await;
+                            }
+                            Ok(PtyControl::Terminate) => {
+                                if let Err(error) = sessions.terminate(&name).await {
+                                    eprintln!("pty: terminating session '{name}' failed: {error:#}");
+                                }
                             }
                             Ok(PtyControl::Session { .. }) | Ok(PtyControl::Attach { .. }) => {
                                 // Handshake messages after handshake are nonsensical

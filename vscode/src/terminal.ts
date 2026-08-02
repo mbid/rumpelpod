@@ -3,13 +3,11 @@
 
 import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
-import type * as NodePty from "node-pty";
 
 import type { AgentKind } from "./generated/protocol";
 import { AGENTS, agentLabel, isAgentKind } from "./agents";
 import type { Repository } from "./model";
-
-let nodePty: typeof NodePty | undefined;
+import { startTerminal, type TerminalProcess } from "./terminalConnection";
 
 export const AGENT_VIEW_ID = "rumpelpod.agent";
 
@@ -75,9 +73,9 @@ interface AgentSelection {
 }
 
 interface RunningTerminal {
-  readonly data: NodePty.IDisposable;
-  readonly exit: NodePty.IDisposable;
-  readonly process: NodePty.IPty;
+  readonly data: vscode.Disposable;
+  readonly exit: vscode.Disposable;
+  readonly process: TerminalProcess;
   readonly session: number;
   readonly tab: TerminalTab;
 }
@@ -88,7 +86,7 @@ interface TerminalChannel {
     | { readonly data: string; readonly sequence: number; readonly session: number }
     | undefined;
   outputSequence: number;
-  pausedOutput: NodePty.IPty | undefined;
+  pausedOutput: TerminalProcess | undefined;
   running: RunningTerminal | undefined;
   session: number;
   viewMessage: string | undefined;
@@ -531,15 +529,17 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     session: number,
   ): Promise<void> {
     this.updateChannel(channel, "starting");
-    let process: NodePty.IPty;
+    let process: TerminalProcess;
     try {
-      process = loadNodePty().spawn(selected.executable, [agent, "--create", selected.pod], {
-        cols: this.columns,
-        cwd: selected.repository.root,
-        env: { ...globalThis.process.env },
-        name: "xterm-256color",
-        rows: this.rows,
-      });
+      process = await startTerminal(
+        selected.executable,
+        selected.repository.root,
+        agent,
+        selected.pod,
+        this.columns,
+        this.rows,
+        this.reportError,
+      );
     } catch (error) {
       this.updateChannel(
         channel,
@@ -589,15 +589,17 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     this.shellChannel.session += 1;
     this.resetOutputBuffer(this.shellChannel);
     this.updateChannel(this.shellChannel, "starting");
-    let process: NodePty.IPty;
+    let process: TerminalProcess;
     try {
-      process = loadNodePty().spawn(executable, ["enter", pod], {
-        cols: this.columns,
-        cwd: repository.root,
-        env: { ...globalThis.process.env },
-        name: "xterm-256color",
-        rows: this.rows,
-      });
+      process = await startTerminal(
+        executable,
+        repository.root,
+        "shell",
+        pod,
+        this.columns,
+        this.rows,
+        this.reportError,
+      );
     } catch (error) {
       this.updateChannel(
         this.shellChannel,
@@ -894,18 +896,14 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     running.data.dispose();
     running.exit.dispose();
     try {
-      if (running.tab === "shell") {
-        running.process.kill();
-      } else {
-        running.process.write("\x01d");
-      }
+      running.process.close(running.tab === "shell");
     } catch (error) {
       this.reportError(context, error);
     }
     await Promise.race([processExited, delay(TERMINATION_GRACE_MILLISECONDS)]);
     if (!exited) {
       try {
-        running.process.kill();
+        running.process.close(running.tab === "shell");
       } catch (error) {
         this.reportError(context, error);
       }
@@ -1381,21 +1379,6 @@ function disposeLegacyAgentTerminal(terminal: vscode.Terminal): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function loadNodePty(): typeof NodePty {
-  if (nodePty !== undefined) {
-    return nodePty;
-  }
-  try {
-    nodePty = require("./node-pty/lib/index.js") as typeof NodePty;
-  } catch (error) {
-    throw new Error(
-      `The Rumpelpod terminal helper cannot run on ${process.platform}-${process.arch}. Install a Rumpelpod VSIX built for this platform: ${errorMessage(error)}`,
-      { cause: error },
-    );
-  }
-  return nodePty;
 }
 
 function delay(milliseconds: number): Promise<void> {

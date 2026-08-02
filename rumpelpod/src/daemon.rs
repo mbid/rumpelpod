@@ -4711,7 +4711,8 @@ pub fn run_daemon() -> Result<()> {
         crate::async_runtime::RUNTIME.spawn(host_event_reader(daemon, host_events_rx));
     }
 
-    let extra_routes = crate::codex::daemon_routes(daemon.clone());
+    let extra_routes = crate::codex::daemon_routes(daemon.clone())
+        .merge(crate::terminal::daemon_routes(daemon.clone()));
     protocol::serve_daemon(daemon, listener, extra_routes);
 }
 

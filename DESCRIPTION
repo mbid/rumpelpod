@@ -64,3 +64,16 @@ Start the baked development daemon socket and browser VS Code service
 from a lingering systemd user session during container boot. Keep
 startup independent of devcontainer lifecycle commands so rumpel-created
 pods expose their editor without a background post-create build race.
+
+Remove the extension's native node-pty dependency. Prepare agent and
+shell sessions with a short-lived rumpel command, then connect xterm.js
+directly to the daemon's Unix-socket WebSocket terminal protocol. Let
+the daemon own Codex PTYs and relay pod-hosted agent and shell sessions,
+including input, resize, detach, reconnect, and shell termination.
+
+Build one platform-independent VSIX and attach it directly to tagged
+GitHub releases. Publish the platform binaries separately as well, so
+the installer downloads only the binary needed for the current Linux or
+macOS host instead of the aggregate release archive. Document
+installing the VSIX without a marketplace and using it with the Linux
+daemon in WSL.

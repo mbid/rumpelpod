@@ -33,8 +33,10 @@ use url::Url;
 
 use crate::cli::CodexCommand;
 use crate::config::load_json_config;
-use crate::daemon::{self, DaemonServer};
-use crate::enter::{confirm_pod_creation, find_local_codex_cli, launch_pod};
+use crate::daemon::DaemonServer;
+use crate::enter::{
+    confirm_pod_creation, find_local_codex_cli, launch_pod, launch_pod_for_terminal,
+};
 use crate::git::get_repo_root;
 use crate::pty_attach;
 use crate::pty_session::{serve_ws_session_with_params, SessionSpec};
@@ -45,6 +47,14 @@ type WsServerResponse = tungstenite::handshake::server::Response;
 type WsServerErrorResponse = tungstenite::handshake::server::ErrorResponse;
 
 pub fn codex(cmd: &CodexCommand) -> Result<()> {
+    prepare(cmd, false)?.attach()
+}
+
+pub(crate) fn prepare_terminal(cmd: &CodexCommand) -> Result<crate::terminal::PreparedTerminal> {
+    prepare(cmd, true)
+}
+
+fn prepare(cmd: &CodexCommand, reserve_stdout: bool) -> Result<crate::terminal::PreparedTerminal> {
     let repo_root = get_repo_root()?;
     let host_override = cmd.host_args.resolve()?;
     let json_config = load_json_config(&repo_root)?;
@@ -62,7 +72,11 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
 
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
 
-    let result = launch_pod(&cmd.name, host_override)?;
+    let result = if reserve_stdout {
+        launch_pod_for_terminal(&cmd.name, host_override)?
+    } else {
+        launch_pod(&cmd.name, host_override)?
+    };
 
     let pod = crate::pod::PodClient::connect(&result.container_url, &result.container_token)?;
     write_codex_credentials(&pod)?;
@@ -76,35 +90,14 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
     }
     extra_args.extend(cmd.args.iter().cloned());
 
-    let socket_path = daemon::socket_path()?;
-    // form_urlencoded escapes the repo path so absolute paths with
-    // slashes survive the URL.  Pod names are ASCII-only per the
-    // PodName validator, so the path segment does not need escaping.
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("repo_path", &repo_root.to_string_lossy())
-        .append_pair("codex_cli_path", &codex_bin.to_string_lossy())
-        .finish();
-    let path = format!("/pod/codex/{}?{query}", cmd.name);
-
-    let outcome = pty_attach::attach(
-        pty_attach::PtyTransport::Unix {
-            socket: socket_path,
-        },
-        &path,
-        // Daemon's Unix socket does not validate Authorization.
-        "",
-        pty_attach::WireParams::Attach { extra_args },
-        None,
-    )?;
-
-    match outcome {
-        pty_attach::AttachOutcome::Detached => {
-            eprintln!("[detached from session]");
-        }
-        pty_attach::AttachOutcome::SessionEnded => {}
-    }
-
-    Ok(())
+    Ok(crate::terminal::PreparedTerminal {
+        kind: crate::terminal::TerminalKind::Codex,
+        pod: cmd.name.clone(),
+        repo_path: repo_root,
+        params: pty_attach::WireParams::Attach { extra_args },
+        codex_cli_path: Some(codex_bin),
+        reconnect: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +140,7 @@ async fn codex_ws_handler(
     })
 }
 
-async fn build_codex_spec(
+pub(crate) async fn build_codex_spec(
     daemon: &Arc<DaemonServer>,
     repo_path: &std::path::Path,
     pod_name: &str,

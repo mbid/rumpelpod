@@ -421,6 +421,71 @@ fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
 }
 
 #[test]
+fn vscode_package_is_universal_and_published_separately() {
+    let root = workspace_root();
+    let package: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("vscode/package.json")).expect("read extension manifest"),
+    )
+    .expect("parse extension manifest");
+    let dependencies = package["devDependencies"]
+        .as_object()
+        .expect("extension devDependencies object");
+    assert!(
+        !dependencies.contains_key("node-pty"),
+        "the extension still required a native PTY module"
+    );
+
+    let package_script =
+        fs::read_to_string(root.join("vscode/package.mjs")).expect("read extension package script");
+    assert!(
+        !package_script.contains("--target"),
+        "the extension package was restricted to its build platform"
+    );
+
+    let vsix = find_vsix(&root);
+    let entries = Command::new("unzip")
+        .args(["-Z1"])
+        .arg(&vsix)
+        .success()
+        .expect("list packaged extension files");
+    let entries = String::from_utf8(entries).expect("VSIX entries were not UTF-8");
+    assert!(
+        !entries.lines().any(|entry| entry.ends_with(".node")),
+        "the extension package contained a native Node module"
+    );
+    assert!(
+        !entries.contains("node-pty"),
+        "the extension package contained the obsolete PTY dependency"
+    );
+
+    let manifest = Command::new("unzip")
+        .args(["-p"])
+        .arg(&vsix)
+        .arg("extension.vsixmanifest")
+        .success()
+        .expect("read packaged extension manifest");
+    assert!(
+        !String::from_utf8(manifest)
+            .expect("VSIX manifest was not UTF-8")
+            .contains("TargetPlatform"),
+        "the VSIX declared a platform target"
+    );
+
+    let workflow =
+        fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read release workflow");
+    assert!(
+        workflow.contains("rumpelpod-vscode-${{ github.ref_name }}.vsix"),
+        "tagged releases did not publish the VSIX"
+    );
+    let installer = fs::read_to_string(root.join("install.sh")).expect("read installer");
+    assert!(
+        installer.contains("releases/download/${version}/${binary}")
+            && !installer.contains("tar xzf"),
+        "the installer still downloaded the aggregate release archive"
+    );
+}
+
+#[test]
 fn vscode_server_is_unauthenticated_and_loopback_only() {
     let root = workspace_root();
     let temporary = tempfile::tempdir().expect("create VS Code service test directory");
