@@ -491,6 +491,33 @@ async function waitForAgentView(page, podName, agent = "codex", expectedAgents =
         0,
         "agent tab also rendered the shell xterm",
     );
+    const terminalChrome = await frame.locator(`#${agent}-terminal`).evaluate((element) => {
+        const terminalStyle = getComputedStyle(element);
+        const viewport = element.querySelector(".xterm-viewport");
+        if (!(viewport instanceof HTMLElement)) {
+            throw new Error("xterm viewport was missing");
+        }
+        return {
+            bodyBackground: getComputedStyle(document.body).backgroundColor,
+            padding: [
+                terminalStyle.paddingTop,
+                terminalStyle.paddingRight,
+                terminalStyle.paddingBottom,
+                terminalStyle.paddingLeft,
+            ],
+            viewportBackground: getComputedStyle(viewport).backgroundColor,
+        };
+    });
+    assert.deepEqual(
+        terminalChrome.padding,
+        ["4px", "6px", "4px", "6px"],
+        "embedded terminal spacing was asymmetric",
+    );
+    assert.equal(
+        terminalChrome.viewportBackground,
+        terminalChrome.bodyBackground,
+        "xterm viewport did not match the VS Code sidebar background",
+    );
     return {
         agent,
         agentTab,

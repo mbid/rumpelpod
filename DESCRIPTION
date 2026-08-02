@@ -56,3 +56,6 @@ the terminal session tabs until more than one session is open.
 Launch multiple agent sessions concurrently in the same pod. Make
 header popovers toggle from their trigger and show the complete pod list
 without a filter field.
+
+Use symmetric terminal spacing and theme the xterm viewport to match the
+VS Code sidebar instead of exposing xterm's black fallback background.

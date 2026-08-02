@@ -160,14 +160,19 @@ body {
 }
 
 .terminal {
+  box-sizing: border-box;
   flex: 1;
   min-height: 0;
   min-width: 0;
-  padding: 4px 2px 2px 6px;
+  padding: 4px 6px;
 }
 
 .terminal .xterm {
   height: 100%;
+}
+
+.terminal .xterm-viewport {
+  background-color: var(--vscode-sideBar-background);
 }
 
 .empty {
