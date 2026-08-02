@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Build a "prepared" Docker image that pre-installs the rumpel binary,
-//! a repo clone, and (optionally) the Claude CLI on top of the resolved
-//! devcontainer image.  This avoids repeating expensive setup steps every
-//! time a container is created.
+//! a repo clone, and locally available coding agent CLIs on top of the
+//! resolved devcontainer image. This avoids repeating expensive setup steps
+//! every time a container is created.
 
 use std::fs;
 use std::io::Write;
@@ -79,20 +79,36 @@ const PI_MIN_NODE: (u64, u64, u64) = (22, 19, 0);
 ///
 /// Uses the client-provided path so the daemon does not depend on its
 /// own PATH. `codex --version` outputs e.g. `codex-cli 0.145.0`.
-fn detect_local_codex(codex_cli_path: Option<&Path>) -> Option<LocalCodexInfo> {
-    let bin = codex_cli_path?;
+fn detect_local_codex(codex_cli_path: Option<&Path>) -> Result<Option<LocalCodexInfo>> {
+    let Some(bin) = codex_cli_path else {
+        return Ok(None);
+    };
     let output = Command::new(bin)
         .arg("--version")
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .output()
-        .ok()?;
+        .with_context(|| format!("running {} --version", bin.display()))?;
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "{} --version failed with {}: {}",
+            bin.display(),
+            output.status,
+            stderr.trim()
+        ));
     }
     let raw = String::from_utf8_lossy(&output.stdout);
-    let version = parse_codex_version(&raw)?.to_string();
-    Some(LocalCodexInfo { version })
+    let Some(version) = parse_codex_version(&raw) else {
+        return Err(anyhow::anyhow!(
+            "unsupported Codex version output from {}: {:?}",
+            bin.display(),
+            raw.trim()
+        ));
+    };
+    Ok(Some(LocalCodexInfo {
+        version: version.to_string(),
+    }))
 }
 
 /// Extract the release version while rejecting output that cannot safely be
@@ -625,7 +641,7 @@ pub fn build_prepared_image(
 ) -> Result<BuildResult> {
     let claude_info = detect_local_claude(claude_cli_path);
     let pi_info = detect_local_pi(pi_cli_path);
-    let codex_info = detect_local_codex(codex_cli_path);
+    let codex_info = detect_local_codex(codex_cli_path)?;
     let install_grok = local_has_grok(grok_cli_path);
 
     let mode = BuildxMode::from_host(docker_host, docker_socket);
@@ -1634,6 +1650,27 @@ mod tests {
         assert_eq!(parse_codex_version("0.146.0\n"), None);
         assert_eq!(parse_codex_version("codex-cli 0.146.0 extra\n"), None);
         assert_eq!(parse_codex_version("codex-cli ../../latest\n"), None);
+    }
+
+    #[test]
+    fn codex_detection_rejects_unrecognized_version_output() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin = dir.path().join("codex");
+        fs::write(&bin, "#!/bin/sh\necho 'unexpected output'\n").expect("write fake codex");
+        let mut permissions = fs::metadata(&bin).expect("stat fake codex").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bin, permissions).expect("chmod fake codex");
+
+        let result = detect_local_codex(Some(&bin));
+        let Err(error) = result else {
+            panic!("unrecognized Codex version output should fail detection");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Codex version output"),
+            "unexpected error: {error:#}"
+        );
     }
 
     fn serve_slow_active_body(mut stream: TcpStream) -> std::io::Result<()> {

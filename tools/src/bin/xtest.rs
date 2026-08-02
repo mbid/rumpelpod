@@ -78,11 +78,6 @@ use tools::CommandExt;
 /// Keeps flaky-test workarounds from masking systemic problems.
 const RETRY_BUDGET: usize = 10;
 
-/// Avoid overwhelming Docker on hosts that expose very large CPU counts.
-/// Explicit CLI and environment overrides remain uncapped for callers that
-/// have enough independent executor capacity.
-const DEFAULT_JOB_LIMIT: usize = 16;
-
 /// (cargo target triple, binary name in flat layout)
 const LINUX_TARGETS: &[(&str, &str)] = &[
     ("x86_64-unknown-linux-musl", "rumpel-linux-amd64"),
@@ -1176,7 +1171,7 @@ fn main() -> ExitCode {
 
 fn default_jobs() -> usize {
     std::thread::available_parallelism()
-        .map(|jobs| jobs.get().min(DEFAULT_JOB_LIMIT))
+        .map(|jobs| tools::default_xtest_jobs(jobs.get()))
         .unwrap_or(4)
 }
 
