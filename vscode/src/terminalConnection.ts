@@ -241,15 +241,47 @@ class DirectTerminal implements TerminalProcess {
       this.reportError("parsing a terminal control message", error);
       return;
     }
-    if (
-      typeof control === "object" &&
-      control !== null &&
-      "type" in control &&
-      control.type === "session_ended"
-    ) {
-      this.stopped = true;
-      socket.close();
+    if (typeof control !== "object" || control === null || !("type" in control)) {
+      this.reportError(
+        "reading a terminal control message",
+        new Error("the daemon returned an unexpected terminal control message"),
+      );
+      return;
     }
+    switch (control.type) {
+      case "session_ended":
+        this.stopFromServer(socket);
+        return;
+      case "session_error":
+        if (!("error" in control) || typeof control.error !== "string") {
+          this.reportError(
+            "reading a terminal control message",
+            new Error("the daemon returned a malformed terminal session error"),
+          );
+          this.stopFromServer(socket);
+          return;
+        }
+        this.reportError("starting the terminal session", new Error(control.error));
+        this.stopFromServer(socket);
+        return;
+      case "session_unavailable":
+        this.reportError(
+          "starting the terminal session",
+          new Error("the daemon cannot create the terminal from its current pod connection"),
+        );
+        this.stopFromServer(socket);
+        return;
+      default:
+        this.reportError(
+          "reading a terminal control message",
+          new Error(`the daemon returned unexpected terminal control type ${String(control.type)}`),
+        );
+    }
+  }
+
+  private stopFromServer(socket: WebSocket): void {
+    this.stopped = true;
+    socket.close();
   }
 
   private scheduleReconnect(): void {

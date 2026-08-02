@@ -81,4 +81,5 @@ daemon in WSL.
 Preserve daemon-local Codex reattachment when carrying the editor
 transport onto current main. Resolve editor terminal proxies from the
 daemon's live pod connection, and serialize shell termination through
-the same PTY lifecycle guard used by pod cleanup.
+the same PTY lifecycle guard used by pod cleanup. Surface daemon-side
+terminal preparation failures instead of silently reconnecting.
