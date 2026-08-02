@@ -497,6 +497,16 @@ async function waitForAgentView(page, podName, agent = "codex", expectedAgents =
         if (!(viewport instanceof HTMLElement)) {
             throw new Error("xterm viewport was missing");
         }
+        const scrollbar = element.querySelector(
+            ".xterm-scrollable-element > .scrollbar.vertical",
+        );
+        if (!(scrollbar instanceof HTMLElement)) {
+            throw new Error("xterm scrollbar was missing");
+        }
+        const slider = scrollbar.querySelector(".slider");
+        if (!(slider instanceof HTMLElement)) {
+            throw new Error("xterm scrollbar slider was missing");
+        }
         return {
             bodyBackground: getComputedStyle(document.body).backgroundColor,
             padding: [
@@ -505,13 +515,25 @@ async function waitForAgentView(page, podName, agent = "codex", expectedAgents =
                 terminalStyle.paddingBottom,
                 terminalStyle.paddingLeft,
             ],
+            scrollbarWidth: getComputedStyle(scrollbar).width,
+            sliderBackground: getComputedStyle(slider).backgroundColor,
             viewportBackground: getComputedStyle(viewport).backgroundColor,
         };
     });
     assert.deepEqual(
         terminalChrome.padding,
-        ["4px", "6px", "4px", "6px"],
-        "embedded terminal spacing was asymmetric",
+        ["4px", "0px", "4px", "6px"],
+        "embedded terminal did not account for xterm's scrollbar gutter",
+    );
+    assert.equal(
+        terminalChrome.scrollbarWidth,
+        terminalChrome.padding[3],
+        "xterm scrollbar gutter did not match the left terminal inset",
+    );
+    assert.equal(
+        terminalChrome.sliderBackground,
+        "rgba(0, 0, 0, 0)",
+        "xterm scrollbar thumb was visible while idle",
     );
     assert.equal(
         terminalChrome.viewportBackground,
