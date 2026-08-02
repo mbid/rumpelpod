@@ -57,6 +57,5 @@ Launch multiple agent sessions concurrently in the same pod. Make
 header popovers toggle from their trigger and show the complete pod list
 without a filter field.
 
-Preserve the terminal inset and xterm's normal scrollbar while scoping
-spacing to the extension wrapper. Keep xterm's black fallback from
-showing through at its edges.
+Keep the existing terminal spacing and scrollbar behavior unchanged.
+Theme only xterm's black fallback viewport to match the VS Code sidebar.

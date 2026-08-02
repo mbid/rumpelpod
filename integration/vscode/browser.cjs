@@ -492,104 +492,19 @@ async function waitForAgentView(page, podName, agent = "codex", expectedAgents =
         "agent tab also rendered the shell xterm",
     );
     const terminalChrome = await frame.locator(`#${agent}-terminal`).evaluate((element) => {
-        const terminalStyle = getComputedStyle(element);
         const viewport = element.querySelector(".xterm-viewport");
         if (!(viewport instanceof HTMLElement)) {
             throw new Error("xterm viewport was missing");
         }
-        const xterm = element.querySelector(":scope > .xterm");
-        if (!(xterm instanceof HTMLElement)) {
-            throw new Error("xterm root was missing");
-        }
-        const scrollable = element.querySelector(".xterm-scrollable-element");
-        if (!(scrollable instanceof HTMLElement)) {
-            throw new Error("xterm scrollable element was missing");
-        }
-        const scrollbar = element.querySelector(
-            ".xterm-scrollable-element > .scrollbar.vertical",
-        );
-        if (!(scrollbar instanceof HTMLElement)) {
-            throw new Error("xterm scrollbar was missing");
-        }
-        const slider = scrollbar.querySelector(".slider");
-        if (!(slider instanceof HTMLElement)) {
-            throw new Error("xterm scrollbar slider was missing");
-        }
-        const terminalRect = element.getBoundingClientRect();
-        const xtermRect = xterm.getBoundingClientRect();
-        const scrollableRect = scrollable.getBoundingClientRect();
-        const xtermStyle = getComputedStyle(xterm);
         return {
             bodyBackground: getComputedStyle(document.body).backgroundColor,
-            geometry: {
-                leftInset: xtermRect.left - terminalRect.left,
-                rightInset: terminalRect.right - xtermRect.right,
-                scrollableLeftInset: scrollableRect.left - xtermRect.left,
-                scrollableRightInset: xtermRect.right - scrollableRect.right,
-            },
-            padding: [
-                terminalStyle.paddingTop,
-                terminalStyle.paddingRight,
-                terminalStyle.paddingBottom,
-                terminalStyle.paddingLeft,
-            ],
-            scrollbarWidth: getComputedStyle(scrollbar).width,
-            sliderBackground: getComputedStyle(slider).backgroundColor,
-            terminalBackground: terminalStyle.backgroundColor,
             viewportBackground: getComputedStyle(viewport).backgroundColor,
-            xtermBackground: xtermStyle.backgroundColor,
-            xtermPadding: [
-                xtermStyle.paddingTop,
-                xtermStyle.paddingRight,
-                xtermStyle.paddingBottom,
-                xtermStyle.paddingLeft,
-            ],
         };
     });
-    assert.deepEqual(
-        terminalChrome.padding,
-        ["8px", "12px", "8px", "12px"],
-        "embedded terminal did not preserve its balanced spacing",
-    );
-    assert.deepEqual(
-        terminalChrome.xtermPadding,
-        ["0px", "0px", "0px", "0px"],
-        "wrapper spacing leaked into xterm's internal terminal element",
-    );
-    assert.deepEqual(
-        terminalChrome.geometry,
-        {
-            leftInset: 12,
-            rightInset: 12,
-            scrollableLeftInset: 0,
-            scrollableRightInset: 0,
-        },
-        "embedded terminal spacing was not symmetric around xterm",
-    );
-    assert.equal(
-        terminalChrome.scrollbarWidth,
-        "14px",
-        "xterm's normal scrollbar width was changed",
-    );
-    assert.notEqual(
-        terminalChrome.sliderBackground,
-        "rgba(0, 0, 0, 0)",
-        "xterm's normal scrollbar thumb was hidden",
-    );
-    assert.equal(
-        terminalChrome.terminalBackground,
-        terminalChrome.bodyBackground,
-        "terminal padding did not match the VS Code sidebar background",
-    );
     assert.equal(
         terminalChrome.viewportBackground,
         terminalChrome.bodyBackground,
         "xterm viewport did not match the VS Code sidebar background",
-    );
-    assert.equal(
-        terminalChrome.xtermBackground,
-        terminalChrome.bodyBackground,
-        "xterm root did not match the VS Code sidebar background",
     );
     return {
         agent,

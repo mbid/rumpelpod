@@ -159,21 +159,18 @@ body {
   position: relative;
 }
 
-.surface > .terminal {
-  background-color: var(--vscode-sideBar-background);
-  box-sizing: border-box;
+.terminal {
   flex: 1;
   min-height: 0;
   min-width: 0;
-  padding: 8px 12px;
+  padding: 4px 2px 2px 6px;
 }
 
-.surface > .terminal > .xterm {
-  background-color: var(--vscode-sideBar-background);
+.terminal .xterm {
   height: 100%;
 }
 
-.surface > .terminal > .xterm > .xterm-viewport {
+.terminal .xterm-viewport {
   background-color: var(--vscode-sideBar-background);
 }
 
