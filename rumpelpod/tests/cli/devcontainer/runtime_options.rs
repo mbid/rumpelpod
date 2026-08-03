@@ -3,7 +3,7 @@
 
 //! Integration tests for devcontainer.json container runtime options:
 //! `overrideCommand`, `privileged`, `init`, `capAdd`, `securityOpt`, and
-//! `runArgs` device passthrough.
+//! `runArgs` device and DNS passthrough.
 
 use std::fs;
 
@@ -322,6 +322,49 @@ fn run_args_device() {
         ])
         .success()
         .expect("/dev/null should be a character device in container");
+}
+
+// ---------------------------------------------------------------------------
+// runArgs --dns
+// ---------------------------------------------------------------------------
+
+/// Repeated `--dns` entries should replace the backend's resolver list while
+/// preserving both accepted argument forms and their order.
+#[test]
+fn run_args_dns() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_runtime_opts(
+        &repo,
+        r#""runArgs": ["--dns=1.1.1.1", "--dns", "8.8.8.8"]"#,
+    );
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "dns-test",
+            "--",
+            "cat",
+            "/etc/resolv.conf",
+        ])
+        .success()
+        .expect("rumpel enter failed with --dns runArgs");
+
+    let resolv_conf = String::from_utf8_lossy(&stdout);
+    let nameservers: Vec<&str> = resolv_conf
+        .lines()
+        .filter_map(|line| line.strip_prefix("nameserver "))
+        .collect();
+    assert_eq!(
+        nameservers,
+        ["1.1.1.1", "8.8.8.8"],
+        "runArgs DNS servers should replace the resolver list: {resolv_conf}",
+    );
 }
 
 // ---------------------------------------------------------------------------
