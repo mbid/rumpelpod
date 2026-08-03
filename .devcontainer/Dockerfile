@@ -302,6 +302,8 @@ RUN cargo build --bin rumpel --target x86_64-unknown-linux-musl \
     && cargo build --bin xtest --bin pipeline \
     && cargo test --no-run
 
+USER root
+
 # Pre-download container images so services start without network access.
 # Sources are pinned by digest because tags (especially :latest and :2)
 # move; the docker-archive references keep the tags the tooling expects.
