@@ -74,3 +74,7 @@ Attach the three platform-tagged VSIX files to tagged GitHub releases as
 separate assets. Keep them outside the rumpel binary tarball so CLI
 installation downloads only the executable needed by the current host.
 Document choosing the extension-host platform, including Linux for WSL.
+
+Build every native VSIX through the shared Cargo extension command. Keep
+the existing release job graph while having each platform job stage its
+matching rumpel executable and extension bundle.

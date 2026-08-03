@@ -127,10 +127,7 @@ jobs:
         run: cargo build --release --bin rumpel --target aarch64-apple-darwin
 
       - name: Build native VS Code extension
-        working-directory: vscode
-        run: |
-          npm ci
-          npm run package
+        run: cargo vscode --check
 
       - name: Stage release artifacts
         run: |
