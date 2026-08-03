@@ -400,18 +400,11 @@ fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
         dockerfile.contains("touch /var/lib/systemd/linger/${USER}"),
         "the image did not arrange a user manager at container boot"
     );
-    let ci_stage = dockerfile
-        .find("FROM common AS ci")
-        .expect("CI image stage");
-    let development_stage = dockerfile
-        .find("FROM common AS development")
-        .expect("development image stage");
-    let browser_install = dockerfile
-        .find("apt-get install --yes --no-install-recommends chromium")
-        .expect("development browser install");
     assert!(
-        ci_stage < development_stage && development_stage < browser_install,
-        "the CI image included the opt-in browser development stack"
+        !dockerfile.contains(" AS ci")
+            && !dockerfile.contains(" AS development")
+            && dockerfile.contains("apt-get install --yes --no-install-recommends chromium"),
+        "CI and development did not use the same complete devcontainer image"
     );
     assert!(
         dockerfile
@@ -513,10 +506,15 @@ fn vscode_package_is_native_and_published_for_each_release_platform() {
     let ci_script =
         fs::read_to_string(root.join("ci/run-pipeline.sh")).expect("read CI pipeline script");
     assert!(
-        ci_script.contains("--target ci")
+        !ci_script.contains("--target ci")
             && ci_script.contains("vscode/Dockerfile.linux")
             && ci_script.contains("type=local,dest=$vsix_output"),
         "Linux release jobs did not use the compatibility VSIX builder"
+    );
+    assert!(
+        ci_script.contains("docker inspect --format '{{.State.Running}}'")
+            && ci_script.contains("docker logs devcontainer"),
+        "CI did not report devcontainer startup failures"
     );
     let linux_builder =
         fs::read_to_string(root.join("vscode/Dockerfile.linux")).expect("read Linux VSIX builder");

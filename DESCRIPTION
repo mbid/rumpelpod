@@ -20,6 +20,7 @@ extension checks local so they do not start nested Docker builds.
 
 Provide a loopback-only live code-server workspace backed by a small
 anyhow demo repository and lingering user services. Persist only
-allowlisted agent credentials for those services. Split the devcontainer
-so CI skips the live browser stack. Keep the timing-sensitive Playwright
-test available only through the explicit ignored-test flag.
+allowlisted agent credentials for those services. Use the same complete
+devcontainer image in development and CI, and report startup logs when
+its entrypoint fails. Keep the timing-sensitive Playwright test
+available only through the explicit ignored-test flag.

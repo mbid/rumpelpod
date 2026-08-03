@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE
-FROM ${BASE_IMAGE:-debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271} AS common
+FROM ${BASE_IMAGE:-debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271}
 
 USER root
 
@@ -188,8 +188,6 @@ ARG GROUP_ID=1000
 ENV USER=${USER}
 ENV USER_ID=${USER_ID}
 ENV GROUP_ID=${GROUP_ID}
-ENV XDG_RUNTIME_DIR=/run/user/${USER_ID}
-ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_ID}/bus
 
 # Ensure the user and group exist, handling the case where the base image
 # already provides them (possibly with a different uid/gid/shell).
@@ -328,16 +326,6 @@ RUN printf '[Unit]\nDescription=Provision k3d cluster\nAfter=preload-images.serv
 
 COPY .devcontainer/entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
 
-ENV RUMPELPOD_TEST_SYSTEMD=1
-
-ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]
-
-# CI needs the systemd and nested-container test environment, but not the live
-# browser workspace or its browser, server, extension, and demo repository.
-FROM common AS ci
-
-FROM common AS development
-
 USER root
 
 # Headless browser used by the opt-in VS Code integration test. Avoid desktop
@@ -403,3 +391,12 @@ RUN mkdir -p \
     && ln -s ../rumpelpod-vscode.service \
         "/home/${USER}/.config/systemd/user/default.target.wants/rumpelpod-vscode.service" \
     && chown -R ${USER}:${USER} "/home/${USER}/.config"
+
+# These paths exist only after systemd starts the container. Declare them after
+# all build-time commands so rootful image tools do not inspect a nonexistent
+# user runtime directory while constructing the image.
+ENV XDG_RUNTIME_DIR=/run/user/${USER_ID}
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_ID}/bus
+ENV RUMPELPOD_TEST_SYSTEMD=1
+
+ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]
