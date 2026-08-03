@@ -1,0 +1,5 @@
+Propagate DNS into SSH test daemons
+
+Nested Docker cannot reuse the outer container's loopback resolver.
+Pass the pod's routable nameservers to dockerd so remote image builds
+can resolve package repositories.
