@@ -340,7 +340,7 @@ ARG CODE_SERVER_VERSION=4.121.0
 RUN ARCH=$(uname -m) && \
     case "$ARCH" in \
         x86_64) CODE_SERVER_ARCH="amd64"; CODE_SERVER_SHA256="3860893f15376e5f984492c5c92e87c51975d67e3902410f422823d9f60e06af" ;; \
-        aarch64) CODE_SERVER_ARCH="arm64"; CODE_SERVER_SHA256="de5101a3c1f86b385343f4824e7d6a82c3229cdbb4f18a3277525649338acb71" ;; \
+        aarch64) CODE_SERVER_ARCH="arm64"; CODE_SERVER_SHA256="de5101a3c1f86b3853431d6920dcf4daaca879f613dec9139496099e31baa569" ;; \
         *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;; \
     esac && \
     CODE_SERVER_TARBALL="code-server-${CODE_SERVER_VERSION}-linux-${CODE_SERVER_ARCH}.tar.gz" && \
