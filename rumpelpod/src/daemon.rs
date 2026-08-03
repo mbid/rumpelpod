@@ -28,9 +28,8 @@ use sha2::{Digest, Sha256};
 use crate::async_runtime::block_on;
 use crate::config::{ContainerEngine, Host};
 use crate::devcontainer::{
-    self, check_no_unresolved_mount_vars, compute_devcontainer_id, substitute_vars, BuildOptions,
-    DevContainer, GpuRequirement, HostRequirements, MountType, Port, PortAttributes,
-    SubstitutionContext,
+    self, check_no_unresolved_mount_vars, resolve_devcontainer_vars, BuildOptions, DevContainer,
+    GpuRequirement, HostRequirements, MountType, Port, PortAttributes,
 };
 use crate::executor::PodBackendInfo;
 use crate::gateway;
@@ -579,76 +578,6 @@ fn validate_bind_mount_ownership(devcontainer: &DevContainer) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Resolve all devcontainer.json variables using the client-provided
-/// `${localEnv:...}` map and the repo path.
-///
-/// Runs in two passes because `containerWorkspaceFolder` is derived from
-/// `workspace_folder` after its own substitution pass, and everything
-/// else can then reference the derived value.
-fn resolve_devcontainer_vars(
-    dc: DevContainer,
-    repo_path: &Path,
-    pod_name: &str,
-    local_env: &HashMap<String, String>,
-) -> DevContainer {
-    let devcontainer_id = compute_devcontainer_id(repo_path, pod_name);
-
-    // Canonicalize for ${localWorkspaceFolder} so symlinks like
-    // /var -> /private/var on macOS resolve to the form Docker bind
-    // mounts need.  The DB still keys pods by the client's original
-    // repo_path so this is only used for substitution.
-    let canonical = repo_path
-        .canonicalize()
-        .unwrap_or_else(|_| repo_path.to_path_buf());
-    let local_ws = canonical
-        .to_string_lossy()
-        .trim_end_matches('/')
-        .to_string();
-    let local_ws_basename = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "workspace".to_string());
-
-    // workspace_folder may itself contain ${devcontainerId} or
-    // ${localWorkspaceFolderBasename}, so resolve it before deriving
-    // containerWorkspaceFolder from it.
-    let workspace_folder = dc.workspace_folder.as_ref().map(|wf| {
-        substitute_vars(
-            wf,
-            &SubstitutionContext {
-                local_env: Some(local_env.clone()),
-                local_workspace_folder: Some(local_ws.clone()),
-                local_workspace_folder_basename: Some(local_ws_basename.clone()),
-                // containerWorkspaceFolder is derived from workspace_folder,
-                // so it cannot be resolved yet.
-                container_workspace_folder: None,
-                container_workspace_folder_basename: None,
-                devcontainer_id: Some(devcontainer_id.clone()),
-            },
-        )
-    });
-    let dc = DevContainer {
-        workspace_folder,
-        ..dc
-    };
-
-    let container_ws = dc.container_repo_path(repo_path);
-    let container_ws_str = container_ws.to_string_lossy().to_string();
-    let container_ws_basename = container_ws
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "workspace".to_string());
-
-    dc.substitute(&SubstitutionContext {
-        local_env: Some(local_env.clone()),
-        local_workspace_folder: Some(local_ws),
-        local_workspace_folder_basename: Some(local_ws_basename),
-        container_workspace_folder: Some(container_ws_str),
-        container_workspace_folder_basename: Some(container_ws_basename),
-        devcontainer_id: Some(devcontainer_id),
-    })
 }
 
 /// Clean up pod refs in a repo's git directory.

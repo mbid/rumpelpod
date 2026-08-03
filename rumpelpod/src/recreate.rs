@@ -28,7 +28,9 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     }
 
     let docker_host = determine_host(&repo_root, cmd.host_args.resolve()?)?;
-    let local_env_vars = collect_local_env(&repo_root)?;
+    let mut local_env_vars = collect_local_env(&repo_root)?;
+    let docker_host =
+        crate::initialize::run(&repo_root, &cmd.name, docker_host, &mut local_env_vars)?;
 
     let host_branch = get_current_branch(&repo_root);
     let git_identity = get_git_user_config(&repo_root);

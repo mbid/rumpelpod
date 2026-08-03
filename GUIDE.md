@@ -147,6 +147,18 @@ For secret files such as certificates, use a bind mount pointing at a gitignored
 For SSH keys, use agent forwarding rather than copying key files into the pod.
 See [SSH key forwarding](#ssh-key-forwarding).
 
+### Host initialization
+
+`initializeCommand` runs on the machine where `rumpel` is invoked, with the repository root as its working directory.
+It completes before rumpelpod builds an image or creates a container, and a failure aborts creation.
+It runs for a new pod and for `rumpel recreate`, but not when an existing stopped pod is restarted.
+
+String commands run through `/bin/sh`, argument arrays run directly, and object entries run in parallel.
+The command supports `${localEnv:VARIABLE_NAME}` (including default values), `${localWorkspaceFolder}`, `${localWorkspaceFolderBasename}`, `${containerWorkspaceFolder}`, `${containerWorkspaceFolderBasename}`, and `${devcontainerId}` substitutions.
+
+For local and SSH Docker hosts, `DOCKER_HOST` points initializer subprocesses at the engine selected for the pod and is also available through `${localEnv:DOCKER_HOST}`.
+Kubernetes initialization still runs on the invoking machine, but there is no Docker endpoint corresponding to the Kubernetes target, so rumpelpod does not synthesize `DOCKER_HOST` for it.
+
 ### Warm build caches
 
 Rumpelpod derives a per-repo image on top of the configured base image, with a checkout of the repository baked in.
@@ -183,8 +195,9 @@ Rumpelpod ignores them with a warning when they appear.
 - `workspaceMount`: rumpelpod syncs the workspace via git rather than bind-mounting it.
 - `appPort`: use `forwardPorts` instead, so that rumpelpod's port tracking can remap across pods.
 - `shutdownAction`: containers stay running between sessions and are only removed explicitly with `rumpel delete`.
-- `initializeCommand` and `postAttachCommand` are ignored.
-  The remaining lifecycle commands run once per container start.
+- `postAttachCommand` is ignored.
+- The Dev Container metadata reference allows `initializeCommand` on subsequent starts and permits it to run more than once per session.
+  Rumpelpod deliberately limits it to initial creation and explicit recreation.
 - `userEnvProbe` is supported but behaves differently: the probe runs once when the pod is first created and the result is cached for the container's lifetime.
   Changes to shell init files do not take effect until the pod is recreated.
 - Bind mounts work fully only when containers run locally.

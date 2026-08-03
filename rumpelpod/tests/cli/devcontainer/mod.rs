@@ -4,6 +4,7 @@
 mod build_paths;
 mod env;
 mod image;
+mod initialize_command;
 mod lifecycle_commands;
 mod malformed_checkout;
 mod mounts;

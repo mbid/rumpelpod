@@ -13,7 +13,7 @@ use crate::cli::EnterCommand;
 use crate::config::{load_json_config, ContainerEngine, Host};
 use crate::daemon;
 use crate::daemon::protocol::{
-    Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
+    Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName, PodStatus,
 };
 use crate::devcontainer::{DevContainer, GpuRequirement, HostRequirements, SubstitutionContext};
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
@@ -274,8 +274,28 @@ pub fn confirm_pod_creation(pod_name: &str, repo_root: &Path, create: bool) -> R
 pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
     let t = Instant::now();
     let repo_root = get_repo_root()?;
-    let docker_host = determine_host(&repo_root, host_override)?;
-    let local_env_vars = collect_local_env(&repo_root)?;
+    let mut docker_host = determine_host(&repo_root, host_override)?;
+    let mut local_env_vars = collect_local_env(&repo_root)?;
+
+    let socket_path = daemon::socket_path()?;
+    let client = DaemonClient::new_unix(&socket_path);
+    let pods = client.list_pods(repo_root.clone(), true, false)?;
+    let creates_container = match pods.iter().find(|pod| pod.name == pod_name) {
+        None => true,
+        Some(pod) => match pod.status {
+            PodStatus::Gone => true,
+            PodStatus::Running
+            | PodStatus::Stopped
+            | PodStatus::Disconnected
+            | PodStatus::Stopping
+            | PodStatus::Deleting
+            | PodStatus::Broken => false,
+        },
+    };
+    if creates_container {
+        docker_host =
+            crate::initialize::run(&repo_root, pod_name, docker_host, &mut local_env_vars)?;
+    }
     let elapsed = t.elapsed();
     trace!("launch_pod config: {elapsed:?}");
 
@@ -286,9 +306,6 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let pi_cli_path = find_local_pi_cli();
     let grok_cli_path = find_local_grok_cli();
     let json_config = load_json_config(&repo_root)?;
-
-    let socket_path = daemon::socket_path()?;
-    let client = DaemonClient::new_unix(&socket_path);
 
     let t = Instant::now();
     let description_file = json_config

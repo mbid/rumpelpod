@@ -580,8 +580,6 @@ impl DevContainer {
     /// These properties are intentionally not supported but may appear
     /// in devcontainer.json files shared with other tools like VS Code.
     ///
-    /// - `initializeCommand`: runs on the host, which does not generalize to
-    ///   non-local backends (e.g. Kubernetes).
     /// - `features` / `overrideFeatureInstallOrder`: Dev Container Features
     ///   require an OCI registry client and a custom image build pipeline.
     ///   Out of scope -- use a Dockerfile instead.
@@ -592,7 +590,6 @@ impl DevContainer {
             ("dockerComposeFile", self.docker_compose_file.is_some()),
             ("service", self.service.is_some()),
             ("runServices", self.run_services.is_some()),
-            ("initializeCommand", self.initialize_command.is_some()),
             ("features", self.features.is_some()),
             (
                 "overrideFeatureInstallOrder",
@@ -1110,6 +1107,70 @@ pub fn compute_devcontainer_id(repo_path: &Path, pod_name: &str) -> String {
     let normalized = serde_json::to_string(&label_json).expect("JSON serialization cannot fail");
     let hash = Sha256::digest(normalized.as_bytes());
     hex::encode(hash)
+}
+
+/// Resolve the variables whose values are known before container creation.
+///
+/// Keeping this shared between the invoking client and the daemon ensures
+/// host-side initializeCommand execution sees the same values as the
+/// container configuration that is applied afterward.
+pub(crate) fn resolve_devcontainer_vars(
+    dc: DevContainer,
+    repo_path: &Path,
+    pod_name: &str,
+    local_env: &HashMap<String, String>,
+) -> DevContainer {
+    let devcontainer_id = compute_devcontainer_id(repo_path, pod_name);
+
+    // Docker bind mounts need canonical host paths on macOS, where paths
+    // such as /var are symlinks into /private/var.
+    let canonical = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let local_ws = canonical
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let local_ws_basename = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    // The container workspace is needed by initializeCommand substitution,
+    // but may itself depend on host-side variables.
+    let workspace_folder = dc.workspace_folder.as_ref().map(|wf| {
+        substitute_vars(
+            wf,
+            &SubstitutionContext {
+                local_env: Some(local_env.clone()),
+                local_workspace_folder: Some(local_ws.clone()),
+                local_workspace_folder_basename: Some(local_ws_basename.clone()),
+                container_workspace_folder: None,
+                container_workspace_folder_basename: None,
+                devcontainer_id: Some(devcontainer_id.clone()),
+            },
+        )
+    });
+    let dc = DevContainer {
+        workspace_folder,
+        ..dc
+    };
+
+    let container_ws = dc.container_repo_path(repo_path);
+    let container_ws_str = container_ws.to_string_lossy().to_string();
+    let container_ws_basename = container_ws
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    dc.substitute(&SubstitutionContext {
+        local_env: Some(local_env.clone()),
+        local_workspace_folder: Some(local_ws),
+        local_workspace_folder_basename: Some(local_ws_basename),
+        container_workspace_folder: Some(container_ws_str),
+        container_workspace_folder_basename: Some(container_ws_basename),
+        devcontainer_id: Some(devcontainer_id),
+    })
 }
 
 /// Scan raw devcontainer.json text for `${localEnv:VAR}` references and
