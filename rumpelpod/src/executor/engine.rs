@@ -738,6 +738,7 @@ fn docker_launch(backend: &DockerBackend, id: &PodId, spec: PodSpec) -> Result<S
         apparmor_unconfined,
         resources: _,
         runtime,
+        dns,
         docker_only,
         k8s_only: _,
     } = spec;
@@ -758,6 +759,9 @@ fn docker_launch(backend: &DockerBackend, id: &PodId, spec: PodSpec) -> Result<S
         command.args(["--network", network]);
     } else if backend.engine == ContainerEngine::Docker {
         command.args(["--network", "bridge"]);
+    }
+    for dns_server in dns {
+        command.args(["--dns", &dns_server]);
     }
     if let Some(runtime) = runtime {
         match backend.engine {
@@ -854,6 +858,7 @@ fn k8s_launch(backend: &K8sBackend, id: &PodId, spec: PodSpec) -> Result<()> {
         apparmor_unconfined,
         resources,
         runtime,
+        dns,
         docker_only: _,
         k8s_only,
     } = spec;
@@ -899,6 +904,7 @@ fn k8s_launch(backend: &K8sBackend, id: &PodId, spec: PodSpec) -> Result<()> {
         // Callers pass `None` rather than `Some("runc")`; normalize
         // anyway for defense-in-depth.
         runtime_class_name: runtime.filter(|r| r != "runc"),
+        dns_nameservers: dns,
     };
 
     backend
