@@ -769,6 +769,9 @@ function createXterm(
   terminal.loadAddon(fit);
   terminal.open(host);
   terminal.onData((data) => {
+    if (surfaces[tab].terminal !== terminal) {
+      return;
+    }
     const session = sessions[tab];
     if (session !== 0) {
       vscode.postMessage({ data, session, tab, type: "input" });
