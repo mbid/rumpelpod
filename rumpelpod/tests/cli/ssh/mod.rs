@@ -18,7 +18,8 @@ use indoc::formatdoc;
 use tempfile::TempDir;
 
 use crate::common::{
-    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_USER_UID,
+    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH,
+    TEST_USER_UID,
 };
 use crate::executor::ExecutorResources;
 use rumpelpod::CommandExt;
@@ -755,6 +756,62 @@ fn ssh_smoke_test() {
         stderr
     );
     assert_eq!(stdout.trim(), "hello from remote");
+}
+
+#[test]
+fn ssh_run_args_dns() {
+    println!("xtest:timeout=300");
+    if !matches!(
+        crate::executor::executor_mode(),
+        crate::executor::ExecutorMode::Docker
+    ) {
+        crate::executor::skip_test();
+        return;
+    }
+
+    let home = TestHome::new();
+    let executor = ExecutorResources::ssh(&home);
+    let daemon = TestDaemon::start(&home);
+    let repo = TestRepo::new();
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    std::fs::create_dir_all(&devcontainer_dir).unwrap();
+    // The nested daemon only needs to pull this image; package repository
+    // access during an image build is unrelated to SSH create arguments.
+    std::fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        formatdoc! {r#"
+            {{
+                "image": "buildpack-deps:bookworm-scm",
+                "workspaceFolder": "{TEST_REPO_PATH}",
+                "runArgs": ["--dns=1.1.1.1", "--dns", "8.8.8.8"]
+            }}
+        "#},
+    )
+    .unwrap();
+    std::fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let stdout = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "remote-dns",
+            "--",
+            "cat",
+            "/etc/resolv.conf",
+        ])
+        .success()
+        .expect("rumpel enter failed with --dns on remote Docker");
+
+    let resolv_conf = String::from_utf8_lossy(&stdout);
+    let nameservers: Vec<&str> = resolv_conf
+        .lines()
+        .filter_map(|line| line.strip_prefix("nameserver "))
+        .collect();
+    assert_eq!(
+        nameservers,
+        ["1.1.1.1", "8.8.8.8"],
+        "remote Docker should receive runArgs DNS servers: {resolv_conf}",
+    );
 }
 
 #[test]

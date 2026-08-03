@@ -38,6 +38,7 @@ pub struct K8sPodOptions {
     pub node_selector: Option<BTreeMap<String, String>>,
     pub tolerations: Option<Vec<crate::config::KubernetesToleration>>,
     pub runtime_class_name: Option<String>,
+    pub dns_nameservers: Vec<String>,
 }
 
 /// A volume mount for a Kubernetes pod (backed by emptyDir).
@@ -260,6 +261,15 @@ impl K8sClient {
                 );
                 pod_spec["spec"]["hostUsers"] = serde_json::json!(false);
             }
+        }
+
+        if !options.dns_nameservers.is_empty() {
+            // ClusterFirst would put cluster DNS ahead of the requested
+            // servers, so NXDOMAIN responses could prevent them being tried.
+            pod_spec["spec"]["dnsPolicy"] = serde_json::json!("None");
+            pod_spec["spec"]["dnsConfig"] = serde_json::json!({
+                "nameservers": options.dns_nameservers,
+            });
         }
 
         if let Some(ref ns) = options.node_selector {
