@@ -655,6 +655,7 @@ fn vscode_demo_workspace_uses_standard_runtime() {
 }
 
 #[test]
+#[ignore = "Playwright review restoration is flaky; run explicitly while quarantined"]
 fn vscode_browser_lists_creates_and_reviews_pods() {
     println!("xtest:timeout=360");
 

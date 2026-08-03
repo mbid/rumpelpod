@@ -79,11 +79,12 @@ library, so build development VSIX files on the deployment host or in a release
 container whose C library is no newer than the supported environments.
 
 The browser integration test launches an isolated code-server instance and a
-real rumpelpod daemon, then drives the packaged extension with Playwright. Run
-it through the normal test pipeline:
+real rumpelpod daemon, then drives the packaged extension with Playwright. It
+is ignored by default while review restoration remains flaky. Run it explicitly
+through the normal test pipeline:
 
 ```sh
-cargo pipeline vscode_browser_lists_creates_and_reviews_pods
+cargo pipeline vscode_browser_lists_creates_and_reviews_pods -- --ignored
 ```
 
 Successful runs capture the Activity Bar mode, pod switcher, agent launcher,
@@ -94,7 +95,7 @@ running the same test, use:
 
 ```sh
 RUMPELPOD_VSCODE_REFERENCE_IMAGES="$PWD/vscode/docs/images" \
-    cargo pipeline vscode_browser_lists_creates_and_reviews_pods
+    cargo pipeline vscode_browser_lists_creates_and_reviews_pods -- --ignored
 ```
 
 The creation flow reaches a real Codex prompt while the daemon reports the new

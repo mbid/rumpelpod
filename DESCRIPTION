@@ -78,3 +78,7 @@ Document choosing the extension-host platform, including Linux for WSL.
 Build every native VSIX through the shared Cargo extension command. Keep
 the existing release job graph while having each platform job stage its
 matching rumpel executable and extension bundle.
+
+Quarantine the flaky Playwright browser integration from default xtest
+and pipeline runs. Keep it compiled and available through the explicit
+ignored-test flag while fast VS Code checks continue to run normally.
