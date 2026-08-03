@@ -71,12 +71,12 @@ until the browser service is healthy. `cargo vscode --check` performs the
 extension checks used by the Rust pipeline without updating either live
 service.
 
-The embedded xterm connects directly to a WebSocket on the local rumpelpod
-daemon. The daemon either owns the PTY or relays the existing PTY protocol from
-the pod server, so the extension contains no native Node modules. `npm run
-package` produces one platform-independent VSIX; the separately installed
-`rumpel` executable remains platform-specific. Tagged GitHub releases attach
-the VSIX directly, without requiring publication to an extension marketplace.
+The embedded terminal uses a native PTY binding. `npm run package` labels the
+VSIX for the current operating system and architecture and includes the binding
+built on that host. Tagged releases provide Linux x64, Linux arm64, and macOS
+arm64 bundles as separate assets. Linux artifacts also require a compatible C
+library, so build development VSIX files on the deployment host or in a release
+container whose C library is no newer than the supported environments.
 
 The browser integration test launches an isolated code-server instance and a
 real rumpelpod daemon, then drives the packaged extension with Playwright. Run

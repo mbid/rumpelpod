@@ -12,10 +12,11 @@ rumpel system-install
 
 Requirements: git, Docker or Podman, optionally ssh and kubectl.
 
-Tagged releases also provide a platform-independent VSIX for the Rumpelpod
-workspace extension. Install it without a marketplace account using `code
---install-extension rumpelpod-vscode-VERSION.vsix`. In a WSL window the
-extension runs beside the Linux `rumpel` executable in WSL.
+Tagged releases provide native VSIX files for Linux x64, Linux arm64, and
+macOS arm64. Install the bundle matching the VS Code extension host with
+`code --install-extension rumpelpod-vscode-VERSION-PLATFORM.vsix`. In a WSL
+window, use the Linux bundle because the extension runs beside `rumpel` in
+WSL.
 
 ## What Is This?
 

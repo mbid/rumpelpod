@@ -14,9 +14,9 @@
 # commit id as long as it is reachable from a ref, which a pushed
 # branch tip always is.
 #
-# When STAGING_DIR is set, the release rumpel binary the pipeline built
-# and tested is copied there afterwards. The amd64 run also copies the
-# universal VSIX exercised by the browser test.
+# When STAGING_DIR is set, the release rumpel binary and native VSIX the
+# pipeline built and tested are copied there afterwards. Running this script
+# on both Linux release architectures produces both Linux extension bundles.
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ set -euo pipefail
 REPO_URL=${REPO_URL:?REPO_URL must be set}
 # Commit id or ref to check out and test.
 COMMIT=${COMMIT:?COMMIT must be set}
-# Optional: directory on the host to copy the tested release binary to.
+# Optional: directory on the host to copy the tested release artifacts to.
 STAGING_DIR=${STAGING_DIR:-}
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -85,8 +85,16 @@ docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
 # hard-linked file on the arm64 runner, while a normal exec reads it.
 if [ -n "$STAGING_DIR" ]; then
   case "$(dpkg --print-architecture)" in
-    amd64) triple=x86_64-unknown-linux-musl; name=rumpel-linux-amd64 ;;
-    arm64) triple=aarch64-unknown-linux-musl; name=rumpel-linux-arm64 ;;
+    amd64)
+      triple=x86_64-unknown-linux-musl
+      name=rumpel-linux-amd64
+      vscode_target=linux-x64
+      ;;
+    arm64)
+      triple=aarch64-unknown-linux-musl
+      name=rumpel-linux-arm64
+      vscode_target=linux-arm64
+      ;;
     *)
       echo "unsupported host architecture: $(dpkg --print-architecture)" >&2
       exit 1
@@ -96,8 +104,7 @@ if [ -n "$STAGING_DIR" ]; then
   docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
     cat "target/$triple/release/rumpel" >"$STAGING_DIR/$name"
   chmod +x "$STAGING_DIR/$name"
-  if [ "$(dpkg --print-architecture)" = amd64 ]; then
-    docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
-      cat vscode/dist/rumpelpod-vscode.vsix >"$STAGING_DIR/rumpelpod-vscode.vsix"
-  fi
+  docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
+    cat vscode/dist/rumpelpod-vscode.vsix \
+    >"$STAGING_DIR/rumpelpod-vscode-$vscode_target.vsix"
 fi

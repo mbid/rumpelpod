@@ -49,7 +49,7 @@ jobs:
             -o /tmp/sysbox-ce.deb
           sudo apt-get install --yes /tmp/sysbox-ce.deb
 
-      - name: Run pipeline and stage binary
+      - name: Run pipeline and stage release artifacts
         env:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           COMMIT: ${{ github.sha }}
@@ -61,7 +61,7 @@ jobs:
           name: rumpel-linux-amd64
           path: |
             staging/rumpel-linux-amd64
-            staging/rumpelpod-vscode.vsix
+            staging/rumpelpod-vscode-linux-x64.vsix
 
   linux-arm64:
     runs-on: ubuntu-24.04-arm
@@ -87,7 +87,7 @@ jobs:
             -o /tmp/sysbox-ce.deb
           sudo apt-get install --yes /tmp/sysbox-ce.deb
 
-      - name: Run pipeline and stage binary
+      - name: Run pipeline and stage release artifacts
         env:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
           COMMIT: ${{ github.sha }}
@@ -97,7 +97,9 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: rumpel-linux-arm64
-          path: staging/rumpel-linux-arm64
+          path: |
+            staging/rumpel-linux-arm64
+            staging/rumpelpod-vscode-linux-arm64.vsix
 
   # Build-only: GitHub's arm64 macos runners are VMs with no docker
   # daemon, and the pod tests need one. macos test coverage stays on the
@@ -110,18 +112,39 @@ jobs:
           # build.rs embeds version info from git history.
           fetch-depth: 0
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vscode/package-lock.json
+
+      - name: Verify release architecture
+        run: |
+          test "$(uname -m)" = arm64
+          test "$(node -p 'process.arch')" = arm64
+
       - name: Build release binary
         run: cargo build --release --bin rumpel --target aarch64-apple-darwin
 
-      - name: Stage binary
+      - name: Build native VS Code extension
+        working-directory: vscode
+        run: |
+          npm ci
+          npm run package
+
+      - name: Stage release artifacts
         run: |
           mkdir -p staging
           cp target/aarch64-apple-darwin/release/rumpel staging/rumpel-darwin-arm64
+          cp vscode/dist/rumpelpod-vscode.vsix \
+            staging/rumpelpod-vscode-darwin-arm64.vsix
 
       - uses: actions/upload-artifact@v6
         with:
           name: rumpel-darwin-arm64
-          path: staging/rumpel-darwin-arm64
+          path: |
+            staging/rumpel-darwin-arm64
+            staging/rumpelpod-vscode-darwin-arm64.vsix
 
   release:
     needs: [linux-amd64, linux-arm64, macos-arm64]
@@ -144,8 +167,10 @@ jobs:
             staging/rumpel-darwin-arm64
           tar -C staging -czf "rumpel-${{ github.ref_name }}.tar.gz" \
             rumpel-linux-amd64 rumpel-linux-arm64 rumpel-darwin-arm64
-          mv staging/rumpelpod-vscode.vsix \
-            "rumpelpod-vscode-${{ github.ref_name }}.vsix"
+          for target in linux-x64 linux-arm64 darwin-arm64; do
+            mv "staging/rumpelpod-vscode-$target.vsix" \
+              "rumpelpod-vscode-${{ github.ref_name }}-$target.vsix"
+          done
 
       - name: Create GitHub release
         env:
@@ -153,7 +178,9 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             "rumpel-${{ github.ref_name }}.tar.gz" \
-            "rumpelpod-vscode-${{ github.ref_name }}.vsix" \
+            "rumpelpod-vscode-${{ github.ref_name }}-linux-x64.vsix" \
+            "rumpelpod-vscode-${{ github.ref_name }}-linux-arm64.vsix" \
+            "rumpelpod-vscode-${{ github.ref_name }}-darwin-arm64.vsix" \
             staging/rumpel-linux-amd64 \
             staging/rumpel-linux-arm64 \
             staging/rumpel-darwin-arm64 \
