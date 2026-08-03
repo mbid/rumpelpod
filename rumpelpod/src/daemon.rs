@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::image::OutputLine;
 use anyhow::{Context, Result};
@@ -39,6 +39,7 @@ use pod_connection::{PodConnectionRegistry, PodConnectionStatus};
 use protocol::{
     AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, EnsurePiConfigRequest,
     ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
+    ResolvedHost,
 };
 
 use crate::pod::types::{ClaudeState, CodexState, GitSetupParams};
@@ -378,6 +379,9 @@ pub struct DaemonServer {
     pty_sessions: crate::pty_session::PtySessions,
     /// Backend container ids served by plain `list` (no --sync).
     container_ids: Arc<Mutex<ContainerIdCache>>,
+    /// Authorizes at most one client at a time to cross the host-side
+    /// initialization gap and create a particular pod.
+    create_reservations: Arc<Mutex<HashMap<(PathBuf, String), CreateReservationState>>>,
 }
 
 /// Cache of backend container ids, keyed by (repo path, pod name).
@@ -395,6 +399,35 @@ pub struct DaemonServer {
 struct ContainerIdCache {
     ids: HashMap<(PathBuf, String), String>,
     warmed_hosts: HashSet<(PathBuf, String)>,
+}
+
+struct CreateReservationState {
+    token: String,
+    reserved_at: Instant,
+    claimed: bool,
+}
+
+const UNCLAIMED_CREATE_RESERVATION_TIMEOUT: Duration = Duration::from_secs(60);
+
+struct CreateReservationGuard {
+    reservations: Arc<Mutex<HashMap<(PathBuf, String), CreateReservationState>>>,
+    key: (PathBuf, String),
+    token: String,
+}
+
+impl Drop for CreateReservationGuard {
+    fn drop(&mut self) {
+        let Ok(mut reservations) = self.reservations.lock() else {
+            eprintln!("warning: create reservation lock was poisoned");
+            return;
+        };
+        if reservations
+            .get(&self.key)
+            .is_some_and(|reservation| reservation.token == self.token)
+        {
+            reservations.remove(&self.key);
+        }
+    }
 }
 
 /// Sanitize a string for use as a container hostname (RFC 1123):
@@ -1951,6 +1984,38 @@ impl protocol::LaunchProgress for ServerLaunchProgress {
 }
 
 impl DaemonServer {
+    fn claim_create_reservation(
+        &self,
+        params: &PodLaunchParams,
+    ) -> Result<Option<CreateReservationGuard>> {
+        let Some(token) = params.create_token.as_ref() else {
+            return Ok(None);
+        };
+        let key = (params.repo_path.clone(), params.pod_name.0.clone());
+        let mut reservations = self.create_reservations.lock().unwrap();
+        let reservation = reservations
+            .get_mut(&key)
+            .context("create reservation is missing or expired; retry the command")?;
+        if reservation.token != *token {
+            return Err(anyhow::anyhow!(
+                "create reservation belongs to another request; retry the command"
+            ));
+        }
+        if reservation.claimed {
+            return Err(anyhow::anyhow!(
+                "create reservation was already claimed; retry the command"
+            ));
+        }
+        reservation.claimed = true;
+        drop(reservations);
+
+        Ok(Some(CreateReservationGuard {
+            reservations: self.create_reservations.clone(),
+            key,
+            token: token.clone(),
+        }))
+    }
+
     /// Build an executor for `host`, ensuring the underlying host
     /// connection is up.  This is the single chokepoint by which the
     /// daemon talks to a backend; it implicitly registers the host
@@ -2682,6 +2747,7 @@ impl DaemonServer {
             repo_path,
             host_branch,
             host: docker_host,
+            create_token,
             git_identity,
             claude_cli_path,
             codex_cli_path,
@@ -2692,6 +2758,7 @@ impl DaemonServer {
             local_env_vars,
             ssh_auth_sock,
         } = params;
+        let allow_create = create_token.is_some();
         let requested_host = docker_host;
 
         let (mut devcontainer, used_default_image) =
@@ -2744,6 +2811,12 @@ impl DaemonServer {
                 ) {
                     ReconnectPodResult::Connected(result) => return Ok(*result),
                     ReconnectPodResult::Gone(e) => {
+                        if !allow_create {
+                            let name = &pod_name.0;
+                            return Err(anyhow::anyhow!(
+                                "pod '{name}' disappeared before create initialization; retry the command"
+                            ));
+                        }
                         log::warn!("existing pod is gone, will recreate: {e:#}");
                         self.pod_connections.remove(&repo_path, &pod_name.0);
                         self.cleanup_codex_runtime(&repo_path, &pod_name.0);
@@ -2763,6 +2836,13 @@ impl DaemonServer {
                     }
                 }
             }
+        }
+
+        if !allow_create {
+            let name = &pod_name.0;
+            return Err(anyhow::anyhow!(
+                "pod '{name}' disappeared before create initialization; retry the command"
+            ));
         }
 
         let docker_host = requested_host.resolve_container_tools()?;
@@ -3896,10 +3976,113 @@ pub(crate) fn generate_codex_proxy_token() -> String {
 impl Daemon for DaemonServer {
     type Progress = ServerLaunchProgress;
 
+    fn resolve_host(&self, host: Host) -> Result<ResolvedHost> {
+        let host = host.resolve_container_tools()?;
+        let docker_socket = match &host {
+            Host::Localhost {
+                engine: ContainerEngine::Docker,
+            } => Some(default_docker_socket()),
+            Host::Localhost {
+                engine: ContainerEngine::Podman,
+            }
+            | Host::Ssh {
+                engine: ContainerEngine::Docker | ContainerEngine::Podman,
+                ..
+            }
+            | Host::Kubernetes { .. } => None,
+            Host::Localhost {
+                engine: ContainerEngine::Auto,
+            }
+            | Host::Ssh {
+                engine: ContainerEngine::Auto,
+                ..
+            } => panic!("container engine auto remained after resolve"),
+        };
+        Ok(ResolvedHost {
+            host,
+            docker_socket,
+        })
+    }
+
+    fn reserve_create(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String> {
+        let key = (repo_path, pod_name.0);
+        let mut reservations = self.create_reservations.lock().unwrap();
+        if let Some(existing) = reservations.get(&key) {
+            if existing.claimed
+                || existing.reserved_at.elapsed() < UNCLAIMED_CREATE_RESERVATION_TIMEOUT
+            {
+                return Err(anyhow::anyhow!(
+                    "pod creation is already in progress; retry after it completes"
+                ));
+            }
+        }
+
+        let token = hex::encode(rand::random::<[u8; 32]>());
+        reservations.insert(
+            key,
+            CreateReservationState {
+                token: token.clone(),
+                reserved_at: Instant::now(),
+                claimed: false,
+            },
+        );
+        Ok(token)
+    }
+
+    fn renew_create_reservation(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        token: String,
+    ) -> Result<()> {
+        let key = (repo_path, pod_name.0);
+        let mut reservations = self.create_reservations.lock().unwrap();
+        let reservation = reservations
+            .get_mut(&key)
+            .context("create reservation is missing or expired")?;
+        if reservation.token != token {
+            return Err(anyhow::anyhow!(
+                "create reservation belongs to another request"
+            ));
+        }
+        if reservation.claimed {
+            return Err(anyhow::anyhow!("create reservation is already claimed"));
+        }
+        reservation.reserved_at = Instant::now();
+        Ok(())
+    }
+
+    fn release_create_reservation(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        token: String,
+    ) -> Result<()> {
+        let key = (repo_path, pod_name.0);
+        let mut reservations = self.create_reservations.lock().unwrap();
+        let reservation = reservations
+            .get(&key)
+            .context("create reservation is missing or expired")?;
+        if reservation.token != token {
+            return Err(anyhow::anyhow!(
+                "create reservation belongs to another request"
+            ));
+        }
+        if reservation.claimed {
+            return Err(anyhow::anyhow!("create reservation is already claimed"));
+        }
+        reservations.remove(&key);
+        Ok(())
+    }
+
     fn launch_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        let reservation = self.claim_create_reservation(&params)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.clone();
-        let handle = std::thread::spawn(move || this.launch_pod_impl(params, tx));
+        let handle = std::thread::spawn(move || {
+            let _reservation = reservation;
+            this.launch_pod_impl(params, tx)
+        });
         Ok(ServerLaunchProgress {
             rx: Some(rx),
             handle: Some(handle),
@@ -3907,9 +4090,18 @@ impl Daemon for DaemonServer {
     }
 
     fn recreate_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        if params.create_token.is_none() {
+            return Err(anyhow::anyhow!(
+                "recreate request is missing its create reservation; retry the command"
+            ));
+        }
+        let reservation = self.claim_create_reservation(&params)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.clone();
-        let handle = std::thread::spawn(move || this.recreate_pod_impl(params, tx));
+        let handle = std::thread::spawn(move || {
+            let _reservation = reservation;
+            this.recreate_pod_impl(params, tx)
+        });
         Ok(ServerLaunchProgress {
             rx: Some(rx),
             handle: Some(handle),
@@ -4180,6 +4372,15 @@ impl Daemon for DaemonServer {
         for pod in db_pods {
             let host = serde_json::from_str::<Host>(&pod.host).ok();
             let is_remote = host.as_ref().is_some_and(|h| h.is_remote());
+            let create_is_active = self
+                .create_reservations
+                .lock()
+                .unwrap()
+                .get(&(repo_path.clone(), pod.name.clone()))
+                .is_some_and(|reservation| {
+                    reservation.claimed
+                        || reservation.reserved_at.elapsed() < UNCLAIMED_CREATE_RESERVATION_TIMEOUT
+                });
 
             let status = if sync {
                 let container_info = status_maps
@@ -4198,13 +4399,25 @@ impl Daemon for DaemonServer {
                             }
                         }
                     },
-                    db::PodStatus::Initializing | db::PodStatus::Error => match container_info {
+                    db::PodStatus::Initializing => match container_info {
+                        Some(info) => info.status.clone(),
+                        None => {
+                            if is_remote && status_maps.get(&pod.host).is_none_or(|m| m.is_none()) {
+                                PodStatus::Disconnected
+                            } else if create_is_active {
+                                PodStatus::Stopped
+                            } else {
+                                PodStatus::Gone
+                            }
+                        }
+                    },
+                    db::PodStatus::Error => match container_info {
                         Some(info) => info.status.clone(),
                         None => {
                             if is_remote && status_maps.get(&pod.host).is_none_or(|m| m.is_none()) {
                                 PodStatus::Disconnected
                             } else {
-                                PodStatus::Stopped
+                                PodStatus::Gone
                             }
                         }
                     },
@@ -4568,6 +4781,7 @@ pub fn run_daemon() -> Result<()> {
         pod_connections,
         pty_sessions: crate::pty_session::PtySessions::new(),
         container_ids: Arc::new(Mutex::new(ContainerIdCache::default())),
+        create_reservations: Arc::new(Mutex::new(HashMap::new())),
     };
 
     // Re-establish connections to pods that were running before we

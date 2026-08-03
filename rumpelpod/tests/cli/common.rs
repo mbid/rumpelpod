@@ -545,12 +545,16 @@ pub fn pod_command(repo: &TestRepo, daemon: &TestDaemon) -> Command {
 pub fn launch_pod_via_daemon(repo: &TestRepo, daemon: &TestDaemon, pod_name: &str) -> LaunchResult {
     let client = DaemonClient::new_unix(&daemon.socket_path);
     let pod_name = PodName::new(pod_name.to_string()).expect("valid pod name");
+    let create_token = client
+        .reserve_create(pod_name.clone(), repo.path().to_path_buf())
+        .expect("reserve pod creation");
     let mut progress = client
         .launch_pod(PodLaunchParams {
             pod_name,
             repo_path: repo.path().to_path_buf(),
             host_branch: current_branch(repo.path()),
             host: resolve_test_host(repo.path()),
+            create_token: Some(create_token),
             git_identity: None,
             claude_cli_path: None,
             codex_cli_path: None,

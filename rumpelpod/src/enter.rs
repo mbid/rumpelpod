@@ -146,8 +146,7 @@ pub fn determine_host(repo_root: &Path, host_override: Option<Host>) -> Result<H
 /// daemon can substitute them when it loads devcontainer.json.
 ///
 /// The daemon cannot do this itself because it does not have access to
-/// the user's shell environment.  This is the only reason the client
-/// opens devcontainer.json at all.
+/// the user's shell environment.
 pub fn collect_local_env(repo_root: &Path) -> Result<HashMap<String, String>> {
     let raw = DevContainer::find_raw(repo_root)?.unwrap_or_else(|| "{}".to_string());
     Ok(crate::devcontainer::collect_local_env_vars(&raw))
@@ -274,13 +273,14 @@ pub fn confirm_pod_creation(pod_name: &str, repo_root: &Path, create: bool) -> R
 pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
     let t = Instant::now();
     let repo_root = get_repo_root()?;
+    let pod_name = PodName::new(pod_name.to_string()).map_err(|e| anyhow::anyhow!(e))?;
     let mut docker_host = determine_host(&repo_root, host_override)?;
     let mut local_env_vars = collect_local_env(&repo_root)?;
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
     let pods = client.list_pods(repo_root.clone(), true, false)?;
-    let creates_container = match pods.iter().find(|pod| pod.name == pod_name) {
+    let creates_container = match pods.iter().find(|pod| pod.name == pod_name.0) {
         None => true,
         Some(pod) => match pod.status {
             PodStatus::Gone => true,
@@ -292,10 +292,27 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
             | PodStatus::Broken => false,
         },
     };
-    if creates_container {
-        docker_host =
-            crate::initialize::run(&repo_root, pod_name, docker_host, &mut local_env_vars)?;
-    }
+    let create_reservation = if creates_container {
+        let resolved_host = client.resolve_host(docker_host)?;
+        let reservation = crate::initialize::CreateReservation::acquire(
+            &client,
+            &socket_path,
+            pod_name.clone(),
+            repo_root.clone(),
+        )?;
+        crate::initialize::run(
+            &repo_root,
+            &pod_name.0,
+            &resolved_host.host,
+            resolved_host.docker_socket.as_deref(),
+            &mut local_env_vars,
+            &reservation,
+        )?;
+        docker_host = resolved_host.host;
+        Some(reservation)
+    } else {
+        None
+    };
     let elapsed = t.elapsed();
     trace!("launch_pod config: {elapsed:?}");
 
@@ -313,12 +330,17 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
         .description_file_path()
         .map(str::to_string);
     let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
-    let pod_name = PodName::new(pod_name.to_string()).map_err(|e| anyhow::anyhow!(e))?;
-    let mut progress = client.launch_pod(PodLaunchParams {
+    let mut create_reservation = create_reservation;
+    let create_token = match create_reservation.as_mut() {
+        Some(reservation) => Some(reservation.token_for_handoff()?),
+        None => None,
+    };
+    let progress = client.launch_pod(PodLaunchParams {
         pod_name,
         repo_path: repo_root,
         host_branch,
         host: docker_host,
+        create_token,
         git_identity: Some(git_identity),
         claude_cli_path,
         codex_cli_path,
@@ -328,7 +350,16 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
         description_file,
         local_env_vars,
         ssh_auth_sock,
-    })?;
+    });
+    let mut progress = match progress {
+        Ok(progress) => {
+            if let Some(reservation) = create_reservation.as_mut() {
+                reservation.disarm();
+            }
+            progress
+        }
+        Err(error) => return Err(error),
+    };
     for line in &mut progress {
         match line {
             OutputLine::Stdout(s) => println!("{s}"),

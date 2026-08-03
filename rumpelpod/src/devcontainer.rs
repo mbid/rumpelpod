@@ -1067,7 +1067,6 @@ fn resolve_variable(inner: &str, ctx: &SubstitutionContext) -> Option<String> {
         let (var_name, default) = split_var_default(rest);
         let val = local_env
             .get(var_name)
-            .filter(|v| !v.is_empty())
             .cloned()
             .or_else(|| default.map(str::to_string))
             .unwrap_or_default();
@@ -1175,8 +1174,8 @@ pub(crate) fn resolve_devcontainer_vars(
 
 /// Scan raw devcontainer.json text for `${localEnv:VAR}` references and
 /// resolve them from the local environment.  Returns a map of VAR name
-/// -> value for all referenced variables.  Unset vars map to empty
-/// string.
+/// -> value for all referenced variables that are set. Missing entries
+/// remain distinguishable from variables explicitly set to an empty string.
 ///
 /// Must be called on the client side where the local environment is
 /// available.  The daemon then uses this map to substitute
@@ -1191,8 +1190,9 @@ pub fn collect_local_env_vars(raw_json: &str) -> HashMap<String, String> {
             let inner = &after[..end];
             let var_name = inner.split(':').next().unwrap_or("");
             if !var_name.is_empty() && !vars.contains_key(var_name) {
-                let value = std::env::var(var_name).unwrap_or_default();
-                vars.insert(var_name.to_string(), value);
+                if let Some(value) = std::env::var_os(var_name) {
+                    vars.insert(var_name.to_string(), value.to_string_lossy().into_owned());
+                }
             }
             rest = &after[end + 1..];
         } else {
@@ -1216,7 +1216,6 @@ pub fn resolve_local_env_from_map(value: &str, local_env: &HashMap<String, Strin
             let (var_name, default) = split_var_default(inner);
             let resolved = local_env
                 .get(var_name)
-                .filter(|v| !v.is_empty())
                 .map(String::as_str)
                 .or(default)
                 .unwrap_or("");
@@ -1244,11 +1243,7 @@ pub fn resolve_container_env_in_process(value: &str) -> String {
             let inner = &after[..end];
             let (var_name, default) = split_var_default(inner);
             let resolved = std::env::var(var_name).ok();
-            let resolved = resolved
-                .as_deref()
-                .filter(|v| !v.is_empty())
-                .or(default)
-                .unwrap_or("");
+            let resolved = resolved.as_deref().or(default).unwrap_or("");
             result.push_str(resolved);
             rest = &after[end + 1..];
         } else {
@@ -1329,6 +1324,12 @@ mod tests {
     fn substitute_local_env_set_ignores_default() {
         let ctx = local_env_only_ctx(HashMap::from([("SET".to_string(), "value".to_string())]));
         assert_eq!(substitute_vars("${localEnv:SET:fallback}", &ctx), "value");
+    }
+
+    #[test]
+    fn substitute_local_env_empty_ignores_default() {
+        let ctx = local_env_only_ctx(HashMap::from([("SET".to_string(), String::new())]));
+        assert_eq!(substitute_vars("${localEnv:SET:fallback}", &ctx), "");
     }
 
     #[test]

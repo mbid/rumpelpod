@@ -151,7 +151,7 @@ See [SSH key forwarding](#ssh-key-forwarding).
 
 `initializeCommand` runs on the machine where `rumpel` is invoked, with the repository root as its working directory.
 It completes before rumpelpod builds an image or creates a container, and a failure aborts creation.
-It runs for a new pod and for `rumpel recreate`, but not when an existing stopped pod is restarted.
+It runs before `rumpel enter` creates a missing pod and for `rumpel recreate`, but not when an existing stopped pod is restarted or when `rumpel fork` clones a pod.
 
 String commands run through `/bin/sh`, argument arrays run directly, and object entries run in parallel.
 The command supports `${localEnv:VARIABLE_NAME}` (including default values), `${localWorkspaceFolder}`, `${localWorkspaceFolderBasename}`, `${containerWorkspaceFolder}`, `${containerWorkspaceFolderBasename}`, and `${devcontainerId}` substitutions.

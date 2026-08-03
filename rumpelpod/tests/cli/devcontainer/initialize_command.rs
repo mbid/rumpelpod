@@ -3,8 +3,11 @@
 
 //! Integration tests for host-side devcontainer initializeCommand execution.
 
+use std::collections::HashMap;
 use std::fs;
 
+use rumpelpod::config::{ContainerEngine, Host};
+use rumpelpod::daemon::protocol::{Daemon, DaemonClient, LaunchProgress, PodLaunchParams, PodName};
 use rumpelpod::CommandExt;
 use serde_json::json;
 
@@ -60,6 +63,7 @@ fn initialize_command_array_expands_spec_variables() {
         "${containerWorkspaceFolder}",
         "${containerWorkspaceFolderBasename}",
         "${localEnv:RUMPELPOD_INITIALIZE_SET}",
+        "${localEnv:RUMPELPOD_INITIALIZE_EMPTY:fallback}",
         "${localEnv:RUMPELPOD_INITIALIZE_MISSING:fallback}"
     ]);
     let extra_json = initialize_json(command);
@@ -70,6 +74,7 @@ fn initialize_command_array_expands_spec_variables() {
     pod_command(&repo, &daemon)
         .env("RUMPELPOD_INITIALIZE_OUTPUT", &output_path)
         .env("RUMPELPOD_INITIALIZE_SET", "from-host")
+        .env("RUMPELPOD_INITIALIZE_EMPTY", "")
         .env_remove("RUMPELPOD_INITIALIZE_MISSING")
         .args(["enter", "--create", "init-vars", "--", "true"])
         .success()
@@ -77,7 +82,7 @@ fn initialize_command_array_expands_spec_variables() {
 
     let output = fs::read_to_string(&output_path).expect("read substitution output");
     let lines: Vec<_> = output.lines().collect();
-    assert_eq!(lines.len(), 7, "unexpected substitution output: {output}");
+    assert_eq!(lines.len(), 8, "unexpected substitution output: {output}");
     assert_eq!(
         lines[0].len(),
         64,
@@ -99,7 +104,8 @@ fn initialize_command_array_expands_spec_variables() {
     assert_eq!(lines[3], "/home/testuser/workspace");
     assert_eq!(lines[4], "workspace");
     assert_eq!(lines[5], "from-host");
-    assert_eq!(lines[6], "fallback");
+    assert_eq!(lines[6], "");
+    assert_eq!(lines[7], "fallback");
 }
 
 #[test]
@@ -165,6 +171,71 @@ fn initialize_command_failure_aborts_creation() {
         !output.status.success(),
         "initializer failure should prevent the daemon from creating a pod"
     );
+}
+
+#[test]
+fn daemon_refuses_creation_without_client_preflight() {
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+
+    let home = TestHome::new();
+    let (_executor, daemon) = configure(&repo, &home);
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    let mut progress = client
+        .launch_pod(PodLaunchParams {
+            pod_name: PodName::new("init-preflight").expect("valid pod name"),
+            repo_path: repo.path().to_path_buf(),
+            host_branch: None,
+            host: Host::Localhost {
+                engine: ContainerEngine::Auto,
+            },
+            create_token: None,
+            git_identity: None,
+            claude_cli_path: None,
+            codex_cli_path: None,
+            pi_cli_path: None,
+            grok_cli_path: None,
+            inject_system_prompt: false,
+            description_file: None,
+            local_env_vars: HashMap::new(),
+            ssh_auth_sock: None,
+        })
+        .expect("launch request");
+    for _line in &mut progress {}
+    let error = progress.finish().expect_err("creation should be rejected");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("disappeared before create initialization"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn daemon_serializes_create_reservations() {
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+
+    let home = TestHome::new();
+    let (_executor, daemon) = configure(&repo, &home);
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    let pod_name = PodName::new("init-reservation").expect("valid pod name");
+    let token = client
+        .reserve_create(pod_name.clone(), repo.path().to_path_buf())
+        .expect("first reservation");
+    let error = client
+        .reserve_create(pod_name.clone(), repo.path().to_path_buf())
+        .expect_err("second reservation should be rejected");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("creation is already in progress"),
+        "unexpected error: {error}"
+    );
+    client
+        .release_create_reservation(pod_name.clone(), repo.path().to_path_buf(), token)
+        .expect("release first reservation");
+    client
+        .reserve_create(pod_name, repo.path().to_path_buf())
+        .expect("reserve after release");
 }
 
 #[test]
@@ -288,7 +359,7 @@ fn initialize_command_receives_target_docker_host() {
     let home = TestHome::new();
     let (executor, daemon) = configure(&repo, &home);
     pod_command(&repo, &daemon)
-        .env("DOCKER_HOST", "sentinel://must-be-replaced")
+        .env("DOCKER_HOST", "unix:///tmp/must-be-replaced.sock")
         .env("RUMPELPOD_INITIALIZE_OUTPUT", &output_path)
         .args(["enter", "--create", "init-docker-host", "--", "true"])
         .success()
@@ -306,12 +377,12 @@ fn initialize_command_receives_target_docker_host() {
     match config.get("host").and_then(serde_json::Value::as_str) {
         Some(host) => assert_eq!(lines[0], host),
         None => {
+            let docker_host = lines[0];
             assert!(
-                lines[0].starts_with("unix://"),
-                "local Docker should receive a Unix socket target: {}",
-                lines[0]
+                docker_host.starts_with("unix://"),
+                "local Docker should receive a Unix socket target: {docker_host}"
             );
-            assert_ne!(lines[0], "sentinel://must-be-replaced");
+            assert_ne!(docker_host, "unix:///tmp/must-be-replaced.sock");
         }
     }
 }
