@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::process::Command;
 
 use rumpelpod::config::{ContainerEngine, Host};
 use rumpelpod::daemon::protocol::{Daemon, DaemonClient, LaunchProgress, PodLaunchParams, PodName};
@@ -48,13 +49,85 @@ fn initialize_command_string_runs_in_workspace_before_build() {
 }
 
 #[test]
+fn initialize_command_can_create_files_used_by_container_configuration() {
+    let repo = TestRepo::new();
+    let command = json!("printf 'INITIALIZED_ENV=yes\\n' > initialize.env");
+    let extra_json =
+        format!(r#", "initializeCommand": {command}, "runArgs": ["--env-file", "initialize.env"]"#);
+    write_test_devcontainer(&repo, "", &extra_json);
+
+    let home = TestHome::new();
+    let (_executor, daemon) = configure(&repo, &home);
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "init-config-file",
+            "--",
+            "/bin/sh",
+            "-c",
+            "test \"$INITIALIZED_ENV\" = yes",
+        ])
+        .success()
+        .expect("rumpel enter failed");
+}
+
+#[test]
+fn initialize_command_runs_before_config_reload_when_backend_pod_is_gone() {
+    if !matches!(executor_mode(), ExecutorMode::Docker) {
+        skip_test();
+        return;
+    }
+
+    let repo = TestRepo::new();
+    let command =
+        json!("printf x >> initialize.count; printf 'INITIALIZED_ENV=yes\\n' > initialize.env");
+    let extra_json =
+        format!(r#", "initializeCommand": {command}, "runArgs": ["--env-file", "initialize.env"]"#);
+    write_test_devcontainer(&repo, "", &extra_json);
+
+    let home = TestHome::new();
+    let (_executor, daemon) = configure(&repo, &home);
+    let pod_name = "init-gone-config";
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "true"])
+        .success()
+        .expect("initial rumpel enter failed");
+
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    let container_id = client
+        .list_pods(repo.path().to_path_buf(), false, false)
+        .expect("list created pod")
+        .into_iter()
+        .find(|pod| pod.name == pod_name)
+        .and_then(|pod| pod.container_id)
+        .expect("created pod should have a cached container ID");
+    let docker_socket = rumpelpod::daemon::default_docker_socket();
+    let docker_host = format!("unix://{}", docker_socket.display());
+    Command::new("docker")
+        .args(["-H", &docker_host, "rm", "-f", &container_id])
+        .success()
+        .expect("remove backend container outside the daemon");
+    fs::remove_file(repo.path().join("initialize.env")).expect("remove generated env file");
+
+    pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "true"])
+        .success()
+        .expect("rumpel enter should recreate the gone pod");
+    assert_eq!(
+        fs::read_to_string(repo.path().join("initialize.count")).expect("read initialize count"),
+        "xx"
+    );
+}
+
+#[test]
 fn initialize_command_array_expands_spec_variables() {
     let repo = TestRepo::new();
     let output_path = repo.path().join("initialize.variables");
     let command = json!([
         "/bin/sh",
         "-c",
-        r#"output=$1; shift; printf '%s\n' "$@" > "$output""#,
+        r#"output=$1; shift; printf '%s\n' "$@" "$RUMPELPOD_INITIALIZE_SET" "${RUMPELPOD_INITIALIZE_UNREFERENCED-unset}" "$SSH_AUTH_SOCK" > "$output""#,
         "initializeCommand",
         "${localEnv:RUMPELPOD_INITIALIZE_OUTPUT}",
         "${devcontainerId}",
@@ -64,7 +137,9 @@ fn initialize_command_array_expands_spec_variables() {
         "${containerWorkspaceFolderBasename}",
         "${localEnv:RUMPELPOD_INITIALIZE_SET}",
         "${localEnv:RUMPELPOD_INITIALIZE_EMPTY:fallback}",
-        "${localEnv:RUMPELPOD_INITIALIZE_MISSING:fallback}"
+        "${localEnv:RUMPELPOD_INITIALIZE_MISSING:fallback}",
+        "${env:RUMPELPOD_INITIALIZE_SET}",
+        "${localEnv:SSH_AUTH_SOCK}"
     ]);
     let extra_json = initialize_json(command);
     write_test_devcontainer(&repo, "", &extra_json);
@@ -75,6 +150,8 @@ fn initialize_command_array_expands_spec_variables() {
         .env("RUMPELPOD_INITIALIZE_OUTPUT", &output_path)
         .env("RUMPELPOD_INITIALIZE_SET", "from-host")
         .env("RUMPELPOD_INITIALIZE_EMPTY", "")
+        .env("RUMPELPOD_INITIALIZE_UNREFERENCED", "client-only")
+        .env("SSH_AUTH_SOCK", "/tmp/invoking-agent.sock")
         .env_remove("RUMPELPOD_INITIALIZE_MISSING")
         .args(["enter", "--create", "init-vars", "--", "true"])
         .success()
@@ -82,7 +159,7 @@ fn initialize_command_array_expands_spec_variables() {
 
     let output = fs::read_to_string(&output_path).expect("read substitution output");
     let lines: Vec<_> = output.lines().collect();
-    assert_eq!(lines.len(), 8, "unexpected substitution output: {output}");
+    assert_eq!(lines.len(), 13, "unexpected substitution output: {output}");
     assert_eq!(
         lines[0].len(),
         64,
@@ -106,6 +183,38 @@ fn initialize_command_array_expands_spec_variables() {
     assert_eq!(lines[5], "from-host");
     assert_eq!(lines[6], "");
     assert_eq!(lines[7], "fallback");
+    assert_eq!(lines[8], "from-host");
+    assert_eq!(lines[9], "/tmp/invoking-agent.sock");
+    assert_eq!(lines[10], "from-host");
+    assert_eq!(lines[11], "unset");
+    assert_eq!(lines[12], "/tmp/invoking-agent.sock");
+}
+
+#[test]
+fn initialize_command_removes_referenced_variables_unset_by_client() {
+    let repo = TestRepo::new();
+    let output_path = repo.path().join("initialize.unset-variable");
+    let command = json!([
+        "/bin/sh",
+        "-c",
+        r#"printf '%s\n%s\n' "${HOME-unset}" "$1" > "$2""#,
+        "initializeCommand",
+        "${localEnv:HOME:fallback}",
+        "${localEnv:RUMPELPOD_INITIALIZE_OUTPUT}"
+    ]);
+    write_test_devcontainer(&repo, "", &initialize_json(command));
+
+    let home = TestHome::new();
+    let (_executor, daemon) = configure(&repo, &home);
+    pod_command(&repo, &daemon)
+        .env_remove("HOME")
+        .env("RUMPELPOD_INITIALIZE_OUTPUT", &output_path)
+        .args(["enter", "--create", "init-unset-env", "--", "true"])
+        .success()
+        .expect("rumpel enter failed");
+
+    let output = fs::read_to_string(&output_path).expect("read unset-variable output");
+    assert_eq!(output, "unset\nfallback\n");
 }
 
 #[test]
@@ -174,68 +283,52 @@ fn initialize_command_failure_aborts_creation() {
 }
 
 #[test]
-fn daemon_refuses_creation_without_client_preflight() {
+fn daemon_serializes_concurrent_initialize_commands() {
     let repo = TestRepo::new();
-    write_test_devcontainer(&repo, "", "");
+    let extra_json = initialize_json(json!("printf x >> initialize.count; sleep 1"));
+    write_test_devcontainer(&repo, "", &extra_json);
 
     let home = TestHome::new();
     let (_executor, daemon) = configure(&repo, &home);
-    let client = DaemonClient::new_unix(&daemon.socket_path);
-    let mut progress = client
-        .launch_pod(PodLaunchParams {
-            pod_name: PodName::new("init-preflight").expect("valid pod name"),
-            repo_path: repo.path().to_path_buf(),
-            host_branch: None,
-            host: Host::Localhost {
-                engine: ContainerEngine::Auto,
-            },
-            create_token: None,
-            git_identity: None,
-            claude_cli_path: None,
-            codex_cli_path: None,
-            pi_cli_path: None,
-            grok_cli_path: None,
-            inject_system_prompt: false,
-            description_file: None,
-            local_env_vars: HashMap::new(),
-            ssh_auth_sock: None,
+    let launch = |socket_path: std::path::PathBuf, repo_path: std::path::PathBuf| {
+        std::thread::spawn(move || {
+            let client = DaemonClient::new_unix(&socket_path);
+            let mut progress = client.launch_pod(PodLaunchParams {
+                pod_name: PodName::new("init-concurrent").expect("valid pod name"),
+                repo_path,
+                host_branch: None,
+                host: Host::Localhost {
+                    engine: ContainerEngine::Auto,
+                },
+                git_identity: None,
+                claude_cli_path: None,
+                codex_cli_path: None,
+                pi_cli_path: None,
+                grok_cli_path: None,
+                inject_system_prompt: false,
+                description_file: None,
+                local_env_vars: HashMap::new(),
+                ssh_auth_sock: None,
+            })?;
+            for _line in &mut progress {}
+            progress.finish()
         })
-        .expect("launch request");
-    for _line in &mut progress {}
-    let error = progress.finish().expect_err("creation should be rejected");
-    let error = format!("{error:#}");
-    assert!(
-        error.contains("disappeared before create initialization"),
-        "unexpected error: {error}"
-    );
-}
+    };
+    let first = launch(daemon.socket_path.clone(), repo.path().to_path_buf());
+    let second = launch(daemon.socket_path.clone(), repo.path().to_path_buf());
+    first
+        .join()
+        .expect("first launch thread should not panic")
+        .expect("first launch should succeed");
+    second
+        .join()
+        .expect("second launch thread should not panic")
+        .expect("second launch should succeed");
 
-#[test]
-fn daemon_serializes_create_reservations() {
-    let repo = TestRepo::new();
-    write_test_devcontainer(&repo, "", "");
-
-    let home = TestHome::new();
-    let (_executor, daemon) = configure(&repo, &home);
-    let client = DaemonClient::new_unix(&daemon.socket_path);
-    let pod_name = PodName::new("init-reservation").expect("valid pod name");
-    let token = client
-        .reserve_create(pod_name.clone(), repo.path().to_path_buf())
-        .expect("first reservation");
-    let error = client
-        .reserve_create(pod_name.clone(), repo.path().to_path_buf())
-        .expect_err("second reservation should be rejected");
-    let error = format!("{error:#}");
-    assert!(
-        error.contains("creation is already in progress"),
-        "unexpected error: {error}"
+    assert_eq!(
+        fs::read_to_string(repo.path().join("initialize.count")).expect("read initializer count"),
+        "x"
     );
-    client
-        .release_create_reservation(pod_name.clone(), repo.path().to_path_buf(), token)
-        .expect("release first reservation");
-    client
-        .reserve_create(pod_name, repo.path().to_path_buf())
-        .expect("reserve after release");
 }
 
 #[test]
@@ -385,4 +478,53 @@ fn initialize_command_receives_target_docker_host() {
             assert_ne!(docker_host, "unix:///tmp/must-be-replaced.sock");
         }
     }
+}
+
+#[test]
+fn initialize_command_receives_remote_docker_host() {
+    if !matches!(executor_mode(), ExecutorMode::Docker) {
+        skip_test();
+        return;
+    }
+
+    let repo = TestRepo::new();
+    let output_path = repo.path().join("initialize.remote-docker-host");
+    let command = json!([
+        "/bin/sh",
+        "-c",
+        r#"printf '%s\n%s\n' "$DOCKER_HOST" "$1" > "$2""#,
+        "initializeCommand",
+        "${localEnv:DOCKER_HOST}",
+        "${localEnv:RUMPELPOD_INITIALIZE_OUTPUT}"
+    ]);
+    write_test_devcontainer(&repo, "", &initialize_json(command));
+
+    let home = TestHome::new();
+    let executor = ExecutorResources::ssh(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json)
+        .expect("write remote rumpelpod config");
+    let daemon = TestDaemon::start(&home);
+    pod_command(&repo, &daemon)
+        .env("DOCKER_HOST", "unix:///tmp/must-be-replaced.sock")
+        .env("RUMPELPOD_INITIALIZE_OUTPUT", &output_path)
+        .args(["enter", "--create", "init-remote-host", "--", "true"])
+        .success()
+        .expect("rumpel enter failed");
+
+    let output = fs::read_to_string(&output_path).expect("read remote DOCKER_HOST output");
+    let lines: Vec<_> = output.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "unexpected remote DOCKER_HOST output: {output}"
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "child environment and localEnv substitution should match"
+    );
+    assert!(
+        lines[0].starts_with("ssh://"),
+        "remote Docker should receive an SSH target: {output}"
+    );
+    assert_ne!(lines[0], "unix:///tmp/must-be-replaced.sock");
 }

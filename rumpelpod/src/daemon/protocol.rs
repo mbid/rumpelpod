@@ -9,8 +9,7 @@
 //! or remove fields freely and let the compiler catch all call sites.
 
 use std::collections::HashMap;
-use std::error::Error;
-use std::fmt::{self, Debug, Display};
+use std::fmt::Debug;
 use std::future::Future;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -184,15 +183,12 @@ pub struct PortInfo {
     pub label: String,
 }
 
-/// Concrete target selected by the daemon for a requested host.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolvedHost {
-    pub host: Host,
-    /// Socket selected from the daemon's environment for localhost Docker.
-    pub docker_socket: Option<PathBuf>,
-}
-
 /// Everything the daemon needs to launch or recreate a pod.
+///
+/// The client does not parse devcontainer.json: it only scans the raw
+/// file for `${localEnv:...}` / `${env:...}` references and resolves them
+/// from the local environment. The daemon loads and resolves the config
+/// itself from `repo_path`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PodLaunchParams {
     pub pod_name: PodName,
@@ -206,9 +202,6 @@ pub struct PodLaunchParams {
     pub host_branch: Option<String>,
     /// Where the pod runs: localhost, a remote SSH host, or Kubernetes.
     pub host: Host,
-    /// Daemon-issued proof that this client may create after completing its
-    /// host-side preflight. `None` permits reconnecting but never creation.
-    pub create_token: Option<String>,
     /// Git user identity from the host, to be written into the pod's .git/config.
     pub git_identity: Option<GitIdentity>,
     /// Absolute path to the Claude CLI binary on the local machine,
@@ -230,10 +223,9 @@ pub struct PodLaunchParams {
     /// Path of the description file for merge commit messages (None = disabled).
     /// Included in the system prompt so the agent knows where to write it.
     pub description_file: Option<String>,
-    /// Host-side environment variables referenced by `${localEnv:...}` in the
-    /// raw devcontainer.json.  Collected by the client (which has access to the
-    /// host env) and forwarded to the daemon so it can substitute
-    /// `${localEnv:...}` without touching its own process environment.
+    /// Host-side environment variables referenced by `${localEnv:...}` or
+    /// `${env:...}` in the raw devcontainer.json. Collected by the client and
+    /// forwarded to the daemon for substitution.
     pub local_env_vars: HashMap<String, String>,
     /// `SSH_AUTH_SOCK` from the client's environment, if set.  The daemon
     /// forwards it verbatim as `SSH_AUTH_SOCK` on every `docker buildx
@@ -319,27 +311,6 @@ struct ListPodsRequest {
 #[derive(Debug, Serialize, Deserialize)]
 struct ListPodsResponse {
     pods: Vec<PodInfo>,
-}
-
-/// Request body for reserving a fresh pod creation.
-#[derive(Debug, Serialize, Deserialize)]
-struct ReserveCreateRequest {
-    pod_name: PodName,
-    repo_path: PathBuf,
-}
-
-/// Response body for reserving a fresh pod creation.
-#[derive(Debug, Serialize, Deserialize)]
-struct ReserveCreateResponse {
-    token: String,
-}
-
-/// Request body for renewing or releasing a creation reservation.
-#[derive(Debug, Serialize, Deserialize)]
-struct UpdateCreateReservationRequest {
-    pod_name: PodName,
-    repo_path: PathBuf,
-    token: String,
 }
 
 /// Request body for list_ports endpoint.
@@ -431,32 +402,6 @@ struct ErrorResponse {
     error: String,
 }
 
-/// A daemon response proving that a create reservation is no longer owned.
-#[derive(Debug)]
-pub(crate) struct CreateReservationRejected {
-    status: u16,
-    message: String,
-}
-
-impl CreateReservationRejected {
-    pub(crate) fn new(status: u16, message: String) -> Self {
-        Self { status, message }
-    }
-}
-
-impl Display for CreateReservationRejected {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = self.status;
-        let message = &self.message;
-        write!(
-            formatter,
-            "server rejected create reservation update with HTTP {status}: {message}"
-        )
-    }
-}
-
-impl Error for CreateReservationRejected {}
-
 /// Progress handle for a launch/recreate operation.
 ///
 /// Yields build-output lines via `Iterator::next()` and returns the final
@@ -493,29 +438,7 @@ impl LaunchProgress for ImmediateLaunchProgress {
 }
 
 pub trait Daemon: Send + Sync + 'static {
-    type Progress: LaunchProgress + Send;
-
-    // POST /host/resolve
-    fn resolve_host(&self, host: Host) -> Result<ResolvedHost>;
-
-    // POST /pod/reserve-create
-    fn reserve_create(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String>;
-
-    // POST /pod/reserve-create/renew
-    fn renew_create_reservation(
-        &self,
-        pod_name: PodName,
-        repo_path: PathBuf,
-        token: String,
-    ) -> Result<()>;
-
-    // POST /pod/reserve-create/release
-    fn release_create_reservation(
-        &self,
-        pod_name: PodName,
-        repo_path: PathBuf,
-        token: String,
-    ) -> Result<()>;
+    type Progress: LaunchProgress;
 
     // PUT /pod
     fn launch_pod(&self, params: PodLaunchParams) -> Result<Self::Progress>;
@@ -610,37 +533,6 @@ impl DaemonClient {
         // URL host is ignored for Unix sockets, but we need a valid URL
         let url = Url::parse("http://localhost").unwrap();
         Self { client, url }
-    }
-
-    fn update_create_reservation(
-        &self,
-        endpoint: &str,
-        pod_name: PodName,
-        repo_path: PathBuf,
-        token: String,
-    ) -> Result<()> {
-        let url = self.url.join(endpoint)?;
-        let request = UpdateCreateReservationRequest {
-            pod_name,
-            repo_path,
-            token,
-        };
-        let response = self
-            .client
-            .post(url)
-            .json(&request)
-            .send()
-            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
-
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            let status = response.status().as_u16();
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "unknown error".to_string(),
-            });
-            Err(CreateReservationRejected::new(status, error.error).into())
-        }
     }
 }
 
@@ -788,75 +680,6 @@ impl LaunchProgress for ClientLaunchProgress {
 
 impl Daemon for DaemonClient {
     type Progress = ClientLaunchProgress;
-
-    fn resolve_host(&self, host: Host) -> Result<ResolvedHost> {
-        let url = self.url.join("/host/resolve")?;
-
-        let response = self
-            .client
-            .post(url)
-            .json(&host)
-            .send()
-            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
-
-        if response.status().is_success() {
-            response
-                .json::<ResolvedHost>()
-                .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))
-        } else {
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "unknown error".to_string(),
-            });
-            let msg = &error.error;
-            Err(anyhow::anyhow!("server error: {msg}"))
-        }
-    }
-
-    fn reserve_create(&self, pod_name: PodName, repo_path: PathBuf) -> Result<String> {
-        let url = self.url.join("/pod/reserve-create")?;
-        let request = ReserveCreateRequest {
-            pod_name,
-            repo_path,
-        };
-
-        let response = self
-            .client
-            .post(url)
-            .json(&request)
-            .send()
-            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
-
-        if response.status().is_success() {
-            let response = response
-                .json::<ReserveCreateResponse>()
-                .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
-            Ok(response.token)
-        } else {
-            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
-                error: "unknown error".to_string(),
-            });
-            let msg = &error.error;
-            Err(anyhow::anyhow!("server error: {msg}"))
-        }
-    }
-
-    fn renew_create_reservation(
-        &self,
-        pod_name: PodName,
-        repo_path: PathBuf,
-        token: String,
-    ) -> Result<()> {
-        self.update_create_reservation("/pod/reserve-create/renew", pod_name, repo_path, token)
-    }
-
-    fn release_create_reservation(
-        &self,
-        pod_name: PodName,
-        repo_path: PathBuf,
-        token: String,
-    ) -> Result<()> {
-        self.update_create_reservation("/pod/reserve-create/release", pod_name, repo_path, token)
-    }
 
     fn launch_pod(&self, params: PodLaunchParams) -> Result<ClientLaunchProgress> {
         let url = self.url.join("/pod")?;
@@ -1382,9 +1205,9 @@ fn read_sse_result<T: serde::de::DeserializeOwned + Send + 'static>(
 
 /// Build an SSE streaming response for launch/recreate endpoints.
 ///
-/// Starts `op()` before returning response headers so creation reservations
-/// are claimed before the client hands them off. A blocking task then iterates
-/// build output lines (sending each as `event: build_stdout` or `event: build_stderr`),
+/// Spawns a blocking task that calls `op()` to get a `LaunchProgress`,
+/// iterates build output lines (sending each as `event: build_stdout` or
+/// `event: build_stderr`),
 /// then calls `finish()` and sends `event: result` or `event: error`.
 fn streaming_launch_response<D: Daemon, P: Send + 'static>(
     daemon: Arc<D>,
@@ -1392,7 +1215,6 @@ fn streaming_launch_response<D: Daemon, P: Send + 'static>(
     op: fn(&D, P) -> Result<D::Progress>,
 ) -> Response {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
-    let progress = block_in_place(|| op(&daemon, params));
 
     // SlowGuard covers the period before any build output arrives.
     // Forward plain-text guard messages as SSE log events.
@@ -1410,7 +1232,7 @@ fn streaming_launch_response<D: Daemon, P: Send + 'static>(
     tokio::task::spawn_blocking(move || {
         let _guard = crate::slow_guard::SlowGuard::new("launching pod...", guard_tx);
 
-        let mut progress = match progress {
+        let mut progress = match op(&daemon, params) {
             Ok(p) => p,
             Err(e) => {
                 let msg = sse_event(
@@ -1486,78 +1308,6 @@ async fn launch_pod_handler<D: Daemon>(
     Json(params): Json<PodLaunchParams>,
 ) -> Response {
     streaming_launch_response(daemon, params, D::launch_pod)
-}
-
-/// Handler for POST /host/resolve endpoint.
-async fn resolve_host_handler<D: Daemon>(
-    State(daemon): State<Arc<D>>,
-    Json(host): Json<Host>,
-) -> Result<Json<ResolvedHost>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.resolve_host(host));
-    match result {
-        Ok(host) => Ok(Json(host)),
-        Err(e) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("{e:#}"),
-            }),
-        )),
-    }
-}
-
-/// Handler for POST /pod/reserve-create endpoint.
-async fn reserve_create_handler<D: Daemon>(
-    State(daemon): State<Arc<D>>,
-    Json(request): Json<ReserveCreateRequest>,
-) -> Result<Json<ReserveCreateResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.reserve_create(request.pod_name, request.repo_path));
-    match result {
-        Ok(token) => Ok(Json(ReserveCreateResponse { token })),
-        Err(e) => Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("{e:#}"),
-            }),
-        )),
-    }
-}
-
-/// Handler for POST /pod/reserve-create/renew endpoint.
-async fn renew_create_reservation_handler<D: Daemon>(
-    State(daemon): State<Arc<D>>,
-    Json(request): Json<UpdateCreateReservationRequest>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| {
-        daemon.renew_create_reservation(request.pod_name, request.repo_path, request.token)
-    });
-    match result {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("{e:#}"),
-            }),
-        )),
-    }
-}
-
-/// Handler for POST /pod/reserve-create/release endpoint.
-async fn release_create_reservation_handler<D: Daemon>(
-    State(daemon): State<Arc<D>>,
-    Json(request): Json<UpdateCreateReservationRequest>,
-) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| {
-        daemon.release_create_reservation(request.pod_name, request.repo_path, request.token)
-    });
-    match result {
-        Ok(()) => Ok(StatusCode::NO_CONTENT),
-        Err(e) => Err((
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: format!("{e:#}"),
-            }),
-        )),
-    }
 }
 
 /// Handler for POST /pod/recreate endpoint.
@@ -1789,16 +1539,6 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     let app = Router::new()
-        .route("/host/resolve", post(resolve_host_handler::<D>))
-        .route("/pod/reserve-create", post(reserve_create_handler::<D>))
-        .route(
-            "/pod/reserve-create/renew",
-            post(renew_create_reservation_handler::<D>),
-        )
-        .route(
-            "/pod/reserve-create/release",
-            post(release_create_reservation_handler::<D>),
-        )
         .route("/pod", put(launch_pod_handler::<D>))
         .route("/pod/recreate", post(recreate_pod_handler::<D>))
         .route("/pod/fork", post(fork_pod_handler::<D>))
