@@ -1,0 +1,5 @@
+Support devcontainer initializeCommand
+
+Run trusted initializeCommand hooks on the invoking host before creating
+or recreating pods, with spec-compatible command forms, variable
+substitution, and target Docker environment selection.
