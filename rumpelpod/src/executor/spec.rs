@@ -37,6 +37,9 @@ pub struct PodSpec {
     /// docker's `--runtime` and k8s's `runtimeClassName`.  Podman uses
     /// containers.conf for runtime selection instead of this field.
     pub runtime: Option<String>,
+    /// Custom DNS servers in resolver order. Each backend replaces its
+    /// normal resolver configuration so this matches container run semantics.
+    pub dns: Vec<String>,
     pub docker_only: DockerOnly,
     pub k8s_only: K8sOnly,
 }

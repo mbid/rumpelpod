@@ -674,6 +674,7 @@ fn cleanup_pod_refs(repo_path: &Path, pod_name: &PodName) {
 struct DockerRunArgs {
     runtime: Option<String>,
     network: Option<String>,
+    dns: Vec<String>,
     devices: Vec<String>,
     cap_add: Vec<String>,
     security_opt: Vec<String>,
@@ -689,6 +690,7 @@ fn parse_run_args_for_docker(args: &[String]) -> DockerRunArgs {
     let mut result = DockerRunArgs {
         runtime: None,
         network: None,
+        dns: Vec::new(),
         devices: Vec::new(),
         cap_add: Vec::new(),
         security_opt: Vec::new(),
@@ -710,6 +712,12 @@ fn parse_run_args_for_docker(args: &[String]) -> DockerRunArgs {
         } else if arg == "--network" {
             if let Some(val) = iter.next() {
                 result.network = Some(val.to_string());
+            }
+        } else if let Some(val) = strip_flag(arg, "--dns") {
+            result.dns.push(val.to_string());
+        } else if arg == "--dns" {
+            if let Some(val) = iter.next() {
+                result.dns.push(val.to_string());
             }
         } else if let Some(val) = strip_flag(arg, "--device") {
             result.devices.push(val.to_string());
@@ -1105,6 +1113,7 @@ fn build_k8s_pod_spec(
         apparmor_unconfined,
         resources,
         runtime,
+        dns: run_args_config.dns,
         docker_only: DockerOnly::default(),
         k8s_only: K8sOnly {
             node_selector,
@@ -1217,6 +1226,7 @@ fn build_docker_pod_spec(
         apparmor_unconfined: false,
         resources: None,
         runtime,
+        dns: run_args_config.dns,
         docker_only: DockerOnly {
             init,
             devices: run_args_config.devices,

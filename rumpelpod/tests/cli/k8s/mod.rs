@@ -1092,6 +1092,70 @@ fn k8s_runtime_runc_omitted() {
     );
 }
 
+#[test]
+fn k8s_run_args_dns() {
+    println!("xtest:timeout=240");
+    if !has_k8s_executor() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = k8s_executor(&home);
+    let daemon = TestDaemon::start(&home);
+
+    write_test_devcontainer(
+        &repo,
+        "",
+        r#","runArgs": ["--dns=1.1.1.1", "--dns", "8.8.8.8"]"#,
+    );
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "k8s-dns-test",
+            "--",
+            "cat",
+            "/etc/resolv.conf",
+        ])
+        .success()
+        .expect("rumpel enter with --dns should succeed on k8s");
+
+    let output = Command::new("kubectl")
+        .args(["--context", &executor.context])
+        .args(["--namespace", &executor.namespace])
+        .args([
+            "get",
+            "pod",
+            "-l",
+            "rumpelpod/pod-name=k8s-dns-test",
+            "-o",
+            "json",
+        ])
+        .output()
+        .expect("kubectl get failed");
+    assert!(
+        output.status.success(),
+        "kubectl get failed: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let pods: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("kubectl returned invalid JSON");
+    let spec = &pods["items"][0]["spec"];
+    assert_eq!(
+        spec["dnsPolicy"].as_str(),
+        Some("None"),
+        "custom DNS servers should replace the cluster DNS policy: {spec}",
+    );
+    assert_eq!(
+        spec["dnsConfig"]["nameservers"],
+        serde_json::json!(["1.1.1.1", "8.8.8.8"]),
+        "k8s should preserve every runArgs DNS server in order: {spec}",
+    );
+}
+
 // Port forwarding to user-specified ports (forwardPorts) relies on
 // kubectl port-forward, which does not work reliably through k3d's
 // Docker-in-Docker networking.  Keep under #[ignore] until we have
