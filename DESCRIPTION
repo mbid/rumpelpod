@@ -1,0 +1,4 @@
+Support DNS servers from devcontainer runArgs
+
+Honor repeated --dns arguments across local and remote engines.
+Map them to pod DNS configuration on Kubernetes.
