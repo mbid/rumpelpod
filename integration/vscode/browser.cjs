@@ -1367,11 +1367,17 @@ async function main() {
         );
         await podNameInput.fill(createdPodName);
         await capture(page, artifacts, "05-pod-name.png");
+        const previousPodTerminal = await viewWhileShellIsOpen.terminal.elementHandle();
+        assert(previousPodTerminal, "existing pod terminal was missing before creating a pod");
         await createPopover.locator('button[type="submit"]').click();
         await createPopover.waitFor({ state: "hidden", timeout: 30_000 });
 
         const createdView = await waitForAgentView(page, createdPodName);
         await waitForCodexPrompt(page, createdView.terminal);
+        await page.waitForFunction((terminal) => !terminal.isConnected, previousPodTerminal, {
+            timeout: 30_000,
+        });
+        await previousPodTerminal.dispose();
         await waitForPersistedPodStatus(page, createdPodName);
         assert.equal(
             await page.locator(".part.panel:visible .terminal-wrapper .xterm:visible").count(),
@@ -1400,6 +1406,8 @@ async function main() {
             listedPods.some((label) => label.includes(createdPodName)),
             `created pod was not listed in the switcher: ${JSON.stringify(listedPods)}`,
         );
+        const createdPodTerminal = await createdView.terminal.elementHandle();
+        assert(createdPodTerminal, "created pod terminal was missing before switching pods");
         await selectPopoverOption(switchedPodSwitcher.popover, podName);
         const switchedView = await waitForAgentView(
             page,
@@ -1408,6 +1416,10 @@ async function main() {
             ["codex", "claude"],
         );
         await waitForCodexPrompt(page, switchedView.terminal, false);
+        await page.waitForFunction((terminal) => !terminal.isConnected, createdPodTerminal, {
+            timeout: 30_000,
+        });
+        await createdPodTerminal.dispose();
         const switchedDiff = await waitForReview(
             page,
             podName,

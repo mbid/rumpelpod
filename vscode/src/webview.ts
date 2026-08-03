@@ -104,11 +104,16 @@ interface PodMenuMessage {
 interface TerminalSurface {
   readonly empty: HTMLElement;
   readonly emptyContainer: HTMLElement;
-  readonly fit: FitAddon;
+  fit: FitAddon;
   readonly restart: HTMLElement;
   readonly surface: HTMLElement;
-  readonly terminal: Terminal;
+  terminal: Terminal;
   readonly terminalElement: HTMLElement;
+}
+
+interface XtermInstance {
+  readonly fit: FitAddon;
+  readonly terminal: Terminal;
 }
 
 type HostMessage =
@@ -156,12 +161,6 @@ for (const tab of terminalTabs()) {
   const button = tabButton(tab);
   button.addEventListener("click", () => selectTab(tab));
   button.addEventListener("keydown", (event) => navigateTerminalTabs(event, tab));
-  surface.terminal.onData((data) => {
-    const session = sessions[tab];
-    if (session !== 0) {
-      vscode.postMessage({ data, session, tab, type: "input" });
-    }
-  });
   surface.restart.addEventListener("click", () => {
     const session = sessions[tab];
     if (session !== 0) {
@@ -719,6 +718,19 @@ function validatePodName(value: string): string | undefined {
 
 function createSurface(tab: TerminalTab): TerminalSurface {
   const terminalElement = requiredElement(`${tab}-terminal`);
+  const xterm = createXterm(tab, terminalElement);
+  return {
+    empty: requiredElement(`${tab}-empty-message`),
+    emptyContainer: requiredElement(`${tab}-empty`),
+    fit: xterm.fit,
+    restart: requiredElement(`${tab}-restart`),
+    surface: requiredElement(`${tab}-surface`),
+    terminal: xterm.terminal,
+    terminalElement,
+  };
+}
+
+function createXterm(tab: TerminalTab, terminalElement: HTMLElement): XtermInstance {
   const terminal = new Terminal({
     allowProposedApi: false,
     convertEol: false,
@@ -738,15 +750,21 @@ function createSurface(tab: TerminalTab): TerminalSurface {
   const fit = new FitAddon();
   terminal.loadAddon(fit);
   terminal.open(terminalElement);
-  return {
-    empty: requiredElement(`${tab}-empty-message`),
-    emptyContainer: requiredElement(`${tab}-empty`),
-    fit,
-    restart: requiredElement(`${tab}-restart`),
-    surface: requiredElement(`${tab}-surface`),
-    terminal,
-    terminalElement,
-  };
+  terminal.onData((data) => {
+    const session = sessions[tab];
+    if (session !== 0) {
+      vscode.postMessage({ data, session, tab, type: "input" });
+    }
+  });
+  return { fit, terminal };
+}
+
+function replaceXterm(tab: TerminalTab): void {
+  const surface = surfaces[tab];
+  surface.terminal.dispose();
+  const xterm = createXterm(tab, surface.terminalElement);
+  surface.fit = xterm.fit;
+  surface.terminal = xterm.terminal;
 }
 
 function selectTab(tab: TerminalTab): void {
@@ -808,8 +826,8 @@ function updateSurface(tab: TerminalTab, session: number, state: ViewState, mess
   surfaces[tab].emptyContainer.hidden = running;
   surfaces[tab].terminalElement.hidden = !running;
   surfaces[tab].restart.hidden = state !== "exited";
-  if (session !== previousSession && state === "starting") {
-    surfaces[tab].terminal.reset();
+  if (previousSession !== 0 && session !== previousSession) {
+    replaceXterm(tab);
   }
   if (tab === activeTab) {
     body.dataset.rumpelpodSession = String(session);
