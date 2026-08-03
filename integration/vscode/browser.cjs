@@ -1374,10 +1374,11 @@ async function main() {
 
         const createdView = await waitForAgentView(page, createdPodName);
         await waitForCodexPrompt(page, createdView.terminal);
-        await page.waitForFunction((terminal) => !terminal.isConnected, previousPodTerminal, {
-            timeout: 30_000,
-        });
-        await previousPodTerminal.dispose();
+        await page.waitForFunction(
+            (terminal) => terminal.isConnected && terminal.getClientRects().length === 0,
+            previousPodTerminal,
+            { timeout: 30_000 },
+        );
         await waitForPersistedPodStatus(page, createdPodName);
         assert.equal(
             await page.locator(".part.panel:visible .terminal-wrapper .xterm:visible").count(),
@@ -1416,10 +1417,28 @@ async function main() {
             ["codex", "claude"],
         );
         await waitForCodexPrompt(page, switchedView.terminal, false);
-        await page.waitForFunction((terminal) => !terminal.isConnected, createdPodTerminal, {
-            timeout: 30_000,
-        });
+        await page.waitForFunction(
+            (terminal) => terminal.isConnected && terminal.getClientRects().length === 0,
+            createdPodTerminal,
+            { timeout: 30_000 },
+        );
         await createdPodTerminal.dispose();
+        await page.waitForFunction(
+            (terminal) => terminal.isConnected && terminal.getClientRects().length > 0,
+            previousPodTerminal,
+            { timeout: 30_000 },
+        );
+        const restoredPodTerminal = await switchedView.terminal.elementHandle();
+        assert(restoredPodTerminal, "restored pod terminal was missing after switching pods");
+        assert(
+            await previousPodTerminal.evaluate(
+                (previous, restored) => previous === restored,
+                restoredPodTerminal,
+            ),
+            "switching back replaced the pod's terminal and scrollback",
+        );
+        await restoredPodTerminal.dispose();
+        await previousPodTerminal.dispose();
         const switchedDiff = await waitForReview(
             page,
             podName,

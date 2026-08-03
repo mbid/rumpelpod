@@ -836,6 +836,7 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
   }
 
   private sessionState(tab: TerminalTab, selected: AgentSelection): {
+    readonly key: string;
     readonly label: string;
     readonly message: string;
     readonly session: number;
@@ -844,6 +845,7 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
   } {
     const channel = this.channel(tab);
     return {
+      key: terminalKey(selected.repository, selected.pod),
       label: tab,
       message:
         channel.viewMessage ??

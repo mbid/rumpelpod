@@ -14,6 +14,7 @@ type PopoverAnchor = HTMLButtonElement | "createPod";
 
 const CREATE_POD_ANCHOR = "createPod" satisfies PopoverAnchor;
 const BLUR_DISMISS_DELAY_MS = 250;
+const MAX_CACHED_XTERMS = 20;
 
 interface WebviewApi<State> {
   getState(): State | undefined;
@@ -35,6 +36,7 @@ interface AgentStateMessage {
   readonly repository: string;
   readonly repositoryState: string;
   readonly sessions: readonly {
+    readonly key: string;
     readonly label: string;
     readonly message: string;
     readonly session: number;
@@ -102,9 +104,11 @@ interface PodMenuMessage {
 }
 
 interface TerminalSurface {
+  activeXterm: XtermInstance;
   readonly empty: HTMLElement;
   readonly emptyContainer: HTMLElement;
   fit: FitAddon;
+  readonly instances: Map<string, XtermInstance>;
   readonly restart: HTMLElement;
   readonly surface: HTMLElement;
   terminal: Terminal;
@@ -113,6 +117,9 @@ interface TerminalSurface {
 
 interface XtermInstance {
   readonly fit: FitAddon;
+  readonly host: HTMLElement;
+  readonly key: string;
+  lastUsed: number;
   readonly terminal: Terminal;
 }
 
@@ -148,6 +155,7 @@ const surfaces: Record<TerminalTab, TerminalSurface> = {
 let activeTab: TerminalTab = "codex";
 let openTabs: readonly TerminalTab[] = [];
 let resizeTimer: number | undefined;
+let xtermUse = 0;
 const sessions: Record<TerminalTab, number> = {
   claude: 0,
   codex: 0,
@@ -239,8 +247,9 @@ window.addEventListener("message", (event: MessageEvent<unknown>) => {
           continue;
         }
         button.textContent = session.label;
-        updateSurface(tab, session.session, session.state, session.message);
+        updateSurface(tab, session.key, session.session, session.state, session.message);
       }
+      pruneXterms();
       terminalTabsElement.hidden = message.sessions.length <= 1;
       noSessions.hidden = message.sessions.length > 0;
       updateSelectedTab();
@@ -718,11 +727,13 @@ function validatePodName(value: string): string | undefined {
 
 function createSurface(tab: TerminalTab): TerminalSurface {
   const terminalElement = requiredElement(`${tab}-terminal`);
-  const xterm = createXterm(tab, terminalElement);
+  const xterm = createXterm(tab, terminalElement, "");
   return {
+    activeXterm: xterm,
     empty: requiredElement(`${tab}-empty-message`),
     emptyContainer: requiredElement(`${tab}-empty`),
     fit: xterm.fit,
+    instances: new Map([[xterm.key, xterm]]),
     restart: requiredElement(`${tab}-restart`),
     surface: requiredElement(`${tab}-surface`),
     terminal: xterm.terminal,
@@ -730,7 +741,14 @@ function createSurface(tab: TerminalTab): TerminalSurface {
   };
 }
 
-function createXterm(tab: TerminalTab, terminalElement: HTMLElement): XtermInstance {
+function createXterm(
+  tab: TerminalTab,
+  terminalElement: HTMLElement,
+  key: string,
+): XtermInstance {
+  const host = document.createElement("div");
+  host.className = "terminal-instance";
+  terminalElement.append(host);
   const terminal = new Terminal({
     allowProposedApi: false,
     convertEol: false,
@@ -749,22 +767,66 @@ function createXterm(tab: TerminalTab, terminalElement: HTMLElement): XtermInsta
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
-  terminal.open(terminalElement);
+  terminal.open(host);
   terminal.onData((data) => {
     const session = sessions[tab];
     if (session !== 0) {
       vscode.postMessage({ data, session, tab, type: "input" });
     }
   });
-  return { fit, terminal };
+  return { fit, host, key, lastUsed: ++xtermUse, terminal };
 }
 
-function replaceXterm(tab: TerminalTab): void {
+function activateXterm(tab: TerminalTab, key: string): void {
   const surface = surfaces[tab];
-  surface.terminal.dispose();
-  const xterm = createXterm(tab, surface.terminalElement);
+  if (surface.activeXterm.key === key) {
+    surface.activeXterm.lastUsed = ++xtermUse;
+    return;
+  }
+
+  const previous = surface.activeXterm;
+  previous.host.hidden = true;
+  let xterm = surface.instances.get(key);
+  if (xterm === undefined) {
+    xterm = createXterm(tab, surface.terminalElement, key);
+    surface.instances.set(key, xterm);
+  } else {
+    xterm.lastUsed = ++xtermUse;
+  }
+  xterm.host.hidden = false;
+  surface.activeXterm = xterm;
   surface.fit = xterm.fit;
   surface.terminal = xterm.terminal;
+
+  if (previous.key === "") {
+    surface.instances.delete(previous.key);
+    disposeXterm(previous);
+  }
+}
+
+function pruneXterms(): void {
+  const cached = terminalTabs().flatMap((tab) => [...surfaces[tab].instances.values()]);
+  let remaining = cached.length;
+  const removable = cached
+    .filter((xterm) => !terminalTabs().some((tab) => surfaces[tab].activeXterm === xterm))
+    .sort((left, right) => left.lastUsed - right.lastUsed);
+  for (const oldest of removable) {
+    if (remaining <= MAX_CACHED_XTERMS) {
+      return;
+    }
+    const owner = terminalTabs().find((tab) => surfaces[tab].instances.get(oldest.key) === oldest);
+    if (owner === undefined) {
+      continue;
+    }
+    surfaces[owner].instances.delete(oldest.key);
+    disposeXterm(oldest);
+    remaining -= 1;
+  }
+}
+
+function disposeXterm(xterm: XtermInstance): void {
+  xterm.terminal.dispose();
+  xterm.host.remove();
 }
 
 function selectTab(tab: TerminalTab): void {
@@ -816,8 +878,13 @@ function navigateTerminalTabs(event: KeyboardEvent, tab: TerminalTab): void {
   tabButton(target).focus();
 }
 
-function updateSurface(tab: TerminalTab, session: number, state: ViewState, message: string): void {
-  const previousSession = Number(body.dataset[`rumpelpod${capitalize(tab)}Session`] ?? "0");
+function updateSurface(
+  tab: TerminalTab,
+  key: string,
+  session: number,
+  state: ViewState,
+  message: string,
+): void {
   sessions[tab] = session;
   body.dataset[`rumpelpod${capitalize(tab)}Session`] = String(session);
   body.dataset[`rumpelpod${capitalize(tab)}State`] = state;
@@ -826,9 +893,7 @@ function updateSurface(tab: TerminalTab, session: number, state: ViewState, mess
   surfaces[tab].emptyContainer.hidden = running;
   surfaces[tab].terminalElement.hidden = !running;
   surfaces[tab].restart.hidden = state !== "exited";
-  if (session !== previousSession) {
-    replaceXterm(tab);
-  }
+  activateXterm(tab, key);
   if (tab === activeTab) {
     body.dataset.rumpelpodSession = String(session);
     body.dataset.rumpelpodState = state;
@@ -1011,6 +1076,8 @@ function isTerminalSession(value: unknown): value is AgentStateMessage["sessions
   return (
     typeof value === "object" &&
     value !== null &&
+    "key" in value &&
+    typeof value.key === "string" &&
     "label" in value &&
     typeof value.label === "string" &&
     "message" in value &&
