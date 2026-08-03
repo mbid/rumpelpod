@@ -8,13 +8,14 @@
 //! both an SSH server and a Docker daemon (in privileged mode), simulating
 //! a remote Docker host.
 
+use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use indoc::formatdoc;
+use indoc::{formatdoc, indoc};
 use tempfile::TempDir;
 
 use crate::common::{
@@ -28,6 +29,8 @@ pub const SSH_USER: &str = "testuser";
 
 /// Timeout for waiting for services to become available.
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
+
+const NESTED_DOCKER_DNS_ENV: &str = "RUMPELPOD_NESTED_DOCKER_DNS";
 
 /// Which container engine the remote host container runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -89,6 +92,18 @@ impl SshRemoteHost {
                 build_remote_podman_image().expect("Failed to build remote podman image")
             }
         };
+        let nested_docker_dns = match engine {
+            RemoteEngine::Docker => {
+                let servers = host_dns_servers().expect("Failed to read host DNS servers");
+                let servers = servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Some(format!("{NESTED_DOCKER_DNS_ENV}={servers}"))
+            }
+            RemoteEngine::Podman => None,
+        };
 
         // Create temporary directory for SSH keys
         let temp_dir =
@@ -133,6 +148,10 @@ impl SshRemoteHost {
             // fallback, so give the nested Podman tmpfs-backed storage.
             run_args.push("--tmpfs");
             run_args.push("/var/lib/containers:rw,size=4g,mode=0700");
+        }
+        if let Some(nested_docker_dns) = nested_docker_dns.as_deref() {
+            run_args.push("--env");
+            run_args.push(nested_docker_dns);
         }
         if publish_ssh {
             run_args.push("-p");
@@ -419,6 +438,43 @@ fn get_container_ip(container_id: &str) -> Result<String> {
     Ok(ip)
 }
 
+/// Return resolvers that remain reachable across another network namespace.
+///
+/// A Docker user-defined network writes only its embedded loopback resolver
+/// into the outer container. Nested dockerd cannot reuse that address and
+/// otherwise falls back to public resolvers that may be blocked.
+fn host_dns_servers() -> Result<Vec<IpAddr>> {
+    let resolv_conf = std::fs::read_to_string("/etc/resolv.conf")
+        .context("reading /etc/resolv.conf for nested Docker DNS")?;
+    parse_dns_servers(&resolv_conf)
+}
+
+fn parse_dns_servers(resolv_conf: &str) -> Result<Vec<IpAddr>> {
+    let mut servers = Vec::new();
+    for (index, line) in resolv_conf.lines().enumerate() {
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("nameserver") {
+            continue;
+        }
+        let line_number = index + 1;
+        let address = fields
+            .next()
+            .with_context(|| format!("nameserver on line {line_number} has no address"))?;
+        let address = address
+            .parse::<IpAddr>()
+            .with_context(|| format!("invalid nameserver {address:?} on line {line_number}"))?;
+        if !address.is_loopback() {
+            servers.push(address);
+        }
+    }
+    if servers.is_empty() {
+        return Err(anyhow::anyhow!(
+            "/etc/resolv.conf contains no non-loopback DNS servers"
+        ));
+    }
+    Ok(servers)
+}
+
 /// Build the Docker image for the remote Docker host test container.
 ///
 /// This is infrastructure (not a test pod image), so it builds directly
@@ -461,7 +517,11 @@ fn build_remote_docker_image() -> Result<String> {
             rm -f /var/run/docker.pid\n\
             rm -f /var/run/docker/containerd/containerd.pid\n\
             rm -f /var/run/docker/containerd/containerd.sock*\n\
-            dockerd &\n\
+            dns_args=()\n\
+            for dns_server in ${NESTED_DOCKER_DNS_ENV}; do\n\
+                dns_args+=(--dns "$dns_server")\n\
+            done\n\
+            dockerd "${{dns_args[@]}}" &\n\
             for i in $(seq 1 60); do\n\
                 if docker info >/dev/null 2>&1; then break; fi\n\
                 sleep 1\n\
@@ -711,6 +771,40 @@ fn shell_quote(value: &str) -> String {
 // Tests
 // Note: These tests require privileged Docker containers, which may not be
 // available in all CI environments.
+
+#[test]
+fn dns_servers_exclude_loopback_resolvers() {
+    let servers = parse_dns_servers(indoc! {r#"
+        nameserver 127.0.0.11
+        nameserver 172.16.200.26
+        nameserver ::1
+        nameserver 2001:db8::53
+        search example.test
+    "#})
+    .unwrap();
+
+    assert_eq!(
+        servers,
+        vec![
+            "172.16.200.26".parse::<IpAddr>().unwrap(),
+            "2001:db8::53".parse::<IpAddr>().unwrap(),
+        ]
+    );
+}
+
+#[test]
+fn dns_servers_require_a_routable_resolver() {
+    let error = parse_dns_servers(indoc! {r#"
+        nameserver 127.0.0.11
+        nameserver ::1
+    "#})
+    .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "/etc/resolv.conf contains no non-loopback DNS servers"
+    );
+}
 
 #[test]
 fn ssh_smoke_test() {
