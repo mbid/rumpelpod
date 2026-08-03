@@ -826,7 +826,7 @@ function updateSurface(tab: TerminalTab, session: number, state: ViewState, mess
   surfaces[tab].emptyContainer.hidden = running;
   surfaces[tab].terminalElement.hidden = !running;
   surfaces[tab].restart.hidden = state !== "exited";
-  if (previousSession !== 0 && session !== previousSession) {
+  if (session !== previousSession) {
     replaceXterm(tab);
   }
   if (tab === activeTab) {
