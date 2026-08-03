@@ -9,15 +9,13 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::State;
 use axum::response::Response;
 
 pub use crate::pty_session::PtySessions;
-use crate::pty_session::{
-    serve_ws_session, serve_ws_session_with_params, CmdTransform, SessionSpec,
-};
+use crate::pty_session::{serve_ws_session, CmdTransform};
 
 // ---------------------------------------------------------------------------
 // Claude CLI resolution
@@ -124,62 +122,5 @@ pub async fn grok_session_handler(
             Ok(())
         });
         serve_ws_session(socket, state.pty_sessions, Some(transform))
-    })
-}
-
-pub async fn shell_session_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<super::server::PodServerState>,
-) -> Response {
-    ws.on_upgrade(move |socket| async move {
-        let result = async {
-            let uid = nix::unistd::getuid();
-            let user = nix::unistd::User::from_uid(uid)
-                .with_context(|| format!("looking up uid {uid}"))?
-                .with_context(|| format!("uid {uid} not found in passwd"))?;
-            let mut cmd = vec![user.shell.to_string_lossy().into_owned()];
-            if let Some(flags) = crate::container_exec::interactive_shell_flags() {
-                cmd.push(flags);
-            }
-            let workdir = state
-                .repo_path
-                .lock()
-                .await
-                .clone()
-                .context("pod repository path is not initialized")?;
-            let mut env: Vec<String> = state
-                .resolved_env
-                .lock()
-                .expect("resolved environment lock poisoned")
-                .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect();
-            env.sort();
-            let session_name = "vscode-shell".to_string();
-            serve_ws_session_with_params(
-                socket,
-                state.pty_sessions,
-                session_name.clone(),
-                move |extra_args| {
-                    if !extra_args.is_empty() {
-                        return Err(anyhow::anyhow!(
-                            "the editor shell does not accept additional arguments"
-                        ));
-                    }
-                    Ok(Some(SessionSpec {
-                        name: session_name,
-                        cmd,
-                        workdir: Some(workdir),
-                        env,
-                    }))
-                },
-            )
-            .await;
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
-        if let Err(error) = result {
-            eprintln!("shell session failed: {error:#}");
-        }
     })
 }

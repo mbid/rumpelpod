@@ -1,84 +1,25 @@
-Add browser-based VS Code workflow for rumpelpod
+Add native VS Code workspace for rumpelpod
 
-Add a VS Code extension for switching among pods with persistent agent
-terminals and native review diffs. Include generated Rust-to-TypeScript
-types, browser-mode development tooling, devcontainer services, and real
-daemon browser integration coverage. Keep the browser server
-unauthenticated and reachable only through loopback port forwarding.
+Add a workspace extension that switches pods from an Activity Bar view.
+Attach agent and shell sessions in sidebar xterm terminals. Show pod
+changes in native VS Code multi-diff editors. Run CLI commands under a
+packaged node-pty binding. Pod creation, lifecycle output, and
+interactive sessions share the CLI's established terminal behavior.
 
-Serve a separate anyhow demo repository so live test pods use a standard
-nested runtime. Keep the demo beside the rumpelpod checkout under
-`/workspaces` so it is easy to find from the development container.
+Expose JSON list and review snapshots plus daemon invalidation events.
+Use them for live status and review updates. Notify review clients from
+a bounded host post-receive hook while preserving user hooks and custom
+daemon sockets. Keep this as the only new terminal-related rumpel core
+surface. Do not retain the abandoned daemon PTY streaming routes or API.
 
-Restore a Rumpelpod Activity Bar mode with agent sessions rendered by
-extension-owned xterm.js terminals in the primary sidebar. Keep the
-native review diff in the main editor and let VS Code choose inline or
-side-by-side rendering. Preserve the compact pod switcher, creation and
-shell controls, and event-driven status and review updates.
+Publish separate Linux x64, Linux arm64, and macOS arm64 VSIX assets.
+Build them in existing platform jobs. Preserve the multi-binary rumpel
+tarball and installer. Build Linux bindings in a pinned Bullseye image.
+Reject bindings above the supported glibc baseline. Keep normal pipeline
+extension checks local so they do not start nested Docker builds.
 
-Keep pod selection available when another pod has a stale Git callback.
-Only explicit refresh actions synchronize refs; picker and restoration
-reads use the daemon's current inventory.
-
-Always open a native review editor when selecting or restoring a pod.
-Show an empty changes editor for clean pods instead of leaving the main
-editor blank or displaying the previous pod's diff.
-
-Make the active pod name the sidebar's pod selector and put its agent
-and shell sessions in extension-owned xterm tabs that keep their PTYs
-alive. Show every changed file in one native vertically stacked VS Code
-review with concise pod and file-path labels. Keep terminal focus intact
-when daemon events refresh that review.
-
-Keep reviews unpinned and closable, but out of preview mode so opening a
-different pod does not replace them. Keep background refreshes from
-stealing another editor's focus or resurrecting a closed review, and
-expose a View diff action that focuses or reopens it.
-
-When selecting or creating a pod, focus its existing review or open a
-new one. Leave unrelated pod reviews open and avoid duplicate tabs when
-returning to a pod.
-
-Separate workspace-wide pod creation into VS Code's native view toolbar.
-Add merge, stop, delete, and SSH key actions for the selected pod, while
-keeping destructive and secondary operations in a grouped overflow menu.
-Remove the redundant global session restart action.
-
-Force SSH key loading through the extension askpass helper so encrypted
-keys prompt in VS Code instead of reading the extension host terminal.
-
-Clear the active pod after merge, stop, or delete and close its review.
-
-Keep VS Code's normal editor tabs and move pod, agent, and creation
-selectors into popovers anchored to the Rumpelpod sidebar header. Hide
-the terminal session tabs until more than one session is open.
-
-Launch multiple agent sessions concurrently in the same pod. Make
-header popovers toggle from their trigger and show the complete pod list
-without a filter field.
-
-Keep the existing terminal spacing and scrollbar behavior unchanged.
-Theme only xterm's black fallback viewport to match the VS Code sidebar.
-
-Start the baked development daemon socket and browser VS Code service
-from a lingering systemd user session during container boot. Keep
-startup independent of devcontainer lifecycle commands so rumpel-created
-pods expose their editor without a background post-create build race.
-
-Keep the extension's native PTY path so pod creation and lifecycle
-progress remain part of the embedded terminal stream. Package its native
-binding for Linux x64, Linux arm64, and macOS arm64 to match rumpel's
-existing release platforms.
-
-Attach the three platform-tagged VSIX files to tagged GitHub releases as
-separate assets. Keep them outside the rumpel binary tarball so CLI
-installation downloads only the executable needed by the current host.
-Document choosing the extension-host platform, including Linux for WSL.
-
-Build every native VSIX through the shared Cargo extension command. Keep
-the existing release job graph while having each platform job stage its
-matching rumpel executable and extension bundle.
-
-Quarantine the flaky Playwright browser integration from default xtest
-and pipeline runs. Keep it compiled and available through the explicit
-ignored-test flag while fast VS Code checks continue to run normally.
+Provide a loopback-only live code-server workspace backed by a small
+anyhow demo repository and lingering user services. Persist only
+allowlisted agent credentials for those services. Split the devcontainer
+so CI skips the live browser stack. Keep the timing-sensitive Playwright
+test available only through the explicit ignored-test flag.

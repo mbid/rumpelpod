@@ -272,21 +272,6 @@ pub fn confirm_pod_creation(pod_name: &str, repo_root: &Path, create: bool) -> R
 
 /// Launch a pod and return the container ID and user.
 pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
-    launch_pod_with_progress(pod_name, host_override, false)
-}
-
-pub(crate) fn launch_pod_for_terminal(
-    pod_name: &str,
-    host_override: Option<Host>,
-) -> Result<LaunchResult> {
-    launch_pod_with_progress(pod_name, host_override, true)
-}
-
-fn launch_pod_with_progress(
-    pod_name: &str,
-    host_override: Option<Host>,
-    reserve_stdout: bool,
-) -> Result<LaunchResult> {
     let t = Instant::now();
     let repo_root = get_repo_root()?;
     let docker_host = determine_host(&repo_root, host_override)?;
@@ -329,7 +314,6 @@ fn launch_pod_with_progress(
     })?;
     for line in &mut progress {
         match line {
-            OutputLine::Stdout(s) if reserve_stdout => eprintln!("{s}"),
             OutputLine::Stdout(s) => println!("{s}"),
             OutputLine::Stderr(s) => eprintln!("{s}"),
         }
@@ -456,30 +440,6 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     }
 
     Ok(())
-}
-
-pub(crate) fn prepare_terminal(cmd: &EnterCommand) -> Result<crate::terminal::PreparedTerminal> {
-    if !cmd.command.is_empty() {
-        return Err(anyhow::anyhow!(
-            "the editor shell does not accept an explicit command"
-        ));
-    }
-    let repo_path = get_repo_root()?;
-    let host_override = cmd.host_args.resolve()?;
-    confirm_pod_creation(&cmd.name, &repo_path, cmd.create)?;
-    launch_pod_for_terminal(&cmd.name, host_override)?;
-    Ok(crate::terminal::PreparedTerminal {
-        kind: crate::terminal::TerminalKind::Shell,
-        pod: cmd.name.clone(),
-        repo_path: repo_path.clone(),
-        params: crate::pty_attach::WireParams::Attach { extra_args: vec![] },
-        codex_cli_path: None,
-        reconnect: Some(crate::pty_attach::ReconnectConfig {
-            daemon_socket: daemon::socket_path()?,
-            repo_path,
-            pod_name: cmd.name.clone(),
-        }),
-    })
 }
 
 #[cfg(test)]

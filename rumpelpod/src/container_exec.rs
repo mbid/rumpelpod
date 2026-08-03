@@ -79,7 +79,7 @@ pub fn container_exec(command: Vec<String>, workdir: Option<PathBuf>) -> Result<
 
 /// Read userEnvProbe from the baked devcontainer.json and return the
 /// corresponding interactive shell flags (e.g. "-li").
-pub(crate) fn interactive_shell_flags() -> Option<String> {
+fn interactive_shell_flags() -> Option<String> {
     let json = std::fs::read_to_string(DEVCONTAINER_CONFIG_PATH).ok()?;
     let doc: serde_json::Value = serde_json::from_str(&json).ok()?;
     let probe_str = doc.get("userEnvProbe")?.as_str()?;

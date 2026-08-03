@@ -161,16 +161,15 @@ fn get_difftool_cmd(repo_root: &std::path::Path, tool: &str) -> Result<Option<St
     }
 }
 
-/// Get the list of files changed between two commits,
-/// optionally restricted to specific paths (like git diff -- <path>...).
-fn get_changed_files(
+/// Get the files changed between two commits, including which side exists.
+fn get_review_files(
     repo_root: &std::path::Path,
     base: &str,
     target: &str,
     paths: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<ReviewFile>> {
     let mut cmd = Command::new("git");
-    cmd.args(["diff", "--name-only", "-z", base, target]);
+    cmd.args(["diff", "--name-status", "-z", "--no-renames", base, target]);
     if !paths.is_empty() {
         cmd.arg("--");
         cmd.args(paths);
@@ -186,41 +185,39 @@ fn get_changed_files(
         return Err(anyhow::anyhow!("failed to get changed files: {stderr}"));
     }
 
-    let mut files = Vec::new();
-    for path in output.stdout.split(|byte| *byte == 0) {
-        if path.is_empty() {
-            continue;
-        }
-        let path = std::str::from_utf8(path)
+    let mut fields: Vec<&[u8]> = output.stdout.split(|byte| *byte == 0).collect();
+    if fields.last().is_some_and(|field| field.is_empty()) {
+        fields.pop();
+    }
+    if !fields.len().is_multiple_of(2) {
+        return Err(anyhow::anyhow!("git diff returned a status without a path"));
+    }
+
+    let mut files = Vec::with_capacity(fields.len() / 2);
+    for fields in fields.chunks_exact(2) {
+        let status =
+            std::str::from_utf8(fields[0]).context("changed file status is not valid UTF-8")?;
+        let path = std::str::from_utf8(fields[1])
             .context("changed file path is not valid UTF-8")?
             .to_string();
-        files.push(path);
+        let (base_exists, target_exists) = match status {
+            "A" => (false, true),
+            "D" => (true, false),
+            "M" | "T" => (true, true),
+            other => {
+                return Err(anyhow::anyhow!(
+                    "git diff returned unknown file status '{other}' for '{path}'"
+                ))
+            }
+        };
+        files.push(ReviewFile {
+            path,
+            base_exists,
+            target_exists,
+        });
     }
 
     Ok(files)
-}
-
-fn file_exists_at_revision(
-    repo_root: &std::path::Path,
-    revision: &str,
-    file_path: &str,
-) -> Result<bool> {
-    let pathspec = format!(":(literal){file_path}");
-    let output = Command::new("git")
-        .args(["ls-tree", "-z", "--name-only", revision, "--", &pathspec])
-        .current_dir(repo_root)
-        .output()
-        .context("failed to check file content at revision")?;
-
-    if output.status.success() {
-        return Ok(!output.stdout.is_empty());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stderr = stderr.trim();
-    Err(anyhow::anyhow!(
-        "failed to check '{file_path}' at '{revision}': {stderr}"
-    ))
 }
 
 /// Compute the exact review inputs shared by the CLI and editor integrations.
@@ -278,15 +275,7 @@ pub fn build_review_plan(
     let base = String::from_utf8_lossy(&merge_base_output.stdout)
         .trim()
         .to_string();
-    let changed_files = get_changed_files(repo_root, &base, &target, paths)?;
-    let mut files = Vec::with_capacity(changed_files.len());
-    for path in changed_files {
-        files.push(ReviewFile {
-            base_exists: file_exists_at_revision(repo_root, &base, &path)?,
-            target_exists: file_exists_at_revision(repo_root, &target, &path)?,
-            path,
-        });
-    }
+    let files = get_review_files(repo_root, &base, &target, paths)?;
 
     Ok(ReviewPlan {
         base,
@@ -430,7 +419,10 @@ pub fn review(cmd: &ReviewCommand) -> Result<()> {
     // "ref not found" message for typos or deleted pods.
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
-    let pods = client.list_pods(repo_root.clone(), true, false)?;
+    // Editor refreshes are driven by daemon invalidations and only need the
+    // database membership check. A backend sync here would turn every review
+    // update into a remote container query.
+    let pods = client.list_pods(repo_root.clone(), !cmd.json, false)?;
     if !pods.iter().any(|s| s.name == cmd.name) {
         let name = &cmd.name;
         return Err(anyhow::anyhow!("pod '{name}' does not exist"));

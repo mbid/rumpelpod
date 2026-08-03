@@ -20,7 +20,7 @@ use log::trace;
 use crate::cli::GrokCommand;
 use crate::config::load_json_config;
 use crate::daemon;
-use crate::enter::{confirm_pod_creation, launch_pod, launch_pod_for_terminal};
+use crate::enter::{confirm_pod_creation, launch_pod};
 use crate::git::get_repo_root;
 use crate::pty_attach;
 
@@ -32,14 +32,6 @@ const PTY_SESSION_NAME: &str = "grok";
 const XAI_API_KEY_ENV: &str = "XAI_API_KEY";
 
 pub fn grok(cmd: &GrokCommand) -> Result<()> {
-    prepare(cmd, false)?.attach()
-}
-
-pub(crate) fn prepare_terminal(cmd: &GrokCommand) -> Result<crate::terminal::PreparedTerminal> {
-    prepare(cmd, true)
-}
-
-fn prepare(cmd: &GrokCommand, reserve_stdout: bool) -> Result<crate::terminal::PreparedTerminal> {
     let t_total = Instant::now();
 
     let repo_root = get_repo_root()?;
@@ -52,11 +44,7 @@ fn prepare(cmd: &GrokCommand, reserve_stdout: bool) -> Result<crate::terminal::P
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
 
     let t = Instant::now();
-    let result = if reserve_stdout {
-        launch_pod_for_terminal(&cmd.name, host_override)?
-    } else {
-        launch_pod(&cmd.name, host_override)?
-    };
+    let result = launch_pod(&cmd.name, host_override)?;
     trace!("launch_pod: {:?}", t.elapsed());
     let workdir = result.container_repo_path.clone();
 
@@ -79,19 +67,29 @@ fn prepare(cmd: &GrokCommand, reserve_stdout: bool) -> Result<crate::terminal::P
         pod_name: cmd.name.clone(),
     });
 
-    Ok(crate::terminal::PreparedTerminal {
-        kind: crate::terminal::TerminalKind::Grok,
-        pod: cmd.name.clone(),
-        repo_path: repo_root,
-        params: pty_attach::WireParams::Session(pty_attach::SessionParams {
+    let outcome = pty_attach::attach(
+        pty_attach::PtyTransport::Tcp {
+            url: result.container_url.clone(),
+        },
+        "/grok",
+        &result.container_token,
+        pty_attach::WireParams::Session(pty_attach::SessionParams {
             name: PTY_SESSION_NAME.to_string(),
             cmd: grok_cmd,
             workdir: Some(workdir_str),
             env: session_env,
         }),
-        codex_cli_path: None,
         reconnect,
-    })
+    )?;
+
+    match outcome {
+        pty_attach::AttachOutcome::Detached => {
+            eprintln!("[detached from session]");
+        }
+        pty_attach::AttachOutcome::SessionEnded => {}
+    }
+
+    Ok(())
 }
 
 /// Forward grok credentials and config from the local machine into the

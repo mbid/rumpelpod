@@ -6,8 +6,6 @@
 //! Must be run from a clean checkout of a git tag.  Builds linux-amd64 and
 //! linux-arm64 locally, and darwin-arm64 either locally (on mac) or via
 //! `ssh macos` (on linux).
-//! Platform-specific VSIX files are published by CI because each native
-//! binding must be packaged on its matching runner.
 //!
 //! Usage: cargo run --bin release
 
@@ -164,17 +162,11 @@ fn run() -> Result<ExitCode> {
     )?;
 
     eprintln!("==> Creating GitHub release {tag}...");
-    let linux_amd64 = staging.path().join("rumpel-linux-amd64");
-    let linux_arm64 = staging.path().join("rumpel-linux-arm64");
-    let darwin_arm64 = staging.path().join(DARWIN_NAME);
     tools::run(Command::new("gh").args([
         "release",
         "create",
         &tag,
         tarball.to_str().unwrap(),
-        linux_amd64.to_str().unwrap(),
-        linux_arm64.to_str().unwrap(),
-        darwin_arm64.to_str().unwrap(),
         "--title",
         &tag,
     ]))?;

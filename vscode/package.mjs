@@ -35,38 +35,18 @@ function currentTarget() {
       switch (process.arch) {
         case "arm64":
           return "darwin-arm64";
-        case "x64":
-          return "darwin-x64";
         default:
           return unsupportedTarget();
       }
     case "linux":
-      if (usesGlibc()) {
-        switch (process.arch) {
-          case "arm":
-            return "linux-armhf";
-          case "arm64":
-            return "linux-arm64";
-          case "x64":
-            return "linux-x64";
-          default:
-            return unsupportedTarget();
-        }
+      if (!usesGlibc()) {
+        return unsupportedTarget();
       }
       switch (process.arch) {
         case "arm64":
-          return "alpine-arm64";
+          return "linux-arm64";
         case "x64":
-          return "alpine-x64";
-        default:
-          return unsupportedTarget();
-      }
-    case "win32":
-      switch (process.arch) {
-        case "arm64":
-          return "win32-arm64";
-        case "x64":
-          return "win32-x64";
+          return "linux-x64";
         default:
           return unsupportedTarget();
       }

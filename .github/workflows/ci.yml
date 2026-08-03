@@ -6,8 +6,8 @@
 # (via ci/run-pipeline.sh) and stage the very binary the tests ran
 # against; macos builds release-only because its runners have no docker
 # daemon for the pod tests. The release job assembles those staged
-# binaries into a GitHub release. Jobs are kept flat (not a matrix) so
-# each platform shows up on its own in the checks UI.
+# binaries and VSIX bundles into a GitHub release. Jobs are kept flat
+# (not a matrix) so each platform shows up on its own in the checks UI.
 
 name: CI
 
@@ -178,8 +178,5 @@ jobs:
             "rumpelpod-vscode-${{ github.ref_name }}-linux-x64.vsix" \
             "rumpelpod-vscode-${{ github.ref_name }}-linux-arm64.vsix" \
             "rumpelpod-vscode-${{ github.ref_name }}-darwin-arm64.vsix" \
-            staging/rumpel-linux-amd64 \
-            staging/rumpel-linux-arm64 \
-            staging/rumpel-darwin-arm64 \
             --title "${{ github.ref_name }}" \
             --repo "${{ github.repository }}"

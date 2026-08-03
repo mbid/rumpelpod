@@ -228,7 +228,6 @@ pub fn run_container_server(
         .route("/claude", any(super::pty::claude_session_handler))
         .route("/pi", any(super::pty::pi_session_handler))
         .route("/grok", any(super::pty::grok_session_handler))
-        .route("/shell", any(super::pty::shell_session_handler))
         .route("/codex", any(super::codex::codex_ws_handler))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(

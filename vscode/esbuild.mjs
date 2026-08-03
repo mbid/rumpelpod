@@ -43,12 +43,20 @@ async function stageRuntimeDependencies() {
   const licenses = path.resolve("dist/licenses");
   await fs.rm(destination, { force: true, recursive: true });
   await fs.rm(licenses, { force: true, recursive: true });
-  await fs.mkdir(destination, { recursive: true });
+  await fs.mkdir(path.join(destination, "lib"), { recursive: true });
   await fs.mkdir(licenses, { recursive: true });
+  const runtimeFiles = [
+    "eventEmitter2.js",
+    "index.js",
+    "terminal.js",
+    "unixTerminal.js",
+    "utils.js",
+  ];
   await Promise.all([
     fs.copyFile(path.join(source, "LICENSE"), path.join(destination, "LICENSE")),
-    fs.copyFile(path.join(source, "package.json"), path.join(destination, "package.json")),
-    fs.cp(path.join(source, "lib"), path.join(destination, "lib"), { recursive: true }),
+    ...runtimeFiles.map((file) =>
+      fs.copyFile(path.join(source, "lib", file), path.join(destination, "lib", file))
+    ),
     fs.copyFile(
       path.resolve("node_modules/@xterm/xterm/LICENSE"),
       path.join(licenses, "xterm.txt"),

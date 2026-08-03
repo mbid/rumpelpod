@@ -15,7 +15,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const terminals = new AgentTerminals(context.extensionUri, (operation, error) => {
     model.logError(operation, error);
   });
-  const reviews = new ReviewDocuments(context.workspaceState, (operation, error) => {
+  const reviews = new ReviewDocuments((operation, error) => {
     model.logError(operation, error);
   });
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -29,7 +29,6 @@ export function activate(context: vscode.ExtensionContext): void {
     terminals,
     reviews,
     status,
-    controller,
     events,
     terminals.onDidShow(() => {
       void runCommand(model, "opening the Rumpelpod view", () => controller.enterMode());
@@ -77,6 +76,10 @@ export function activate(context: vscode.ExtensionContext): void {
         events.restart();
       }
     }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      model.invalidateRepositories();
+      events.restart();
+    }),
   );
 
   controller.updateStatus();
@@ -85,9 +88,6 @@ export function activate(context: vscode.ExtensionContext): void {
     model.logError("starting rumpelpod daemon events", error);
     events.restart();
   });
-  void runCommand(model, "removing obsolete review placeholders", () =>
-    reviews.clearPlaceholders(),
-  );
 }
 
 function dismissFailedMenu(terminals: AgentTerminals, action: AgentViewAction): void {
@@ -141,8 +141,6 @@ function viewActionContext(action: AgentViewAction): string {
       return "opening the active pod diff";
   }
 }
-
-export function deactivate(): void {}
 
 async function runCommand(
   model: RumpelpodModel,

@@ -4,8 +4,8 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 
-import type { AgentKind, PodInfo, ReviewPlan } from "./generated/protocol";
-import { isAgentKind } from "./agents";
+import type { PodInfo, ReviewPlan } from "./generated/protocol";
+import { isAgentKind, type AgentKind } from "./agents";
 import { ProcessError, runProcess } from "./process";
 
 const LAUNCHED_AGENTS_KEY = "rumpelpod.launchedAgents";
@@ -40,6 +40,10 @@ export class RumpelpodModel {
   public async repositories(): Promise<readonly Repository[]> {
     this.repositoriesPromise ??= this.discoverRepositories();
     return this.repositoriesPromise;
+  }
+
+  public invalidateRepositories(): void {
+    this.repositoriesPromise = undefined;
   }
 
   public async listPods(

@@ -34,9 +34,7 @@ use url::Url;
 use crate::cli::CodexCommand;
 use crate::config::load_json_config;
 use crate::daemon::{self, DaemonServer};
-use crate::enter::{
-    confirm_pod_creation, find_local_codex_cli, launch_pod, launch_pod_for_terminal,
-};
+use crate::enter::{confirm_pod_creation, find_local_codex_cli, launch_pod};
 use crate::git::get_repo_root;
 use crate::pty_attach;
 use crate::pty_session::{serve_ws_session_with_params, SessionSpec};
@@ -103,30 +101,6 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
         }
     })?;
     finish_codex_attachment(outcome)
-}
-
-pub(crate) fn prepare_terminal(cmd: &CodexCommand) -> Result<crate::terminal::PreparedTerminal> {
-    let repo_root = get_repo_root()?;
-    let host_override = cmd.host_args.resolve()?;
-    let codex_bin = find_local_codex_cli().ok_or_else(|| {
-        anyhow::anyhow!(
-            "codex CLI not found in PATH. Install it from https://github.com/openai/codex"
-        )
-    })?;
-
-    confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
-    launch_pod_for_terminal(&cmd.name, host_override)?;
-
-    Ok(crate::terminal::PreparedTerminal {
-        kind: crate::terminal::TerminalKind::Codex,
-        pod: cmd.name.clone(),
-        repo_path: repo_root,
-        params: pty_attach::WireParams::Attach {
-            extra_args: cmd.args.clone(),
-        },
-        codex_cli_path: Some(codex_bin),
-        reconnect: None,
-    })
 }
 
 fn attach_codex(

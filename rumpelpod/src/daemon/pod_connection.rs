@@ -856,6 +856,35 @@ mod tests {
     use crate::config::ContainerEngine;
 
     #[test]
+    fn connection_and_agent_state_changes_emit_status_invalidations() {
+        let (events_tx, mut events_rx) = broadcast::channel(4);
+        let key = PodConnectionKey::new("/repo", "test");
+        let status = Mutex::new(PodConnectionStatus::Connecting);
+
+        replace_and_emit(&status, PodConnectionStatus::Connecting, &events_tx, &key);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        replace_and_emit(&status, PodConnectionStatus::Connected, &events_tx, &key);
+        let expected = DaemonEvent::PodStatusChanged {
+            repository: "/repo".to_string(),
+            pod: "test".to_string(),
+        };
+        assert_eq!(events_rx.try_recv(), Ok(expected.clone()));
+
+        let claude_state = Mutex::new(None);
+        replace_and_emit(
+            &claude_state,
+            Some(ClaudeState::Processing),
+            &events_tx,
+            &key,
+        );
+        assert_eq!(events_rx.try_recv(), Ok(expected));
+    }
+
+    #[test]
     fn removing_pod_connection_discards_cached_codex_state() {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let host_connections = Arc::new(HostConnectionRegistry::new(events_tx));

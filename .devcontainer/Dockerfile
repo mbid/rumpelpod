@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE
-FROM ${BASE_IMAGE:-debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271}
+FROM ${BASE_IMAGE:-debian:testing-20260623@sha256:1c79280f13304aedb1d88795f80fbc26d818f951e56adab23d365ea626187271} AS common
 
 USER root
 
@@ -51,12 +51,6 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         skopeo \
         procps \
         unzip
-
-# Headless browser used by the VS Code integration test. Avoid desktop
-# recommendations because the browser UI itself is never displayed.
-RUN export DEBIAN_FRONTEND=noninteractive \
-    && apt-get update \
-    && apt-get install --yes --no-install-recommends chromium
 
 # Rootless Podman cannot create its user namespace under this outer sandbox.
 # Use Podman's rootful API service. The devcontainer runtime creates a
@@ -254,23 +248,6 @@ RUN ARCH=$(uname -m) && \
     mv "/tmp/codex-$CODEX_ARCH" /usr/local/bin/codex && \
     chmod +x /usr/local/bin/codex
 
-# code-server supplies the remote extension host and xterm.js terminal
-# while keeping the development UI accessible through a normal browser.
-ARG CODE_SERVER_VERSION=4.121.0
-RUN ARCH=$(uname -m) && \
-    case "$ARCH" in \
-        x86_64) CODE_SERVER_ARCH="amd64"; CODE_SERVER_SHA256="3860893f15376e5f984492c5c92e87c51975d67e3902410f422823d9f60e06af" ;; \
-        aarch64) CODE_SERVER_ARCH="arm64"; CODE_SERVER_SHA256="de5101a3c1f86b385343f4824e7d6a82c3229cdbb4f18a3277525649338acb71" ;; \
-        *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;; \
-    esac && \
-    CODE_SERVER_TARBALL="code-server-${CODE_SERVER_VERSION}-linux-${CODE_SERVER_ARCH}.tar.gz" && \
-    curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${CODE_SERVER_TARBALL}" \
-        -o "/tmp/${CODE_SERVER_TARBALL}" && \
-    echo "${CODE_SERVER_SHA256}  /tmp/${CODE_SERVER_TARBALL}" | sha256sum -c - && \
-    tar xzf "/tmp/${CODE_SERVER_TARBALL}" -C /opt && \
-    ln -s "/opt/code-server-${CODE_SERVER_VERSION}-linux-${CODE_SERVER_ARCH}/bin/code-server" /usr/local/bin/code-server && \
-    rm "/tmp/${CODE_SERVER_TARBALL}"
-
 # Install the xAI Grok Build coding agent: a single statically-linked binary served
 # per (version, platform), pinned for reproducibility.
 RUN ARCH=$(uname -m) && \
@@ -319,6 +296,73 @@ WORKDIR /workspaces/rumpelpod
 
 COPY --chown=${USER}:${USER} --chmod=755 .devcontainer/commit-msg /workspaces/rumpelpod/.git/hooks/commit-msg
 
+# Populate target/ so incremental builds are fast.
+RUN cargo build --bin rumpel --target x86_64-unknown-linux-musl \
+    && cargo build --bin rumpel --target aarch64-unknown-linux-musl \
+    && cargo build --bin xtest --bin pipeline \
+    && cargo test --no-run
+
+# Pre-download container images so services start without network access.
+# Sources are pinned by digest because tags (especially :latest and :2)
+# move; the docker-archive references keep the tags the tooling expects.
+RUN mkdir /preloaded-images \
+    && skopeo copy docker://cgr.dev/chainguard/wolfi-base@sha256:2f7a5c164eafbdbe46fe1d91bd1ab4c8cb5c2bdbd10641c3d61bd39962384cdb docker-archive:/preloaded-images/wolfi-base.tar:cgr.dev/chainguard/wolfi-base:latest \
+    && skopeo copy docker://docker.io/rancher/k3s@sha256:53cf744fe2fabf140cee240d2db70d13a4f2d98f1a13c98f58f457f423096917 docker-archive:/preloaded-images/k3s.tar:rancher/k3s:v1.31.5-k3s1 \
+    && skopeo copy docker://ghcr.io/k3d-io/k3d-tools@sha256:c5ceb2b9e8ff2cf55917b0bee8bc9c54fe1483a16366b734117e2cfac1417bed docker-archive:/preloaded-images/k3d-tools.tar:ghcr.io/k3d-io/k3d-tools:5.8.3 \
+    && skopeo copy docker://ghcr.io/k3d-io/k3d-proxy@sha256:d43e6ffd27c216d0b21815c1226c8aeac2e07086ac5a988eb39bd7e308f6e370 docker-archive:/preloaded-images/k3d-proxy.tar:ghcr.io/k3d-io/k3d-proxy:5.8.3 \
+    && skopeo copy docker://docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 docker-archive:/preloaded-images/registry-2.tar:registry:2 \
+    && skopeo copy docker://docker.io/moby/buildkit@sha256:87afb62ed6a762bb65b85d53819f3b341fb74a36d1fc0a1153a64f367637bfda docker-archive:/preloaded-images/buildkit.tar:moby/buildkit:v0.21.1
+
+RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c '"'"'for f in /preloaded-images/*.tar; do /usr/bin/docker load -i "$f"; done'"'"'\n\n[Install]\nWantedBy=multi-user.target\n' \
+    > /etc/systemd/system/preload-images.service \
+    && systemctl enable preload-images.service
+
+COPY .devcontainer/provision-k3d.sh /usr/local/bin/provision-k3d.sh
+RUN chmod +x /usr/local/bin/provision-k3d.sh
+
+RUN printf '[Unit]\nDescription=Provision k3d cluster\nAfter=preload-images.service\nRequires=preload-images.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/provision-k3d.sh\nEnvironment=CLOUD_DIR=/workspaces/rumpelpod/cloud\nEnvironment=CONTAINER_USER=%s\n\n[Install]\nWantedBy=multi-user.target\n' "${USER}" \
+    > /etc/systemd/system/provision-k3d.service \
+    && systemctl enable provision-k3d.service
+
+COPY .devcontainer/entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
+
+ENV RUMPELPOD_TEST_SYSTEMD=1
+
+ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]
+
+# CI needs the systemd and nested-container test environment, but not the live
+# browser workspace or its browser, server, extension, and demo repository.
+FROM common AS ci
+
+FROM common AS development
+
+USER root
+
+# Headless browser used by the opt-in VS Code integration test. Avoid desktop
+# recommendations because the browser UI itself is never displayed.
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
+    && apt-get install --yes --no-install-recommends chromium
+
+# code-server supplies the remote extension host and xterm.js terminal while
+# keeping the development UI accessible through a normal browser.
+ARG CODE_SERVER_VERSION=4.121.0
+RUN ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64) CODE_SERVER_ARCH="amd64"; CODE_SERVER_SHA256="3860893f15376e5f984492c5c92e87c51975d67e3902410f422823d9f60e06af" ;; \
+        aarch64) CODE_SERVER_ARCH="arm64"; CODE_SERVER_SHA256="de5101a3c1f86b385343f4824e7d6a82c3229cdbb4f18a3277525649338acb71" ;; \
+        *) echo "unsupported architecture: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    CODE_SERVER_TARBALL="code-server-${CODE_SERVER_VERSION}-linux-${CODE_SERVER_ARCH}.tar.gz" && \
+    curl -fsSL "https://github.com/coder/code-server/releases/download/v${CODE_SERVER_VERSION}/${CODE_SERVER_TARBALL}" \
+        -o "/tmp/${CODE_SERVER_TARBALL}" && \
+    echo "${CODE_SERVER_SHA256}  /tmp/${CODE_SERVER_TARBALL}" | sha256sum -c - && \
+    tar xzf "/tmp/${CODE_SERVER_TARBALL}" -C /opt && \
+    ln -s "/opt/code-server-${CODE_SERVER_VERSION}-linux-${CODE_SERVER_ARCH}/bin/code-server" /usr/local/bin/code-server && \
+    rm "/tmp/${CODE_SERVER_TARBALL}"
+
+USER ${USER}
+
 # Cache extension dependencies independently from its source so normal
 # TypeScript edits do not make the dependency layer cold.
 COPY --chown=${USER}:${USER} vscode/package.json vscode/package-lock.json /tmp/rumpelpod-vscode/
@@ -326,12 +370,6 @@ RUN npm ci --prefix /tmp/rumpelpod-vscode
 COPY --chown=${USER}:${USER} vscode /tmp/rumpelpod-vscode
 RUN npm --prefix /tmp/rumpelpod-vscode run package \
     && code-server --force --install-extension /tmp/rumpelpod-vscode/dist/rumpelpod-vscode.vsix
-
-# Populate target/ so incremental builds are fast.
-RUN cargo build --bin rumpel --target x86_64-unknown-linux-musl \
-    && cargo build --bin rumpel --target aarch64-unknown-linux-musl \
-    && cargo build --bin xtest --bin pipeline \
-    && cargo test --no-run
 
 RUN native_arch=$(dpkg --print-architecture) \
     && if [ "$native_arch" = "amd64" ]; then \
@@ -363,31 +401,3 @@ RUN mkdir -p \
     && ln -s ../rumpelpod-vscode.service \
         "/home/${USER}/.config/systemd/user/default.target.wants/rumpelpod-vscode.service" \
     && chown -R ${USER}:${USER} "/home/${USER}/.config"
-
-# Pre-download container images so services start without network access.
-# Sources are pinned by digest because tags (especially :latest and :2)
-# move; the docker-archive references keep the tags the tooling expects.
-RUN mkdir /preloaded-images \
-    && skopeo copy docker://cgr.dev/chainguard/wolfi-base@sha256:2f7a5c164eafbdbe46fe1d91bd1ab4c8cb5c2bdbd10641c3d61bd39962384cdb docker-archive:/preloaded-images/wolfi-base.tar:cgr.dev/chainguard/wolfi-base:latest \
-    && skopeo copy docker://docker.io/rancher/k3s@sha256:53cf744fe2fabf140cee240d2db70d13a4f2d98f1a13c98f58f457f423096917 docker-archive:/preloaded-images/k3s.tar:rancher/k3s:v1.31.5-k3s1 \
-    && skopeo copy docker://ghcr.io/k3d-io/k3d-tools@sha256:c5ceb2b9e8ff2cf55917b0bee8bc9c54fe1483a16366b734117e2cfac1417bed docker-archive:/preloaded-images/k3d-tools.tar:ghcr.io/k3d-io/k3d-tools:5.8.3 \
-    && skopeo copy docker://ghcr.io/k3d-io/k3d-proxy@sha256:d43e6ffd27c216d0b21815c1226c8aeac2e07086ac5a988eb39bd7e308f6e370 docker-archive:/preloaded-images/k3d-proxy.tar:ghcr.io/k3d-io/k3d-proxy:5.8.3 \
-    && skopeo copy docker://docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373 docker-archive:/preloaded-images/registry-2.tar:registry:2 \
-    && skopeo copy docker://docker.io/moby/buildkit@sha256:87afb62ed6a762bb65b85d53819f3b341fb74a36d1fc0a1153a64f367637bfda docker-archive:/preloaded-images/buildkit.tar:moby/buildkit:v0.21.1
-
-RUN printf '[Unit]\nAfter=docker.service\nRequires=docker.service\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -c '"'"'for f in /preloaded-images/*.tar; do /usr/bin/docker load -i "$f"; done'"'"'\n\n[Install]\nWantedBy=multi-user.target\n' \
-    > /etc/systemd/system/preload-images.service \
-    && systemctl enable preload-images.service
-
-COPY .devcontainer/provision-k3d.sh /usr/local/bin/provision-k3d.sh
-RUN chmod +x /usr/local/bin/provision-k3d.sh
-
-RUN printf '[Unit]\nDescription=Provision k3d cluster\nAfter=preload-images.service\nRequires=preload-images.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/provision-k3d.sh\nEnvironment=CLOUD_DIR=/workspaces/rumpelpod/cloud\nEnvironment=CONTAINER_USER=%s\n\n[Install]\nWantedBy=multi-user.target\n' "${USER}" \
-    > /etc/systemd/system/provision-k3d.service \
-    && systemctl enable provision-k3d.service
-
-COPY .devcontainer/entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
-
-ENV RUMPELPOD_TEST_SYSTEMD=1
-
-ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]

@@ -48,7 +48,8 @@ latest_version() {
 main() {
     binary="$(detect_binary)"
     version="$(latest_version)"
-    url="https://github.com/$REPO/releases/download/${version}/${binary}"
+    tarball="rumpel-${version}.tar.gz"
+    url="https://github.com/$REPO/releases/download/${version}/${tarball}"
 
     echo "Installing rumpelpod $version to $INSTALL_DIR"
 
@@ -57,9 +58,8 @@ main() {
     tmpdir="$(mktemp -d)"
     trap 'rm -rf "$tmpdir"' EXIT
 
-    curl -fSL -o "$tmpdir/$binary" "$url"
-    chmod +x "$tmpdir/$binary"
-    cp "$tmpdir/$binary" "$INSTALL_DIR/$binary"
+    curl -fSL -o "$tmpdir/$tarball" "$url"
+    tar xzf "$tmpdir/$tarball" -C "$INSTALL_DIR"
     ln -sf "$binary" "$INSTALL_DIR/rumpel"
 
     echo "Running system-install..."

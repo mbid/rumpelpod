@@ -400,6 +400,19 @@ fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
         dockerfile.contains("touch /var/lib/systemd/linger/${USER}"),
         "the image did not arrange a user manager at container boot"
     );
+    let ci_stage = dockerfile
+        .find("FROM common AS ci")
+        .expect("CI image stage");
+    let development_stage = dockerfile
+        .find("FROM common AS development")
+        .expect("development image stage");
+    let browser_install = dockerfile
+        .find("apt-get install --yes --no-install-recommends chromium")
+        .expect("development browser install");
+    assert!(
+        ci_stage < development_stage && development_stage < browser_install,
+        "the CI image included the opt-in browser development stack"
+    );
     assert!(
         dockerfile
             .contains("/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket"),
@@ -465,6 +478,14 @@ fn vscode_package_is_native_and_published_for_each_release_platform() {
         entries.contains("node-pty"),
         "the extension package omitted the PTY runtime"
     );
+    assert!(
+        !entries.lines().any(|entry| entry.ends_with(".test.js")),
+        "the extension package included node-pty's test suite"
+    );
+    assert!(
+        !entries.lines().any(|entry| entry.ends_with(".map")),
+        "the extension package included production source maps"
+    );
 
     let manifest = Command::new("unzip")
         .args(["-p"])
@@ -489,11 +510,27 @@ fn vscode_package_is_native_and_published_for_each_release_platform() {
             "tagged releases did not publish the {target} VSIX"
         );
     }
+    let ci_script =
+        fs::read_to_string(root.join("ci/run-pipeline.sh")).expect("read CI pipeline script");
+    assert!(
+        ci_script.contains("--target ci")
+            && ci_script.contains("vscode/Dockerfile.linux")
+            && ci_script.contains("type=local,dest=$vsix_output"),
+        "Linux release jobs did not use the compatibility VSIX builder"
+    );
+    let linux_builder =
+        fs::read_to_string(root.join("vscode/Dockerfile.linux")).expect("read Linux VSIX builder");
+    assert!(
+        linux_builder.contains("snapshot.debian.org")
+            && linux_builder.contains("dpkg --compare-versions")
+            && linux_builder.contains("le 2.31"),
+        "Linux VSIX releases did not pin and enforce their glibc baseline"
+    );
     let installer = fs::read_to_string(root.join("install.sh")).expect("read installer");
     assert!(
-        installer.contains("releases/download/${version}/${binary}")
-            && !installer.contains("tar xzf"),
-        "the installer still downloaded the aggregate release archive"
+        installer.contains("releases/download/${version}/${tarball}")
+            && installer.contains("tar xzf"),
+        "the VSIX release changed the existing binary tarball installer"
     );
 }
 
@@ -655,7 +692,7 @@ fn vscode_demo_workspace_uses_standard_runtime() {
 }
 
 #[test]
-#[ignore = "Playwright review restoration is flaky; run explicitly while quarantined"]
+#[ignore = "slow and timing-sensitive browser coverage; run explicitly"]
 fn vscode_browser_lists_creates_and_reviews_pods() {
     println!("xtest:timeout=360");
 

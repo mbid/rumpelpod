@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Rust is the source of truth for these API types.
-export type { AgentKind } from "./AgentKind";
 export type { DaemonEvent } from "./DaemonEvent";
 export type { PodInfo } from "./PodInfo";
 export type { ReviewFile } from "./ReviewFile";

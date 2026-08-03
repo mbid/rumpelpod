@@ -22,7 +22,6 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished",
     "onView:rumpelpod.agent"
   ],
   "contributes": {
@@ -61,43 +60,50 @@
         "command": "rumpelpod.refresh",
         "title": "Refresh Active Pod",
         "category": "Rumpelpod",
-        "icon": "$(refresh)"
+        "icon": "$(refresh)",
+        "enablement": "rumpelpod.hasActivePod"
       },
       {
         "command": "rumpelpod.launchAgent",
         "title": "Launch Agent",
         "category": "Rumpelpod",
-        "icon": "$(person)"
+        "icon": "$(person)",
+        "enablement": "rumpelpod.hasActivePod"
       },
       {
         "command": "rumpelpod.openActiveShell",
         "title": "Open Pod Shell",
         "category": "Rumpelpod",
-        "icon": "$(terminal)"
+        "icon": "$(terminal)",
+        "enablement": "rumpelpod.hasActivePod"
       },
       {
         "command": "rumpelpod.mergeActivePod",
         "title": "Merge Active Pod",
         "category": "Rumpelpod",
-        "icon": "$(git-merge)"
+        "icon": "$(git-merge)",
+        "enablement": "rumpelpod.hasActivePod"
       },
       {
         "command": "rumpelpod.addSshKey",
         "title": "Add SSH Key to Active Pod",
         "category": "Rumpelpod",
-        "icon": "$(key)"
+        "icon": "$(key)",
+        "enablement": "rumpelpod.hasActivePod"
       },
       {
         "command": "rumpelpod.stopActivePod",
         "title": "Stop Active Pod",
         "category": "Rumpelpod",
-        "icon": "$(debug-stop)"
+        "icon": "$(debug-stop)",
+        "enablement": "rumpelpod.hasActivePod"
       },
       {
         "command": "rumpelpod.deleteActivePod",
         "title": "Delete Active Pod",
         "category": "Rumpelpod",
-        "icon": "$(trash)"
+        "icon": "$(trash)",
+        "enablement": "rumpelpod.hasActivePod"
       }
     ],
     "menus": {
@@ -135,7 +141,7 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "check": "tsc --noEmit",
-    "package": "npm run check && npm run build && node package.mjs"
+    "package": "npm run check && npm run build && node smoke-native.mjs && node package.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

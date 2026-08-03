@@ -259,8 +259,20 @@ fn review_shows_new_files() {
 }
 
 #[test]
-fn review_json_preserves_utf8_file_names() {
+fn review_json_describes_added_deleted_and_renamed_files() {
     let repo = TestRepo::new();
+    let deleted_file = "deleted.txt";
+    let renamed_file = "renamed-before.txt";
+    let renamed_target = "renamed-after.txt";
+    fs::write(repo.path().join(deleted_file), "delete this\n").expect("write deleted fixture");
+    fs::write(repo.path().join(renamed_file), "rename this\n").expect("write renamed fixture");
+    Command::new("git")
+        .args(["add", deleted_file, renamed_file])
+        .current_dir(repo.path())
+        .success()
+        .expect("stage review fixtures");
+    create_commit(repo.path(), "Add review JSON fixtures");
+
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
     let daemon = TestDaemon::start(&home);
@@ -275,22 +287,36 @@ fn review_json_preserves_utf8_file_names() {
         .expect("Failed to run rumpel enter");
 
     let command = format!(
-        "printf '%s\\n' 'utf8 review content' > '{file_name}' && git add '{file_name}' && git commit --no-verify -m 'Add UTF-8 review file'"
+        "rm '{deleted_file}' && git mv '{renamed_file}' '{renamed_target}' && \
+         printf '%s\\n' 'utf8 review content' > '{file_name}' && \
+         git add -A && git commit --no-verify -m 'Change review files'"
     );
     pod_command(&repo, &daemon)
         .args(["enter", "--create", pod_name, "--", "sh", "-c", &command])
         .success()
-        .expect("Failed to commit UTF-8 file in pod");
+        .expect("Failed to commit review files in pod");
 
     let output = pod_command(&repo, &daemon)
         .args(["review", pod_name, "--json"])
         .success()
-        .expect("rumpel review --json failed for UTF-8 file");
+        .expect("rumpel review --json failed");
     let plan: serde_json::Value =
         serde_json::from_slice(&output).expect("review plan was not JSON");
-    assert_eq!(plan["files"][0]["path"], file_name);
-    assert_eq!(plan["files"][0]["base_exists"], false);
-    assert_eq!(plan["files"][0]["target_exists"], true);
+    let files = plan["files"].as_array().expect("review files array");
+    let file = |path: &str| {
+        files
+            .iter()
+            .find(|file| file["path"] == path)
+            .unwrap_or_else(|| panic!("review plan omitted '{path}': {files:?}"))
+    };
+    for path in [file_name, renamed_target] {
+        assert_eq!(file(path)["base_exists"], false);
+        assert_eq!(file(path)["target_exists"], true);
+    }
+    for path in [deleted_file, renamed_file] {
+        assert_eq!(file(path)["base_exists"], true);
+        assert_eq!(file(path)["target_exists"], false);
+    }
 }
 
 #[test]

@@ -19,10 +19,11 @@ use anyhow::{Context, Result};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+use url::Url;
 
 use crate::daemon::protocol::DaemonClient;
 use crate::daemon::reconnect::ReconnectEvent;
@@ -158,8 +159,14 @@ pub struct SessionParams {
     pub env: Vec<String>,
 }
 
-/// Unix domain socket used to reach the local daemon.
+/// Underlying transport for the WebSocket: TCP through a tunnel/proxy
+/// (used by claude against the in-pod server) or a Unix domain socket
+/// (used by codex against the local daemon).
 pub enum PtyTransport {
+    /// HTTP(S) URL.  We currently only use plain `http://` against
+    /// loopback; TLS is not wired up.
+    Tcp { url: String },
+    /// Path to a Unix domain socket (the daemon's main RPC socket).
     Unix { socket: PathBuf },
 }
 
@@ -295,12 +302,31 @@ fn build_ws_request(
     path: &str,
     token: &str,
 ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
-    let PtyTransport::Unix { .. } = transport;
-    let uri = format!("ws://localhost{path}");
+    let (uri, host) = match transport {
+        PtyTransport::Tcp { url } => {
+            let mut ws_url = Url::parse(url).context("parsing container URL")?;
+            let scheme = match ws_url.scheme() {
+                "http" => "ws",
+                "https" => "wss",
+                other => return Err(anyhow::anyhow!("unexpected scheme: {other}")),
+            };
+            ws_url
+                .set_scheme(scheme)
+                .expect("ws/wss are always valid schemes");
+            ws_url.set_path(path);
+
+            let host = match ws_url.port() {
+                Some(port) => format!("{}:{port}", ws_url.host_str().unwrap_or("localhost")),
+                None => ws_url.host_str().unwrap_or("localhost").to_string(),
+            };
+            (ws_url.into(), host)
+        }
+        PtyTransport::Unix { .. } => (format!("ws://localhost{path}"), "localhost".to_string()),
+    };
 
     tokio_tungstenite::tungstenite::http::Request::builder()
         .uri(uri)
-        .header("Host", "localhost")
+        .header("Host", &host)
         .header("Authorization", format!("Bearer {token}"))
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
@@ -316,11 +342,28 @@ fn build_ws_request(
 /// Open the underlying byte stream.  Returns a boxed trait object so
 /// the WS code path is uniform across TCP and Unix transports.
 async fn open_transport(transport: &PtyTransport) -> Result<Box<dyn WsTransport>> {
-    let PtyTransport::Unix { socket } = transport;
-    let stream = UnixStream::connect(socket)
-        .await
-        .with_context(|| format!("connecting to {}", socket.display()))?;
-    Ok(Box::new(stream))
+    match transport {
+        PtyTransport::Tcp { url } => {
+            let url = Url::parse(url).context("parsing TCP URL")?;
+            let host = url
+                .host_str()
+                .context("missing host in TCP URL")?
+                .to_string();
+            let port = url
+                .port_or_known_default()
+                .context("missing port in TCP URL")?;
+            let stream = TcpStream::connect((host.as_str(), port))
+                .await
+                .with_context(|| format!("connecting to {host}:{port}"))?;
+            Ok(Box::new(stream))
+        }
+        PtyTransport::Unix { socket } => {
+            let stream = UnixStream::connect(socket)
+                .await
+                .with_context(|| format!("connecting to {}", socket.display()))?;
+            Ok(Box::new(stream))
+        }
+    }
 }
 
 /// Connect a WebSocket and send the first control message based on
@@ -665,7 +708,6 @@ async fn read_loop(
                 Ok(PtyControl::Session { .. })
                 | Ok(PtyControl::Attach { .. })
                 | Ok(PtyControl::Resize { .. })
-                | Ok(PtyControl::Terminate)
                 | Err(_) => {}
             },
             Message::Close(_) => break,

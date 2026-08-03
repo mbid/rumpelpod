@@ -14,9 +14,9 @@
 # commit id as long as it is reachable from a ref, which a pushed
 # branch tip always is.
 #
-# When STAGING_DIR is set, the release rumpel binary and native VSIX the
-# pipeline built and tested are copied there afterwards. Running this script
-# on both Linux release architectures produces both Linux extension bundles.
+# When STAGING_DIR is set, the tested rumpel binary and a native VSIX built on
+# the host against the supported glibc baseline are copied there afterwards.
+# Running this script on both Linux architectures produces both Linux bundles.
 
 set -euo pipefail
 
@@ -35,6 +35,7 @@ repo_root=$(cd "$script_dir/.." && pwd)
 # build needs no --build-arg to stay reproducible.
 docker build \
   --file "$repo_root/.devcontainer/Dockerfile" \
+  --target ci \
   --tag rumpelpod-dev \
   "$repo_root"
 
@@ -47,6 +48,9 @@ docker run --detach --name devcontainer \
 
 cleanup() {
   docker rm --force devcontainer >/dev/null 2>&1 || true
+  if [ -n "${vsix_output:-}" ]; then
+    rm -rf "$vsix_output"
+  fi
 }
 trap cleanup EXIT
 
@@ -104,7 +108,14 @@ if [ -n "$STAGING_DIR" ]; then
   docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
     cat "target/$triple/release/rumpel" >"$STAGING_DIR/$name"
   chmod +x "$STAGING_DIR/$name"
-  docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
-    cat vscode/dist/rumpelpod-vscode.vsix \
-    >"$STAGING_DIR/rumpelpod-vscode-$vscode_target.vsix"
+  # The compatibility builder uses host Docker. Stop the sysbox test container
+  # first so both container stacks never compete for the runner at once.
+  docker stop devcontainer >/dev/null
+  vsix_output=$(mktemp -d)
+  DOCKER_BUILDKIT=1 docker build \
+    --file "$repo_root/vscode/Dockerfile.linux" \
+    --output "type=local,dest=$vsix_output" \
+    "$repo_root"
+  cp "$vsix_output/rumpelpod-vscode.vsix" \
+    "$STAGING_DIR/rumpelpod-vscode-$vscode_target.vsix"
 fi

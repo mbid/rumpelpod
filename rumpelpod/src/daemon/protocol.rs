@@ -563,8 +563,7 @@ impl DaemonClient {
         Self::new_unix_with_timeout(socket_path, None)
     }
 
-    /// Variant with a request timeout, intended for shell completion so a
-    /// stalled daemon never hangs the user's prompt.
+    /// Variant for bounded control requests such as shell completion and hooks.
     pub fn new_unix_with_timeout(socket_path: &Path, timeout: Option<Duration>) -> Self {
         let client = reqwest::blocking::Client::builder()
             .unix_socket(socket_path)

@@ -3876,16 +3876,6 @@ impl DaemonServer {
         self.pty_sessions.clone()
     }
 
-    pub(crate) fn connected_pod_endpoint(
-        &self,
-        repo_path: &Path,
-        pod_name: &str,
-    ) -> Option<(String, String)> {
-        self.pod_connections
-            .endpoint(repo_path, pod_name)
-            .map(|endpoint| (endpoint.url, endpoint.token))
-    }
-
     /// Return the Codex inputs owned by a live pod connection without
     /// contacting its backend or probing the pod again.
     pub(crate) fn connected_codex_pod(
@@ -4729,8 +4719,7 @@ pub fn run_daemon() -> Result<()> {
         crate::async_runtime::RUNTIME.spawn(host_event_reader(daemon, host_events_rx));
     }
 
-    let extra_routes = crate::codex::daemon_routes(daemon.clone())
-        .merge(crate::terminal::daemon_routes(daemon.clone()));
+    let extra_routes = crate::codex::daemon_routes(daemon.clone());
     protocol::serve_daemon(daemon, listener, extra_routes);
 }
 

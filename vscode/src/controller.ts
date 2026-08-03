@@ -5,8 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
-import type { AgentKind, PodInfo } from "./generated/protocol";
-import { AGENTS, agentDescription, agentLabel } from "./agents";
+import type { PodInfo } from "./generated/protocol";
+import { AGENTS, agentDescription, agentLabel, type AgentKind } from "./agents";
 import { SshPassphraseRequiredError, type Repository, type RumpelpodModel } from "./model";
 import type { ReviewDocuments } from "./review";
 import type {
@@ -24,8 +24,7 @@ interface ActivePod {
   readonly repository: Repository;
 }
 
-export class RumpelpodController implements vscode.Disposable {
-  private readonly scheduledRefreshes = new Set<NodeJS.Timeout>();
+export class RumpelpodController {
   private active: ActivePod | undefined;
   private agentLaunches = Promise.resolve();
   private modeEntries = Promise.resolve();
@@ -271,7 +270,6 @@ export class RumpelpodController implements vscode.Disposable {
         await this.reviewDocuments.revealEmpty(repository, pod);
       }
     });
-    this.scheduleRefreshes();
   }
 
   public async openPod(repository: Repository, pod: PodInfo): Promise<void> {
@@ -541,19 +539,11 @@ export class RumpelpodController implements vscode.Disposable {
     this.status.text = `$(comment-discussion) ${selected.pod} / ${state}${repositoryState}`;
     this.status.tooltip = statusTooltip(selected, state);
     this.status.show();
-    this.terminals.updateActiveState(
+    this.terminals.updateActiveRepositoryState(
       selected.repository,
       selected.pod,
-      state,
       selected.info?.repo_state ?? "",
     );
-  }
-
-  public dispose(): void {
-    for (const timeout of this.scheduledRefreshes) {
-      clearTimeout(timeout);
-    }
-    this.scheduledRefreshes.clear();
   }
 
   private currentSelection(selected: ActivePod): ActivePod | undefined {
@@ -690,17 +680,6 @@ export class RumpelpodController implements vscode.Disposable {
     return agents.length === 0 ? [this.model.defaultAgent()] : agents;
   }
 
-  private scheduleRefreshes(): void {
-    for (const delay of [1_000, 3_000, 10_000]) {
-      const timeout = setTimeout(() => {
-        this.scheduledRefreshes.delete(timeout);
-        void this.refresh(false).catch((error: unknown) => {
-          this.model.logError(`refreshing newly created pod ${this.active?.pod ?? "unknown"}`, error);
-        });
-      }, delay);
-      this.scheduledRefreshes.add(timeout);
-    }
-  }
 }
 
 function agentActivity(pod: PodInfo, agent: AgentKind): string | undefined {

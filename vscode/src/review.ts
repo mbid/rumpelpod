@@ -8,8 +8,6 @@ import type { Repository } from "./model";
 import { runProcess } from "./process";
 
 const REVIEW_SCHEME = "rumpelpod-review";
-const REVIEW_GENERATIONS_KEY = "rumpelpod.reviewGenerations";
-const STORED_REVIEWS_KEY = "rumpelpod.openReviews";
 const BINARY_FILE_MESSAGE = "Binary file cannot be displayed by the text diff editor.\n";
 
 interface ReviewDocumentDescriptor {
@@ -35,18 +33,6 @@ interface ReviewSnapshot {
   readonly source: string;
 }
 
-interface StoredReview {
-  readonly pod: string;
-  readonly repository: string;
-  readonly resources: readonly StoredReviewResource[];
-  readonly source: string;
-}
-
-interface StoredReviewResource {
-  readonly modified: string;
-  readonly original: string;
-}
-
 interface ReviewRecord {
   readonly current: ReviewTab;
   readonly pending: ReviewSnapshot | undefined;
@@ -66,19 +52,17 @@ interface OpenMultiDiffEditorOptions {
 export class ReviewDocuments implements vscode.TextDocumentContentProvider, vscode.Disposable {
   private readonly registration: vscode.Disposable;
   private readonly tabSubscription: vscode.Disposable;
-  private readonly closeTimers = new Map<string, NodeJS.Timeout>();
   private readonly content = new Map<string, Promise<string>>();
   private readonly reviews = new Map<string, ReviewRecord>();
   private disposed = false;
   private operations = Promise.resolve();
 
   public constructor(
-    private readonly workspaceState: vscode.Memento,
     private readonly reportError: (context: string, error: unknown) => void,
   ) {
     this.registration = vscode.workspace.registerTextDocumentContentProvider(REVIEW_SCHEME, this);
     this.tabSubscription = vscode.window.tabGroups.onDidChangeTabs((event) => {
-      this.scheduleClosedReviews(event.closed);
+      this.forgetClosedEmptyReviews(event.closed);
       void this.applyPendingReview().catch((error: unknown) => {
         this.reportError("refreshing the activated pod review", error);
       });
@@ -119,8 +103,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     plan: ReviewPlan,
     refreshOnly: boolean,
   ): Promise<void> {
-    const generation = this.reviewGeneration(repository.root, pod);
-    const source = populatedReviewUri(repository, pod, plan, generation);
+    const source = populatedReviewUri(repository, pod, plan);
     const snapshot = {
       pod,
       repository: repository.root,
@@ -149,8 +132,7 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     pod: string,
     refreshOnly: boolean,
   ): Promise<void> {
-    const generation = this.reviewGeneration(repository.root, pod);
-    const source = emptyReviewUri(repository, pod, generation);
+    const source = emptyReviewUri(repository, pod);
     const snapshot = {
       pod,
       repository: repository.root,
@@ -165,18 +147,9 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     const record = this.reviews.get(key);
     let current = record?.current;
     let openTab = current === undefined ? undefined : this.findOpenTab(current);
-    let restoredShell: vscode.Tab | undefined;
     if (!refreshOnly && openTab === undefined) {
-      const restoredTabs = this.findPodTabs(snapshot.repository, snapshot.pod);
-      let exact = restoredTabs.find((tab) => isSnapshotReviewTab(tab, snapshot));
-      const storedRestored = exact === undefined
-        ? this.findStoredRestoredTab(snapshot)
-        : undefined;
-      if (snapshot.resources.length === 0) {
-        exact = storedRestored;
-      } else {
-        restoredShell = storedRestored;
-      }
+      const restoredTabs = this.findPodTabs(snapshot);
+      const exact = restoredTabs.find((tab) => isSnapshotReviewTab(tab, snapshot));
       const staleTabs = restoredTabs.filter((tab) => tab !== exact);
       if (staleTabs.length > 0) {
         await vscode.window.tabGroups.close(staleTabs, true);
@@ -189,30 +162,8 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
         openTab = exact;
         this.reviews.set(key, { current, pending: record?.pending });
       }
-      if (restoredShell !== undefined) {
-        await vscode.window.tabGroups.close(restoredShell, true);
-        const shellIsOpen = vscode.window.tabGroups.all
-          .flatMap((group) => group.tabs)
-          .includes(restoredShell);
-        if (shellIsOpen) {
-          throw new Error(`VS Code did not close the restored review for pod '${snapshot.pod}'`);
-        }
-        this.evictTab(restoredShell);
-        await this.advanceReviewGeneration(snapshot.repository, snapshot.pod);
-        snapshot = reviewSnapshotWithGeneration(
-          snapshot,
-          this.reviewGeneration(snapshot.repository, snapshot.pod),
-        );
-      }
     }
     const currentIsOpen = openTab !== undefined;
-    if (!refreshOnly && current !== undefined && !currentIsOpen) {
-      await this.advanceReviewGeneration(snapshot.repository, snapshot.pod);
-      snapshot = reviewSnapshotWithGeneration(
-        snapshot,
-        this.reviewGeneration(snapshot.repository, snapshot.pod),
-      );
-    }
     if (current !== undefined && openTab !== undefined && openTab !== current.tab) {
       current = { ...current, tab: openTab };
       this.reviews.set(key, { current, pending: record?.pending });
@@ -223,25 +174,12 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       }
       if (current.source === snapshot.source) {
         this.reviews.set(key, { current, pending: undefined });
-        await this.rememberReview(snapshot);
         return;
       }
       if (!this.isActive(current)) {
         this.reviews.set(key, { current, pending: snapshot });
         return;
       }
-    }
-
-    if (
-      !refreshOnly &&
-      current !== undefined &&
-      openTab !== undefined &&
-      current.source === snapshot.source
-    ) {
-      const tab = await this.focus(openTab, snapshot);
-      this.reviews.set(key, { current: { ...snapshot, tab }, pending: undefined });
-      await this.rememberReview(snapshot);
-      return;
     }
 
     if (current !== undefined && (current.source !== snapshot.source || !currentIsOpen)) {
@@ -252,7 +190,6 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       await this.closeDisposedTab(tab);
     }
     this.reviews.set(key, { current: { ...snapshot, tab }, pending: undefined });
-    await this.rememberReview(snapshot);
   }
 
   private async show(snapshot: ReviewSnapshot): Promise<vscode.Tab> {
@@ -265,109 +202,17 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
         title: snapshot.pod,
       } satisfies OpenMultiDiffEditorOptions,
     );
-    return this.normalizeActive(snapshot, undefined);
-  }
-
-  private async focus(tab: vscode.Tab, snapshot: ReviewSnapshot): Promise<vscode.Tab> {
-    const focused = await this.show(snapshot);
-    if (focused === tab) {
-      return focused;
-    }
-    const openTabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs);
-    if (!openTabs.includes(tab)) {
-      if (!isSnapshotReviewTab(focused, snapshot)) {
-        throw new Error(`VS Code replaced the review for pod '${snapshot.pod}' with another editor`);
-      }
-      return focused;
-    }
-    if (!isSnapshotReviewTab(focused, snapshot)) {
-      throw new Error(`VS Code opened another editor while focusing pod '${snapshot.pod}'`);
-    }
-    await vscode.window.tabGroups.close(focused, true);
-    const remainingTabs = vscode.window.tabGroups.all.flatMap((group) => group.tabs);
-    if (remainingTabs.includes(focused)) {
-      throw new Error(`VS Code did not close a duplicate review for pod '${snapshot.pod}'`);
-    }
-    await this.activateTab(tab, `review for pod '${snapshot.pod}'`);
-    return this.normalizeActive(snapshot, tab);
-  }
-
-  private async activateTab(
-    tab: vscode.Tab,
-    description: string,
-    matches: (active: vscode.Tab) => boolean = (active) => active === tab,
-  ): Promise<void> {
-    if (tab.group !== vscode.window.tabGroups.activeTabGroup) {
-      await vscode.commands.executeCommand(focusGroupCommand(tab.group.viewColumn));
-      if (tab.group !== vscode.window.tabGroups.activeTabGroup) {
-        throw new Error(`VS Code did not focus the editor group containing the ${description}`);
-      }
-    }
-    // Pod selection originates in the sidebar webview, which otherwise keeps
-    // navigation commands from changing the editor group's active tab.
-    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
-    const index = tab.group.tabs.indexOf(tab);
-    if (index < 0) {
-      throw new Error(`VS Code lost the ${description} while focusing it`);
-    }
-    if (index < 9) {
-      await vscode.commands.executeCommand(`workbench.action.openEditorAtIndex${index + 1}`);
-      const focused = vscode.window.tabGroups.activeTabGroup.activeTab;
-      if (focused === undefined || !matches(focused)) {
-        throw new Error(`VS Code did not focus the ${description}`);
-      }
-      return;
-    }
-    const active = tab.group.activeTab;
-    if (active === undefined) {
-      throw new Error(`VS Code has no active editor while focusing the ${description}`);
-    }
-    const activeIndex = tab.group.tabs.indexOf(active);
-    if (activeIndex < 0) {
-      throw new Error(`VS Code lost its active editor while focusing the ${description}`);
-    }
-    const steps = (index - activeIndex + tab.group.tabs.length) % tab.group.tabs.length;
-    for (let step = 0; step < steps; step += 1) {
-      await vscode.commands.executeCommand("workbench.action.nextEditor");
-    }
-    const focused = vscode.window.tabGroups.activeTabGroup.activeTab;
-    if (focused === undefined || !matches(focused)) {
-      throw new Error(`VS Code did not focus the ${description}`);
-    }
-  }
-
-  private async normalizeActive(
-    snapshot: ReviewSnapshot,
-    expected: vscode.Tab | undefined,
-  ): Promise<vscode.Tab> {
     let tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    // Multi-diff tabs can render as previews before the tab API reports that state.
-    await vscode.commands.executeCommand("workbench.action.keepEditor");
-    tab = vscode.window.tabGroups.activeTabGroup.activeTab;
     if (tab?.isPinned === true) {
       await vscode.commands.executeCommand("workbench.action.unpinEditor");
       tab = vscode.window.tabGroups.activeTabGroup.activeTab;
     }
-    const matchesReview = tab !== undefined && (
-      expected === undefined
-        ? isSnapshotReviewTab(tab, snapshot)
-        : tab === expected
-    );
     if (
       tab === undefined ||
       tab.isPinned ||
-      tab.isPreview ||
-      !matchesReview
+      !isSnapshotReviewTab(tab, snapshot)
     ) {
-      const activeLabel = tab?.label ?? "none";
-      const expectedLabel = expected?.label ?? "none";
-      const sameTab = tab !== undefined && tab === expected;
-      const snapshotMatch = tab !== undefined && isSnapshotReviewTab(tab, snapshot);
-      throw new Error(
-        `VS Code did not open the review for pod '${snapshot.pod}' ` +
-          `(active '${activeLabel}', expected '${expectedLabel}', ` +
-          `same tab ${sameTab}, snapshot match ${snapshotMatch})`,
-      );
+      throw new Error(`VS Code did not open the review for pod '${snapshot.pod}'`);
     }
     return tab;
   }
@@ -378,143 +223,23 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       const current = this.reviews.get(key)?.current;
       if (current !== undefined) {
         await this.closeReviewNow(key, current);
-        return;
       }
-      const stored = this.storedReview(repository.root, pod);
-      const restored = stored === undefined ? undefined : this.findStoredRestoredTab(stored);
-      const tabs = [
-        ...this.findPodTabs(repository.root, pod),
-        ...(restored === undefined ? [] : [restored]),
-      ];
-      if (tabs.length > 0) {
-        await this.closeTabs(
-          (tab) => tabs.includes(tab) || isPodReviewTab(tab, repository.root, pod),
-          pod,
-          stored,
-        );
-        for (const tab of tabs) {
-          this.evictTab(tab);
-        }
-      }
-      await this.forgetReview(repository.root, pod);
     });
   }
 
   private async closeReviewNow(key: string, review: ReviewTab): Promise<void> {
     this.reviews.delete(key);
     const tabs = vscode.window.tabGroups.all.flatMap((group) =>
-      group.tabs.filter((tab) =>
-        isSameReviewTab(tab, review) ||
-        isPodReviewTab(tab, review.repository, review.pod)
-      ),
-    );
-    if (tabs.length > 0) {
-      await this.closeTabs(
-        (tab) =>
-          isSameReviewTab(tab, review) ||
-          isPodReviewTab(tab, review.repository, review.pod),
-        review.pod,
-        review,
-      );
-    }
-    this.evict(review);
-    await this.forgetReview(review.repository, review.pod);
-  }
-
-  private async closeTabs(
-    matches: (tab: vscode.Tab) => boolean,
-    pod: string,
-    snapshot: ReviewSnapshot | undefined,
-  ): Promise<void> {
-    const tabs = vscode.window.tabGroups.all
-      .flatMap((group) => group.tabs)
-      .filter(matches);
-    const active = vscode.window.tabGroups.activeTabGroup.activeTab;
-    const activeReview = tabs.find((tab) => tab === active);
-    const background = tabs.filter((tab) => tab !== activeReview);
-    if (background.length > 0) {
-      await vscode.window.tabGroups.close(background, true);
-    }
-    if (activeReview !== undefined) {
-      if (vscode.window.tabGroups.activeTabGroup.activeTab !== activeReview) {
-        throw new Error(`VS Code changed editors while closing the review for pod '${pod}'`);
-      }
-      if (snapshot !== undefined && isSnapshotReviewTab(activeReview, snapshot)) {
-        await this.focus(activeReview, snapshot);
-      }
-      await this.closeActiveReview(matches, pod);
-    }
-    let remaining = vscode.window.tabGroups.all
-      .flatMap((group) => group.tabs)
-      .filter(matches);
-    for (const tab of remaining) {
-      const tabIsOpen = vscode.window.tabGroups.all
-        .flatMap((group) => group.tabs)
-        .includes(tab);
-      if (!tabIsOpen) {
-        continue;
-      }
-      const previouslyActive = vscode.window.tabGroups.activeTabGroup.activeTab;
-      if (snapshot !== undefined && isSnapshotReviewTab(tab, snapshot)) {
-        await this.focus(tab, snapshot);
-      } else {
-        await this.activateTab(tab, `review for pod '${pod}'`);
-      }
-      await this.closeActiveReview(matches, pod);
-      if (previouslyActive !== undefined) {
-        const previousIsOpen = vscode.window.tabGroups.all
-          .flatMap((group) => group.tabs)
-          .includes(previouslyActive);
-        if (previousIsOpen) {
-          await this.activateTab(previouslyActive, "previously active editor");
-        }
-      }
-    }
-    remaining = vscode.window.tabGroups.all
-      .flatMap((group) => group.tabs)
-      .filter(matches);
-    if (remaining.length > 0) {
-      throw new Error(`VS Code did not close the review for pod '${pod}'`);
-    }
-  }
-
-  private async closeActiveReview(
-    matches: (tab: vscode.Tab) => boolean,
-    pod: string,
-  ): Promise<void> {
-    // code-server ignores editor commands while its sidebar webview still owns focus.
-    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
-    await vscode.commands.executeCommand("workbench.action.keepEditor");
-    let active = vscode.window.tabGroups.activeTabGroup.activeTab;
-    if (active?.isPinned === true) {
-      await vscode.commands.executeCommand("workbench.action.unpinEditor");
-      active = vscode.window.tabGroups.activeTabGroup.activeTab;
-    }
-    if (active === undefined || !matches(active)) {
-      throw new Error(`VS Code changed editors while closing the review for pod '${pod}'`);
-    }
-    await vscode.commands.executeCommand("workbench.action.closeActiveEditor");
-  }
-
-  public async clearPlaceholders(): Promise<void> {
-    return this.enqueue(() => this.clearPlaceholdersNow());
-  }
-
-  private async clearPlaceholdersNow(): Promise<void> {
-    const tabs = vscode.window.tabGroups.all.flatMap((group) =>
-      group.tabs.filter((tab) => isReviewPlaceholderTab(tab)),
+      group.tabs.filter((tab) => isSameReviewTab(tab, review)),
     );
     if (tabs.length > 0) {
       await vscode.window.tabGroups.close(tabs, true);
     }
+    this.evict(review);
   }
 
   public dispose(): void {
     this.disposed = true;
-    for (const timer of this.closeTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.closeTimers.clear();
     this.reviews.clear();
     this.registration.dispose();
     this.tabSubscription.dispose();
@@ -546,7 +271,6 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
           await this.closeDisposedTab(tab);
         }
         this.reviews.set(key, { current: { ...pending, tab }, pending: undefined });
-        await this.rememberReview(pending);
       } catch (error) {
         if (!this.disposed && !this.reviews.has(key)) {
           this.reviews.set(key, { current: record.current, pending });
@@ -604,45 +328,15 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     }
   }
 
-  private scheduleClosedReviews(closedTabs: readonly vscode.Tab[]): void {
-    // Browser reload reports teardown as tab closures before disposing the extension.
-    if (vscode.window.tabGroups.all.every((group) => group.tabs.length === 0)) {
-      return;
-    }
+  private forgetClosedEmptyReviews(closedTabs: readonly vscode.Tab[]): void {
     for (const [key, record] of this.reviews) {
-      if (!closedTabs.some((tab) => isSameReviewTab(tab, record.current))) {
-        continue;
+      if (
+        record.current.resources.length === 0 &&
+        closedTabs.includes(record.current.tab)
+      ) {
+        this.reviews.delete(key);
+        this.evict(record.current);
       }
-      const existing = this.closeTimers.get(key);
-      if (existing !== undefined) {
-        clearTimeout(existing);
-      }
-      const closed = record.current;
-      const timer = setTimeout(() => {
-        this.closeTimers.delete(key);
-        if (this.disposed) {
-          return;
-        }
-        void this.enqueue(async () => {
-          if (this.reviews.get(key)?.current !== closed) {
-            return;
-          }
-          const matchingTab = this.findOpenTab(closed) ?? this.findStoredRestoredTab(closed);
-          if (
-            matchingTab !== undefined ||
-            vscode.window.tabGroups.all.every((group) => group.tabs.length === 0)
-          ) {
-            return;
-          }
-          this.reviews.delete(key);
-          this.evict(closed);
-          await this.forgetReview(closed.repository, closed.pod);
-          await this.advanceReviewGeneration(closed.repository, closed.pod);
-        }).catch((error: unknown) => {
-          this.reportError("forgetting a closed pod review", error);
-        });
-      }, 500);
-      this.closeTimers.set(key, timer);
     }
   }
 
@@ -651,95 +345,10 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     return tabs.find((tab) => isSameReviewTab(tab, review));
   }
 
-  private findPodTabs(repository: string, pod: string): readonly vscode.Tab[] {
+  private findPodTabs(snapshot: ReviewSnapshot): readonly vscode.Tab[] {
     return vscode.window.tabGroups.all
       .flatMap((group) => group.tabs)
-      .filter((tab) => isPodReviewTab(tab, repository, pod));
-  }
-
-  private findStoredRestoredTab(snapshot: ReviewSnapshot): vscode.Tab | undefined {
-    const stored = Object.values(this.storedReviews()).filter((review) =>
-      review.pod === snapshot.pod && review.resources.length === snapshot.resources.length
-    );
-    if (
-      stored.length !== 1 ||
-      !storedReviewMatchesSnapshot(stored[0], snapshot)
-    ) {
-      return undefined;
-    }
-    const candidates = vscode.window.tabGroups.all
-      .flatMap((group) => group.tabs)
-      .filter((tab) => isOpaqueRestoredReviewTab(tab, snapshot));
-    return candidates.length === 1 ? candidates[0] : undefined;
-  }
-
-  private storedReview(repository: string, pod: string): ReviewSnapshot | undefined {
-    const stored = this.storedReviews()[reviewKey(repository, pod)];
-    return stored === undefined ? undefined : snapshotFromStoredReview(stored);
-  }
-
-  private storedReviews(): Readonly<Record<string, StoredReview>> {
-    const value = this.workspaceState.get<unknown>(STORED_REVIEWS_KEY);
-    if (value === undefined) {
-      return {};
-    }
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw new Error("invalid stored Rumpelpod review state");
-    }
-    const reviews: Record<string, StoredReview> = {};
-    for (const [key, review] of Object.entries(value)) {
-      if (!isStoredReview(review)) {
-        throw new Error(`invalid stored Rumpelpod review '${key}'`);
-      }
-      reviews[key] = review;
-    }
-    return reviews;
-  }
-
-  private async rememberReview(snapshot: ReviewSnapshot): Promise<void> {
-    const key = reviewKey(snapshot.repository, snapshot.pod);
-    const timer = this.closeTimers.get(key);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.closeTimers.delete(key);
-    }
-    const reviews = { ...this.storedReviews() };
-    reviews[key] = storedReviewFromSnapshot(snapshot);
-    await this.workspaceState.update(STORED_REVIEWS_KEY, reviews);
-  }
-
-  private async forgetReview(repository: string, pod: string): Promise<void> {
-    const reviews = { ...this.storedReviews() };
-    delete reviews[reviewKey(repository, pod)];
-    await this.workspaceState.update(STORED_REVIEWS_KEY, reviews);
-  }
-
-  private reviewGeneration(repository: string, pod: string): number {
-    const generations = this.workspaceState.get<unknown>(REVIEW_GENERATIONS_KEY);
-    if (generations === undefined) {
-      return 0;
-    }
-    if (typeof generations !== "object" || generations === null || Array.isArray(generations)) {
-      throw new Error("invalid stored Rumpelpod review generations");
-    }
-    const generation = (generations as Record<string, unknown>)[reviewKey(repository, pod)];
-    if (generation === undefined) {
-      return 0;
-    }
-    if (!Number.isSafeInteger(generation) || (generation as number) < 0) {
-      throw new Error(`invalid stored Rumpelpod review generation for pod '${pod}'`);
-    }
-    return generation as number;
-  }
-
-  private async advanceReviewGeneration(repository: string, pod: string): Promise<void> {
-    const value = this.workspaceState.get<unknown>(REVIEW_GENERATIONS_KEY);
-    if (value !== undefined && (typeof value !== "object" || value === null || Array.isArray(value))) {
-      throw new Error("invalid stored Rumpelpod review generations");
-    }
-    const generations = { ...(value as Record<string, unknown> | undefined) };
-    generations[reviewKey(repository, pod)] = this.reviewGeneration(repository, pod) + 1;
-    await this.workspaceState.update(REVIEW_GENERATIONS_KEY, generations);
+      .filter((tab) => isPodReviewTab(tab, snapshot.repository, snapshot.pod));
   }
 
   private isActive(review: ReviewTab): boolean {
@@ -769,16 +378,14 @@ function isSnapshotReviewTab(tab: vscode.Tab, snapshot: ReviewSnapshot): boolean
   if (diffs.length === 0) {
     return true;
   }
-  const actual = diffs.map((diff) => reviewResourceKey(diff.original, diff.modified)).sort();
-  const expected = snapshot.resources
-    .map((resource) => reviewResourceKey(resource.originalUri, resource.modifiedUri))
-    .sort();
-  return actual.every((resource, index) => resource === expected[index]);
-}
-
-function isReviewPlaceholderTab(tab: vscode.Tab): boolean {
-  const input = tab.input;
-  return input instanceof vscode.TabInputText && input.uri.scheme === REVIEW_SCHEME;
+  return diffs.every(
+    (diff, index) => {
+      const resource = snapshot.resources[index];
+      return resource !== undefined &&
+        diff.original.toString() === resource.originalUri.toString() &&
+        diff.modified.toString() === resource.modifiedUri.toString();
+    },
+  );
 }
 
 function isPodReviewTab(tab: vscode.Tab, repository: string, pod: string): boolean {
@@ -792,140 +399,8 @@ function isPodReviewTab(tab: vscode.Tab, repository: string, pod: string): boole
   );
 }
 
-function isEmptyReviewTab(tab: vscode.Tab, pod: string): boolean {
-  return isPodTabLabel(tab.label, pod) && multiDiffs(tab.input)?.length === 0;
-}
-
-function isOpaqueRestoredReviewTab(tab: vscode.Tab, snapshot: ReviewSnapshot): boolean {
-  const count = snapshot.resources.length;
-  const labelMatches = tab.label === snapshot.pod ||
-    tab.label === `${snapshot.pod} (${count} file)` ||
-    tab.label === `${snapshot.pod} (${count} files)`;
-  return labelMatches && multiDiffs(tab.input)?.length === 0;
-}
-
 function isPodTabLabel(label: string, pod: string): boolean {
   return label === pod || label.startsWith(`${pod} (`);
-}
-
-function reviewResourceKey(original: vscode.Uri, modified: vscode.Uri): string {
-  return JSON.stringify([original.toString(), modified.toString()]);
-}
-
-function reviewSnapshotWithGeneration(
-  snapshot: ReviewSnapshot,
-  generation: number,
-): ReviewSnapshot {
-  const uri = vscode.Uri.parse(snapshot.source);
-  let query: unknown;
-  try {
-    query = JSON.parse(decodeURIComponent(uri.query));
-  } catch (error) {
-    throw new Error(`invalid Rumpelpod review source: ${snapshot.source}`, { cause: error });
-  }
-  if (typeof query !== "object" || query === null || Array.isArray(query)) {
-    throw new Error(`invalid Rumpelpod review source: ${snapshot.source}`);
-  }
-  return {
-    ...snapshot,
-    source: uri.with({
-      query: encodeURIComponent(JSON.stringify({ ...query, generation })),
-    }).toString(),
-  };
-}
-
-function storedReviewFromSnapshot(snapshot: ReviewSnapshot): StoredReview {
-  return {
-    pod: snapshot.pod,
-    repository: snapshot.repository,
-    resources: snapshot.resources.map((resource) => ({
-      modified: resource.modifiedUri.toString(),
-      original: resource.originalUri.toString(),
-    })),
-    source: snapshot.source,
-  };
-}
-
-function snapshotFromStoredReview(review: StoredReview): ReviewSnapshot {
-  return {
-    pod: review.pod,
-    repository: review.repository,
-    resources: review.resources.map((resource) => ({
-      modifiedUri: vscode.Uri.parse(resource.modified),
-      originalUri: vscode.Uri.parse(resource.original),
-    })),
-    source: review.source,
-  };
-}
-
-function storedReviewMatchesSnapshot(
-  stored: StoredReview | undefined,
-  snapshot: ReviewSnapshot,
-): boolean {
-  if (stored === undefined) {
-    return false;
-  }
-  const actual = stored.resources
-    .map((resource) => JSON.stringify([resource.original, resource.modified]))
-    .sort();
-  const expected = snapshot.resources
-    .map((resource) => reviewResourceKey(resource.originalUri, resource.modifiedUri))
-    .sort();
-  return stored.pod === snapshot.pod &&
-    stored.repository === snapshot.repository &&
-    actual.length === expected.length &&
-    actual.every((resource, index) => resource === expected[index]);
-}
-
-function isStoredReview(value: unknown): value is StoredReview {
-  return typeof value === "object" &&
-    value !== null &&
-    "pod" in value &&
-    typeof value.pod === "string" &&
-    "repository" in value &&
-    typeof value.repository === "string" &&
-    "source" in value &&
-    typeof value.source === "string" &&
-    "resources" in value &&
-    Array.isArray(value.resources) &&
-    value.resources.every(isStoredReviewResource);
-}
-
-function isStoredReviewResource(value: unknown): value is StoredReviewResource {
-  return typeof value === "object" &&
-    value !== null &&
-    "modified" in value &&
-    typeof value.modified === "string" &&
-    "original" in value &&
-    typeof value.original === "string";
-}
-
-function focusGroupCommand(viewColumn: vscode.ViewColumn): string {
-  switch (viewColumn) {
-    case vscode.ViewColumn.Active:
-      throw new Error("an editor tab resolved to the symbolic active group");
-    case vscode.ViewColumn.Beside:
-      throw new Error("an editor tab resolved to the symbolic beside group");
-    case vscode.ViewColumn.One:
-      return "workbench.action.focusFirstEditorGroup";
-    case vscode.ViewColumn.Two:
-      return "workbench.action.focusSecondEditorGroup";
-    case vscode.ViewColumn.Three:
-      return "workbench.action.focusThirdEditorGroup";
-    case vscode.ViewColumn.Four:
-      return "workbench.action.focusFourthEditorGroup";
-    case vscode.ViewColumn.Five:
-      return "workbench.action.focusFifthEditorGroup";
-    case vscode.ViewColumn.Six:
-      return "workbench.action.focusSixthEditorGroup";
-    case vscode.ViewColumn.Seven:
-      return "workbench.action.focusSeventhEditorGroup";
-    case vscode.ViewColumn.Eight:
-      return "workbench.action.focusEighthEditorGroup";
-    case vscode.ViewColumn.Nine:
-      return "workbench.action.focusLastEditorGroup";
-  }
-  throw new Error(`unknown editor view column: ${viewColumn}`);
 }
 
 function reviewKey(repository: string, pod: string): string {
@@ -952,15 +427,12 @@ function reviewRepository(uri: vscode.Uri): string | undefined {
   return decodeDescriptor(uri).repository;
 }
 
-function emptyReviewUri(repository: Repository, pod: string, generation: number): vscode.Uri {
+function emptyReviewUri(repository: Repository, pod: string): vscode.Uri {
   return vscode.Uri.from({
     scheme: REVIEW_SCHEME,
     authority: "empty",
     path: `/${pod}`,
-    query: encodeURIComponent(JSON.stringify({
-      generation,
-      repository: repository.root,
-    })),
+    query: encodeURIComponent(repository.root),
   });
 }
 
@@ -968,7 +440,6 @@ function populatedReviewUri(
   repository: Repository,
   pod: string,
   plan: ReviewPlan,
-  generation: number,
 ): vscode.Uri {
   return vscode.Uri.from({
     scheme: REVIEW_SCHEME,
@@ -976,7 +447,6 @@ function populatedReviewUri(
     path: `/${pod}`,
     query: encodeURIComponent(JSON.stringify({
       base: plan.base,
-      generation,
       repository: repository.root,
       target: plan.target,
     })),

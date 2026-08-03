@@ -1475,7 +1475,6 @@ async function main() {
             originalContent,
             finalPodContent,
         );
-        await assertOpenReviews(page, podName, [podName, createdPodName]);
         await assertSidebarAndDiffGeometry(page, restoredView.terminal, restoredDiff);
         assert.equal(
             await restoredView.frame.locator("#codex-terminal .xterm:visible").count(),

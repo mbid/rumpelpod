@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rumpelpod::daemon::protocol::{DaemonEvent, PodInfo};
 use rumpelpod::review::ReviewPlan;
-use rumpelpod::vscode::AgentKind;
 use ts_rs::{Config, TS};
 
 const LINUX_RUMPEL_TARGETS: [(&str, &str); 2] = [
@@ -50,22 +49,11 @@ fn run() -> Result<()> {
     let repo_root = tools::repo_root()?;
     let generated = repo_root.join("vscode/src/generated");
     let vscode_dir = repo_root.join("vscode");
+    check_extension_version(&vscode_dir)?;
 
     if args.check {
         check_types(&generated)?;
-        install_npm_dependencies(&vscode_dir)?;
-        run_command(
-            Command::new("npm")
-                .args(["run", "check"])
-                .current_dir(&vscode_dir),
-            "checking the VS Code extension",
-        )?;
-        run_command(
-            Command::new("npm")
-                .args(["run", "package"])
-                .current_dir(&vscode_dir),
-            "packaging the VS Code extension",
-        )?;
+        package_extension(&vscode_dir)?;
         return Ok(());
     }
 
@@ -74,13 +62,7 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
-    install_npm_dependencies(&vscode_dir)?;
-    run_command(
-        Command::new("npm")
-            .args(["run", "package"])
-            .current_dir(&vscode_dir),
-        "packaging the VS Code extension",
-    )?;
+    package_extension(&vscode_dir)?;
 
     for (target, _) in LINUX_RUMPEL_TARGETS {
         run_command(
@@ -116,7 +98,6 @@ fn run() -> Result<()> {
     let rumpel = install_rumpel(&rumpel, &repo_root)?;
 
     let home = dirs::home_dir().context("locating the home directory")?;
-    remove_legacy_vscode_password(&home)?;
     let prepare_demo = home.join(".local/lib/rumpelpod/prepare-vscode-demo.sh");
     install_runtime_file(
         &repo_root.join(".devcontainer/prepare-vscode-demo.sh"),
@@ -188,18 +169,6 @@ fn run() -> Result<()> {
     let workspace = workspace.display();
     println!("rumpelpod VS Code is serving {workspace} on port 3000");
     Ok(())
-}
-
-fn remove_legacy_vscode_password(home: &Path) -> Result<()> {
-    let password = home.join(".config/rumpelpod/vscode-password");
-    match std::fs::remove_file(&password) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => {
-            let password = password.display();
-            Err(error).with_context(|| format!("removing obsolete VS Code password {password}"))
-        }
-    }
 }
 
 fn install_runtime_file(source: &Path, destination: &Path, mode: u32) -> Result<()> {
@@ -342,6 +311,61 @@ fn install_npm_dependencies(vscode_dir: &Path) -> Result<()> {
     )
 }
 
+fn check_extension_version(vscode_dir: &Path) -> Result<()> {
+    let expected = rumpelpod::PACKAGE_VERSION;
+    let package_path = vscode_dir.join("package.json");
+    let package = read_json(&package_path)?;
+    check_json_version(&package_path, &package, "/version", expected)?;
+
+    let lock_path = vscode_dir.join("package-lock.json");
+    let lock = read_json(&lock_path)?;
+    check_json_version(&lock_path, &lock, "/version", expected)?;
+    check_json_version(&lock_path, &lock, "/packages//version", expected)?;
+    Ok(())
+}
+
+fn read_json(path: &Path) -> Result<serde_json::Value> {
+    let source = std::fs::read_to_string(path).with_context(|| {
+        let path = path.display();
+        format!("reading {path}")
+    })?;
+    serde_json::from_str(&source).with_context(|| {
+        let path = path.display();
+        format!("parsing {path}")
+    })
+}
+
+fn check_json_version(
+    path: &Path,
+    value: &serde_json::Value,
+    pointer: &str,
+    expected: &str,
+) -> Result<()> {
+    let Some(actual) = value.pointer(pointer).and_then(serde_json::Value::as_str) else {
+        let path = path.display();
+        return Err(anyhow::anyhow!(
+            "{path} has no string at JSON pointer {pointer}"
+        ));
+    };
+    if actual != expected {
+        let path = path.display();
+        return Err(anyhow::anyhow!(
+            "VS Code extension version {actual} in {path} does not match Cargo version {expected}"
+        ));
+    }
+    Ok(())
+}
+
+fn package_extension(vscode_dir: &Path) -> Result<()> {
+    install_npm_dependencies(vscode_dir)?;
+    run_command(
+        Command::new("npm")
+            .args(["run", "package"])
+            .current_dir(vscode_dir),
+        "packaging the VS Code extension",
+    )
+}
+
 fn configure_user_bus(command: &mut Command) {
     let uid = unsafe { libc::getuid() };
     let runtime_dir = format!("/run/user/{uid}");
@@ -377,7 +401,6 @@ fn generate_types(output: &Path) -> Result<()> {
     PodInfo::export_all(&config).context("generating PodInfo TypeScript bindings")?;
     DaemonEvent::export_all(&config).context("generating DaemonEvent TypeScript bindings")?;
     ReviewPlan::export_all(&config).context("generating ReviewPlan TypeScript bindings")?;
-    AgentKind::export_all(&config).context("generating AgentKind TypeScript bindings")?;
     normalize_generated_types(output)?;
 
     std::fs::write(
@@ -387,7 +410,6 @@ fn generate_types(output: &Path) -> Result<()> {
             "// SPDX-License-Identifier: Apache-2.0\n",
             "\n",
             "// Rust is the source of truth for these API types.\n",
-            "export type { AgentKind } from \"./AgentKind\";\n",
             "export type { DaemonEvent } from \"./DaemonEvent\";\n",
             "export type { PodInfo } from \"./PodInfo\";\n",
             "export type { ReviewFile } from \"./ReviewFile\";\n",

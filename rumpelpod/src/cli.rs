@@ -352,10 +352,6 @@ pub enum Command {
     #[command(hide = true)]
     Daemon,
 
-    /// Prepare a terminal session for an editor integration (internal)
-    #[command(name = "editor-session", hide = true)]
-    EditorSession(EditorSessionCommand),
-
     /// Run the in-pod tunnel server (internal, started by daemon via kubectl exec)
     #[command(hide = true)]
     TunnelServer,
@@ -492,24 +488,6 @@ pub struct EnterCommand {
     /// Command to run inside the pod (default: interactive shell)
     #[arg(last = true, value_name = "COMMAND")]
     pub command: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum EditorTerminalKind {
-    Claude,
-    Codex,
-    Grok,
-    Pi,
-    Shell,
-}
-
-#[derive(Args, Debug)]
-pub struct EditorSessionCommand {
-    #[arg(value_enum)]
-    pub kind: EditorTerminalKind,
-
-    #[arg(value_parser = validate_pod_name)]
-    pub name: String,
 }
 
 #[derive(Args)]

@@ -5,8 +5,7 @@ import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
 import type * as NodePty from "node-pty";
 
-import type { AgentKind } from "./generated/protocol";
-import { AGENTS, agentLabel, isAgentKind } from "./agents";
+import { AGENTS, agentLabel, isAgentKind, type AgentKind } from "./agents";
 import type { Repository } from "./model";
 
 let nodePty: typeof NodePty | undefined;
@@ -71,7 +70,6 @@ interface AgentSelection {
   readonly pod: string;
   readonly repository: Repository;
   readonly repositoryState: string;
-  readonly state: string;
 }
 
 interface RunningTerminal {
@@ -167,7 +165,6 @@ function newChannel(): TerminalChannel {
 export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly didRequestActionEmitter = new vscode.EventEmitter<AgentViewAction>();
   private readonly didShowEmitter = new vscode.EventEmitter<void>();
-  private readonly legacyTerminalSubscription: vscode.Disposable;
   private readonly agentChannels = new Map<AgentKind, TerminalChannel>(
     AGENTS.map((agent) => [agent, newChannel()]),
   );
@@ -253,14 +250,7 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
   public constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly reportError: (context: string, error: unknown) => void,
-  ) {
-    for (const terminal of vscode.window.terminals) {
-      disposeLegacyAgentTerminal(terminal);
-    }
-    this.legacyTerminalSubscription = vscode.window.onDidOpenTerminal((terminal) => {
-      disposeLegacyAgentTerminal(terminal);
-    });
-  }
+  ) {}
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     for (const channel of this.agentChannels.values()) {
@@ -324,8 +314,7 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
         generation,
         pod,
         repository,
-        repositoryState: sameSelection ? current.repositoryState : "",
-        state: sameSelection ? current.state : "starting",
+        repositoryState: "",
       };
       for (const availableAgent of AGENTS) {
         const channel = this.agentChannel(availableAgent);
@@ -409,10 +398,9 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     await this.restoreFocus();
   }
 
-  public updateActiveState(
+  public updateActiveRepositoryState(
     repository: Repository,
     pod: string,
-    state: string,
     repositoryState: string,
   ): void {
     const selected = this.selection;
@@ -422,7 +410,7 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     ) {
       return;
     }
-    this.selection = { ...selected, repositoryState, state };
+    this.selection = { ...selected, repositoryState };
     this.updateView();
   }
 
@@ -498,7 +486,6 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
     this.terminalFocused = false;
     this.didRequestActionEmitter.dispose();
     this.didShowEmitter.dispose();
-    this.legacyTerminalSubscription.dispose();
     for (const channel of [...this.agentChannels.values(), this.shellChannel]) {
       const running = channel.running;
       channel.running = undefined;
@@ -1368,15 +1355,6 @@ function sameAgents(left: readonly AgentKind[], right: readonly AgentKind[]): bo
 
 function terminalKey(repository: Repository, pod: string): string {
   return JSON.stringify([repository.root, pod]);
-}
-
-function disposeLegacyAgentTerminal(terminal: vscode.Terminal): void {
-  if (
-    terminal.name.startsWith("Rumpelpod: ") ||
-    terminal.name.startsWith("Rumpelpod shell: ")
-  ) {
-    terminal.dispose();
-  }
 }
 
 function errorMessage(error: unknown): string {
