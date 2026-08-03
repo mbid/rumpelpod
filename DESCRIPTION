@@ -26,4 +26,4 @@ its entrypoint fails. Pin the arm64 code-server archive to its published
 digest. Keep the timing-sensitive Playwright test available only through
 the explicit ignored-test flag. Keep a bounded terminal cache per pod so
 scrollback survives pod switches while parser and mouse state remain
-isolated.
+isolated. Keep SSH integration fixtures independent of ambient agents.
