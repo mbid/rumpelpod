@@ -1,0 +1,10 @@
+Resume Codex threads when relaunching a frontend
+
+When a rumpelpod Codex frontend exits but its per-pod app-server remains
+available, launch the replacement TUI with `resume --last`. Preserve the
+existing fast path for attaching to a live frontend.
+Start a new thread only when no Codex state has been reported for the
+pod.
+
+Cover recovery with an integration test that exits the first TUI and
+verifies the relaunched frontend restores its remote conversation.
