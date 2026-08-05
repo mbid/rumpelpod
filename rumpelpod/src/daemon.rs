@@ -36,7 +36,7 @@ use crate::executor::PodBackendInfo;
 use crate::gateway;
 use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use host_connection::{HostConnectionEvent, HostConnectionEventRx, HostConnectionRegistry};
-use pod_connection::{PodConnectionRegistry, PodConnectionStatus};
+use pod_connection::{PodConnection, PodConnectionRegistry, PodConnectionStatus};
 use protocol::{
     AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, EnsurePiConfigRequest,
     ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
@@ -2041,6 +2041,85 @@ impl DaemonServer {
         crate::executor::Executor::new(&conn)
     }
 
+    fn ensure_git_tunnel(
+        &self,
+        pod_connection: &PodConnection,
+        executor: &crate::executor::Executor,
+        pod_id: &crate::executor::PodId,
+    ) -> Result<()> {
+        let _setup = pod_connection.git_tunnel_setup_guard();
+        if pod_connection.git_tunnel_is_alive() {
+            return Ok(());
+        }
+
+        pod_connection.remove_git_tunnel();
+        let target = format!("127.0.0.1:{}", self.localhost_server_port);
+        let tunnel = block_on(crate::tunnel::start_tunnel(executor, pod_id, &target))?;
+        pod_connection.set_git_tunnel(tunnel);
+        Ok(())
+    }
+
+    fn try_repair_git_tunnel(&self, pod_connection: &PodConnection) -> Result<()> {
+        let _setup = pod_connection.git_tunnel_setup_guard();
+        if !pod_connection.git_tunnel_supervision_enabled()
+            || pod_connection.git_tunnel_is_alive()
+            || !pod_connection.host_is_connected()
+        {
+            return Ok(());
+        }
+
+        let host = pod_connection.host();
+        let executor = self.host_executor(&host)?;
+        let pod_name = PodName(pod_connection.key().pod_name().to_string());
+        let pod_id = crate::executor::pod_id_for(&pod_name, pod_connection.key().repo_path());
+        if pod_connection.validate_pod_before_git_tunnel_repair() {
+            match executor.status(&pod_id)? {
+                PodStatus::Running => {
+                    pod_connection.mark_pod_validated_for_git_tunnel_repair();
+                }
+                PodStatus::Gone
+                | PodStatus::Stopped
+                | PodStatus::Stopping
+                | PodStatus::Deleting
+                | PodStatus::Broken => {
+                    pod_connection.disable_git_tunnel_supervision();
+                    return Ok(());
+                }
+                PodStatus::Disconnected => {
+                    return Err(anyhow::anyhow!("pod '{pod_id}' status is disconnected"));
+                }
+            }
+        }
+        pod_connection.remove_git_tunnel();
+        let target = format!("127.0.0.1:{}", self.localhost_server_port);
+        let tunnel = block_on(crate::tunnel::try_start_tunnel(&executor, &pod_id, &target))?;
+        pod_connection.install_repaired_git_tunnel(tunnel);
+        Ok(())
+    }
+
+    fn supervise_git_tunnel(self: Arc<Self>, pod_connection: Arc<PodConnection>) {
+        let mut backoff = Duration::from_secs(1);
+        loop {
+            if !pod_connection.git_tunnel_supervision_enabled()
+                || pod_connection.git_tunnel_is_alive()
+                || !pod_connection.host_is_connected()
+            {
+                break;
+            }
+
+            match self.try_repair_git_tunnel(&pod_connection) {
+                Ok(()) => break,
+                Err(e) => {
+                    let name = pod_connection.key().pod_name();
+                    log::warn!("git tunnel repair for pod '{name}' failed: {e:#}");
+                    std::thread::sleep(crate::jitter(backoff));
+                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_secs(5));
+                }
+            }
+        }
+        pod_connection.finish_git_tunnel_repair();
+    }
+
     /// The unix socket that engine CLI invocations (builds, inspects)
     /// should target for this host, if any.  Localhost Docker pins the
     /// daemon-resolved socket; localhost Podman uses the client's own
@@ -2244,21 +2323,8 @@ impl DaemonServer {
             self.cleanup_codex_runtime(repo_path, &pod_name.0);
         }
 
-        // Reuse the existing tunnel if it's still alive, otherwise
-        // start a fresh one.
-        if !pod_connection.git_tunnel_is_alive() {
-            let name = &pod_name.0;
-            log::warn!("k8s tunnel for {name} is dead, reconnecting");
-            pod_connection.remove_git_tunnel();
-            let port = self.localhost_server_port;
-            let tunnel = block_on(crate::tunnel::start_tunnel(
-                executor,
-                pod_id,
-                &format!("127.0.0.1:{port}"),
-            ))
+        self.ensure_git_tunnel(&pod_connection, executor, pod_id)
             .context("starting tunnel to existing k8s pod")?;
-            pod_connection.set_git_tunnel(tunnel);
-        }
 
         // Readiness check: PodClient::new polls /events.
         let _pod = PodClient::new(&container_url, &token, RetryPolicy::UserBlocking)?;
@@ -2471,17 +2537,11 @@ impl DaemonServer {
         // If the container was stopped, the tunnel-server inside it is
         // gone even if the mux task hasn't noticed yet, so always start
         // fresh in that case.
-        let localhost_server_port = self.localhost_server_port;
-        if was_stopped || !pod_connection.git_tunnel_is_alive() {
+        if was_stopped {
             pod_connection.remove_git_tunnel();
-            let tunnel = block_on(crate::tunnel::start_tunnel(
-                executor,
-                pod_id,
-                &format!("127.0.0.1:{localhost_server_port}"),
-            ))
-            .context("starting tunnel to existing docker container")?;
-            pod_connection.set_git_tunnel(tunnel);
         }
+        self.ensure_git_tunnel(&pod_connection, executor, pod_id)
+            .context("starting tunnel to existing docker container")?;
 
         if was_stopped {
             start_container_server(
@@ -2654,13 +2714,8 @@ impl DaemonServer {
         // Start exec tunnel so the container can reach the git HTTP
         // server on a loopback port.  Must be up before container-serve
         // starts, because container-serve clones the repo at startup.
-        let tunnel = block_on(crate::tunnel::start_tunnel(
-            &executor,
-            &exec_pod_id,
-            &format!("127.0.0.1:{}", self.localhost_server_port),
-        ))
-        .map_err(|e| mark_error(e.context("starting tunnel to k8s pod")))?;
-        pod_connection.set_git_tunnel(tunnel);
+        self.ensure_git_tunnel(&pod_connection, &executor, &exec_pod_id)
+            .map_err(|e| mark_error(e.context("starting tunnel to k8s pod")))?;
 
         // Start container-serve with git-init params.  It clones the
         // repo, sets up git remotes/hooks, and runs lifecycle commands
@@ -3120,8 +3175,6 @@ impl DaemonServer {
         }
 
         let exec_pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
-        let localhost_server_port = self.localhost_server_port;
-
         let token = SharedGitServerState::generate_token();
 
         let local_env_json = serialize_local_env(&local_env_vars);
@@ -3184,13 +3237,8 @@ impl DaemonServer {
             // Start exec tunnel so the container can reach the git HTTP
             // server on a loopback port.  Must be up before container-serve
             // starts, because container-serve clones the repo at startup.
-            let tunnel = block_on(crate::tunnel::start_tunnel(
-                &executor,
-                &exec_pod_id,
-                &format!("127.0.0.1:{localhost_server_port}"),
-            ))
-            .context("starting tunnel to docker container")?;
-            pod_connection.set_git_tunnel(tunnel);
+            self.ensure_git_tunnel(&pod_connection, &executor, &exec_pod_id)
+                .context("starting tunnel to docker container")?;
 
             // Start container-serve with git-init params.  It clones the
             // repo, sets up git remotes/hooks, and runs lifecycle commands
@@ -3798,25 +3846,28 @@ impl DaemonServer {
                 }
             };
 
-            if let Err(e) = self.pod_connections.get_or_create(
+            let pod_connection = match self.pod_connections.get_or_create(
                 Path::new(&pod.repo_path),
                 &pod.name,
                 host.clone(),
                 pod.token.clone(),
             ) {
-                eprintln!(
-                    "restore_running_pods: failed to create connection for {}: {e:#}",
-                    pod.name
-                );
-                continue;
-            }
+                Ok(connection) => connection,
+                Err(e) => {
+                    eprintln!(
+                        "restore_running_pods: failed to create connection for {}: {e:#}",
+                        pod.name
+                    );
+                    continue;
+                }
+            };
 
             match host {
                 Host::Localhost { .. } => {}
-                // Remote pods wait for a later re-entry to rebuild
-                // pod-server and tunnel handles.
-                Host::Ssh { .. } => continue,
-                Host::Kubernetes { .. } => continue,
+                Host::Ssh { .. } | Host::Kubernetes { .. } => {
+                    pod_connection.enable_git_tunnel_supervision();
+                    continue;
+                }
             }
 
             if let Err(e) = self.restore_one_pod(&pod, &host) {
@@ -3846,13 +3897,8 @@ impl DaemonServer {
             host.clone(),
             pod.token.clone(),
         )?;
-        let tunnel = block_on(crate::tunnel::start_tunnel(
-            &executor,
-            &pod_id,
-            &format!("127.0.0.1:{}", self.localhost_server_port),
-        ))
-        .context("starting docker tunnel")?;
-        pod_connection.set_git_tunnel(tunnel);
+        self.ensure_git_tunnel(&pod_connection, &executor, &pod_id)
+            .context("starting docker tunnel")?;
 
         let proxy = block_on(crate::exec_proxy::start_exec_proxy(
             executor.clone(),
@@ -4669,6 +4715,7 @@ pub fn run_daemon() -> Result<()> {
         let daemon = daemon.clone();
         crate::async_runtime::RUNTIME.spawn(host_event_reader(daemon, host_events_rx));
     }
+    crate::async_runtime::RUNTIME.spawn(git_tunnel_supervisor(daemon.clone()));
 
     let extra_routes = crate::codex::daemon_routes(daemon.clone());
     protocol::serve_daemon(daemon, listener, extra_routes);
@@ -4690,6 +4737,20 @@ async fn host_event_reader(daemon: Arc<DaemonServer>, mut rx: HostConnectionEven
                 daemon.pod_connections.notify_host_disconnected(&key);
             }
         }
+    }
+}
+
+async fn git_tunnel_supervisor(daemon: Arc<DaemonServer>) {
+    loop {
+        for pod_connection in daemon.pod_connections.git_tunnels_needing_repair() {
+            let daemon = daemon.clone();
+            let pod_name = pod_connection.key().pod_name().to_string();
+            std::thread::Builder::new()
+                .name(format!("git-tunnel-{pod_name}"))
+                .spawn(move || daemon.supervise_git_tunnel(pod_connection))
+                .expect("failed to spawn git tunnel supervisor");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 

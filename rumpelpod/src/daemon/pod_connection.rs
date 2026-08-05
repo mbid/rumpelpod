@@ -73,6 +73,8 @@ pub struct PodEndpoint {
 struct PodConnectionResources {
     pod_server: Option<crate::exec_proxy::ExecProxyHandle>,
     git_tunnel: Option<crate::tunnel::TunnelHandle>,
+    supervise_git_tunnel: bool,
+    validate_pod_before_git_tunnel_repair: bool,
     forwarded_ports: Option<Vec<crate::exec_proxy::ExecProxyHandle>>,
     ssh_agent: Option<SshAgentHandle>,
     codex_proxy: Option<CodexProxyHandle>,
@@ -83,6 +85,8 @@ impl PodConnectionResources {
         Self {
             pod_server: None,
             git_tunnel: None,
+            supervise_git_tunnel: false,
+            validate_pod_before_git_tunnel_repair: false,
             forwarded_ports: None,
             ssh_agent: None,
             codex_proxy: None,
@@ -106,6 +110,8 @@ pub struct PodConnection {
     claude_state: Arc<Mutex<Option<ClaudeState>>>,
     codex_state: Arc<Mutex<Option<CodexState>>>,
     resources: Mutex<PodConnectionResources>,
+    git_tunnel_setup: Mutex<()>,
+    git_tunnel_repair_scheduled: AtomicBool,
     event_loop: Mutex<Option<EventLoopHandle>>,
     host_connections: Arc<HostConnectionRegistry>,
 }
@@ -136,6 +142,8 @@ impl PodConnection {
             claude_state: Arc::new(Mutex::new(None)),
             codex_state: Arc::new(Mutex::new(None)),
             resources: Mutex::new(PodConnectionResources::new()),
+            git_tunnel_setup: Mutex::new(()),
+            git_tunnel_repair_scheduled: AtomicBool::new(false),
             event_loop: Mutex::new(None),
             host_connections,
         })
@@ -278,7 +286,83 @@ impl PodConnection {
     }
 
     pub fn set_git_tunnel(&self, handle: crate::tunnel::TunnelHandle) {
-        self.resources.lock().unwrap().git_tunnel = Some(handle);
+        let mut resources = self.resources.lock().unwrap();
+        resources.git_tunnel = Some(handle);
+        resources.supervise_git_tunnel = true;
+        resources.validate_pod_before_git_tunnel_repair = false;
+    }
+
+    pub fn enable_git_tunnel_supervision(&self) {
+        let mut resources = self.resources.lock().unwrap();
+        resources.supervise_git_tunnel = true;
+        resources.validate_pod_before_git_tunnel_repair = resources.git_tunnel.is_none();
+    }
+
+    pub fn git_tunnel_supervision_enabled(&self) -> bool {
+        self.resources.lock().unwrap().supervise_git_tunnel
+    }
+
+    pub fn validate_pod_before_git_tunnel_repair(&self) -> bool {
+        self.resources
+            .lock()
+            .unwrap()
+            .validate_pod_before_git_tunnel_repair
+    }
+
+    pub fn mark_pod_validated_for_git_tunnel_repair(&self) {
+        self.resources
+            .lock()
+            .unwrap()
+            .validate_pod_before_git_tunnel_repair = false;
+    }
+
+    pub fn disable_git_tunnel_supervision(&self) {
+        let mut resources = self.resources.lock().unwrap();
+        resources.supervise_git_tunnel = false;
+        resources.validate_pod_before_git_tunnel_repair = false;
+        resources.git_tunnel = None;
+    }
+
+    pub fn git_tunnel_setup_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.git_tunnel_setup.lock().unwrap()
+    }
+
+    pub fn try_schedule_git_tunnel_repair(&self) -> bool {
+        let resources = self.resources.lock().unwrap();
+        if !resources.supervise_git_tunnel
+            || resources
+                .git_tunnel
+                .as_ref()
+                .is_some_and(|handle| handle.is_alive())
+        {
+            return false;
+        }
+        drop(resources);
+
+        self.git_tunnel_repair_scheduled
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    pub fn finish_git_tunnel_repair(&self) {
+        self.git_tunnel_repair_scheduled
+            .store(false, Ordering::SeqCst);
+    }
+
+    pub fn install_repaired_git_tunnel(&self, handle: crate::tunnel::TunnelHandle) {
+        let mut resources = self.resources.lock().unwrap();
+        if resources.supervise_git_tunnel {
+            resources.git_tunnel = Some(handle);
+            resources.validate_pod_before_git_tunnel_repair = false;
+        }
+    }
+
+    pub fn host(&self) -> Host {
+        self.host.lock().unwrap().clone()
+    }
+
+    pub fn host_is_connected(&self) -> bool {
+        self.host_conn.lock().unwrap().status() == HostStatus::Connected
     }
 
     pub fn has_forwarded_ports(&self) -> bool {
@@ -432,12 +516,18 @@ impl PodConnection {
             return;
         }
         *self.status.lock().unwrap() = PodConnectionStatus::HostDisconnected;
+        let mut resources = self.resources.lock().unwrap();
+        if resources.supervise_git_tunnel {
+            resources.git_tunnel = None;
+        }
+        drop(resources);
         let _ = self.tx.send(ReconnectEvent::Attempting);
     }
 
     pub fn stop_events(&self) {
         self.stop_event_loop();
         *self.status.lock().unwrap() = PodConnectionStatus::Stopped;
+        self.disable_git_tunnel_supervision();
         let _ = self.tx.send(ReconnectEvent::Stopped);
     }
 
@@ -566,6 +656,18 @@ impl PodConnectionRegistry {
                 connection.notify_host_disconnected();
             }
         }
+    }
+
+    pub fn git_tunnels_needing_repair(&self) -> Vec<Arc<PodConnection>> {
+        self.pods
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|connection| {
+                connection.host_is_connected() && connection.try_schedule_git_tunnel_repair()
+            })
+            .cloned()
+            .collect()
     }
 }
 

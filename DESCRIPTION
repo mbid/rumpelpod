@@ -1,0 +1,14 @@
+Supervise git tunnels without client entry
+
+Recover dead git tunnels as daemon-owned pod resources after
+transport outages, tunnel process failures, and daemon restarts.
+Serialize foreground and background setup so recovery cannot race a
+concurrent enter.
+
+Trigger pending branch pushes when the replacement tunnel refreshes
+the pod's gateway configuration. The events stream now reports pod
+state only and no longer performs a redundant, incorrectly ordered
+recovery push.
+
+Cover autonomous recovery for local Docker, SSH, and Kubernetes without
+using rumpel enter as the repair trigger.
