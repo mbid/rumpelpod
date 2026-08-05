@@ -1,32 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::io::{BufRead, BufReader};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Child, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use rumpelpod::daemon::protocol::DaemonEvent;
+use rumpelpod::daemon::protocol::{DaemonClient, DaemonEvent};
 use rumpelpod::CommandExt as RumpelCommandExt;
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::ExecutorResources;
-
-struct EventProcess {
-    child: Child,
-}
-
-impl Drop for EventProcess {
-    fn drop(&mut self) {
-        if let Err(error) = self.child.kill() {
-            eprintln!("stopping rumpel events failed: {error}");
-        }
-        if let Err(error) = self.child.wait() {
-            eprintln!("waiting for rumpel events failed: {error}");
-        }
-    }
-}
 
 #[test]
 fn events_reports_pod_commit_after_user_post_receive_hook() {
@@ -56,31 +39,23 @@ fn events_reports_pod_commit_after_user_post_receive_hook() {
         .success()
         .expect("launch test pod");
 
-    let mut child = pod_command(&repo, &daemon);
-    let mut child = child
-        .args(["events", "--json"])
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("start rumpel events");
-    let stdout = child.stdout.take().expect("rumpel events stdout");
-    let _events = EventProcess { child };
-    let (line_tx, line_rx) = mpsc::channel();
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    let mut events = client.daemon_events().expect("subscribe to daemon events");
+    assert_eq!(
+        events
+            .next()
+            .expect("receive initial event")
+            .expect("read initial event"),
+        DaemonEvent::Resync
+    );
+    let (event_tx, event_rx) = mpsc::channel();
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if line_tx.send(line).is_err() {
+        for event in events {
+            if event_tx.send(event).is_err() {
                 return;
             }
         }
     });
-
-    let initial = line_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("receive initial daemon event")
-        .expect("read initial daemon event");
-    assert_eq!(
-        serde_json::from_str::<DaemonEvent>(&initial).expect("parse initial daemon event"),
-        DaemonEvent::Resync
-    );
 
     pod_command(&repo, &daemon)
         .args([
@@ -104,12 +79,15 @@ fn events_reports_pod_commit_after_user_post_receive_hook() {
     };
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for pod review event"
+        );
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let line = line_rx
+        let event = event_rx
             .recv_timeout(remaining)
             .expect("receive pod review event")
             .expect("read pod review event");
-        let event: DaemonEvent = serde_json::from_str(&line).expect("parse pod review event");
         if event == expected {
             break;
         }

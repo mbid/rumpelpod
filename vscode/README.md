@@ -37,6 +37,10 @@ Merging, stopping, or deleting the selected pod clears the sidebar selection,
 detaches its sessions, forgets it as the last active pod, and closes its review
 wherever that tab is open.
 
+Pod lists, review plans, and live invalidations come directly from the local
+rumpelpod daemon over its Unix socket. The configured `rumpel` executable is
+used for lifecycle actions and interactive terminals, not as a JSON transport.
+
 ## Development
 
 The Rust type generator owns `src/generated/`. The repository tool regenerates

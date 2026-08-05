@@ -13,6 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
+use rumpelpod::daemon::protocol::{Daemon, DaemonClient, PodName};
 use rumpelpod::CommandExt;
 
 use crate::common::{
@@ -259,7 +260,7 @@ fn review_shows_new_files() {
 }
 
 #[test]
-fn review_json_describes_added_deleted_and_renamed_files() {
+fn review_api_describes_added_deleted_and_renamed_files() {
     let repo = TestRepo::new();
     let deleted_file = "deleted.txt";
     let renamed_file = "renamed-before.txt";
@@ -296,26 +297,28 @@ fn review_json_describes_added_deleted_and_renamed_files() {
         .success()
         .expect("Failed to commit review files in pod");
 
-    let output = pod_command(&repo, &daemon)
-        .args(["review", pod_name, "--json"])
-        .success()
-        .expect("rumpel review --json failed");
-    let plan: serde_json::Value =
-        serde_json::from_slice(&output).expect("review plan was not JSON");
-    let files = plan["files"].as_array().expect("review files array");
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    let plan = client
+        .review_plan(
+            repo.path().to_path_buf(),
+            PodName::new(pod_name).expect("valid pod name"),
+            Vec::new(),
+        )
+        .expect("request review plan from daemon");
+    let files = &plan.files;
     let file = |path: &str| {
         files
             .iter()
-            .find(|file| file["path"] == path)
+            .find(|file| file.path == path)
             .unwrap_or_else(|| panic!("review plan omitted '{path}': {files:?}"))
     };
     for path in [file_name, renamed_target] {
-        assert_eq!(file(path)["base_exists"], false);
-        assert_eq!(file(path)["target_exists"], true);
+        assert!(!file(path).base_exists);
+        assert!(file(path).target_exists);
     }
     for path in [deleted_file, renamed_file] {
-        assert_eq!(file(path)["base_exists"], true);
-        assert_eq!(file(path)["target_exists"], false);
+        assert!(file(path).base_exists);
+        assert!(!file(path).target_exists);
     }
 }
 

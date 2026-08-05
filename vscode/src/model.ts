@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 
 import type { PodInfo, ReviewPlan } from "./generated/protocol";
 import { isAgentKind, type AgentKind } from "./agents";
+import type { RumpelpodDaemon } from "./daemon";
 import { ProcessError, runProcess } from "./process";
 
 const LAUNCHED_AGENTS_KEY = "rumpelpod.launchedAgents";
@@ -35,6 +36,7 @@ export class RumpelpodModel {
     private readonly workspaceState: vscode.Memento,
     private readonly output: vscode.OutputChannel,
     private readonly extensionUri: vscode.Uri,
+    private readonly daemon: RumpelpodDaemon,
   ) {}
 
   public async repositories(): Promise<readonly Repository[]> {
@@ -50,22 +52,11 @@ export class RumpelpodModel {
     repository: Repository,
     sync: boolean,
   ): Promise<readonly PodInfo[]> {
-    const args = sync ? ["list", "--sync", "--json"] : ["list", "--json"];
-    const output = await this.runRumpel(repository, args);
-    const parsed: unknown = JSON.parse(output);
-    if (!Array.isArray(parsed) || !parsed.every(isPodInfo)) {
-      throw new Error("rumpel list --json returned an unexpected payload");
-    }
-    return parsed;
+    return this.daemon.listPods(repository.root, sync);
   }
 
   public async review(repository: Repository, pod: string): Promise<ReviewPlan> {
-    const output = await this.runRumpel(repository, ["review", pod, "--json"]);
-    const parsed: unknown = JSON.parse(output);
-    if (!isReviewPlan(parsed)) {
-      throw new Error("rumpel review --json returned an unexpected payload");
-    }
-    return parsed;
+    return this.daemon.review(repository.root, pod);
   }
 
   public async mergePod(repository: Repository, pod: string): Promise<void> {
@@ -246,94 +237,4 @@ export class RumpelpodModel {
 
 function assignmentKey(repository: Repository, pod: string): string {
   return JSON.stringify([repository.root, pod]);
-}
-
-function isPodInfo(value: unknown): value is PodInfo {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "name" in value &&
-    "status" in value &&
-    "created" in value &&
-    "host" in value &&
-    "repo_state" in value &&
-    "container_id" in value &&
-    "last_commit_time" in value &&
-    "claude_state" in value &&
-    "codex_state" in value &&
-    typeof value.name === "string" &&
-    isPodStatus(value.status) &&
-    typeof value.created === "string" &&
-    typeof value.host === "string" &&
-    isNullableString(value.repo_state) &&
-    isNullableString(value.container_id) &&
-    (value.last_commit_time === null || typeof value.last_commit_time === "number") &&
-    isClaudeState(value.claude_state) &&
-    isCodexState(value.codex_state)
-  );
-}
-
-function isPodStatus(value: unknown): value is PodInfo["status"] {
-  switch (value) {
-    case "Running":
-    case "Stopped":
-    case "Gone":
-    case "Disconnected":
-    case "Stopping":
-    case "Deleting":
-    case "Broken":
-      return true;
-  }
-  return false;
-}
-
-function isNullableString(value: unknown): value is string | null {
-  return value === null || typeof value === "string";
-}
-
-function isClaudeState(value: unknown): value is PodInfo["claude_state"] {
-  switch (value) {
-    case null:
-    case "processing":
-    case "waiting_for_input":
-    case "auth_error":
-    case "stopped":
-      return true;
-  }
-  return false;
-}
-
-function isCodexState(value: unknown): value is PodInfo["codex_state"] {
-  switch (value) {
-    case null:
-    case "processing":
-    case "idle":
-    case "error":
-      return true;
-  }
-  return false;
-}
-
-function isReviewPlan(value: unknown): value is ReviewPlan {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "base" in value &&
-    "target" in value &&
-    "files" in value &&
-    typeof value.base === "string" &&
-    typeof value.target === "string" &&
-    Array.isArray(value.files) &&
-    value.files.every(
-      (file) =>
-        typeof file === "object" &&
-        file !== null &&
-        "path" in file &&
-        "base_exists" in file &&
-        "target_exists" in file &&
-        typeof file.path === "string" &&
-        typeof file.base_exists === "boolean" &&
-        typeof file.target_exists === "boolean",
-    )
-  );
 }

@@ -4374,6 +4374,21 @@ impl Daemon for DaemonServer {
         Ok(pods)
     }
 
+    fn review_plan(
+        &self,
+        repo_path: PathBuf,
+        pod_name: PodName,
+        paths: Vec<String>,
+    ) -> Result<crate::review::ReviewPlan> {
+        let conn = self.db.lock().unwrap();
+        let pod = db::get_pod(&conn, &repo_path, &pod_name.0)?;
+        drop(conn);
+        if pod.is_none() {
+            return Err(anyhow::anyhow!("pod '{pod_name}' does not exist"));
+        }
+        crate::review::build_review_plan(&repo_path, &pod_name.0, &paths)
+    }
+
     fn delete_all_pods(&self) -> Result<u32> {
         let conn = self.db.lock().unwrap();
         let all_pods = db::list_all_pods(&conn)?;

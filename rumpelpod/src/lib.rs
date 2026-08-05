@@ -19,7 +19,6 @@ pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod daemon;
 mod delete;
 mod enter;
-mod events;
 mod fork;
 pub mod gateway;
 mod git;
@@ -159,9 +158,6 @@ pub fn run() -> Result<()> {
         }
         Command::List(ref cmd) => {
             list::list(cmd)?;
-        }
-        Command::Events(ref cmd) => {
-            events::events(cmd)?;
         }
         Command::Stop(ref cmd) => {
             stop::stop(cmd)?;

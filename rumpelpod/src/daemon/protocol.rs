@@ -36,6 +36,7 @@ use crate::daemon::reconnect::ReconnectEvent;
 use crate::git::GitIdentity;
 use crate::image::OutputLine;
 use crate::pod::types::{ClaudeState, CodexState};
+use crate::review::ReviewPlan;
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +335,14 @@ struct ListPodsResponse {
     pods: Vec<PodInfo>,
 }
 
+/// Request body for the review plan endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct ReviewPlanRequest {
+    repo_path: PathBuf,
+    pod_name: PodName,
+    paths: Vec<String>,
+}
+
 /// Request body for list_ports endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct ListPortsRequest {
@@ -492,6 +501,15 @@ pub trait Daemon: Send + Sync + 'static {
     // GET /pod
     // Lists all pods for a given repository.
     fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>>;
+
+    // POST /review
+    // Computes immutable revisions and changed paths for reviewing a pod.
+    fn review_plan(
+        &self,
+        repo_path: PathBuf,
+        pod_name: PodName,
+        paths: Vec<String>,
+    ) -> Result<ReviewPlan>;
 
     // POST /pods/delete-all
     // Nukes all containers/pods across all repos.  Only triggers
@@ -817,6 +835,29 @@ impl Daemon for DaemonClient {
 
         let body: ListPodsResponse = read_sse_result(response, "listing pods")?;
         Ok(body.pods)
+    }
+
+    fn review_plan(
+        &self,
+        repo_path: PathBuf,
+        pod_name: PodName,
+        paths: Vec<String>,
+    ) -> Result<ReviewPlan> {
+        let url = self.url.join("/review")?;
+        let request = ReviewPlanRequest {
+            repo_path,
+            pod_name,
+            paths,
+        };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
+
+        read_sse_result(response, "preparing review")
     }
 
     fn delete_all_pods(&self) -> Result<u32> {
@@ -1510,6 +1551,16 @@ async fn list_pods_handler<D: Daemon>(
     })
 }
 
+/// Handler for POST /review endpoint.
+async fn review_plan_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ReviewPlanRequest>,
+) -> Response {
+    streaming_result_response("preparing review...".into(), move || {
+        daemon.review_plan(request.repo_path, request.pod_name, request.paths)
+    })
+}
+
 /// Handler for GET /pod/ports endpoint.
 async fn list_ports_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
@@ -1764,6 +1815,7 @@ where
         .route("/pod/stop", post(stop_pod_handler::<D>))
         .route("/pod", delete(delete_pod_handler::<D>))
         .route("/pod", get(list_pods_handler::<D>))
+        .route("/review", post(review_plan_handler::<D>))
         .route("/pods/delete-all", post(delete_all_pods_handler::<D>))
         .route(
             "/pod/ports",

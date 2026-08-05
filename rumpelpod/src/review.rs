@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use ts_rs::TS;
 
@@ -22,7 +22,7 @@ use crate::daemon::protocol::{Daemon, DaemonClient};
 use crate::git::get_repo_root;
 
 /// One path shown by a pod review.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export_to = "ReviewFile.ts")]
 pub struct ReviewFile {
     pub path: String,
@@ -31,7 +31,7 @@ pub struct ReviewFile {
 }
 
 /// Revisions and files required to reproduce `rumpel review` in an editor.
-#[derive(Debug, Clone, Serialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export_to = "ReviewPlan.ts")]
 pub struct ReviewPlan {
     pub base: String,
@@ -221,7 +221,7 @@ fn get_review_files(
 }
 
 /// Compute the exact review inputs shared by the CLI and editor integrations.
-pub fn build_review_plan(
+pub(crate) fn build_review_plan(
     repo_root: &std::path::Path,
     pod_name: &str,
     paths: &[String],
@@ -414,26 +414,11 @@ fn prompt_for_file(
 pub fn review(cmd: &ReviewCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
 
-    // Verify the pod exists in the daemon database before doing
-    // anything else -- gives a clear error instead of a confusing
-    // "ref not found" message for typos or deleted pods.
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
-    // Editor refreshes are driven by daemon invalidations and only need the
-    // database membership check. A backend sync here would turn every review
-    // update into a remote container query.
-    let pods = client.list_pods(repo_root.clone(), !cmd.json, false)?;
-    if !pods.iter().any(|s| s.name == cmd.name) {
-        let name = &cmd.name;
-        return Err(anyhow::anyhow!("pod '{name}' does not exist"));
-    }
-
-    let plan = build_review_plan(&repo_root, &cmd.name, &cmd.paths)?;
-    if cmd.json {
-        let json = serde_json::to_string(&plan)?;
-        println!("{json}");
-        return Ok(());
-    }
+    let pod_name = crate::daemon::protocol::PodName::new(cmd.name.clone())
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let plan = client.review_plan(repo_root.clone(), pod_name, cmd.paths.clone())?;
 
     if plan.files.is_empty() {
         return Ok(());

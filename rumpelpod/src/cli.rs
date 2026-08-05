@@ -130,17 +130,6 @@ pub struct ListCommand {
     /// Refresh live pod state before printing.
     #[arg(long)]
     pub sync: bool,
-
-    /// Print the daemon response as JSON for editor integrations.
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct EventsCommand {
-    /// Print one JSON object per line for editor integrations.
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(Subcommand)]
@@ -162,9 +151,6 @@ pub enum Command {
     /// Shows pod name, status (running/stopped), and creation time.
     #[command(verbatim_doc_comment)]
     List(ListCommand),
-
-    /// Stream pod status and review invalidations from the daemon.
-    Events(EventsCommand),
 
     /// Stop one or more pod containers without removing them.
     ///
@@ -621,10 +607,6 @@ pub struct ReviewCommand {
     /// Skip prompting before opening each file
     #[arg(short = 'y', long = "yes")]
     pub yes: bool,
-
-    /// Print the review revisions and files as JSON without opening a difftool.
-    #[arg(long)]
-    pub json: bool,
 
     /// Restrict review to specific paths (like git difftool -- <path>...)
     #[arg(last = true, value_name = "PATH")]

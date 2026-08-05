@@ -6,11 +6,13 @@ changes in native VS Code multi-diff editors. Run CLI commands under a
 packaged node-pty binding. Pod creation, lifecycle output, and
 interactive sessions share the CLI's established terminal behavior.
 
-Expose JSON list and review snapshots plus daemon invalidation events.
-Use them for live status and review updates. Notify review clients from
-a bounded host post-receive hook while preserving user hooks and custom
-daemon sockets. Keep this as the only new terminal-related rumpel core
-surface. Do not retain the abandoned daemon PTY streaming routes or API.
+Expose typed daemon endpoints for list and review snapshots plus live
+invalidation events. Have the extension consume them directly over the
+Unix socket without JSON CLI modes or an event subprocess. Notify review
+clients from a bounded host post-receive hook while preserving user
+hooks and custom daemon sockets. Keep this as the only new
+terminal-related rumpel core surface. Do not retain the abandoned
+daemon PTY streaming routes or API.
 
 Publish separate Linux x64, Linux arm64, and macOS arm64 VSIX assets.
 Build them in existing platform jobs. Preserve the multi-binary rumpel

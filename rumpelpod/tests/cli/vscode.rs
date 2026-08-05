@@ -95,30 +95,13 @@ fn find_vsix(root: &Path) -> PathBuf {
         return path;
     }
 
-    let mut candidates = Vec::new();
-    for directory in [root.join("vscode"), root.join("vscode/dist")] {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => panic!("reading {}: {error}", directory.display()),
-        };
-        for entry in entries {
-            let entry = entry.unwrap_or_else(|error| {
-                panic!("reading an entry in {}: {error}", directory.display())
-            });
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) == Some("vsix") {
-                candidates.push(path);
-            }
-        }
-    }
-    candidates.sort();
-    assert_eq!(
-        candidates.len(),
-        1,
-        "expected exactly one packaged extension under vscode/ or vscode/dist/, found: {candidates:?}"
+    let path = root.join("vscode/dist/rumpelpod-vscode.vsix");
+    assert!(
+        path.is_file(),
+        "the pipeline did not create its expected VSIX: {}",
+        path.display()
     );
-    candidates.remove(0)
+    path
 }
 
 fn reserve_loopback_port() -> u16 {
@@ -200,7 +183,7 @@ fn start_code_server(
     daemon: &TestDaemon,
     user_data_dir: &Path,
     extensions_dir: &Path,
-    sync_violation: &Path,
+    daemon_api_violation: &Path,
     action_log: &Path,
 ) -> (CodeServer, u16) {
     let ambient_path = std::env::var("PATH").expect("PATH is not set");
@@ -232,7 +215,10 @@ fn start_code_server(
                 "RUMPELPOD_VSCODE_REAL_RUMPEL",
                 daemon.bin_dir.join("rumpel"),
             )
-            .env("RUMPELPOD_VSCODE_SYNC_VIOLATION", sync_violation)
+            .env(
+                "RUMPELPOD_VSCODE_DAEMON_API_VIOLATION",
+                daemon_api_violation,
+            )
             .env("RUMPELPOD_VSCODE_ACTION_LOG", action_log)
             .stdin(Stdio::null());
         let child = command
@@ -271,16 +257,12 @@ fn write_extension_rumpel_wrapper(directory: &Path) -> PathBuf {
         &executable,
         indoc! {r#"
             #!/bin/sh
-            if [ "$1" = "list" ]; then
-                for argument in "$@"; do
-                    if [ "$argument" = "--sync" ]; then
-                        : > "$RUMPELPOD_VSCODE_SYNC_VIOLATION"
-                        echo "VS Code invoked list --sync during an ordinary UI operation" >&2
-                        exit 97
-                    fi
-                done
-            fi
             case "$1" in
+                list|review|events)
+                    : > "$RUMPELPOD_VSCODE_DAEMON_API_VIOLATION"
+                    echo "VS Code used a CLI subprocess instead of the daemon API" >&2
+                    exit 97
+                    ;;
                 merge|stop|delete|ssh-add)
                     printf '%s\n' "$*" >> "$RUMPELPOD_VSCODE_ACTION_LOG"
                     ;;
@@ -730,7 +712,7 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     let extensions_dir = browser_home.path().join("extensions");
     fs::create_dir_all(&extensions_dir).expect("create code-server extension directory");
     let extension_rumpel = write_extension_rumpel_wrapper(browser_home.path());
-    let sync_violation = browser_home.path().join("unexpected-list-sync");
+    let daemon_api_violation = browser_home.path().join("unexpected-daemon-state-cli");
     let action_log = browser_home.path().join("actions.log");
     let ssh_directory = daemon.home_path.join(".ssh");
     fs::create_dir_all(&ssh_directory).expect("create SSH key directory");
@@ -750,7 +732,7 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
         &daemon,
         &user_data_dir,
         &extensions_dir,
-        &sync_violation,
+        &daemon_api_violation,
         &action_log,
     );
     let artifacts = root
@@ -774,7 +756,7 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
         "VS Code did not add the selected SSH identity"
     );
     assert!(
-        !sync_violation.exists(),
-        "an ordinary VS Code UI operation invoked rumpel list --sync"
+        !daemon_api_violation.exists(),
+        "the VS Code extension used a CLI subprocess for daemon-owned state"
     );
 }

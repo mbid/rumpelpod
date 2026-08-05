@@ -4,6 +4,7 @@
 import * as vscode from "vscode";
 
 import { RumpelpodController } from "./controller";
+import { RumpelpodDaemon } from "./daemon";
 import { DaemonEvents } from "./events";
 import { RumpelpodModel } from "./model";
 import { ReviewDocuments } from "./review";
@@ -11,7 +12,13 @@ import { AGENT_VIEW_ID, AgentTerminals, type AgentViewAction } from "./terminal"
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel("Rumpelpod", { log: true });
-  const model = new RumpelpodModel(context.workspaceState, output, context.extensionUri);
+  const daemon = new RumpelpodDaemon((message) => output.appendLine(message));
+  const model = new RumpelpodModel(
+    context.workspaceState,
+    output,
+    context.extensionUri,
+    daemon,
+  );
   const terminals = new AgentTerminals(context.extensionUri, (operation, error) => {
     model.logError(operation, error);
   });
@@ -22,7 +29,7 @@ export function activate(context: vscode.ExtensionContext): void {
   status.name = "Rumpelpod Active Pod";
   status.command = "rumpelpod.showPods";
   const controller = new RumpelpodController(model, terminals, reviews, status);
-  const events = new DaemonEvents(model, controller);
+  const events = new DaemonEvents(daemon, model, controller);
 
   context.subscriptions.push(
     output,
@@ -71,11 +78,6 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("rumpelpod.deleteActivePod", () =>
       runCommand(model, "deleting the active pod", () => controller.deleteActivePod()),
     ),
-    vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("rumpelpod.executable")) {
-        events.restart();
-      }
-    }),
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       model.invalidateRepositories();
       events.restart();

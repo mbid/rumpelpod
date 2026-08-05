@@ -1,9 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import { spawn, type ChildProcess } from "node:child_process";
-import * as readline from "node:readline";
-
+import type { DaemonEventStream, RumpelpodDaemon } from "./daemon";
 import type { DaemonEvent } from "./generated/protocol";
 import type { RumpelpodController } from "./controller";
 import type { RumpelpodModel } from "./model";
@@ -11,72 +9,52 @@ import type { RumpelpodModel } from "./model";
 const RECONNECT_DELAYS_MS = [250, 1_000, 3_000, 10_000] as const;
 
 export class DaemonEvents {
-  private child: ChildProcess | undefined;
   private disposed = false;
   private flushTimer: NodeJS.Timeout | undefined;
   private pending = new Map<string, DaemonEvent>();
   private reconnectAttempt = 0;
   private reconnectTimer: NodeJS.Timeout | undefined;
   private refreshChain = Promise.resolve();
+  private stream: DaemonEventStream | undefined;
 
   public constructor(
+    private readonly daemon: RumpelpodDaemon,
     private readonly model: RumpelpodModel,
     private readonly controller: RumpelpodController,
   ) {}
 
   public async start(): Promise<void> {
-    this.stopProcess();
-    const repositories = await this.model.repositories();
+    this.stopStream();
     if (this.disposed) {
       return;
     }
-    const executable = this.model.executable();
-    const child = spawn(executable, ["events", "--json"], {
-      cwd: repositories[0]?.root,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    this.child = child;
-    const lines = readline.createInterface({ input: child.stdout! });
-    let stderr = "";
-    let finished = false;
-
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-      if (stderr.length > 32 * 1024) {
-        stderr = stderr.slice(-32 * 1024);
-      }
-    });
-    lines.on("line", (line) => {
+    const stream = this.daemon.events((event) => {
       this.reconnectAttempt = 0;
-      try {
-        this.queue(parseDaemonEvent(line));
-      } catch (error) {
-        this.model.logError("reading a rumpelpod daemon event", error);
-      }
+      this.queue(event);
     });
-    const finish = (error?: unknown): void => {
-      if (finished || this.child !== child) {
-        return;
-      }
-      finished = true;
-      lines.close();
-      this.child = undefined;
-      const detail = stderr.trim();
-      if (error !== undefined) {
+    this.stream = stream;
+    void stream.completion.then(
+      () => {
+        if (this.stream !== stream) {
+          return;
+        }
+        this.stream = undefined;
+        this.scheduleReconnect();
+      },
+      (error: unknown) => {
+        if (this.stream !== stream) {
+          return;
+        }
+        this.stream = undefined;
         this.model.logError("connecting to rumpelpod daemon events", error);
-      } else if (detail.length > 0) {
-        this.model.logError("rumpelpod daemon event stream ended", new Error(detail));
-      }
-      this.scheduleReconnect();
-    };
-    child.on("error", finish);
-    child.on("close", () => finish());
+        this.scheduleReconnect();
+      },
+    );
   }
 
   public restart(): void {
     this.reconnectAttempt = 0;
-    this.stopProcess();
+    this.stopStream();
     void this.start().catch((error: unknown) => {
       this.model.logError("restarting rumpelpod daemon events", error);
       this.scheduleReconnect();
@@ -85,7 +63,7 @@ export class DaemonEvents {
 
   public dispose(): void {
     this.disposed = true;
-    this.stopProcess();
+    this.stopStream();
     if (this.flushTimer !== undefined) {
       clearTimeout(this.flushTimer);
       this.flushTimer = undefined;
@@ -180,47 +158,15 @@ export class DaemonEvents {
     }, delay);
   }
 
-  private stopProcess(): void {
+  private stopStream(): void {
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = undefined;
     }
-    if (this.child !== undefined) {
-      const child = this.child;
-      this.child = undefined;
-      child.kill();
+    if (this.stream !== undefined) {
+      const stream = this.stream;
+      this.stream = undefined;
+      stream.dispose();
     }
   }
-}
-
-function parseDaemonEvent(line: string): DaemonEvent {
-  let value: unknown;
-  try {
-    value = JSON.parse(line);
-  } catch (error) {
-    throw new Error(`rumpel events emitted invalid JSON: ${line}`, { cause: error });
-  }
-  if (typeof value !== "object" || value === null || !("type" in value)) {
-    throw new Error(`rumpel events emitted an invalid payload: ${line}`);
-  }
-  switch (value.type) {
-    case "resync":
-      return { type: "resync" };
-    case "pod_status_changed":
-    case "pod_review_changed":
-      if (
-        !("repository" in value) ||
-        !("pod" in value) ||
-        typeof value.repository !== "string" ||
-        typeof value.pod !== "string"
-      ) {
-        throw new Error(`rumpel events emitted an invalid pod payload: ${line}`);
-      }
-      return {
-        type: value.type,
-        repository: value.repository,
-        pod: value.pod,
-      };
-  }
-  throw new Error(`rumpel events emitted an unknown event: ${line}`);
 }
