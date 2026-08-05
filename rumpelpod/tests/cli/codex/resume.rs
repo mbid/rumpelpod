@@ -11,6 +11,8 @@ use super::common::{setup_codex_test_repo, CodexSession};
 fn codex_relaunch_resumes_last_remote_session() {
     let (home, repo, _executor, daemon) = setup_codex_test_repo();
 
+    // The fresh pod has no thread, so this also verifies that resume --last
+    // falls through to creating one rather than rejecting the first launch.
     let mut first = CodexSession::spawn(&repo, &daemon, home.path(), &[]);
     first.dismiss_dialogs();
     first.send("What is the capital of France? Reply with just the city name, nothing else.");
