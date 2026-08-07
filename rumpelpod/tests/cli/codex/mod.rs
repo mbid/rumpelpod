@@ -8,6 +8,7 @@ mod detach;
 mod host_network;
 mod install;
 mod lifecycle;
+mod resume;
 mod session_isolation;
 mod smoke;
 mod system_prompt;
