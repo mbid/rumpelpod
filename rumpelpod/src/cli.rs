@@ -401,14 +401,7 @@ pub enum Command {
     ///
     /// This is required before using other rumpel commands.
     #[command(verbatim_doc_comment)]
-    SystemInstall {
-        /// Write and enable the unit files without contacting systemd.
-        ///
-        /// For image builds, where no systemd instance is running yet.
-        /// The units take effect when the user manager first starts.
-        #[arg(long)]
-        no_activate: bool,
-    },
+    SystemInstall,
 
     /// Uninstall the rumpelpod daemon.
     ///

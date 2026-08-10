@@ -24,12 +24,14 @@ Provide a loopback-only live code-server workspace backed by a small
 anyhow demo repository and lingering user services. Run demo pods as a
 non-root user because Claude rejects its permission bypass under root.
 Persist only allowlisted agent credentials for those services. Install
-the daemon units through rumpel system-install at image build instead
-of vendoring copies, and let CI boots mask the browser service. Use the
-same complete devcontainer image in development and CI, and report
-startup logs when its entrypoint fails. Pin the arm64 code-server
-archive to its published digest. Keep the timing-sensitive Playwright
-test available only through the explicit ignored-test flag. Keep a
-bounded terminal cache per pod so scrollback survives pod switches
-while parser and mouse state remain isolated. Keep SSH integration
-fixtures independent of ambient agents.
+no daemon service in the image: the first pipeline run installs its
+freshly built native daemon and cross-architecture pod payloads after
+systemd is available. Let browser VS Code start independently and
+reconnect when that daemon appears. Let CI boots mask the browser
+service. Use the same complete devcontainer image in development and CI,
+and report startup logs when its entrypoint fails. Pin the arm64
+code-server archive to its published digest. Keep the timing-sensitive
+Playwright test available only through the explicit ignored-test flag.
+Keep a bounded terminal cache per pod so scrollback survives pod
+switches while parser and mouse state remain isolated. Keep SSH
+integration fixtures independent of ambient agents.

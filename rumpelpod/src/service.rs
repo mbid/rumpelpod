@@ -38,16 +38,7 @@ fn resolve_exe_path() -> Result<PathBuf> {
         .with_context(|| format!("could not resolve executable path: {display}"))
 }
 
-pub fn system_install(no_activate: bool) -> Result<()> {
-    if no_activate {
-        // Image builds have neither a running container engine nor a
-        // systemd instance; both exist once the container boots.
-        if cfg!(target_os = "macos") {
-            return Err(anyhow!("--no-activate is only supported with systemd"));
-        }
-        return systemd_write_enabled_units();
-    }
-
+pub fn system_install() -> Result<()> {
     check_docker_available()?;
 
     if cfg!(target_os = "macos") {
@@ -287,7 +278,9 @@ fn check_systemd_available() -> Result<()> {
     Ok(())
 }
 
-fn systemd_write_unit_files() -> Result<()> {
+fn systemd_install() -> Result<()> {
+    check_systemd_available()?;
+
     let systemd_dir = systemd_user_dir()?;
     let socket_path = socket_unit_path()?;
     let service_path = service_unit_path()?;
@@ -305,50 +298,6 @@ fn systemd_write_unit_files() -> Result<()> {
     let service_display = service_path.display();
     fs::write(&service_path, &service_content)
         .with_context(|| format!("failed to write {service_display}"))?;
-
-    Ok(())
-}
-
-/// Write the unit files and the enablement symlink that `systemctl
-/// enable` would create, without contacting systemd.
-fn systemd_write_enabled_units() -> Result<()> {
-    systemd_write_unit_files()?;
-
-    let wants_dir = systemd_user_dir()?.join("sockets.target.wants");
-    let dir = wants_dir.display();
-    fs::create_dir_all(&wants_dir).with_context(|| format!("failed to create {dir}"))?;
-    let link = wants_dir.join(format!("{SERVICE_NAME}.socket"));
-    let target = PathBuf::from(format!("../{SERVICE_NAME}.socket"));
-    match std::os::unix::fs::symlink(&target, &link) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Reinstalls hit this; only an existing link to some other
-            // unit would silently break enablement.
-            let existing = fs::read_link(&link).with_context(|| {
-                let link = link.display();
-                format!("inspecting existing {link}")
-            })?;
-            if existing != target {
-                let link = link.display();
-                let existing = existing.display();
-                return Err(anyhow!(
-                    "{link} points at {existing}, refusing to overwrite"
-                ));
-            }
-        }
-        Err(e) => {
-            let link = link.display();
-            return Err(anyhow::Error::from(e).context(format!("failed to create {link}")));
-        }
-    }
-
-    println!("installed rumpelpod daemon units");
-    Ok(())
-}
-
-fn systemd_install() -> Result<()> {
-    check_systemd_available()?;
-    systemd_write_unit_files()?;
 
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", &format!("{SERVICE_NAME}.socket")])?;

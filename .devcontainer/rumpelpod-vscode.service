@@ -3,8 +3,7 @@
 
 [Unit]
 Description=Rumpelpod browser VS Code
-After=rumpelpod.socket
-Requires=rumpelpod.socket
+# The extension reconnects after the first pipeline installs the daemon.
 ConditionPathIsDirectory=/workspaces/anyhow-demo/.git
 
 [Service]

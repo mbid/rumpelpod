@@ -350,39 +350,3 @@ fn write_as_user(user: &TestUser, path: &str, content: &str) {
     let status = child.wait().unwrap();
     assert!(status.success(), "tee {path} failed");
 }
-
-/// `--no-activate` targets image builds, where no systemd instance or
-/// container engine exists: it must produce enabled units purely on the
-/// filesystem.
-#[test]
-fn system_install_no_activate_writes_enabled_units() {
-    let home = tempfile::tempdir().expect("create test home");
-    let config = home.path().join(".config/systemd/user");
-
-    for _ in 0..2 {
-        Command::new("rumpel")
-            .args(["system-install", "--no-activate"])
-            .env("HOME", home.path())
-            .env_remove("XDG_CONFIG_HOME")
-            .env("XDG_RUNTIME_DIR", "/run/user/54321")
-            .success()
-            .expect("rumpel system-install --no-activate failed");
-    }
-
-    let socket = std::fs::read_to_string(config.join("rumpelpod.socket"))
-        .expect("read generated socket unit");
-    assert!(
-        socket.contains("ListenStream=/run/user/54321/rumpelpod.sock"),
-        "socket unit did not use the runtime directory: {socket}"
-    );
-    let service = std::fs::read_to_string(config.join("rumpelpod.service"))
-        .expect("read generated service unit");
-    assert!(
-        service.contains(" daemon"),
-        "service unit does not start the daemon: {service}"
-    );
-
-    let link = config.join("sockets.target.wants/rumpelpod.socket");
-    let target = std::fs::read_link(&link).expect("read socket enablement symlink");
-    assert_eq!(target, std::path::PathBuf::from("../rumpelpod.socket"));
-}

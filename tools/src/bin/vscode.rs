@@ -267,41 +267,12 @@ fn install_rumpel(source: &Path, repo_root: &Path) -> Result<PathBuf> {
     })?;
 
     let destination = bin_dir.join("rumpel");
-    install_binary(source, &destination)?;
+    tools::install_binary(source, &destination)?;
     for (target, name) in LINUX_RUMPEL_TARGETS {
         let payload = repo_root.join("target").join(target).join("debug/rumpel");
-        install_binary(&payload, &bin_dir.join(name))?;
+        tools::install_binary(&payload, &bin_dir.join(name))?;
     }
     Ok(destination)
-}
-
-fn install_binary(source: &Path, destination: &Path) -> Result<()> {
-    let parent = destination.parent().with_context(|| {
-        let destination = destination.display();
-        format!("development binary has no parent directory: {destination}")
-    })?;
-    let staged = tempfile::NamedTempFile::new_in(parent)
-        .context("creating staged rumpel development binary")?;
-    std::fs::copy(source, staged.path()).with_context(|| {
-        let source = source.display();
-        format!("staging rumpel development binary {source}")
-    })?;
-    let permissions = std::fs::metadata(source)
-        .with_context(|| {
-            let source = source.display();
-            format!("reading rumpel development binary permissions from {source}")
-        })?
-        .permissions();
-    std::fs::set_permissions(staged.path(), permissions)
-        .context("setting rumpel development binary permissions")?;
-    staged
-        .persist(destination)
-        .map_err(|error| error.error)
-        .with_context(|| {
-            let destination = destination.display();
-            format!("installing rumpel development binary at {destination}")
-        })?;
-    Ok(())
 }
 
 fn install_npm_dependencies(vscode_dir: &Path) -> Result<()> {

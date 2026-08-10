@@ -384,12 +384,6 @@ RUN native_arch=$(dpkg --print-architecture) \
     && cp /workspaces/rumpelpod/target/x86_64-unknown-linux-musl/debug/rumpel ~/.local/bin/rumpel-linux-amd64 \
     && cp /workspaces/rumpelpod/target/aarch64-unknown-linux-musl/debug/rumpel ~/.local/bin/rumpel-linux-arm64
 
-# The daemon units come from rumpel itself so development and ordinary
-# installs cannot drift apart. No systemd runs during the image build, so
-# activation is deferred to the first user-manager start, and the runtime
-# directory that the socket path derives from has to be spelled out.
-RUN XDG_RUNTIME_DIR=/run/user/${USER_ID} ~/.local/bin/rumpel system-install --no-activate
-
 USER root
 
 RUN rm -rf /tmp/rumpelpod-vscode
@@ -412,6 +406,7 @@ RUN mkdir -p \
 # user runtime directory while constructing the image.
 ENV XDG_RUNTIME_DIR=/run/user/${USER_ID}
 ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_ID}/bus
+ENV RUMPELPOD_DEVCONTAINER=1
 ENV RUMPELPOD_TEST_SYSTEMD=1
 
 ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]

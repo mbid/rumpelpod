@@ -148,8 +148,8 @@ pub fn run() -> Result<()> {
                 test_mode,
             );
         }
-        Command::SystemInstall { no_activate } => {
-            service::system_install(no_activate)?;
+        Command::SystemInstall => {
+            service::system_install()?;
         }
         Command::SystemUninstall => {
             service::system_uninstall()?;

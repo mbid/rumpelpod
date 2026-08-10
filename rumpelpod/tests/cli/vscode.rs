@@ -359,7 +359,7 @@ fn vscode_agent_environment_is_systemd_safe() {
 }
 
 #[test]
-fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
+fn vscode_devcontainer_defers_daemon_install_until_first_pipeline() {
     let root = workspace_root();
     // json5, not serde_json: devcontainer.json carries comments.
     let config: serde_json::Value = json5::from_str(
@@ -385,13 +385,14 @@ fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
         "CI and development did not use the same complete devcontainer image"
     );
     assert!(
-        dockerfile.contains("system-install --no-activate"),
-        "the image did not install the daemon units through rumpel"
+        !dockerfile.contains("system-install")
+            && !dockerfile.contains(".devcontainer/rumpelpod.socket")
+            && !dockerfile.contains(".devcontainer/rumpelpod.service "),
+        "the image came with an installed rumpelpod daemon"
     );
     assert!(
-        !dockerfile.contains(".devcontainer/rumpelpod.socket")
-            && !dockerfile.contains(".devcontainer/rumpelpod.service "),
-        "the image copied vendored daemon units instead of using system-install"
+        dockerfile.contains("ENV RUMPELPOD_DEVCONTAINER=1"),
+        "the image did not mark the deferred daemon installation environment"
     );
     assert!(
         dockerfile.contains(
@@ -418,6 +419,23 @@ fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
     assert!(
         ci_pipeline.contains("--env CI"),
         "CI did not forward its marker into the test container"
+    );
+    let cargo_pipeline =
+        fs::read_to_string(root.join("tools/src/bin/pipeline.rs")).expect("read Cargo pipeline");
+    let build = cargo_pipeline
+        .find(".args([\"build\", \"--all-targets\"])")
+        .expect("pipeline did not build workspace binaries");
+    let install = cargo_pipeline
+        .find("install_devcontainer_daemon(release)?")
+        .expect("pipeline did not install the development daemon");
+    assert!(
+        build < install
+            && cargo_pipeline.contains("const DEVCONTAINER_ENV: &str = \"RUMPELPOD_DEVCONTAINER\"")
+            && cargo_pipeline.contains("rumpel-linux-amd64")
+            && cargo_pipeline.contains("rumpel-linux-arm64")
+            && cargo_pipeline.contains("--user\", \"show-environment")
+            && cargo_pipeline.contains(".arg(\"system-install\")"),
+        "the first marked pipeline did not install its freshly built daemon and payloads"
     );
 }
 
@@ -581,8 +599,10 @@ fn vscode_server_is_unauthenticated_and_loopback_only() {
         .expect("read VS Code service");
     assert!(
         service.contains("ConditionPathIsDirectory=/workspaces/anyhow-demo/.git")
-            && service.contains("WorkingDirectory=/workspaces/anyhow-demo"),
-        "the browser service did not use the demo repository in /workspaces"
+            && service.contains("WorkingDirectory=/workspaces/anyhow-demo")
+            && !service.contains("After=rumpelpod.socket")
+            && !service.contains("Requires=rumpelpod.socket"),
+        "the browser service could not start before the first daemon install"
     );
 }
 
