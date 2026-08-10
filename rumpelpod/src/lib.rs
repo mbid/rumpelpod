@@ -8,6 +8,7 @@ mod codex;
 mod command_ext;
 pub(crate) mod completions;
 pub mod config;
+mod connect_cmd;
 mod container_exec;
 mod cp;
 mod devcontainer;
@@ -39,7 +40,6 @@ mod prepared_image;
 mod prune;
 mod pty_attach;
 mod pty_session;
-mod reconnect_cmd;
 mod recreate;
 mod registry;
 mod review;
@@ -177,8 +177,8 @@ pub fn run() -> Result<()> {
         Command::Recreate(ref cmd) => {
             recreate::recreate(cmd)?;
         }
-        Command::Reconnect(ref cmd) => {
-            reconnect_cmd::reconnect(cmd)?;
+        Command::Connect(ref cmd) => {
+            connect_cmd::connect(cmd)?;
         }
         Command::Fork(ref cmd) => {
             fork::fork(cmd)?;

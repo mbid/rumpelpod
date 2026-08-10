@@ -223,12 +223,12 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Recreate(RecreateCommand),
 
-    /// Force a reconnect to a running pod.
+    /// Ensure the daemon is connected to a running pod.
     ///
-    /// Use --host to also reconnect the shared host connection. Other pods on
-    /// that host may briefly lose connectivity.
+    /// Probes the host and pod immediately. Healthy connections are left
+    /// unchanged, while failed or missing connections are restored.
     #[command(verbatim_doc_comment)]
-    Reconnect(ReconnectCommand),
+    Connect(ConnectCommand),
 
     /// Spawn a new pod by cloning an existing, running one.
     #[command(verbatim_doc_comment)]
@@ -527,14 +527,10 @@ pub struct RecreateCommand {
 }
 
 #[derive(Args)]
-pub struct ReconnectCommand {
-    /// Name of the pod to reconnect
+pub struct ConnectCommand {
+    /// Name of the pod to connect
     #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
     pub name: String,
-
-    /// Also reconnect the shared host connection
-    #[arg(long)]
-    pub host: bool,
 }
 
 #[derive(Args)]

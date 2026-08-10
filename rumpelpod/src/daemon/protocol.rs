@@ -397,12 +397,11 @@ pub struct PodReconnectRequest {
     pub pod_name: String,
 }
 
-/// Request body for replacing daemon-owned pod transports.
+/// Request body for ensuring a daemon connection to a pod.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ReconnectPodConnectionRequest {
+pub struct ConnectPodRequest {
     pub pod_name: String,
     pub repo_path: PathBuf,
-    pub reconnect_host: bool,
 }
 
 /// Error response body.
@@ -490,9 +489,9 @@ pub trait Daemon: Send + Sync + 'static {
     // reconnect, just like a devcontainer-declared one.
     fn add_forwarded_port(&self, request: AddForwardedPortRequest) -> Result<PortInfo>;
 
-    // POST /pod/reconnect
-    // Replace daemon-owned transports for one pod and optionally its shared host.
-    fn reconnect_pod_connection(&self, request: ReconnectPodConnectionRequest) -> Result<()>;
+    // POST /pod/connect
+    // Probe the host and pod, restoring only failed or missing connections.
+    fn connect_pod(&self, request: ConnectPodRequest) -> Result<()>;
 
     // PUT /pod/claude-config
     // Ensure Claude Code config files are present in the container.
@@ -855,8 +854,8 @@ impl Daemon for DaemonClient {
         }
     }
 
-    fn reconnect_pod_connection(&self, request: ReconnectPodConnectionRequest) -> Result<()> {
-        let url = self.url.join("/pod/reconnect")?;
+    fn connect_pod(&self, request: ConnectPodRequest) -> Result<()> {
+        let url = self.url.join("/pod/connect")?;
 
         let response = self
             .client
@@ -865,7 +864,7 @@ impl Daemon for DaemonClient {
             .send()
             .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
 
-        let _: serde_json::Value = read_sse_result(response, "reconnecting pod")?;
+        let _: serde_json::Value = read_sse_result(response, "connecting to pod")?;
         Ok(())
     }
 
@@ -1432,14 +1431,14 @@ async fn add_forwarded_port_handler<D: Daemon>(
     }
 }
 
-/// Handler for POST /pod/reconnect endpoint.
-async fn reconnect_pod_connection_handler<D: Daemon>(
+/// Handler for POST /pod/connect endpoint.
+async fn connect_pod_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
-    Json(request): Json<ReconnectPodConnectionRequest>,
+    Json(request): Json<ConnectPodRequest>,
 ) -> Response {
     let name = request.pod_name.clone();
-    streaming_result_response(format!("reconnecting pod '{name}'..."), move || {
-        daemon.reconnect_pod_connection(request)?;
+    streaming_result_response(format!("connecting to pod '{name}'..."), move || {
+        daemon.connect_pod(request)?;
         Ok(serde_json::Value::Null)
     })
 }
@@ -1589,10 +1588,7 @@ where
             "/pod/ports",
             get(list_ports_handler::<D>).post(add_forwarded_port_handler::<D>),
         )
-        .route(
-            "/pod/reconnect",
-            post(reconnect_pod_connection_handler::<D>),
-        )
+        .route("/pod/connect", post(connect_pod_handler::<D>))
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .route("/pod/pi-config", put(ensure_pi_config_handler::<D>))
         .route("/pod/ssh-agent", post(ensure_ssh_agent_handler::<D>))

@@ -36,11 +36,13 @@ use crate::executor::PodBackendInfo;
 use crate::gateway;
 use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use host_connection::{HostConnectionEvent, HostConnectionEventRx, HostConnectionRegistry};
-use pod_connection::{PodConnection, PodConnectionRegistry, PodConnectionStatus, PodRepairBackoff};
+use pod_connection::{
+    PodConnection, PodConnectionRegistry, PodConnectionStatus, PodEndpoint, PodRepairBackoff,
+};
 use protocol::{
-    AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, EnsurePiConfigRequest,
-    ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
-    ReconnectPodConnectionRequest,
+    AddForwardedPortRequest, ConnectPodRequest, ContainerId, Daemon, EnsureClaudeConfigRequest,
+    EnsurePiConfigRequest, ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName,
+    PodStatus, PortInfo,
 };
 
 use crate::pod::types::{ClaudeState, CodexState, GitSetupParams};
@@ -2163,6 +2165,66 @@ impl DaemonServer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_pod_server_route(
+        &self,
+        pod_connection: &Arc<PodConnection>,
+        executor: &crate::executor::Executor,
+        pod_id: &crate::executor::PodId,
+        host: &Host,
+        token: &str,
+        container_repo_path: &Path,
+        pod_name: &str,
+        local_env_vars: &HashMap<String, String>,
+        repair_server: bool,
+    ) -> Result<(PodEndpoint, bool)> {
+        let mut route_changed = false;
+        if !pod_connection.has_alive_pod_server() {
+            pod_connection.remove_pod_server();
+            route_changed = true;
+        }
+
+        let start_proxy = || -> Result<PodEndpoint> {
+            let serve_port = read_container_server_port(executor, pod_id)
+                .context("reading server-port file for existing pod")?;
+            let proxy = block_on(crate::exec_proxy::start_exec_proxy(
+                executor.clone(),
+                pod_id.clone(),
+                serve_port,
+            ))
+            .context("starting exec proxy for existing pod")?;
+            pod_connection.set_pod_server(host.clone(), token.to_string(), proxy)
+        };
+
+        let mut endpoint = match pod_connection.endpoint() {
+            Some(endpoint) => endpoint,
+            None => {
+                route_changed = true;
+                start_proxy()?
+            }
+        };
+
+        if repair_server {
+            if let Err(e) = pod_connection.probe() {
+                log::debug!("existing pod server route failed its probe: {e:#}");
+                pod_connection.remove_pod_server();
+                start_container_server(
+                    executor,
+                    pod_id,
+                    container_repo_path,
+                    pod_name,
+                    local_env_vars,
+                    token,
+                    None,
+                )?;
+                endpoint = start_proxy()?;
+                route_changed = true;
+            }
+        }
+
+        Ok((endpoint, route_changed))
+    }
+
     /// Reconnect to an existing pod that is recorded in the database.
     ///
     /// Only a backend-confirmed Gone status means the DB row is stale.
@@ -2177,6 +2239,7 @@ impl DaemonServer {
         devcontainer: &DevContainer,
         local_env_vars: &HashMap<String, String>,
         record: &db::PodRecord,
+        repair_pod_server: bool,
     ) -> ReconnectPodResult {
         if let Err(e) = gateway::install_host_hooks(repo_path) {
             return ReconnectPodResult::Unavailable(e);
@@ -2222,7 +2285,9 @@ impl DaemonServer {
                     &executor,
                     &pod_id,
                     &container_repo_path,
+                    local_env_vars,
                     record,
+                    repair_pod_server,
                 );
                 let result = match result {
                     Ok(result) => result,
@@ -2277,6 +2342,7 @@ impl DaemonServer {
                     &ports_attributes,
                     &other_ports_attributes,
                     record,
+                    repair_pod_server,
                 ) {
                     Ok(result) => ReconnectPodResult::Connected(Box::new(result)),
                     Err(e) => ReconnectPodResult::Unavailable(e),
@@ -2285,11 +2351,10 @@ impl DaemonServer {
         }
     }
 
-    fn reconnect_pod_connection_impl(&self, request: ReconnectPodConnectionRequest) -> Result<()> {
-        let ReconnectPodConnectionRequest {
+    fn connect_pod_impl(&self, request: ConnectPodRequest) -> Result<()> {
+        let ConnectPodRequest {
             pod_name,
             repo_path,
-            reconnect_host,
         } = request;
         let pod_name = PodName::new(pod_name).map_err(anyhow::Error::msg)?;
         let record = {
@@ -2310,16 +2375,46 @@ impl DaemonServer {
             &local_env_vars,
         )?;
 
-        if let Some(connection) = self.pod_connections.get(&repo_path, &pod_name.0) {
-            connection.reset_pod_transport();
-        }
-        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
+        let host_connection = match self.host_connections.get(&host) {
+            Some(connection) => match connection.ensure_connected() {
+                Ok(()) => connection,
+                Err(probe_error) => {
+                    log::warn!(
+                        "host probe failed before connecting to '{}': {probe_error:#}",
+                        pod_name.0
+                    );
+                    let host_key = host_connection::HostKey::from_host(&host);
+                    let replacement = self.host_connections.replace(&host)?;
+                    self.pod_connections
+                        .replace_host_connection(&host_key, replacement.clone());
+                    replacement.ensure_connected().with_context(|| {
+                        format!(
+                            "host probe failed and a replacement connection for pod '{}' could not be established",
+                            pod_name.0
+                        )
+                    })?;
+                    replacement
+                }
+            },
+            None => {
+                let connection = self.host_connections.get_or_create(&host)?;
+                connection.ensure_connected().with_context(|| {
+                    format!("establishing host connection for pod '{}'", pod_name.0)
+                })?;
+                connection
+            }
+        };
+        drop(host_connection);
 
-        if reconnect_host {
-            let host_key = host_connection::HostKey::from_host(&host);
-            let host_connection = self.host_connections.replace(&host)?;
-            self.pod_connections
-                .replace_host_connection(&host_key, host_connection);
+        if let Some(connection) = self.pod_connections.get(&repo_path, &pod_name.0) {
+            match connection.probe() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    log::warn!("pod probe for '{}' failed: {e:#}", pod_name.0);
+                    connection.reset_pod_transport();
+                    self.cleanup_codex_runtime(&repo_path, &pod_name.0);
+                }
+            }
         }
 
         match self.reconnect_pod(
@@ -2329,11 +2424,12 @@ impl DaemonServer {
             &devcontainer,
             &local_env_vars,
             &record,
+            true,
         ) {
             ReconnectPodResult::Connected(_) => Ok(()),
             ReconnectPodResult::Gone(e) => Err(e.context(format!("pod '{}' is gone", pod_name.0))),
             ReconnectPodResult::Unavailable(e) => {
-                Err(e.context(format!("reconnecting pod '{}' failed", pod_name.0)))
+                Err(e.context(format!("connecting to pod '{}' failed", pod_name.0)))
             }
         }
     }
@@ -2350,7 +2446,9 @@ impl DaemonServer {
         executor: &crate::executor::Executor,
         pod_id: &crate::executor::PodId,
         container_repo_path: &Path,
+        local_env_vars: &HashMap<String, String>,
         record: &db::PodRecord,
+        repair_pod_server: bool,
     ) -> Result<LaunchResult> {
         let token = record.token.clone();
         let pod_connection = self.pod_connections.get_or_create(
@@ -2360,37 +2458,24 @@ impl DaemonServer {
             token.clone(),
         )?;
 
-        // Reuse an existing exec proxy if it's still alive; otherwise
-        // start a fresh one.  Mirrors reconnect_docker so a second
-        // `rumpel enter` into an existing pod doesn't tear down the
-        // connection held by a running `rumpel claude`.
-        let mut pod_server_route_changed = false;
-        if !pod_connection.has_alive_pod_server() {
-            pod_connection.remove_pod_server();
-            pod_server_route_changed = true;
-        }
-        let endpoint = match pod_connection.endpoint() {
-            Some(endpoint) => endpoint,
-            None => {
-                let serve_port = read_container_server_port(executor, pod_id)
-                    .context("reading server-port file for existing k8s pod")?;
-                let proxy = block_on(crate::exec_proxy::start_exec_proxy(
-                    (*executor).clone(),
-                    (*pod_id).clone(),
-                    serve_port,
-                ))
-                .context("starting k8s exec proxy for existing pod")?;
-                pod_server_route_changed = true;
-                pod_connection.set_pod_server(docker_host.clone(), token.clone(), proxy)?
-            }
-        };
+        self.ensure_git_tunnel(&pod_connection, executor, pod_id)
+            .context("starting tunnel to existing k8s pod")?;
+
+        let (endpoint, pod_server_route_changed) = self.ensure_pod_server_route(
+            &pod_connection,
+            executor,
+            pod_id,
+            docker_host,
+            &token,
+            container_repo_path,
+            &pod_name.0,
+            local_env_vars,
+            repair_pod_server,
+        )?;
         let container_url = endpoint.url.clone();
         if pod_server_route_changed {
             self.cleanup_codex_runtime(repo_path, &pod_name.0);
         }
-
-        self.ensure_git_tunnel(&pod_connection, executor, pod_id)
-            .context("starting tunnel to existing k8s pod")?;
 
         // Readiness check: PodClient::new polls /events.
         let _pod = PodClient::new(&container_url, &token, RetryPolicy::UserBlocking)?;
@@ -2544,7 +2629,9 @@ impl DaemonServer {
                 &executor,
                 &backend_pod_id,
                 &repo_path,
+                &HashMap::new(),
                 &pod,
+                false,
             ) {
                 let name = &pod.name;
                 let path = &pod.repo_path;
@@ -2570,6 +2657,7 @@ impl DaemonServer {
         ports_attributes: &HashMap<String, devcontainer::PortAttributes>,
         other_ports_attributes: &Option<devcontainer::PortAttributes>,
         record: &db::PodRecord,
+        repair_pod_server: bool,
     ) -> Result<LaunchResult> {
         let was_stopped = status != PodStatus::Running;
         if was_stopped {
@@ -2584,13 +2672,8 @@ impl DaemonServer {
             token.clone(),
         )?;
 
-        // A proxy from a previous daemon run may still be registered.
-        // If the container was stopped it targets a dead exec session;
-        // drop it so we start a fresh one after container-serve is up.
-        let mut pod_server_route_changed = was_stopped;
-        if was_stopped || !pod_connection.has_alive_pod_server() {
+        if was_stopped {
             pod_connection.remove_pod_server();
-            pod_server_route_changed = true;
         }
 
         {
@@ -2621,21 +2704,17 @@ impl DaemonServer {
             )?;
         }
 
-        let serve_port = read_container_server_port(executor, pod_id)
-            .context("reading server-port file for existing container")?;
-        let endpoint = match pod_connection.endpoint() {
-            Some(endpoint) => endpoint,
-            None => {
-                let proxy = block_on(crate::exec_proxy::start_exec_proxy(
-                    (*executor).clone(),
-                    (*pod_id).clone(),
-                    serve_port,
-                ))
-                .context("starting exec proxy for existing container")?;
-                pod_server_route_changed = true;
-                pod_connection.set_pod_server(docker_host.clone(), token.clone(), proxy)?
-            }
-        };
+        let (endpoint, pod_server_route_changed) = self.ensure_pod_server_route(
+            &pod_connection,
+            executor,
+            pod_id,
+            docker_host,
+            &token,
+            container_repo_path,
+            &pod_name.0,
+            local_env_vars,
+            repair_pod_server,
+        )?;
         let container_url = endpoint.url.clone();
         if pod_server_route_changed {
             self.cleanup_codex_runtime(repo_path, &pod_name.0);
@@ -2943,6 +3022,7 @@ impl DaemonServer {
                     &devcontainer,
                     &local_env_vars,
                     &existing,
+                    false,
                 ) {
                     ReconnectPodResult::Connected(result) => return Ok(*result),
                     ReconnectPodResult::Gone(e) => {
@@ -4585,8 +4665,8 @@ impl Daemon for DaemonServer {
         })
     }
 
-    fn reconnect_pod_connection(&self, request: ReconnectPodConnectionRequest) -> Result<()> {
-        self.reconnect_pod_connection_impl(request)
+    fn connect_pod(&self, request: ConnectPodRequest) -> Result<()> {
+        self.connect_pod_impl(request)
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {

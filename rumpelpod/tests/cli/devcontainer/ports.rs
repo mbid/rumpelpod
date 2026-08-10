@@ -15,12 +15,13 @@ use rumpelpod::CommandExt;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::common::{
     pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH, TEST_USER,
 };
-use crate::executor::ExecutorResources;
+use crate::executor::{self, ExecutorResources};
 
 /// Write a devcontainer.json with port forwarding configuration.
 fn write_devcontainer_with_ports(repo: &TestRepo, ports_config: &str) {
@@ -30,7 +31,7 @@ fn write_devcontainer_with_ports(repo: &TestRepo, ports_config: &str) {
     // Use socat in the image so we can create simple TCP listeners for testing
     let dockerfile = formatdoc! {r#"
         FROM cgr.dev/chainguard/wolfi-base
-        RUN apk add --no-cache git shadow socat
+        RUN apk add --no-cache git shadow socat procps
         RUN useradd -m -u 1000 {TEST_USER}
         COPY --chown={TEST_USER}:{TEST_USER} . {TEST_REPO_PATH}
         USER {TEST_USER}
@@ -85,6 +86,52 @@ fn try_echo(port: u16, message: &str) -> Option<String> {
     let mut buf = String::new();
     stream.read_to_string(&mut buf).ok()?;
     Some(buf)
+}
+
+fn stop_container_server(pod_name: &str) {
+    let output = Command::new("docker")
+        .args([
+            "ps",
+            "-q",
+            "--filter",
+            &format!("label=dev.rumpelpod.name={pod_name}"),
+        ])
+        .success()
+        .expect("docker ps failed");
+    let container_id = String::from_utf8_lossy(&output).trim().to_string();
+    assert!(!container_id.is_empty(), "container not found");
+
+    let find_pid = || -> Option<String> {
+        let output = Command::new("docker")
+            .args([
+                "exec",
+                &container_id,
+                "pgrep",
+                "-f",
+                "/opt/rumpelpod/bin/rumpel container-serve",
+            ])
+            .output()
+            .expect("docker exec pgrep failed");
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .map(str::to_string)
+    };
+
+    let pid = find_pid().expect("container server not running");
+    Command::new("docker")
+        .args(["exec", &container_id, "kill", &pid])
+        .success()
+        .expect("stopping container server failed");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while find_pid().as_deref() == Some(pid.as_str()) {
+        assert!(Instant::now() < deadline, "container server did not stop");
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[test]
@@ -421,7 +468,11 @@ fn forward_port_persists_across_pod_restart() {
 }
 
 #[test]
-fn forward_port_is_restored_after_manual_reconnect() {
+fn forward_port_is_restored_after_connect_repairs_pod() {
+    if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
+        executor::skip_test();
+        return;
+    }
     let repo = TestRepo::new();
 
     write_devcontainer_with_ports(&repo, "");
@@ -431,52 +482,53 @@ fn forward_port_is_restored_after_manual_reconnect() {
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
 
     pod_command(&repo, &daemon)
-        .args(["enter", "--create", "fp-reconnect", "--", "true"])
+        .args(["enter", "--create", "fp-connect", "--", "true"])
         .success()
         .expect("rumpel enter failed");
 
     pod_command(&repo, &daemon)
-        .args(["forward-port", "fp-reconnect:9850"])
+        .args(["forward-port", "fp-connect:9850"])
         .success()
         .expect("rumpel forward-port failed");
 
-    start_echo_server_in_container(&repo, &daemon, "fp-reconnect", 9850);
+    start_echo_server_in_container(&repo, &daemon, "fp-connect", 9850);
 
     let stdout = pod_command(&repo, &daemon)
-        .args(["ports", "fp-reconnect"])
+        .args(["ports", "fp-connect"])
         .success()
-        .expect("rumpel ports failed before reconnect");
+        .expect("rumpel ports failed before connect");
     let listing = String::from_utf8_lossy(&stdout);
     let local_port = extract_local_port(&listing, 9850);
 
-    let response = try_echo(local_port, "before reconnect");
+    let response = try_echo(local_port, "before connect");
     assert_eq!(
         response.as_deref(),
-        Some("before reconnect"),
-        "expected forward to work before reconnect, got {response:?}"
+        Some("before connect"),
+        "expected forward to work before connect, got {response:?}"
     );
 
+    stop_container_server("fp-connect");
     pod_command(&repo, &daemon)
-        .args(["reconnect", "fp-reconnect"])
+        .args(["connect", "fp-connect"])
         .success()
-        .expect("rumpel reconnect failed");
+        .expect("rumpel connect failed");
 
     let stdout = pod_command(&repo, &daemon)
-        .args(["ports", "fp-reconnect"])
+        .args(["ports", "fp-connect"])
         .success()
-        .expect("rumpel ports failed after reconnect");
+        .expect("rumpel ports failed after connect");
     let listing = String::from_utf8_lossy(&stdout);
-    let reconnected_local_port = extract_local_port(&listing, 9850);
+    let connected_local_port = extract_local_port(&listing, 9850);
     assert_eq!(
-        reconnected_local_port, local_port,
-        "manual reconnect changed the persisted local port"
+        connected_local_port, local_port,
+        "connect changed the persisted local port"
     );
 
-    let response = try_echo(reconnected_local_port, "after reconnect");
+    let response = try_echo(connected_local_port, "after connect");
     assert_eq!(
         response.as_deref(),
-        Some("after reconnect"),
-        "expected forward to work after reconnect, got {response:?}"
+        Some("after connect"),
+        "expected forward to work after connect, got {response:?}"
     );
 }
 

@@ -25,15 +25,9 @@ fn container_id(pod_name: &str) -> String {
     id
 }
 
-fn tunnel_server_pid(container_id: &str) -> Option<String> {
+fn process_pid(container_id: &str, pattern: &str) -> Option<String> {
     let output = Command::new("docker")
-        .args([
-            "exec",
-            container_id,
-            "pgrep",
-            "-f",
-            "/opt/rumpelpod/bin/rumpel tunnel-server",
-        ])
+        .args(["exec", container_id, "pgrep", "-f", pattern])
         .output()
         .expect("docker exec pgrep failed");
     if !output.status.success() {
@@ -43,6 +37,10 @@ fn tunnel_server_pid(container_id: &str) -> Option<String> {
         .lines()
         .next()
         .map(str::to_string)
+}
+
+fn tunnel_server_pid(container_id: &str) -> Option<String> {
+    process_pid(container_id, "/opt/rumpelpod/bin/rumpel tunnel-server")
 }
 
 fn wait_for_new_tunnel_server(container_id: &str, old_pid: &str) -> String {
@@ -61,8 +59,28 @@ fn wait_for_new_tunnel_server(container_id: &str, old_pid: &str) -> String {
     }
 }
 
+fn stop_container_server(container_id: &str) {
+    let pid = process_pid(container_id, "/opt/rumpelpod/bin/rumpel container-serve")
+        .expect("container server not running");
+    Command::new("docker")
+        .args(["exec", container_id, "kill", &pid])
+        .success()
+        .expect("stopping container server failed");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_pid(container_id, "/opt/rumpelpod/bin/rumpel container-serve").as_deref()
+        == Some(pid.as_str())
+    {
+        assert!(
+            Instant::now() < deadline,
+            "container server in '{container_id}' did not stop"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 #[test]
-fn reconnect_scopes_transport_replacement_to_the_requested_level() {
+fn connect_preserves_healthy_transport_and_repairs_a_failed_pod() {
     println!("xtest:timeout=300");
     if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
         executor::skip_test();
@@ -76,55 +94,77 @@ fn reconnect_scopes_transport_replacement_to_the_requested_level() {
     write_test_devcontainer(&repo, "RUN apk add --no-cache procps", "");
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
 
-    for name in ["reconnect-a", "reconnect-b"] {
+    for name in ["connect-a", "connect-b"] {
         pod_command(&repo, &daemon)
             .args(["enter", "--create", name, "--", "true"])
             .success()
             .unwrap_or_else(|e| panic!("creating pod '{name}' failed: {e}"));
     }
 
-    let container_a = container_id("reconnect-a");
-    let container_b = container_id("reconnect-b");
+    let container_a = container_id("connect-a");
+    let container_b = container_id("connect-b");
     let tunnel_a = tunnel_server_pid(&container_a).expect("pod A tunnel server not running");
     let tunnel_b = tunnel_server_pid(&container_b).expect("pod B tunnel server not running");
 
     pod_command(&repo, &daemon)
-        .args(["reconnect", "reconnect-a"])
+        .args(["connect", "connect-a"])
         .success()
-        .expect("pod-only reconnect failed");
-    let tunnel_a = wait_for_new_tunnel_server(&container_a, &tunnel_a);
+        .expect("probing healthy connections failed");
+    assert_eq!(
+        tunnel_server_pid(&container_a).as_deref(),
+        Some(tunnel_a.as_str()),
+        "connect replaced the target pod's healthy tunnel"
+    );
     assert_eq!(
         tunnel_server_pid(&container_b).as_deref(),
         Some(tunnel_b.as_str()),
-        "pod-only reconnect replaced a sibling pod's tunnel"
+        "connect replaced a sibling pod's healthy tunnel"
     );
 
+    stop_container_server(&container_a);
     pod_command(&repo, &daemon)
-        .args(["reconnect", "reconnect-a", "--host"])
+        .args(["connect", "connect-a"])
         .success()
-        .expect("host reconnect failed");
+        .expect("repairing a failed pod connection failed");
     wait_for_new_tunnel_server(&container_a, &tunnel_a);
-    wait_for_new_tunnel_server(&container_b, &tunnel_b);
-
-    pod_command(&repo, &daemon)
-        .args(["enter", "reconnect-b", "--", "true"])
-        .success()
-        .expect("sibling pod was not usable after host reconnect");
+    assert_eq!(
+        tunnel_server_pid(&container_b).as_deref(),
+        Some(tunnel_b.as_str()),
+        "repairing one pod replaced a sibling pod's healthy tunnel"
+    );
 }
 
 #[test]
-fn reconnect_rejects_an_unknown_pod() {
+fn connect_rejects_an_unknown_pod() {
     let repo = TestRepo::new();
     let home = TestHome::new();
     let daemon = TestDaemon::start(&home);
 
     let output = pod_command(&repo, &daemon)
-        .args(["reconnect", "missing"])
+        .args(["connect", "missing"])
         .output()
-        .expect("running reconnect failed");
+        .expect("running connect failed");
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("pod 'missing' not found"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn connect_has_no_host_flag() {
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let daemon = TestDaemon::start(&home);
+
+    let output = pod_command(&repo, &daemon)
+        .args(["connect", "missing", "--host"])
+        .output()
+        .expect("running connect failed");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--host'"),
         "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );

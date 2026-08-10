@@ -1,4 +1,4 @@
-Add supervised and manual pod reconnection
+Add supervised and on-demand pod connections
 
 Recover dead git tunnels as daemon-owned pod resources after transport
 outages, tunnel process failures, and daemon restarts. Serialize
@@ -11,15 +11,15 @@ connection immediately resumes every non-stopped pod on that host.
 Back off unavailable host probes with jitter while keeping healthy
 checks and demand-triggered probes responsive.
 
-Add rumpel reconnect to replace one pod's tunnels, proxies, and port
-forwards on demand. Its --host flag also replaces the shared host
-connection and recovers sibling pod tunnels.
+Add rumpel connect to probe the host and pod on demand. Healthy
+connections remain untouched. Missing connections are established, and
+failed probes replace only the connection that needs repair.
 
 Trigger pending branch pushes when replacement tunnels refresh the
 pod's gateway configuration. Publish every initial branch before a new
 pod becomes ready so untouched branches are not omitted after removing
 recovery work from the events stream.
 
-Cover autonomous and manual recovery for local Docker, SSH, and
-Kubernetes. Verify manual reconnect restores a runtime-added port
-forward without changing its local port.
+Cover autonomous and on-demand recovery for local Docker, SSH, and
+Kubernetes. Verify connect restores a runtime-added port forward after
+repairing a failed pod without changing its local port.

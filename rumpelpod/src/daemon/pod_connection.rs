@@ -26,6 +26,7 @@ use crate::config::Host;
 use crate::daemon::host_connection::{HostConnection, HostConnectionRegistry, HostKey, HostStatus};
 use crate::daemon::reconnect::ReconnectEvent;
 use crate::daemon::{ssh_agent_dir, CodexProxyEndpoint, CodexProxyHandle, SshAgentHandle};
+use crate::pod::client::PodClient;
 use crate::pod::types::{ClaudeState, CodexState};
 
 const POD_REPAIR_INITIAL_DELAY: Duration = Duration::from_secs(1);
@@ -271,6 +272,16 @@ impl PodConnection {
             url: format!("http://127.0.0.1:{}", handle.port),
             token: self.token.lock().unwrap().clone(),
         })
+    }
+
+    pub fn probe(&self) -> Result<()> {
+        let endpoint = self
+            .endpoint()
+            .context("pod connection has no live endpoint")?;
+        PodClient::new_with_timeout(&endpoint.url, &endpoint.token, Duration::from_secs(5))?
+            .get_state()
+            .context("probing pod connection")?;
+        Ok(())
     }
 
     pub fn has_alive_pod_server(&self) -> bool {

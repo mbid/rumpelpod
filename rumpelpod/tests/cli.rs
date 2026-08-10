@@ -9,6 +9,8 @@ mod codex;
 mod common;
 #[path = "cli/completions.rs"]
 mod completions;
+#[path = "cli/connect.rs"]
+mod connect;
 #[path = "cli/container_name.rs"]
 mod container_name;
 #[path = "cli/cp.rs"]
@@ -45,8 +47,6 @@ mod pi;
 mod podman;
 #[path = "cli/prune.rs"]
 mod prune;
-#[path = "cli/reconnect.rs"]
-mod reconnect;
 #[path = "cli/recreate.rs"]
 mod recreate;
 #[path = "cli/review.rs"]
