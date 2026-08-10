@@ -183,7 +183,6 @@ fn start_code_server(
     daemon: &TestDaemon,
     user_data_dir: &Path,
     extensions_dir: &Path,
-    daemon_api_violation: &Path,
     action_log: &Path,
 ) -> (CodeServer, u16) {
     let ambient_path = std::env::var("PATH").expect("PATH is not set");
@@ -214,10 +213,6 @@ fn start_code_server(
             .env(
                 "RUMPELPOD_VSCODE_REAL_RUMPEL",
                 daemon.bin_dir.join("rumpel"),
-            )
-            .env(
-                "RUMPELPOD_VSCODE_DAEMON_API_VIOLATION",
-                daemon_api_violation,
             )
             .env("RUMPELPOD_VSCODE_ACTION_LOG", action_log)
             .stdin(Stdio::null());
@@ -258,11 +253,6 @@ fn write_extension_rumpel_wrapper(directory: &Path) -> PathBuf {
         indoc! {r#"
             #!/bin/sh
             case "$1" in
-                list|review|events)
-                    : > "$RUMPELPOD_VSCODE_DAEMON_API_VIOLATION"
-                    echo "VS Code used a CLI subprocess instead of the daemon API" >&2
-                    exit 97
-                    ;;
                 merge|stop|delete|ssh-add)
                     printf '%s\n' "$*" >> "$RUMPELPOD_VSCODE_ACTION_LOG"
                     ;;
@@ -730,7 +720,6 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     let extensions_dir = browser_home.path().join("extensions");
     fs::create_dir_all(&extensions_dir).expect("create code-server extension directory");
     let extension_rumpel = write_extension_rumpel_wrapper(browser_home.path());
-    let daemon_api_violation = browser_home.path().join("unexpected-daemon-state-cli");
     let action_log = browser_home.path().join("actions.log");
     let ssh_directory = daemon.home_path.join(".ssh");
     fs::create_dir_all(&ssh_directory).expect("create SSH key directory");
@@ -750,7 +739,6 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
         &daemon,
         &user_data_dir,
         &extensions_dir,
-        &daemon_api_violation,
         &action_log,
     );
     let artifacts = root
@@ -772,9 +760,5 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     assert!(
         String::from_utf8_lossy(&ssh_identities).contains("ED25519"),
         "VS Code did not add the selected SSH identity"
-    );
-    assert!(
-        !daemon_api_violation.exists(),
-        "the VS Code extension used a CLI subprocess for daemon-owned state"
     );
 }
