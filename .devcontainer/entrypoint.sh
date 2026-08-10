@@ -15,6 +15,12 @@ CLOUD_DIR="${WORKSPACE:-/workspaces/rumpelpod}/cloud"
 # the daemon and browser terminals are intended to receive.
 /usr/local/bin/write-rumpelpod-agent-environment "${USER:-user}"
 
+# CI boots the same image but never opens the browser IDE; mask it so the
+# lingering user manager does not spend test-runner resources on code-server.
+if [ -n "${CI:-}" ]; then
+    ln -sf /dev/null "$USER_HOME/.config/systemd/user/rumpelpod-vscode.service"
+fi
+
 # Copy the first kubeconfig found to ~/.kube/config for interactive use.
 for kc in "$CLOUD_DIR"/*/kubeconfig; do
     [ -f "$kc" ] || continue

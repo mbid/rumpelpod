@@ -40,8 +40,11 @@ docker build \
 
 # Sysbox lets the container run systemd and nested containers (docker,
 # podman, k3d) without --privileged, the same as local development.
+# Forwarding the runner's CI variable lets the entrypoint skip
+# development-only services such as browser VS Code.
 docker run --detach --name devcontainer \
   --runtime=sysbox-runc \
+  --env CI \
   --volume rumpelpod-podman-storage:/var/lib/containers \
   rumpelpod-dev
 

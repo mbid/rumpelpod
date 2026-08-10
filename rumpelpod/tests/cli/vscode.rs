@@ -389,9 +389,13 @@ fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
         "CI and development did not use the same complete devcontainer image"
     );
     assert!(
-        dockerfile
-            .contains("/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket"),
-        "the image did not enable the development daemon socket"
+        dockerfile.contains("system-install --no-activate"),
+        "the image did not install the daemon units through rumpel"
+    );
+    assert!(
+        !dockerfile.contains(".devcontainer/rumpelpod.socket")
+            && !dockerfile.contains(".devcontainer/rumpelpod.service "),
+        "the image copied vendored daemon units instead of using system-install"
     );
     assert!(
         dockerfile.contains(
@@ -405,6 +409,19 @@ fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
     assert!(
         entrypoint.trim_end().ends_with("exec /sbin/init"),
         "the container entrypoint did not start systemd"
+    );
+    assert!(
+        entrypoint.contains(r#"if [ -n "${CI:-}" ]"#)
+            && entrypoint.contains(
+                r#"ln -sf /dev/null "$USER_HOME/.config/systemd/user/rumpelpod-vscode.service""#
+            ),
+        "CI containers did not mask browser VS Code"
+    );
+    let ci_pipeline =
+        fs::read_to_string(root.join("ci/run-pipeline.sh")).expect("read CI pipeline script");
+    assert!(
+        ci_pipeline.contains("--env CI"),
+        "CI did not forward its marker into the test container"
     );
 }
 

@@ -372,6 +372,12 @@ RUN native_arch=$(dpkg --print-architecture) \
     && cp /workspaces/rumpelpod/target/x86_64-unknown-linux-musl/debug/rumpel ~/.local/bin/rumpel-linux-amd64 \
     && cp /workspaces/rumpelpod/target/aarch64-unknown-linux-musl/debug/rumpel ~/.local/bin/rumpel-linux-arm64
 
+# The daemon units come from rumpel itself so development and ordinary
+# installs cannot drift apart. No systemd runs during the image build, so
+# activation is deferred to the first user-manager start, and the runtime
+# directory that the socket path derives from has to be spelled out.
+RUN XDG_RUNTIME_DIR=/run/user/${USER_ID} ~/.local/bin/rumpel system-install --no-activate
+
 USER root
 
 RUN rm -rf /tmp/rumpelpod-vscode
@@ -379,15 +385,12 @@ RUN rm -rf /tmp/rumpelpod-vscode
 COPY --chmod=755 .devcontainer/write-agent-environment.sh /usr/local/bin/write-rumpelpod-agent-environment
 COPY --chown=${USER}:${USER} --chmod=755 .devcontainer/start-vscode.sh /home/${USER}/.local/lib/rumpelpod/start-vscode.sh
 COPY --chown=${USER}:${USER} --chmod=755 .devcontainer/prepare-vscode-demo.sh /home/${USER}/.local/lib/rumpelpod/prepare-vscode-demo.sh
-COPY --chown=${USER}:${USER} .devcontainer/rumpelpod.socket .devcontainer/rumpelpod.service .devcontainer/rumpelpod-vscode.service /home/${USER}/.config/systemd/user/
+COPY --chown=${USER}:${USER} .devcontainer/rumpelpod-vscode.service /home/${USER}/.config/systemd/user/
 USER ${USER}
 RUN /home/${USER}/.local/lib/rumpelpod/prepare-vscode-demo.sh
 USER root
 RUN mkdir -p \
         "/home/${USER}/.config/systemd/user/default.target.wants" \
-        "/home/${USER}/.config/systemd/user/sockets.target.wants" \
-    && ln -s ../rumpelpod.socket \
-        "/home/${USER}/.config/systemd/user/sockets.target.wants/rumpelpod.socket" \
     && ln -s ../rumpelpod-vscode.service \
         "/home/${USER}/.config/systemd/user/default.target.wants/rumpelpod-vscode.service" \
     && chown -R ${USER}:${USER} "/home/${USER}/.config"
