@@ -9,7 +9,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// A devcontainer.json configuration.
@@ -580,8 +580,6 @@ impl DevContainer {
     /// These properties are intentionally not supported but may appear
     /// in devcontainer.json files shared with other tools like VS Code.
     ///
-    /// - `initializeCommand`: runs on the host, which does not generalize to
-    ///   non-local backends (e.g. Kubernetes).
     /// - `features` / `overrideFeatureInstallOrder`: Dev Container Features
     ///   require an OCI registry client and a custom image build pipeline.
     ///   Out of scope -- use a Dockerfile instead.
@@ -592,7 +590,6 @@ impl DevContainer {
             ("dockerComposeFile", self.docker_compose_file.is_some()),
             ("service", self.service.is_some()),
             ("runServices", self.run_services.is_some()),
-            ("initializeCommand", self.initialize_command.is_some()),
             ("features", self.features.is_some()),
             (
                 "overrideFeatureInstallOrder",
@@ -1065,12 +1062,14 @@ pub fn substitute_vars(value: &str, ctx: &SubstitutionContext) -> String {
 /// Returns `None` when the variable type is not available in the current
 /// context, meaning the literal `${...}` should be kept for a later call.
 fn resolve_variable(inner: &str, ctx: &SubstitutionContext) -> Option<String> {
-    if let Some(rest) = inner.strip_prefix("localEnv:") {
+    if let Some(rest) = inner
+        .strip_prefix("localEnv:")
+        .or_else(|| inner.strip_prefix("env:"))
+    {
         let local_env = ctx.local_env.as_ref()?;
         let (var_name, default) = split_var_default(rest);
         let val = local_env
             .get(var_name)
-            .filter(|v| !v.is_empty())
             .cloned()
             .or_else(|| default.map(str::to_string))
             .unwrap_or_default();
@@ -1112,26 +1111,106 @@ pub fn compute_devcontainer_id(repo_path: &Path, pod_name: &str) -> String {
     hex::encode(hash)
 }
 
-/// Scan raw devcontainer.json text for `${localEnv:VAR}` references and
-/// resolve them from the local environment.  Returns a map of VAR name
-/// -> value for all referenced variables.  Unset vars map to empty
+/// Resolve the variables whose values are known before container creation.
+///
+/// Keeping this shared between initialization and launch ensures the host
+/// command sees the same values as the container configuration applied
+/// afterward.
+pub(crate) fn resolve_devcontainer_vars(
+    dc: DevContainer,
+    repo_path: &Path,
+    pod_name: &str,
+    local_env: &HashMap<String, String>,
+) -> DevContainer {
+    let devcontainer_id = compute_devcontainer_id(repo_path, pod_name);
+
+    // Docker bind mounts need canonical host paths on macOS, where paths
+    // such as /var are symlinks into /private/var.
+    let canonical = repo_path
+        .canonicalize()
+        .unwrap_or_else(|_| repo_path.to_path_buf());
+    let local_ws = canonical
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .to_string();
+    let local_ws_basename = canonical
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    // The container workspace is needed by initializeCommand substitution,
+    // but may itself depend on host-side variables.
+    let workspace_folder = dc.workspace_folder.as_ref().map(|wf| {
+        substitute_vars(
+            wf,
+            &SubstitutionContext {
+                local_env: Some(local_env.clone()),
+                local_workspace_folder: Some(local_ws.clone()),
+                local_workspace_folder_basename: Some(local_ws_basename.clone()),
+                container_workspace_folder: None,
+                container_workspace_folder_basename: None,
+                devcontainer_id: Some(devcontainer_id.clone()),
+            },
+        )
+    });
+    let dc = DevContainer {
+        workspace_folder,
+        ..dc
+    };
+
+    let container_ws = dc.container_repo_path(repo_path);
+    let container_ws_str = container_ws.to_string_lossy().to_string();
+    let container_ws_basename = container_ws
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string());
+
+    dc.substitute(&SubstitutionContext {
+        local_env: Some(local_env.clone()),
+        local_workspace_folder: Some(local_ws),
+        local_workspace_folder_basename: Some(local_ws_basename),
+        container_workspace_folder: Some(container_ws_str),
+        container_workspace_folder_basename: Some(container_ws_basename),
+        devcontainer_id: Some(devcontainer_id),
+    })
+}
+
+/// Scan raw devcontainer.json text for `${localEnv:VAR}` and `${env:VAR}`
+/// references and resolve them from the local environment. Returns a map of
+/// VAR name -> value for all referenced variables that are set. Missing
+/// entries remain distinguishable from variables explicitly set to an empty
 /// string.
 ///
 /// Must be called on the client side where the local environment is
 /// available.  The daemon then uses this map to substitute
-/// `${localEnv:...}` without needing access to its own process
-/// environment.
+/// `${localEnv:...}` / `${env:...}` without needing access to its own
+/// process environment.
 pub fn collect_local_env_vars(raw_json: &str) -> HashMap<String, String> {
     let mut vars = HashMap::new();
+    for var_name in collect_local_env_var_names(raw_json) {
+        if let Some(value) = std::env::var_os(&var_name) {
+            vars.insert(var_name, value.to_string_lossy().into_owned());
+        }
+    }
+    vars
+}
+
+/// Return all host environment variable names referenced by configuration.
+pub(crate) fn collect_local_env_var_names(raw_json: &str) -> HashSet<String> {
+    let mut vars = HashSet::new();
     let mut rest = raw_json;
-    while let Some(start) = rest.find("${localEnv:") {
-        let after = &rest[start + "${localEnv:".len()..];
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + "${".len()..];
         if let Some(end) = after.find('}') {
             let inner = &after[..end];
-            let var_name = inner.split(':').next().unwrap_or("");
-            if !var_name.is_empty() && !vars.contains_key(var_name) {
-                let value = std::env::var(var_name).unwrap_or_default();
-                vars.insert(var_name.to_string(), value);
+            if let Some(var) = inner
+                .strip_prefix("localEnv:")
+                .or_else(|| inner.strip_prefix("env:"))
+            {
+                let var_name = var.split(':').next().unwrap_or("");
+                if !var_name.is_empty() {
+                    vars.insert(var_name.to_string());
+                }
             }
             rest = &after[end + 1..];
         } else {
@@ -1141,29 +1220,40 @@ pub fn collect_local_env_vars(raw_json: &str) -> HashMap<String, String> {
     vars
 }
 
-/// Resolve `${localEnv:VAR}` patterns in a string using an explicit map
-/// instead of the process environment.  Used inside the container where
-/// the host env is not available -- the map is passed via CLI flags.
+/// Resolve `${localEnv:VAR}` and `${env:VAR}` patterns using an explicit map
+/// instead of the process environment. Used inside the container where the
+/// host env is not available -- the map is passed via CLI flags.
 pub fn resolve_local_env_from_map(value: &str, local_env: &HashMap<String, String>) -> String {
     let mut result = String::new();
     let mut rest = value;
-    while let Some(start) = rest.find("${localEnv:") {
+    while let Some(start) = rest.find("${") {
         result.push_str(&rest[..start]);
-        let after = &rest[start + "${localEnv:".len()..];
+        let after = &rest[start + "${".len()..];
         if let Some(end) = after.find('}') {
             let inner = &after[..end];
-            let (var_name, default) = split_var_default(inner);
-            let resolved = local_env
-                .get(var_name)
-                .filter(|v| !v.is_empty())
-                .map(String::as_str)
-                .or(default)
-                .unwrap_or("");
-            result.push_str(resolved);
+            match inner
+                .strip_prefix("localEnv:")
+                .or_else(|| inner.strip_prefix("env:"))
+            {
+                Some(var) => {
+                    let (var_name, default) = split_var_default(var);
+                    let resolved = local_env
+                        .get(var_name)
+                        .map(String::as_str)
+                        .or(default)
+                        .unwrap_or("");
+                    result.push_str(resolved);
+                }
+                None => {
+                    result.push_str("${");
+                    result.push_str(inner);
+                    result.push('}');
+                }
+            }
             rest = &after[end + 1..];
         } else {
             result.push_str(&rest[start..]);
-            break;
+            return result;
         }
     }
     result.push_str(rest);
@@ -1183,16 +1273,12 @@ pub fn resolve_container_env_in_process(value: &str) -> String {
             let inner = &after[..end];
             let (var_name, default) = split_var_default(inner);
             let resolved = std::env::var(var_name).ok();
-            let resolved = resolved
-                .as_deref()
-                .filter(|v| !v.is_empty())
-                .or(default)
-                .unwrap_or("");
+            let resolved = resolved.as_deref().or(default).unwrap_or("");
             result.push_str(resolved);
             rest = &after[end + 1..];
         } else {
             result.push_str(&rest[start..]);
-            break;
+            return result;
         }
     }
     result.push_str(rest);
@@ -1268,6 +1354,32 @@ mod tests {
     fn substitute_local_env_set_ignores_default() {
         let ctx = local_env_only_ctx(HashMap::from([("SET".to_string(), "value".to_string())]));
         assert_eq!(substitute_vars("${localEnv:SET:fallback}", &ctx), "value");
+    }
+
+    #[test]
+    fn substitute_local_env_empty_ignores_default() {
+        let ctx = local_env_only_ctx(HashMap::from([("SET".to_string(), String::new())]));
+        assert_eq!(substitute_vars("${localEnv:SET:fallback}", &ctx), "");
+    }
+
+    #[test]
+    fn substitute_env_alias_with_default() {
+        let ctx = local_env_only_ctx(HashMap::new());
+        assert_eq!(substitute_vars("${env:MISSING:fallback}", &ctx), "fallback");
+    }
+
+    #[test]
+    fn resolve_local_env_map_accepts_env_alias() {
+        let env = HashMap::from([("SET".to_string(), "value".to_string())]);
+        assert_eq!(resolve_local_env_from_map("${env:SET}", &env), "value");
+    }
+
+    #[test]
+    fn resolve_local_env_map_preserves_unclosed_reference() {
+        assert_eq!(
+            resolve_local_env_from_map("before-${env:SET", &HashMap::new()),
+            "before-${env:SET"
+        );
     }
 
     #[test]

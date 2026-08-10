@@ -186,9 +186,9 @@ pub struct PortInfo {
 /// Everything the daemon needs to launch or recreate a pod.
 ///
 /// The client does not parse devcontainer.json: it only scans the raw
-/// file for `${localEnv:...}` references and resolves them from the
-/// local environment.  The daemon loads and resolves the config itself
-/// from `repo_path`.
+/// file for `${localEnv:...}` / `${env:...}` references and resolves them
+/// from the local environment. The daemon loads and resolves the config
+/// itself from `repo_path`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PodLaunchParams {
     pub pod_name: PodName,
@@ -223,10 +223,9 @@ pub struct PodLaunchParams {
     /// Path of the description file for merge commit messages (None = disabled).
     /// Included in the system prompt so the agent knows where to write it.
     pub description_file: Option<String>,
-    /// Host-side environment variables referenced by `${localEnv:...}` in the
-    /// raw devcontainer.json.  Collected by the client (which has access to the
-    /// host env) and forwarded to the daemon so it can substitute
-    /// `${localEnv:...}` without touching its own process environment.
+    /// Host-side environment variables referenced by `${localEnv:...}` or
+    /// `${env:...}` in the raw devcontainer.json. Collected by the client and
+    /// forwarded to the daemon for substitution.
     pub local_env_vars: HashMap<String, String>,
     /// `SSH_AUTH_SOCK` from the client's environment, if set.  The daemon
     /// forwards it verbatim as `SSH_AUTH_SOCK` on every `docker buildx

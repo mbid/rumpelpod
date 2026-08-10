@@ -163,32 +163,6 @@ fn warns_on_multiple_unsupported() {
 }
 
 #[test]
-fn warns_on_initialize_command() {
-    let repo = TestRepo::new();
-
-    write_devcontainer_with_unsupported(
-        &repo,
-        r#",
-            "initializeCommand": "echo hello""#,
-    );
-    let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home);
-    let daemon = TestDaemon::start(&home);
-    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
-
-    let output = pod_command(&repo, &daemon)
-        .args(["enter", "--create", "unsupported-initcmd", "--", "true"])
-        .output()
-        .expect("Failed to run pod command");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("initializeCommand") && stderr.contains("not supported"),
-        "stderr should warn about unsupported initializeCommand, got: {stderr}",
-    );
-}
-
-#[test]
 fn warns_on_features() {
     let repo = TestRepo::new();
 

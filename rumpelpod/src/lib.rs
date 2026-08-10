@@ -28,6 +28,7 @@ mod hook;
 mod hub;
 pub(crate) mod image;
 mod image_cmd;
+mod initialize;
 mod k8s;
 mod list;
 mod llm;

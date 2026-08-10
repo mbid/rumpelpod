@@ -12,7 +12,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use crate::image::OutputLine;
@@ -28,9 +28,8 @@ use sha2::{Digest, Sha256};
 use crate::async_runtime::block_on;
 use crate::config::{ContainerEngine, Host};
 use crate::devcontainer::{
-    self, check_no_unresolved_mount_vars, compute_devcontainer_id, substitute_vars, BuildOptions,
-    DevContainer, GpuRequirement, HostRequirements, MountType, Port, PortAttributes,
-    SubstitutionContext,
+    self, check_no_unresolved_mount_vars, resolve_devcontainer_vars, BuildOptions, DevContainer,
+    GpuRequirement, HostRequirements, MountType, Port, PortAttributes,
 };
 use crate::executor::PodBackendInfo;
 use crate::gateway;
@@ -73,6 +72,29 @@ pub fn default_docker_socket() -> PathBuf {
         .into_iter()
         .find(|p| p.exists())
         .unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"))
+}
+
+fn initialize_docker_socket(host: &Host) -> Option<PathBuf> {
+    match host {
+        Host::Localhost {
+            engine: ContainerEngine::Docker,
+        } => Some(default_docker_socket()),
+        Host::Localhost {
+            engine: ContainerEngine::Podman,
+        }
+        | Host::Ssh {
+            engine: ContainerEngine::Docker | ContainerEngine::Podman,
+            ..
+        }
+        | Host::Kubernetes { .. } => None,
+        Host::Localhost {
+            engine: ContainerEngine::Auto,
+        }
+        | Host::Ssh {
+            engine: ContainerEngine::Auto,
+            ..
+        } => panic!("container engine auto remained after resolve"),
+    }
 }
 
 /// Build a `BuildOutputFn` that forwards every line to `tx`.
@@ -382,6 +404,8 @@ pub struct DaemonServer {
     pty_sessions: crate::pty_session::PtySessions,
     /// Backend container ids served by plain `list` (no --sync).
     container_ids: Arc<Mutex<ContainerIdCache>>,
+    /// Serializes create and recreate decisions for each logical pod.
+    launch_locks: Arc<PodLaunchLocks>,
 }
 
 /// Cache of backend container ids, keyed by (repo path, pod name).
@@ -399,6 +423,34 @@ pub struct DaemonServer {
 struct ContainerIdCache {
     ids: HashMap<(PathBuf, String), String>,
     warmed_hosts: HashSet<(PathBuf, String)>,
+}
+
+#[derive(Default)]
+struct PodLaunchLocks {
+    locks: Mutex<HashMap<PodLaunchKey, Weak<PodLaunchLock>>>,
+}
+
+type PodLaunchKey = (PathBuf, String);
+type PodLaunchLock = Mutex<()>;
+
+impl PodLaunchLocks {
+    fn for_pod(&self, repo_path: &Path, pod_name: &str) -> Arc<PodLaunchLock> {
+        let key = (repo_path.to_path_buf(), pod_name.to_string());
+        let mut locks = self.locks.lock().unwrap();
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
+    }
+}
+
+#[derive(Clone, Copy)]
+enum InitializeMode {
+    IfCreating,
+    AlreadyRun,
 }
 
 /// Sanitize a string for use as a container hostname (RFC 1123):
@@ -582,76 +634,6 @@ fn validate_bind_mount_ownership(devcontainer: &DevContainer) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Resolve all devcontainer.json variables using the client-provided
-/// `${localEnv:...}` map and the repo path.
-///
-/// Runs in two passes because `containerWorkspaceFolder` is derived from
-/// `workspace_folder` after its own substitution pass, and everything
-/// else can then reference the derived value.
-fn resolve_devcontainer_vars(
-    dc: DevContainer,
-    repo_path: &Path,
-    pod_name: &str,
-    local_env: &HashMap<String, String>,
-) -> DevContainer {
-    let devcontainer_id = compute_devcontainer_id(repo_path, pod_name);
-
-    // Canonicalize for ${localWorkspaceFolder} so symlinks like
-    // /var -> /private/var on macOS resolve to the form Docker bind
-    // mounts need.  The DB still keys pods by the client's original
-    // repo_path so this is only used for substitution.
-    let canonical = repo_path
-        .canonicalize()
-        .unwrap_or_else(|_| repo_path.to_path_buf());
-    let local_ws = canonical
-        .to_string_lossy()
-        .trim_end_matches('/')
-        .to_string();
-    let local_ws_basename = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "workspace".to_string());
-
-    // workspace_folder may itself contain ${devcontainerId} or
-    // ${localWorkspaceFolderBasename}, so resolve it before deriving
-    // containerWorkspaceFolder from it.
-    let workspace_folder = dc.workspace_folder.as_ref().map(|wf| {
-        substitute_vars(
-            wf,
-            &SubstitutionContext {
-                local_env: Some(local_env.clone()),
-                local_workspace_folder: Some(local_ws.clone()),
-                local_workspace_folder_basename: Some(local_ws_basename.clone()),
-                // containerWorkspaceFolder is derived from workspace_folder,
-                // so it cannot be resolved yet.
-                container_workspace_folder: None,
-                container_workspace_folder_basename: None,
-                devcontainer_id: Some(devcontainer_id.clone()),
-            },
-        )
-    });
-    let dc = DevContainer {
-        workspace_folder,
-        ..dc
-    };
-
-    let container_ws = dc.container_repo_path(repo_path);
-    let container_ws_str = container_ws.to_string_lossy().to_string();
-    let container_ws_basename = container_ws
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "workspace".to_string());
-
-    dc.substitute(&SubstitutionContext {
-        local_env: Some(local_env.clone()),
-        local_workspace_folder: Some(local_ws),
-        local_workspace_folder_basename: Some(local_ws_basename),
-        container_workspace_folder: Some(container_ws_str),
-        container_workspace_folder_basename: Some(container_ws_basename),
-        devcontainer_id: Some(devcontainer_id),
-    })
 }
 
 /// Clean up pod refs in a repo's git directory.
@@ -2946,6 +2928,19 @@ impl DaemonServer {
         })
     }
 
+    fn forget_gone_pod(&self, repo_path: &Path, pod_name: &str) -> Result<()> {
+        self.pod_connections.remove(repo_path, pod_name);
+        self.cleanup_codex_runtime(repo_path, pod_name);
+        self.container_ids
+            .lock()
+            .unwrap()
+            .ids
+            .remove(&(repo_path.to_path_buf(), pod_name.to_string()));
+        let conn = self.db.lock().unwrap();
+        db::delete_pod(&conn, repo_path, pod_name)?;
+        Ok(())
+    }
+
     /// Fresh-pod launch path used by `rumpel enter` and `rumpel recreate`.
     ///
     /// Resolves the devcontainer + image + git_setup from the host repo,
@@ -2957,6 +2952,7 @@ impl DaemonServer {
         &self,
         params: PodLaunchParams,
         build_tx: std::sync::mpsc::Sender<crate::image::OutputLine>,
+        initialize_mode: InitializeMode,
     ) -> Result<LaunchResult> {
         let PodLaunchParams {
             pod_name,
@@ -2970,15 +2966,10 @@ impl DaemonServer {
             grok_cli_path,
             inject_system_prompt,
             description_file,
-            local_env_vars,
+            mut local_env_vars,
             ssh_auth_sock,
         } = params;
         let requested_host = docker_host;
-
-        let (mut devcontainer, used_default_image) =
-            load_and_resolve_devcontainer(&repo_path, &pod_name.0, &local_env_vars)?;
-        let raw_devcontainer_json =
-            DevContainer::find_raw(&repo_path)?.unwrap_or_else(|| "{}".to_string());
 
         // When re-entering an existing pod, use the host it was created on
         // rather than whatever the current config resolves to.  The pod is
@@ -3015,39 +3006,65 @@ impl DaemonServer {
                     .resolve_docker_engine()
                     .context("resolving container engine for existing pod")?;
                 drop(conn);
-                match self.reconnect_pod(
-                    &pod_name,
-                    &repo_path,
-                    &existing_host,
-                    &devcontainer,
-                    &local_env_vars,
-                    &existing,
-                    false,
-                ) {
-                    ReconnectPodResult::Connected(result) => return Ok(*result),
-                    ReconnectPodResult::Gone(e) => {
-                        log::warn!("existing pod is gone, will recreate: {e:#}");
-                        self.pod_connections.remove(&repo_path, &pod_name.0);
-                        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
-                        self.container_ids
-                            .lock()
-                            .unwrap()
-                            .ids
-                            .remove(&(repo_path.clone(), pod_name.0.clone()));
-                        let conn = self.db.lock().unwrap();
-                        db::delete_pod(&conn, &repo_path, &pod_name.0)?;
-                    }
-                    ReconnectPodResult::Unavailable(e) => {
-                        return Err(e.context(format!(
-                            "reconnecting existing pod '{}' failed",
-                            pod_name.0
-                        )));
+                let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
+                let status = self
+                    .host_executor(&existing_host)
+                    .and_then(|executor| executor.status(&pod_id))
+                    .with_context(|| {
+                        format!("checking existing pod '{}' before reconnect", pod_name.0)
+                    })?;
+                if status == PodStatus::Gone {
+                    log::warn!("existing pod is gone, will recreate");
+                    self.forget_gone_pod(&repo_path, &pod_name.0)?;
+                } else {
+                    let (devcontainer, _) =
+                        load_and_resolve_devcontainer(&repo_path, &pod_name.0, &local_env_vars)?;
+                    match self.reconnect_pod(
+                        &pod_name,
+                        &repo_path,
+                        &existing_host,
+                        &devcontainer,
+                        &local_env_vars,
+                        &existing,
+                        false,
+                    ) {
+                        ReconnectPodResult::Connected(result) => return Ok(*result),
+                        ReconnectPodResult::Gone(e) => {
+                            log::warn!("existing pod is gone, will recreate: {e:#}");
+                            self.forget_gone_pod(&repo_path, &pod_name.0)?;
+                        }
+                        ReconnectPodResult::Unavailable(e) => {
+                            return Err(e.context(format!(
+                                "reconnecting existing pod '{}' failed",
+                                pod_name.0
+                            )));
+                        }
                     }
                 }
             }
         }
 
         let docker_host = requested_host.resolve_container_tools()?;
+        match initialize_mode {
+            InitializeMode::IfCreating => {
+                let docker_socket = initialize_docker_socket(&docker_host);
+                crate::initialize::run(
+                    &repo_path,
+                    &pod_name.0,
+                    &docker_host,
+                    docker_socket.as_deref(),
+                    ssh_auth_sock.as_deref(),
+                    &mut local_env_vars,
+                    &build_tx,
+                )?;
+            }
+            InitializeMode::AlreadyRun => {}
+        }
+        let (mut devcontainer, used_default_image) =
+            load_and_resolve_devcontainer(&repo_path, &pod_name.0, &local_env_vars)?;
+        let raw_devcontainer_json =
+            DevContainer::find_raw(&repo_path)?.unwrap_or_else(|| "{}".to_string());
+
         if docker_host.is_remote() {
             validate_bind_mount_ownership(&devcontainer)?;
         }
@@ -3761,6 +3778,17 @@ impl DaemonServer {
         let pod_name = params.pod_name.clone();
         let repo_path = params.repo_path.clone();
         let docker_host = params.host.clone();
+        let docker_socket = initialize_docker_socket(&docker_host);
+        let ssh_auth_sock = params.ssh_auth_sock.clone();
+        crate::initialize::run(
+            &repo_path,
+            &pod_name.0,
+            &docker_host,
+            docker_socket.as_deref(),
+            ssh_auth_sock.as_deref(),
+            &mut params.local_env_vars,
+            &build_tx,
+        )?;
 
         if let Host::Kubernetes { .. } = &docker_host {
             let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
@@ -3822,7 +3850,8 @@ impl DaemonServer {
             Daemon::delete_pod(self, pod_name.clone(), repo_path.clone(), true)?;
 
             // 3. Create new pod (call impl directly to avoid nested thread)
-            let launch_result = self.launch_pod_impl(params, build_tx)?;
+            let launch_result =
+                self.launch_pod_impl(params, build_tx, InitializeMode::AlreadyRun)?;
 
             // 4. Restore snapshots
             if patch.is_some() || !agent_snapshots.is_empty() {
@@ -3924,7 +3953,7 @@ impl DaemonServer {
         }
 
         // 3. Create new pod (call impl directly to avoid nested thread)
-        let launch_result = self.launch_pod_impl(params, build_tx)?;
+        let launch_result = self.launch_pod_impl(params, build_tx, InitializeMode::AlreadyRun)?;
 
         // 4. Restore snapshots
         if patch.is_some() || !agent_snapshots.is_empty() {
@@ -4172,7 +4201,13 @@ impl Daemon for DaemonServer {
     fn launch_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.clone();
-        let handle = std::thread::spawn(move || this.launch_pod_impl(params, tx));
+        let handle = std::thread::spawn(move || {
+            let launch_lock = this
+                .launch_locks
+                .for_pod(&params.repo_path, &params.pod_name.0);
+            let _guard = launch_lock.lock().unwrap();
+            this.launch_pod_impl(params, tx, InitializeMode::IfCreating)
+        });
         Ok(ServerLaunchProgress {
             rx: Some(rx),
             handle: Some(handle),
@@ -4182,7 +4217,13 @@ impl Daemon for DaemonServer {
     fn recreate_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.clone();
-        let handle = std::thread::spawn(move || this.recreate_pod_impl(params, tx));
+        let handle = std::thread::spawn(move || {
+            let launch_lock = this
+                .launch_locks
+                .for_pod(&params.repo_path, &params.pod_name.0);
+            let _guard = launch_lock.lock().unwrap();
+            this.recreate_pod_impl(params, tx)
+        });
         Ok(ServerLaunchProgress {
             rx: Some(rx),
             handle: Some(handle),
@@ -4845,6 +4886,7 @@ pub fn run_daemon() -> Result<()> {
         pod_connections,
         pty_sessions: crate::pty_session::PtySessions::new(),
         container_ids: Arc::new(Mutex::new(ContainerIdCache::default())),
+        launch_locks: Arc::new(PodLaunchLocks::default()),
     };
 
     // Re-establish connections to pods that were running before we
