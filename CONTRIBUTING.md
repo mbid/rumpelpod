@@ -38,10 +38,10 @@ Rumpelpod. The `.devcontainer/` directory defines an image with the Rust
 toolchain (and musl cross-compile targets), Docker, k3d, helm, and the
 LLM agent CLIs preinstalled, ready for `cargo pipeline`.
 
-The dev container runs privileged (see `runArgs` in
-`.devcontainer/devcontainer.json`): Rumpelpod's tests run a Docker
-daemon and k3d clusters inside the container, which the default
-unprivileged `runc` configuration does not allow.
+Warning: the dev container for working on Rumpelpod is *not* itself a
+sandbox. It runs privileged, so code inside it can take over the host.
+Use it only on a remote host (e.g. a disposable VM), not on a device
+with sensitive (e.g. personal) data.
 
 #### Testing
 
