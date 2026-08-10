@@ -616,7 +616,7 @@ fn vscode_demo_workspace_uses_standard_runtime() {
     )
     .expect("parse demo devcontainer");
     assert_eq!(config["workspaceFolder"], "/workspace/anyhow");
-    assert_eq!(config["containerUser"], "root");
+    assert_eq!(config["containerUser"], "user");
     assert!(
         config.get("runArgs").is_none(),
         "demo devcontainer requested an outer-container runtime"
@@ -629,6 +629,11 @@ fn vscode_demo_workspace_uses_standard_runtime() {
             "rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3"
         ),
         "demo Rust image was not pinned"
+    );
+    assert!(
+        dockerfile.contains("useradd -m -s /bin/bash user"),
+        "demo pods must not run agents as root; Claude rejects \
+         --dangerously-skip-permissions under root"
     );
     assert!(
         !dockerfile.contains("sysbox"),

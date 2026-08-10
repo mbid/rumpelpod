@@ -48,16 +48,21 @@ cat > "$staging/.devcontainer/devcontainer.json" <<'EOF'
         "dockerfile": "Dockerfile"
     },
     "workspaceFolder": "/workspace/anyhow",
-    "containerUser": "root",
+    "containerUser": "user",
     "userEnvProbe": "none"
 }
 EOF
+# Claude refuses --dangerously-skip-permissions under root, so demo pods
+# need a non-root user even though the pod itself is the sandbox.
 cat > "$staging/.devcontainer/Dockerfile" <<'EOF'
 FROM rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git \
+    && apt-get install -y --no-install-recommends ca-certificates git sudo \
     && rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/bash user \
+    && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user
 EOF
 
 git -C "$staging" init --quiet --initial-branch main
