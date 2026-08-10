@@ -223,11 +223,10 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Recreate(RecreateCommand),
 
-    /// Re-establish the daemon's connection to a running pod.
+    /// Force a reconnect to a running pod.
     ///
-    /// By default, only the selected pod's tunnels, proxies, and port
-    /// forwards are replaced. Use --host to also replace the shared host
-    /// connection; other pods on that host may briefly lose connectivity.
+    /// Use --host to also reconnect the shared host connection. Other pods on
+    /// that host may briefly lose connectivity.
     #[command(verbatim_doc_comment)]
     Reconnect(ReconnectCommand),
 
@@ -533,7 +532,7 @@ pub struct ReconnectCommand {
     #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
     pub name: String,
 
-    /// Also replace the shared host connection
+    /// Also reconnect the shared host connection
     #[arg(long)]
     pub host: bool,
 }

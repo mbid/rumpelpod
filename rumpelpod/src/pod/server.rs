@@ -91,8 +91,8 @@ pub struct PodServerState {
     /// Whether the codex state monitor task has been spawned.
     pub codex_monitor_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Serializes recovery pushes triggered by gateway refreshes.
-    /// Replacement tunnel servers can overlap while a connection is unstable;
-    /// only one should decide and push the outstanding refs at a time.
+    /// Replacement tunnel servers can overlap while a connection is unstable.
+    /// Only one should decide and push the outstanding refs at a time.
     pub push_gate: std::sync::Arc<tokio::sync::Semaphore>,
     /// Fully resolved environment: base container env + probed shell env +
     /// resolved remoteEnv.  Used for lifecycle commands, Claude, and Codex.

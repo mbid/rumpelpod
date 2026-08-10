@@ -5,6 +5,10 @@ outages, tunnel process failures, and daemon restarts. Serialize
 foreground and background setup so recovery cannot race a concurrent
 enter.
 
+Back off pod repair attempts and pause them after repeated failures
+while the host remains reachable. A re-established shared host
+connection immediately resumes every non-stopped pod on that host.
+
 Add rumpel reconnect to replace one pod's tunnels, proxies, and port
 forwards on demand. Its --host flag also replaces the shared host
 connection and recovers sibling pod tunnels.
@@ -15,6 +19,5 @@ pod becomes ready so untouched branches are not omitted after removing
 recovery work from the events stream.
 
 Cover autonomous and manual recovery for local Docker, SSH, and
-Kubernetes without using rumpel enter as the repair trigger. Verify
-manual reconnect restores a runtime-added port forward without changing
-its local port.
+Kubernetes. Verify manual reconnect restores a runtime-added port
+forward without changing its local port.

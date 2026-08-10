@@ -13,13 +13,12 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::debug;
-use retry::delay::jitter;
 use tokio::sync::{broadcast, watch};
 
 use crate::async_runtime::RUNTIME;
@@ -29,8 +28,81 @@ use crate::daemon::reconnect::ReconnectEvent;
 use crate::daemon::{ssh_agent_dir, CodexProxyEndpoint, CodexProxyHandle, SshAgentHandle};
 use crate::pod::types::{ClaudeState, CodexState};
 
-const INITIAL_DELAY: Duration = Duration::from_secs(1);
-const MAX_DELAY: Duration = Duration::from_secs(5);
+const POD_REPAIR_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const POD_REPAIR_MAX_DELAY: Duration = Duration::from_secs(30);
+const POD_REPAIR_FAILURE_LIMIT: usize = 10;
+
+pub(super) struct PodRepairBackoff {
+    failures: usize,
+    delay: Duration,
+}
+
+impl PodRepairBackoff {
+    pub(super) fn new() -> Self {
+        Self {
+            failures: 0,
+            delay: POD_REPAIR_INITIAL_DELAY,
+        }
+    }
+
+    pub(super) fn reset(&mut self) {
+        self.failures = 0;
+        self.delay = POD_REPAIR_INITIAL_DELAY;
+    }
+
+    pub(super) fn next_delay(&mut self) -> Option<Duration> {
+        self.failures += 1;
+        if self.failures >= POD_REPAIR_FAILURE_LIMIT {
+            return None;
+        }
+        let delay = crate::jitter(self.delay);
+        self.delay = std::cmp::min(self.delay.saturating_mul(2), POD_REPAIR_MAX_DELAY);
+        Some(delay)
+    }
+}
+
+#[derive(Default)]
+struct PodRepairState {
+    paused: AtomicBool,
+    epoch: Mutex<u64>,
+    wake: Condvar,
+}
+
+impl PodRepairState {
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    fn pause(&self) {
+        self.paused.store(true, Ordering::SeqCst);
+        self.signal();
+    }
+
+    fn resume(&self) {
+        self.paused.store(false, Ordering::SeqCst);
+        self.signal();
+    }
+
+    fn signal(&self) {
+        let mut epoch = self.epoch.lock().unwrap();
+        *epoch = epoch.wrapping_add(1);
+        drop(epoch);
+        self.wake.notify_all();
+    }
+
+    fn epoch(&self) -> u64 {
+        *self.epoch.lock().unwrap()
+    }
+
+    fn wait_for_change(&self, observed_epoch: u64, delay: Duration) -> u64 {
+        let epoch = self.epoch.lock().unwrap();
+        if *epoch != observed_epoch {
+            return *epoch;
+        }
+        let (epoch, _) = self.wake.wait_timeout(epoch, delay).unwrap();
+        *epoch
+    }
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct PodConnectionKey {
@@ -112,6 +184,7 @@ pub struct PodConnection {
     resources: Mutex<PodConnectionResources>,
     git_tunnel_setup: Mutex<()>,
     git_tunnel_repair_scheduled: AtomicBool,
+    repair_state: Arc<PodRepairState>,
     event_loop: Mutex<Option<EventLoopHandle>>,
     host_connections: Arc<HostConnectionRegistry>,
 }
@@ -144,6 +217,7 @@ impl PodConnection {
             resources: Mutex::new(PodConnectionResources::new()),
             git_tunnel_setup: Mutex::new(()),
             git_tunnel_repair_scheduled: AtomicBool::new(false),
+            repair_state: Arc::new(PodRepairState::default()),
             event_loop: Mutex::new(None),
             host_connections,
         })
@@ -248,6 +322,7 @@ impl PodConnection {
         let status = self.status.clone();
         let claude_state = self.claude_state.clone();
         let codex_state = self.codex_state.clone();
+        let repair_state = self.repair_state.clone();
         let pod_name = self.key.pod_name.clone();
 
         *self.status.lock().unwrap() = PodConnectionStatus::Connecting;
@@ -255,6 +330,7 @@ impl PodConnection {
             .name(format!("pod-connection-{pod_name}"))
             .spawn(move || {
                 pod_event_loop(PodEventLoop {
+                    pod_name,
                     host_conn,
                     container_url: endpoint.url,
                     token: endpoint.token,
@@ -263,6 +339,7 @@ impl PodConnection {
                     status,
                     claude_state,
                     codex_state,
+                    repair_state,
                 });
             })
             .expect("failed to spawn pod connection event loop");
@@ -290,12 +367,16 @@ impl PodConnection {
         resources.git_tunnel = Some(handle);
         resources.supervise_git_tunnel = true;
         resources.validate_pod_before_git_tunnel_repair = false;
+        drop(resources);
+        self.repair_state.resume();
     }
 
     pub fn enable_git_tunnel_supervision(&self) {
         let mut resources = self.resources.lock().unwrap();
         resources.supervise_git_tunnel = true;
         resources.validate_pod_before_git_tunnel_repair = resources.git_tunnel.is_none();
+        drop(resources);
+        self.repair_state.resume();
     }
 
     pub fn git_tunnel_supervision_enabled(&self) -> bool {
@@ -328,6 +409,9 @@ impl PodConnection {
     }
 
     pub fn try_schedule_git_tunnel_repair(&self) -> bool {
+        if self.repair_state.is_paused() {
+            return false;
+        }
         let resources = self.resources.lock().unwrap();
         if !resources.supervise_git_tunnel
             || resources
@@ -347,6 +431,22 @@ impl PodConnection {
     pub fn finish_git_tunnel_repair(&self) {
         self.git_tunnel_repair_scheduled
             .store(false, Ordering::SeqCst);
+    }
+
+    pub fn pod_repair_is_paused(&self) -> bool {
+        self.repair_state.is_paused()
+    }
+
+    pub fn pause_pod_repair(&self) {
+        self.repair_state.pause();
+    }
+
+    pub fn pod_repair_epoch(&self) -> u64 {
+        self.repair_state.epoch()
+    }
+
+    pub fn wait_for_pod_repair_change(&self, epoch: u64, delay: Duration) -> u64 {
+        self.repair_state.wait_for_change(epoch, delay)
     }
 
     pub fn install_repaired_git_tunnel(&self, handle: crate::tunnel::TunnelHandle) {
@@ -370,6 +470,7 @@ impl PodConnection {
     pub fn reset_pod_transport(&self) {
         let _setup = self.git_tunnel_setup.lock().unwrap();
         self.stop_event_loop();
+        self.repair_state.resume();
 
         let mut resources = self.resources.lock().unwrap();
         resources.pod_server = None;
@@ -393,6 +494,7 @@ impl PodConnection {
     /// endpoint listeners that can reconnect through the replacement.
     pub fn replace_host_connection(&self, host_conn: Arc<HostConnection>) {
         self.stop_event_loop();
+        self.repair_state.resume();
         let connected = host_conn.status() == HostStatus::Connected;
         *self.host_conn.lock().unwrap() = host_conn;
 
@@ -403,6 +505,7 @@ impl PodConnection {
         let mut resources = self.resources.lock().unwrap();
         if resources.supervise_git_tunnel {
             resources.git_tunnel = None;
+            resources.validate_pod_before_git_tunnel_repair = true;
         }
         drop(resources);
 
@@ -564,6 +667,7 @@ impl PodConnection {
         if self.status() == PodConnectionStatus::Stopped {
             return;
         }
+        self.repair_state.resume();
         *self.status.lock().unwrap() = PodConnectionStatus::Connecting;
         let _ = self.tx.send(ReconnectEvent::HostConnected);
     }
@@ -572,10 +676,12 @@ impl PodConnection {
         if self.status() == PodConnectionStatus::Stopped {
             return;
         }
+        self.repair_state.signal();
         *self.status.lock().unwrap() = PodConnectionStatus::HostDisconnected;
         let mut resources = self.resources.lock().unwrap();
         if resources.supervise_git_tunnel {
             resources.git_tunnel = None;
+            resources.validate_pod_before_git_tunnel_repair = true;
         }
         drop(resources);
         let _ = self.tx.send(ReconnectEvent::Attempting);
@@ -603,6 +709,7 @@ impl PodConnection {
     fn stop_event_loop(&self) {
         if let Some(handle) = self.event_loop.lock().unwrap().take() {
             handle.stop.store(true, Ordering::SeqCst);
+            self.repair_state.signal();
         }
     }
 }
@@ -816,6 +923,7 @@ fn parse_greeting_state(data_line: &str) -> GreetingState {
 }
 
 struct PodEventLoop {
+    pod_name: String,
     host_conn: Arc<HostConnection>,
     container_url: String,
     token: String,
@@ -824,10 +932,12 @@ struct PodEventLoop {
     status: Arc<Mutex<PodConnectionStatus>>,
     claude_state: Arc<Mutex<Option<ClaudeState>>>,
     codex_state: Arc<Mutex<Option<CodexState>>>,
+    repair_state: Arc<PodRepairState>,
 }
 
 fn pod_event_loop(ctx: PodEventLoop) {
     let PodEventLoop {
+        pod_name,
         host_conn,
         container_url,
         token,
@@ -836,6 +946,7 @@ fn pod_event_loop(ctx: PodEventLoop) {
         status,
         claude_state,
         codex_state,
+        repair_state,
     } = ctx;
 
     let apply_greeting = |g: GreetingState| {
@@ -844,17 +955,23 @@ fn pod_event_loop(ctx: PodEventLoop) {
     };
 
     let mut host_rx = host_conn.subscribe();
-    let mut backoff = INITIAL_DELAY;
+    let mut backoff = PodRepairBackoff::new();
+    let mut repair_epoch = repair_state.epoch();
 
     loop {
-        if stop.load(Ordering::SeqCst) {
+        if !wait_for_pod_repair_resume(&repair_state, &stop, &mut repair_epoch) {
             return;
         }
 
         let _ = tx.send(ReconnectEvent::Attempting);
         host_conn.request_probe();
+        let host_was_disconnected = host_conn.status() == HostStatus::Disconnected;
         if !wait_for_host(&mut host_rx, &stop, &status) {
             return;
+        }
+        if host_was_disconnected {
+            backoff.reset();
+            repair_epoch = repair_state.epoch();
         }
         *status.lock().unwrap() = PodConnectionStatus::Connecting;
         let _ = tx.send(ReconnectEvent::HostConnected);
@@ -864,7 +981,7 @@ fn pod_event_loop(ctx: PodEventLoop) {
                 apply_greeting(greeting);
                 *status.lock().unwrap() = PodConnectionStatus::Connected;
                 let _ = tx.send(ReconnectEvent::Connected);
-                backoff = INITIAL_DELAY;
+                backoff.reset();
                 reader
             }
             Err(e) => {
@@ -874,8 +991,18 @@ fn pod_event_loop(ctx: PodEventLoop) {
                     error: format!("{e:#}"),
                 });
                 host_conn.request_probe();
-                std::thread::sleep(jitter(backoff));
-                backoff = std::cmp::min(backoff.saturating_mul(2), MAX_DELAY);
+                let Some(delay) = backoff.next_delay() else {
+                    log::warn!(
+                        "pod connection repair for '{pod_name}' paused after repeated failures"
+                    );
+                    repair_state.pause();
+                    continue;
+                };
+                let next_epoch = repair_state.wait_for_change(repair_epoch, delay);
+                if next_epoch != repair_epoch {
+                    repair_epoch = next_epoch;
+                    backoff.reset();
+                }
                 continue;
             }
         };
@@ -922,6 +1049,20 @@ fn pod_event_loop(ctx: PodEventLoop) {
     }
 }
 
+fn wait_for_pod_repair_resume(
+    repair_state: &PodRepairState,
+    stop: &AtomicBool,
+    repair_epoch: &mut u64,
+) -> bool {
+    while repair_state.is_paused() {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        *repair_epoch = repair_state.wait_for_change(*repair_epoch, Duration::from_secs(1));
+    }
+    !stop.load(Ordering::SeqCst)
+}
+
 fn wait_for_host(
     host_rx: &mut watch::Receiver<HostStatus>,
     stop: &AtomicBool,
@@ -947,6 +1088,65 @@ mod tests {
 
     use super::*;
     use crate::config::ContainerEngine;
+
+    #[test]
+    fn pod_repair_backoff_eventually_pauses() {
+        let mut backoff = PodRepairBackoff::new();
+
+        for _ in 1..POD_REPAIR_FAILURE_LIMIT {
+            assert!(backoff.next_delay().is_some());
+        }
+        assert!(backoff.next_delay().is_none());
+
+        backoff.reset();
+        assert!(backoff.next_delay().is_some());
+    }
+
+    #[test]
+    fn host_reconnect_resumes_every_pod_on_that_host() {
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let host_connections = Arc::new(HostConnectionRegistry::new(events_tx));
+        let registry = PodConnectionRegistry::new(host_connections);
+        let docker_host = Host::Localhost {
+            engine: ContainerEngine::Docker,
+        };
+        let podman_host = Host::Localhost {
+            engine: ContainerEngine::Podman,
+        };
+        let docker_a = registry
+            .get_or_create(Path::new("/repo-a"), "a", docker_host.clone(), "a".into())
+            .unwrap();
+        let docker_b = registry
+            .get_or_create(Path::new("/repo-b"), "b", docker_host, "b".into())
+            .unwrap();
+        let podman = registry
+            .get_or_create(Path::new("/repo-c"), "c", podman_host, "c".into())
+            .unwrap();
+
+        for connection in [&docker_a, &docker_b, &podman] {
+            connection.enable_git_tunnel_supervision();
+            connection.mark_pod_validated_for_git_tunnel_repair();
+            connection.pause_pod_repair();
+        }
+
+        let docker_key = HostKey::Localhost {
+            engine: ContainerEngine::Docker,
+        };
+        registry.notify_host_disconnected(&docker_key);
+
+        assert!(docker_a.validate_pod_before_git_tunnel_repair());
+        assert!(docker_b.validate_pod_before_git_tunnel_repair());
+        assert!(!podman.validate_pod_before_git_tunnel_repair());
+
+        registry.notify_host_connected(&docker_key);
+
+        assert!(!docker_a.pod_repair_is_paused());
+        assert!(!docker_b.pod_repair_is_paused());
+        assert!(podman.pod_repair_is_paused());
+        assert!(docker_a.try_schedule_git_tunnel_repair());
+        assert!(docker_b.try_schedule_git_tunnel_repair());
+        assert!(!podman.try_schedule_git_tunnel_repair());
+    }
 
     #[test]
     fn removing_pod_connection_discards_cached_codex_state() {

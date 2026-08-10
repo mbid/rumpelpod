@@ -36,7 +36,7 @@ use crate::executor::PodBackendInfo;
 use crate::gateway;
 use crate::git_http_server::{GitHttpServer, SharedGitServerState};
 use host_connection::{HostConnectionEvent, HostConnectionEventRx, HostConnectionRegistry};
-use pod_connection::{PodConnection, PodConnectionRegistry, PodConnectionStatus};
+use pod_connection::{PodConnection, PodConnectionRegistry, PodConnectionStatus, PodRepairBackoff};
 use protocol::{
     AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, EnsurePiConfigRequest,
     ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
@@ -2083,7 +2083,7 @@ impl DaemonServer {
                 | PodStatus::Stopping
                 | PodStatus::Deleting
                 | PodStatus::Broken => {
-                    pod_connection.disable_git_tunnel_supervision();
+                    pod_connection.pause_pod_repair();
                     return Ok(());
                 }
                 PodStatus::Disconnected => {
@@ -2099,9 +2099,11 @@ impl DaemonServer {
     }
 
     fn supervise_git_tunnel(self: Arc<Self>, pod_connection: Arc<PodConnection>) {
-        let mut backoff = Duration::from_secs(1);
+        let mut backoff = PodRepairBackoff::new();
+        let mut repair_epoch = pod_connection.pod_repair_epoch();
         loop {
             if !pod_connection.git_tunnel_supervision_enabled()
+                || pod_connection.pod_repair_is_paused()
                 || pod_connection.git_tunnel_is_alive()
                 || !pod_connection.host_is_connected()
             {
@@ -2113,8 +2115,18 @@ impl DaemonServer {
                 Err(e) => {
                     let name = pod_connection.key().pod_name();
                     log::warn!("git tunnel repair for pod '{name}' failed: {e:#}");
-                    std::thread::sleep(crate::jitter(backoff));
-                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_secs(5));
+                    let Some(delay) = backoff.next_delay() else {
+                        log::warn!(
+                            "git tunnel repair for pod '{name}' paused after repeated failures"
+                        );
+                        pod_connection.pause_pod_repair();
+                        break;
+                    };
+                    let next_epoch = pod_connection.wait_for_pod_repair_change(repair_epoch, delay);
+                    if next_epoch != repair_epoch {
+                        repair_epoch = next_epoch;
+                        backoff.reset();
+                    }
                 }
             }
         }
@@ -4786,6 +4798,7 @@ async fn host_event_reader(daemon: Arc<DaemonServer>, mut rx: HostConnectionEven
         match event {
             HostConnectionEvent::Connected(key) => {
                 daemon.pod_connections.notify_host_connected(&key);
+                schedule_git_tunnel_repairs(&daemon);
             }
             HostConnectionEvent::Disconnected(key) => {
                 daemon.pod_connections.notify_host_disconnected(&key);
@@ -4800,15 +4813,19 @@ async fn host_event_reader(daemon: Arc<DaemonServer>, mut rx: HostConnectionEven
 
 async fn git_tunnel_supervisor(daemon: Arc<DaemonServer>) {
     loop {
-        for pod_connection in daemon.pod_connections.git_tunnels_needing_repair() {
-            let daemon = daemon.clone();
-            let pod_name = pod_connection.key().pod_name().to_string();
-            std::thread::Builder::new()
-                .name(format!("git-tunnel-{pod_name}"))
-                .spawn(move || daemon.supervise_git_tunnel(pod_connection))
-                .expect("failed to spawn git tunnel supervisor");
-        }
+        schedule_git_tunnel_repairs(&daemon);
         tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+fn schedule_git_tunnel_repairs(daemon: &Arc<DaemonServer>) {
+    for pod_connection in daemon.pod_connections.git_tunnels_needing_repair() {
+        let daemon = daemon.clone();
+        let pod_name = pod_connection.key().pod_name().to_string();
+        std::thread::Builder::new()
+            .name(format!("git-tunnel-{pod_name}"))
+            .spawn(move || daemon.supervise_git_tunnel(pod_connection))
+            .expect("failed to spawn git tunnel supervisor");
     }
 }
 
