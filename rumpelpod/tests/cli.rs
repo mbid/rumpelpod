@@ -23,6 +23,8 @@ mod devcontainer;
 mod enter;
 #[path = "cli/env_probe_hang.rs"]
 mod env_probe_hang;
+#[path = "cli/events.rs"]
+mod events;
 #[path = "cli/executor.rs"]
 mod executor;
 #[path = "cli/fork.rs"]
@@ -41,6 +43,8 @@ mod merge;
 mod network;
 #[path = "cli/pi/mod.rs"]
 mod pi;
+#[path = "cli/pipeline.rs"]
+mod pipeline;
 #[path = "cli/podman.rs"]
 mod podman;
 #[path = "cli/prune.rs"]

@@ -209,6 +209,8 @@ ENV GROUP_ID=${GROUP_ID}
 
 # Ensure the user and group exist, handling the case where the base image
 # already provides them (possibly with a different uid/gid/shell).
+# A lingering user manager lets the pipeline install and start the daemon
+# without an interactive login or an external lifecycle runner.
 RUN if ! getent group ${USER} > /dev/null 2>&1; then \
         groupadd -g ${GROUP_ID} ${USER} || groupadd ${USER}; \
     fi && \
@@ -216,7 +218,9 @@ RUN if ! getent group ${USER} > /dev/null 2>&1; then \
         useradd -m -u ${USER_ID} -g ${USER} ${USER}; \
     fi && \
     echo "${USER} ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers && \
-    usermod -aG docker -s /bin/bash ${USER}
+    usermod -aG docker -s /bin/bash ${USER} \
+    && mkdir -p /var/lib/systemd/linger \
+    && touch /var/lib/systemd/linger/${USER}
 
 ENV CONTAINER_HOST=unix:///run/podman/podman.sock
 
@@ -225,7 +229,7 @@ USER ${USER}
 # The toolchain version must match rust-toolchain.toml at the repo root.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
         --default-toolchain 1.96.1
-ENV PATH="/home/${USER}/.cargo/bin:${PATH}"
+ENV PATH="/home/${USER}/.local/bin:/home/${USER}/.cargo/bin:${PATH}"
 RUN rustup component add rust-analyzer \
     && rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 
@@ -340,6 +344,11 @@ RUN printf '[Unit]\nDescription=Provision k3d cluster\nAfter=preload-images.serv
 
 COPY entrypoint.sh /usr/local/bin/devcontainer-entrypoint.sh
 
+# The user manager creates these paths only after systemd starts the
+# container, so no build-time command should depend on them.
+ENV XDG_RUNTIME_DIR=/run/user/${USER_ID}
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${USER_ID}/bus
+ENV RUMPELPOD_DEVCONTAINER=1
 ENV RUMPELPOD_TEST_SYSTEMD=1
 
 ENTRYPOINT ["/usr/local/bin/devcontainer-entrypoint.sh"]
