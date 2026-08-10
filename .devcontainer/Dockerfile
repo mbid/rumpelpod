@@ -149,14 +149,20 @@ RUN export DEBIAN_FRONTEND=noninteractive && \
         apt-get install --yes gcc-x86-64-linux-gnu; \
     fi
 
-# Build musl from source for both x86_64 and aarch64.
+# Build musl from source for both x86_64 and aarch64. Use Debian's immutable
+# snapshot because the upstream release host is unreliable in CI.
 # Debian's musl-tools only provides musl for the native architecture.
 # CROSS_COMPILE sets the toolchain prefix so musl finds the right gcc/ar/ranlib.
 # Even for native builds we use the full triplet prefix (e.g. x86_64-linux-gnu-)
 # because musl's configure overrides an empty CROSS_COMPILE with "${target}-".
 # Auto wrapper detection depends on a glibc probe that can fail for cross
 # compilers when only the runtime cross libc is installed.
-RUN curl -fsSL https://musl.libc.org/releases/musl-1.2.5.tar.gz | tar xz -C /tmp && \
+RUN curl -fsSL \
+        https://snapshot.debian.org/archive/debian/${APT_SNAPSHOT}/pool/main/m/musl/musl_1.2.5.orig.tar.gz \
+        -o /tmp/musl-1.2.5.tar.gz && \
+    echo 'a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4  /tmp/musl-1.2.5.tar.gz' \
+        | sha256sum --check - && \
+    tar xzf /tmp/musl-1.2.5.tar.gz -C /tmp && \
     for target_arch in x86_64 aarch64; do \
         if [ "$target_arch" = "x86_64" ]; then \
             cross=x86_64-linux-gnu-; \
@@ -169,7 +175,7 @@ RUN curl -fsSL https://musl.libc.org/releases/musl-1.2.5.tar.gz | tar xz -C /tmp
         make -j$(nproc) && make install && \
         cp /opt/musl/$target_arch/bin/musl-gcc /usr/local/bin/${target_arch}-linux-musl-gcc; \
     done && \
-    rm -rf /tmp/musl-1.2.5 /tmp/musl-build-*
+    rm -rf /tmp/musl-1.2.5 /tmp/musl-build-* /tmp/musl-1.2.5.tar.gz
 
 # getty.target is masked because a privileged pod sees the host's VT
 # devices in /dev; getty units would otherwise try to grab the host
