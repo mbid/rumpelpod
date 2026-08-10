@@ -10,8 +10,6 @@
         "--runtime=sysbox-runc",
         "--env-file", ".env"
     ],
-    "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/rumpelpod,type=bind",
-    "workspaceFolder": "/workspaces/rumpelpod",
     "containerUser": "user",
     "forwardPorts": [3000],
     "portsAttributes": {
