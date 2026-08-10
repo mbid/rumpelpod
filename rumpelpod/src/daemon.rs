@@ -40,6 +40,7 @@ use pod_connection::{PodConnection, PodConnectionRegistry, PodConnectionStatus};
 use protocol::{
     AddForwardedPortRequest, ContainerId, Daemon, EnsureClaudeConfigRequest, EnsurePiConfigRequest,
     ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
+    ReconnectPodConnectionRequest,
 };
 
 use crate::pod::types::{ClaudeState, CodexState, GitSetupParams};
@@ -2268,6 +2269,59 @@ impl DaemonServer {
                     Ok(result) => ReconnectPodResult::Connected(Box::new(result)),
                     Err(e) => ReconnectPodResult::Unavailable(e),
                 }
+            }
+        }
+    }
+
+    fn reconnect_pod_connection_impl(&self, request: ReconnectPodConnectionRequest) -> Result<()> {
+        let ReconnectPodConnectionRequest {
+            pod_name,
+            repo_path,
+            reconnect_host,
+        } = request;
+        let pod_name = PodName::new(pod_name).map_err(anyhow::Error::msg)?;
+        let record = {
+            let conn = self.db.lock().unwrap();
+            db::get_pod(&conn, &repo_path, &pod_name.0)?
+                .with_context(|| format!("pod '{}' not found", pod_name.0))?
+        };
+        let host: Host =
+            serde_json::from_str(&record.host).context("parsing stored host for pod")?;
+        let host = host
+            .resolve_docker_engine()
+            .context("resolving container engine for pod")?;
+        let local_env_vars = deserialize_local_env(&record.local_env)?;
+        let devcontainer = parse_prebuilt_devcontainer(
+            &record.devcontainer_json,
+            &repo_path,
+            &pod_name.0,
+            &local_env_vars,
+        )?;
+
+        if let Some(connection) = self.pod_connections.get(&repo_path, &pod_name.0) {
+            connection.reset_pod_transport();
+        }
+        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
+
+        if reconnect_host {
+            let host_key = host_connection::HostKey::from_host(&host);
+            let host_connection = self.host_connections.replace(&host)?;
+            self.pod_connections
+                .replace_host_connection(&host_key, host_connection);
+        }
+
+        match self.reconnect_pod(
+            &pod_name,
+            &repo_path,
+            &host,
+            &devcontainer,
+            &local_env_vars,
+            &record,
+        ) {
+            ReconnectPodResult::Connected(_) => Ok(()),
+            ReconnectPodResult::Gone(e) => Err(e.context(format!("pod '{}' is gone", pod_name.0))),
+            ReconnectPodResult::Unavailable(e) => {
+                Err(e.context(format!("reconnecting pod '{}' failed", pod_name.0)))
             }
         }
     }
@@ -4517,6 +4571,10 @@ impl Daemon for DaemonServer {
             local_port: actual_local_port,
             label,
         })
+    }
+
+    fn reconnect_pod_connection(&self, request: ReconnectPodConnectionRequest) -> Result<()> {
+        self.reconnect_pod_connection_impl(request)
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {

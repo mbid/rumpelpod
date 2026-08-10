@@ -1,14 +1,18 @@
-Supervise git tunnels without client entry
+Add supervised and manual pod reconnection
 
-Recover dead git tunnels as daemon-owned pod resources after
-transport outages, tunnel process failures, and daemon restarts.
-Serialize foreground and background setup so recovery cannot race a
-concurrent enter.
+Recover dead git tunnels as daemon-owned pod resources after transport
+outages, tunnel process failures, and daemon restarts. Serialize
+foreground and background setup so recovery cannot race a concurrent
+enter.
 
-Trigger pending branch pushes when the replacement tunnel refreshes
-the pod's gateway configuration. The events stream now reports pod
-state only and no longer performs a redundant, incorrectly ordered
-recovery push.
+Add rumpel reconnect to replace one pod's tunnels, proxies, and port
+forwards on demand. Its --host flag also replaces the shared host
+connection and recovers sibling pod tunnels.
 
-Cover autonomous recovery for local Docker, SSH, and Kubernetes without
-using rumpel enter as the repair trigger.
+Trigger pending branch pushes when replacement tunnels refresh the
+pod's gateway configuration. Publish every initial branch before a new
+pod becomes ready so untouched branches are not omitted after removing
+recovery work from the events stream.
+
+Cover autonomous and manual recovery for local Docker, SSH, and
+Kubernetes without using rumpel enter as the repair trigger.

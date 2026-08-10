@@ -91,10 +91,8 @@ pub struct PodServerState {
     /// Whether the codex state monitor task has been spawned.
     pub codex_monitor_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Serializes recovery pushes triggered by gateway refreshes.
-    /// A reconnect can overlap a commit hook that already found the ref
-    /// unpushed; without this they would race two `git push`es on the
-    /// gateway, one losing the ref lock and logging an alarming (though
-    /// harmless) error.
+    /// Replacement tunnel servers can overlap while a connection is unstable;
+    /// only one should decide and push the outstanding refs at a time.
     pub push_gate: std::sync::Arc<tokio::sync::Semaphore>,
     /// Fully resolved environment: base container env + probed shell env +
     /// resolved remoteEnv.  Used for lifecycle commands, Claude, and Codex.
@@ -465,6 +463,10 @@ fn run_setup(
             })
             .expect("submodule setup failed");
         }
+
+        // Existing branches do not trigger the newly installed reference
+        // hook, so the first setup must publish them before the pod is ready.
+        recover_push(repo_path, pod_name).expect("initial pod branch push failed");
     } else {
         progress("refreshing git remotes...");
         git_setup::refresh_gateway_urls_impl(&git_setup::GitGatewayRefreshRequest {
@@ -475,7 +477,11 @@ fn run_setup(
         .expect("gateway refresh failed");
         let repo_path = repo_path.to_path_buf();
         let pod_name = pod_name.to_string();
-        std::thread::spawn(move || recover_push(&repo_path, &pod_name));
+        std::thread::spawn(move || {
+            if let Err(e) = recover_push(&repo_path, &pod_name) {
+                eprintln!("gateway recovery push failed: {e:#}");
+            }
+        });
     }
 
     // -- Run lifecycle commands --
@@ -774,25 +780,14 @@ fn ref_matches(repo_path: &Path, refname: &str, sha: &str) -> Result<bool> {
     }
 }
 
-/// Force-push pod branches to the gateway, but only when local refs
-/// show the gateway is behind. Failures are logged and retried after
-/// the next tunnel refresh or commit.
-fn recover_push(repo_path: &Path, pod_name: &str) {
-    match needs_push(repo_path, pod_name) {
-        Ok(false) => return,
-        Ok(true) => {}
-        Err(e) => {
-            eprintln!("gateway recovery: deciding whether to push failed: {e:#}");
-            return;
-        }
+/// Force-push pod branches to the gateway only when local refs show the
+/// gateway is behind. Returning failures lets initial setup fail explicitly
+/// while background refreshes can log them for later retry.
+fn recover_push(repo_path: &Path, pod_name: &str) -> Result<()> {
+    if !needs_push(repo_path, pod_name)? {
+        return Ok(());
     }
-    let skip_lfs_pre_push = match crate::git::prepare_lfs_for_rumpelpod_push(repo_path, pod_name) {
-        Ok(skip) => skip,
-        Err(e) => {
-            eprintln!("gateway recovery: git lfs push failed: {e:#}");
-            return;
-        }
-    };
+    let skip_lfs_pre_push = crate::git::prepare_lfs_for_rumpelpod_push(repo_path, pod_name)?;
     let mut command = Command::new("git");
     command
         .args(["push", "rumpelpod", "--force", "--quiet"])
@@ -804,15 +799,15 @@ fn recover_push(repo_path: &Path, pod_name: &str) {
     if skip_lfs_pre_push {
         command.env("GIT_LFS_SKIP_PUSH", "1");
     }
-    match command.output() {
-        Ok(output) if !output.status.success() => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let status = output.status;
-            eprintln!("gateway recovery: git push rumpelpod exited {status}: {stderr}");
-        }
-        Err(e) => eprintln!("gateway recovery: git push rumpelpod failed: {e}"),
-        Ok(_) => {}
+    let output = command.output().context("running gateway recovery push")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let status = output.status;
+        return Err(anyhow::anyhow!(
+            "git push rumpelpod exited {status}: {stderr}"
+        ));
     }
+    Ok(())
 }
 
 fn queue_recover_push(state: PodServerState) {
@@ -825,11 +820,13 @@ fn queue_recover_push(state: PodServerState) {
         let pod_name = state.pod_name.clone();
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            recover_push(&repo_path, &pod_name);
+            recover_push(&repo_path, &pod_name)
         })
         .await;
-        if let Err(e) = result {
-            eprintln!("gateway recovery push task panicked: {e}");
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("gateway recovery push failed: {e:#}"),
+            Err(e) => eprintln!("gateway recovery push task panicked: {e}"),
         }
     });
 }

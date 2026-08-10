@@ -39,6 +39,7 @@ mod prepared_image;
 mod prune;
 mod pty_attach;
 mod pty_session;
+mod reconnect_cmd;
 mod recreate;
 mod registry;
 mod review;
@@ -175,6 +176,9 @@ pub fn run() -> Result<()> {
         }
         Command::Recreate(ref cmd) => {
             recreate::recreate(cmd)?;
+        }
+        Command::Reconnect(ref cmd) => {
+            reconnect_cmd::reconnect(cmd)?;
         }
         Command::Fork(ref cmd) => {
             fork::fork(cmd)?;

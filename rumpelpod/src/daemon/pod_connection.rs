@@ -365,6 +365,63 @@ impl PodConnection {
         self.host_conn.lock().unwrap().status() == HostStatus::Connected
     }
 
+    /// Manual repair must discard pod-scoped routes without disrupting the
+    /// host connection shared by sibling pods or their local key material.
+    pub fn reset_pod_transport(&self) {
+        let _setup = self.git_tunnel_setup.lock().unwrap();
+        self.stop_event_loop();
+
+        let mut resources = self.resources.lock().unwrap();
+        resources.pod_server = None;
+        resources.git_tunnel = None;
+        resources.supervise_git_tunnel = false;
+        resources.validate_pod_before_git_tunnel_repair = false;
+        resources.forwarded_ports = None;
+        resources.codex_proxy = None;
+        drop(resources);
+
+        let status = if self.host_is_connected() {
+            PodConnectionStatus::PodDisconnected
+        } else {
+            PodConnectionStatus::HostDisconnected
+        };
+        *self.status.lock().unwrap() = status;
+        let _ = self.tx.send(ReconnectEvent::Attempting);
+    }
+
+    /// A host reset must release the old monitor from each pod while preserving
+    /// endpoint listeners that can reconnect through the replacement.
+    pub fn replace_host_connection(&self, host_conn: Arc<HostConnection>) {
+        self.stop_event_loop();
+        let connected = host_conn.status() == HostStatus::Connected;
+        *self.host_conn.lock().unwrap() = host_conn;
+
+        if self.status() == PodConnectionStatus::Stopped {
+            return;
+        }
+
+        let mut resources = self.resources.lock().unwrap();
+        if resources.supervise_git_tunnel {
+            resources.git_tunnel = None;
+        }
+        drop(resources);
+
+        let (status, event) = if connected {
+            (
+                PodConnectionStatus::Connecting,
+                ReconnectEvent::HostConnected,
+            )
+        } else {
+            (
+                PodConnectionStatus::HostDisconnected,
+                ReconnectEvent::Attempting,
+            )
+        };
+        *self.status.lock().unwrap() = status;
+        let _ = self.tx.send(event);
+        self.ensure_event_loop();
+    }
+
     pub fn has_forwarded_ports(&self) -> bool {
         self.resources.lock().unwrap().forwarded_ports.is_some()
     }
@@ -655,6 +712,20 @@ impl PodConnectionRegistry {
             if &*connection.host_key.lock().unwrap() == host {
                 connection.notify_host_disconnected();
             }
+        }
+    }
+
+    pub fn replace_host_connection(&self, host: &HostKey, host_conn: Arc<HostConnection>) {
+        let connections: Vec<_> = self
+            .pods
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|connection| &*connection.host_key.lock().unwrap() == host)
+            .cloned()
+            .collect();
+        for connection in connections {
+            connection.replace_host_connection(host_conn.clone());
         }
     }
 

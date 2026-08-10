@@ -223,6 +223,14 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Recreate(RecreateCommand),
 
+    /// Re-establish the daemon's connection to a running pod.
+    ///
+    /// By default, only the selected pod's tunnels, proxies, and port
+    /// forwards are replaced. Use --host to also replace the shared host
+    /// connection; other pods on that host may briefly lose connectivity.
+    #[command(verbatim_doc_comment)]
+    Reconnect(ReconnectCommand),
+
     /// Spawn a new pod by cloning an existing, running one.
     #[command(verbatim_doc_comment)]
     Fork(ForkCommand),
@@ -517,6 +525,17 @@ pub struct RecreateCommand {
 
     #[command(flatten)]
     pub host_args: HostArgs,
+}
+
+#[derive(Args)]
+pub struct ReconnectCommand {
+    /// Name of the pod to reconnect
+    #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
+    pub name: String,
+
+    /// Also replace the shared host connection
+    #[arg(long)]
+    pub host: bool,
 }
 
 #[derive(Args)]

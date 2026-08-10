@@ -169,6 +169,21 @@ impl HostConnectionRegistry {
         Ok(conn)
     }
 
+    /// Build a fresh connection even when the registry already has one.
+    ///
+    /// This is reserved for explicit recovery: ordinary callers must share
+    /// the cached connection so each host has only one monitor and proxy.
+    pub fn replace(&self, host: &Host) -> Result<Arc<HostConnection>> {
+        let host = host.clone().resolve_docker_engine()?;
+        let key = HostKey::from_host(&host);
+        let conn = Arc::new(HostConnection::new(&host, self.events_tx.clone())?);
+        self.conns
+            .lock()
+            .unwrap()
+            .insert(key, Arc::downgrade(&conn));
+        Ok(conn)
+    }
+
     /// Return a live connection for `host` without creating one.  Used
     /// by paths like `list_pods` that should not implicitly start new
     /// remote connections.

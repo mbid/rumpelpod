@@ -303,6 +303,8 @@ A pod can fetch another pod's work with `git fetch rumpelpod`.
 Synchronization goes through the local machine, so remote pods cannot push or see each other's branches while the local machine is offline.
 The daemon restores the git tunnel and pushes commits made while disconnected when connectivity returns; no `rumpel enter` is required.
 
+If automatic recovery cannot restore a pod, run `rumpel reconnect <pod>` to replace that pod's daemon-owned tunnels and proxies without disturbing the shared host connection. `rumpel reconnect <pod> --host` also replaces the host connection; because pods on the same Docker host or Kubernetes context share it, they may briefly lose connectivity while their tunnels recover.
+
 ### Forking pods
 
 `rumpel fork` creates a new pod from the current state of an existing pod:

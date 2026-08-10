@@ -45,6 +45,8 @@ mod pi;
 mod podman;
 #[path = "cli/prune.rs"]
 mod prune;
+#[path = "cli/reconnect.rs"]
+mod reconnect;
 #[path = "cli/recreate.rs"]
 mod recreate;
 #[path = "cli/review.rs"]
