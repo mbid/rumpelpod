@@ -1075,41 +1075,57 @@ impl Iterator for DaemonEventStream {
     type Item = Result<DaemonEvent>;
 
     fn next(&mut self) -> Option<Result<DaemonEvent>> {
-        loop {
-            let line = match self.lines.next()? {
-                Ok(line) => line,
-                Err(error) => {
-                    return Some(Err(anyhow::anyhow!(
-                        "failed to read daemon event stream: {error}"
-                    )))
-                }
-            };
-            if line != "event: daemon_event" {
-                continue;
-            }
-            let data_line = match self.lines.next() {
-                Some(Ok(line)) => line,
-                Some(Err(error)) => {
-                    return Some(Err(anyhow::anyhow!(
-                        "failed to read daemon event data: {error}"
-                    )))
-                }
-                None => {
-                    return Some(Err(anyhow::anyhow!(
-                        "daemon event stream ended before its data"
-                    )))
-                }
-            };
-            let Some(data) = data_line.strip_prefix("data: ") else {
+        read_daemon_event(&mut self.lines)
+    }
+}
+
+fn read_daemon_event(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+) -> Option<Result<DaemonEvent>> {
+    loop {
+        let line = match lines.next()? {
+            Ok(line) => line,
+            Err(error) => {
                 return Some(Err(anyhow::anyhow!(
-                    "expected daemon event data, got: {data_line}"
-                )));
-            };
-            return Some(
-                serde_json::from_str(data)
-                    .map_err(|error| anyhow::anyhow!("parsing daemon event: {error}")),
-            );
+                    "failed to read daemon event stream: {error}"
+                )))
+            }
+        };
+        if line.is_empty() || line.starts_with(':') {
+            continue;
         }
+        let Some(event_type) = line.strip_prefix("event: ") else {
+            return Some(Err(anyhow::anyhow!(
+                "unexpected daemon event stream line: {line}"
+            )));
+        };
+        if event_type != "daemon_event" {
+            return Some(Err(anyhow::anyhow!(
+                "unknown daemon event type: {event_type}"
+            )));
+        }
+        let data_line = match lines.next() {
+            Some(Ok(line)) => line,
+            Some(Err(error)) => {
+                return Some(Err(anyhow::anyhow!(
+                    "failed to read daemon event data: {error}"
+                )))
+            }
+            None => {
+                return Some(Err(anyhow::anyhow!(
+                    "daemon event stream ended before its data"
+                )))
+            }
+        };
+        let Some(data) = data_line.strip_prefix("data: ") else {
+            return Some(Err(anyhow::anyhow!(
+                "expected daemon event data, got: {data_line}"
+            )));
+        };
+        return Some(
+            serde_json::from_str(data)
+                .map_err(|error| anyhow::anyhow!("parsing daemon event: {error}")),
+        );
     }
 }
 
@@ -1871,5 +1887,27 @@ mod tests {
         assert_eq!(output_rx.recv().await.as_deref(), Some(expected.as_str()));
         assert_eq!(output_rx.recv().await.as_deref(), Some(expected.as_str()));
         task.abort();
+    }
+
+    #[test]
+    fn daemon_event_parser_accepts_keepalives_and_rejects_unknown_frames() {
+        let event = DaemonEvent::PodStatusChanged {
+            repository: "/repo".to_string(),
+            pod: "one".to_string(),
+        };
+        let input = format!(": keepalive\n\n{}", daemon_event_message(&event));
+        let mut lines = BufReader::new(input.as_bytes()).lines();
+        assert_eq!(
+            read_daemon_event(&mut lines)
+                .expect("read daemon event")
+                .expect("parse daemon event"),
+            event
+        );
+
+        let mut lines = BufReader::new("event: future_event\ndata: {}\n\n".as_bytes()).lines();
+        let error = read_daemon_event(&mut lines)
+            .expect("read unknown event")
+            .expect_err("unknown event must fail");
+        assert!(format!("{error:#}").contains("unknown daemon event type: future_event"));
     }
 }

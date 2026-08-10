@@ -38,6 +38,7 @@
 //! via `gitrevisions(7)` shorthand rule 2 (`refs/<refname>`).
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -301,25 +302,47 @@ fn install_host_hook(
             return Err(error).with_context(|| format!("Failed to read hook: {hook_path}"));
         }
     };
-    if let Some(existing) = existing {
-        let cleaned = strip_host_hooks(&existing);
-        let combined = combine_host_hook(&cleaned, block, placement);
-        fs::write(&hook_path, combined).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to update hook: {hook_path}")
-        })?;
+    let content = if let Some(existing) = &existing {
+        let cleaned = strip_host_hooks(existing);
+        combine_host_hook(&cleaned, block, placement)
     } else {
-        let content = format!("#!/bin/sh\n{block}");
-        fs::write(&hook_path, content).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to write hook: {hook_path}")
-        })?;
+        format!("#!/bin/sh\n{block}")
+    };
+    if existing.as_deref() != Some(&content) {
+        write_hook_atomically(&hook_path, &content)?;
     }
 
     let mut perms = fs::metadata(&hook_path)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&hook_path, perms)?;
 
+    Ok(())
+}
+
+fn write_hook_atomically(hook_path: &Path, content: &str) -> Result<()> {
+    let hooks_dir = hook_path.parent().context("hook path has no parent")?;
+    let mut staged = tempfile::NamedTempFile::new_in(hooks_dir).with_context(|| {
+        let hook_path = hook_path.display();
+        format!("Failed to stage hook update: {hook_path}")
+    })?;
+    staged.write_all(content.as_bytes()).with_context(|| {
+        let hook_path = hook_path.display();
+        format!("Failed to write staged hook: {hook_path}")
+    })?;
+    let mut permissions = staged.as_file().metadata()?.permissions();
+    permissions.set_mode(0o755);
+    staged.as_file().set_permissions(permissions)?;
+    staged.as_file().sync_all().with_context(|| {
+        let hook_path = hook_path.display();
+        format!("Failed to sync staged hook: {hook_path}")
+    })?;
+    staged
+        .persist(hook_path)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to install hook: {hook_path}")
+        })?;
     Ok(())
 }
 
@@ -350,6 +373,8 @@ fn combine_host_hook(existing: &str, block: &str, placement: HostHookPlacement) 
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
+
     use super::*;
 
     #[test]
@@ -364,10 +389,18 @@ mod tests {
 
         install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
             .expect("install rumpelpod post-receive hook");
+        let installed_inode = fs::metadata(&hook).expect("read installed metadata").ino();
         install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
             .expect("reinstall rumpelpod post-receive hook");
 
         let installed = fs::read_to_string(&hook).expect("read installed hook");
+        assert_eq!(
+            fs::metadata(&hook)
+                .expect("read reinstalled metadata")
+                .ino(),
+            installed_inode,
+            "an unchanged hook was rewritten"
+        );
         assert!(installed.starts_with("#!/bin/sh\n"));
         let notification_position = installed
             .find(HOST_POST_RECEIVE_COMMENT)
