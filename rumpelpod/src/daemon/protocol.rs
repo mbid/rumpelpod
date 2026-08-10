@@ -20,7 +20,7 @@ use anyhow::Result;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::serve::Listener;
 use axum::{Json, Router};
@@ -555,16 +555,13 @@ pub trait Daemon: Send + Sync + 'static {
 
     // GET /events
     // Subscribe to daemon-wide state invalidations.
-    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<DaemonEvent> {
-        let (_tx, rx) = tokio::sync::broadcast::channel(1);
-        rx
-    }
+    // Returns None when the implementation holds no event stream; only
+    // the server side does, clients consume the SSE endpoint instead.
+    fn subscribe_events(&self) -> Option<tokio::sync::broadcast::Receiver<DaemonEvent>>;
 
     // POST /events/review-changed
     // Called by the host post-receive hook after Git committed pod refs.
-    fn notify_pod_review_changed(&self, _repo_path: &Path, _pod_name: &str) -> Result<()> {
-        Ok(())
-    }
+    fn notify_pod_review_changed(&self, repo_path: &Path, pod_name: &str) -> Result<()>;
 }
 
 pub struct DaemonClient {
@@ -976,6 +973,11 @@ impl Daemon for DaemonClient {
             let msg = &error.error;
             Err(anyhow::anyhow!("server error: {msg}"))
         }
+    }
+
+    // Clients read /events over SSE; there is no local broadcast to hand out.
+    fn subscribe_events(&self) -> Option<tokio::sync::broadcast::Receiver<DaemonEvent>> {
+        None
     }
 
     fn notify_pod_review_changed(&self, repo_path: &Path, pod_name: &str) -> Result<()> {
@@ -1694,7 +1696,16 @@ async fn forward_daemon_events(
 }
 
 async fn daemon_events_handler<D: Daemon>(State(daemon): State<Arc<D>>) -> Response {
-    daemon_events_sse_response(daemon.subscribe_events())
+    match daemon.subscribe_events() {
+        Some(rx) => daemon_events_sse_response(rx),
+        None => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "this daemon endpoint does not serve events".to_string(),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn pod_review_changed_handler<D: Daemon>(

@@ -75,6 +75,8 @@ for _ in $(seq 60); do
     exit 1
   fi
   state=$(docker exec devcontainer systemctl is-system-running 2>/dev/null || true)
+  # Not maintenance or stopping: a manager on its way down never
+  # becomes usable, so let the timeout below surface the boot logs.
   case "$state" in
     initializing | starting | running | degraded)
       manager_ready=1

@@ -4659,8 +4659,8 @@ impl Daemon for DaemonServer {
         self.pod_connections.subscribe(repo_path, pod_name)
     }
 
-    fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<DaemonEvent> {
-        self.events_tx.subscribe()
+    fn subscribe_events(&self) -> Option<tokio::sync::broadcast::Receiver<DaemonEvent>> {
+        Some(self.events_tx.subscribe())
     }
 
     fn notify_pod_review_changed(&self, repo_path: &Path, pod_name: &str) -> Result<()> {
