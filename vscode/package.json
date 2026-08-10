@@ -132,7 +132,8 @@
         "rumpelpod.executable": {
           "type": "string",
           "default": "rumpel",
-          "description": "Path to the rumpel command used by the extension."
+          "scope": "machine",
+          "description": "Path to the rumpel command used by the extension. User settings only: a repository must not choose the binary that manages its own sandbox."
         }
       }
     }

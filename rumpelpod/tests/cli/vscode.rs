@@ -366,7 +366,8 @@ fn vscode_agent_environment_is_systemd_safe() {
 #[test]
 fn vscode_devcontainer_boots_user_services_without_lifecycle_commands() {
     let root = workspace_root();
-    let config: serde_json::Value = serde_json::from_str(
+    // json5, not serde_json: devcontainer.json carries comments.
+    let config: serde_json::Value = json5::from_str(
         &fs::read_to_string(root.join(".devcontainer/devcontainer.json"))
             .expect("read development container configuration"),
     )

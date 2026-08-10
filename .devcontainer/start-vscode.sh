@@ -4,7 +4,9 @@
 
 set -eu
 
-workspace=${WORKSPACE:-/workspaces/anyhow-demo}
+# Not WORKSPACE: the devcontainer already uses that name for the
+# rumpelpod checkout itself (entrypoint.sh).
+workspace=${RUMPELPOD_VSCODE_WORKSPACE:-/workspaces/anyhow-demo}
 export PATH="$HOME/.local/bin:$PATH"
 unset PASSWORD HASHED_PASSWORD
 

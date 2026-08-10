@@ -1,7 +1,6 @@
 .gitignore
 Dockerfile.linux
 esbuild.mjs
-integration/**
 node_modules/**
 package-lock.json
 package.mjs

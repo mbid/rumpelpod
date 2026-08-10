@@ -203,7 +203,10 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       } satisfies OpenMultiDiffEditorOptions,
     );
     let tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    if (tab?.isPinned === true) {
+    // Another editor can grab focus between the open command and this
+    // point; unpinning acts on the active editor, so only unpin what is
+    // provably the review just opened.
+    if (tab?.isPinned === true && isSnapshotReviewTab(tab, snapshot)) {
       await vscode.commands.executeCommand("workbench.action.unpinEditor");
       tab = vscode.window.tabGroups.activeTabGroup.activeTab;
     }

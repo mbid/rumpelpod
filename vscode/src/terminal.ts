@@ -693,7 +693,11 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       case "input":
         {
           const channel = this.channel(value.tab);
-          if (value.session === channel.session && channel.running !== undefined) {
+          if (
+            value.session === channel.session &&
+            channel.running !== undefined &&
+            channel.running.session === channel.session
+          ) {
             channel.running.process.write(value.data);
           }
         }
@@ -720,7 +724,9 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
           }
           this.columns = clamp(value.cols, MIN_COLUMNS, MAX_COLUMNS);
           this.rows = clamp(value.rows, MIN_ROWS, MAX_ROWS);
-          channel.running?.process.resize(this.columns, this.rows);
+          if (channel.running?.session === channel.session) {
+            channel.running.process.resize(this.columns, this.rows);
+          }
         }
         return;
       case "restart":

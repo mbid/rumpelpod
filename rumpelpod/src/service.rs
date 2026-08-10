@@ -318,9 +318,24 @@ fn systemd_write_enabled_units() -> Result<()> {
     let dir = wants_dir.display();
     fs::create_dir_all(&wants_dir).with_context(|| format!("failed to create {dir}"))?;
     let link = wants_dir.join(format!("{SERVICE_NAME}.socket"));
-    match std::os::unix::fs::symlink(format!("../{SERVICE_NAME}.socket"), &link) {
+    let target = PathBuf::from(format!("../{SERVICE_NAME}.socket"));
+    match std::os::unix::fs::symlink(&target, &link) {
         Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Reinstalls hit this; only an existing link to some other
+            // unit would silently break enablement.
+            let existing = fs::read_link(&link).with_context(|| {
+                let link = link.display();
+                format!("inspecting existing {link}")
+            })?;
+            if existing != target {
+                let link = link.display();
+                let existing = existing.display();
+                return Err(anyhow!(
+                    "{link} points at {existing}, refusing to overwrite"
+                ));
+            }
+        }
         Err(e) => {
             let link = link.display();
             return Err(anyhow::Error::from(e).context(format!("failed to create {link}")));
