@@ -237,6 +237,35 @@ fn k8s_enter_smoke() {
 }
 
 #[test]
+fn k8s_initialize_command_runs_on_invoking_host() {
+    println!("xtest:timeout=240");
+    if !has_k8s_executor() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = k8s_executor(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(
+        &repo,
+        "",
+        r#", "initializeCommand": "printf initialized > initialize.k8s""#,
+    );
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "k8s-initialize", "--", "true"])
+        .success()
+        .expect("rumpel enter failed");
+
+    assert_eq!(
+        fs::read_to_string(repo.path().join("initialize.k8s"))
+            .expect("read Kubernetes initialize marker"),
+        "initialized"
+    );
+}
+
+#[test]
 fn k8s_list_shows_pod() {
     println!("xtest:timeout=240");
     if !has_k8s_executor() {

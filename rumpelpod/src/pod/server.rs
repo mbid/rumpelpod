@@ -1475,7 +1475,7 @@ const DEVCONTAINER_CONFIG_PATH: &str = "/opt/rumpelpod/devcontainer.json";
 
 /// Resolve the full environment for the pod on startup.
 ///
-/// Reads the baked devcontainer.json, resolves `${localEnv:...}` from the
+/// Reads the baked devcontainer.json, resolves local host env references from the
 /// CLI flags and `${containerEnv:...}` from the process environment,
 /// probes the user's shell, and merges everything into a single env map.
 fn resolve_pod_env(
@@ -1515,7 +1515,7 @@ fn resolve_pod_env(
 
     let lifecycle_config = dc.lifecycle.clone();
 
-    // Resolve ${localEnv:...} and ${containerEnv:...} in remoteEnv values,
+    // Resolve local host and container environment references in remoteEnv values,
     // and build the final merged environment.
     let remote_env = dc.remote_env.unwrap_or_default();
     let mut resolved_remote: HashMap<String, String> = HashMap::new();

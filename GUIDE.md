@@ -183,8 +183,7 @@ Rumpelpod ignores them with a warning when they appear.
 - `workspaceMount`: rumpelpod syncs the workspace via git rather than bind-mounting it.
 - `appPort`: use `forwardPorts` instead, so that rumpelpod's port tracking can remap across pods.
 - `shutdownAction`: containers stay running between sessions and are only removed explicitly with `rumpel delete`.
-- `initializeCommand` and `postAttachCommand` are ignored.
-  The remaining lifecycle commands run once per container start.
+- `postAttachCommand` is ignored.
 - `userEnvProbe` is supported but behaves differently: the probe runs once when the pod is first created and the result is cached for the container's lifetime.
   Changes to shell init files do not take effect until the pod is recreated.
 - Bind mounts work fully only when containers run locally.
