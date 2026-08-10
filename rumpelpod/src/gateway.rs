@@ -227,7 +227,8 @@ pub fn install_host_hooks(repo_path: &Path) -> Result<()> {
 
     let post_receive_block = format!(
         "{HOST_POST_RECEIVE_COMMENT}\n\
-         {rumpel_exe} git-hook host-post-receive --repo-path {escaped_repo_path}\n"
+         {rumpel_exe} git-hook host-post-receive --repo-path {escaped_repo_path} || \
+         printf '%s\\n' 'warning: failed to notify the rumpelpod daemon' >&2\n"
     );
     install_host_hook(
         &hooks_dir,
@@ -398,6 +399,33 @@ mod tests {
             .expect("run installed post-receive hook");
 
         assert!(temporary.path().join("notification-ran").exists());
+    }
+
+    #[test]
+    fn post_receive_notification_failure_does_not_prevent_user_hook() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let hook = hooks.join("post-receive");
+        let user_notification = temporary.path().join("user-hook-ran");
+        let user_notification =
+            crate::devcontainer::shell_escape(&user_notification.to_string_lossy());
+        fs::write(
+            &hook,
+            format!("#!/bin/sh -e\nprintf user > {user_notification}\n"),
+        )
+        .expect("write user hook");
+        let block = format!(
+            "{HOST_POST_RECEIVE_COMMENT}\n\
+             false || printf '%s\\n' 'notification failed' >&2\n"
+        );
+
+        install_host_hook(hooks, "post-receive", &block, HostHookPlacement::BeforeUser)
+            .expect("install rumpelpod post-receive hook");
+        Command::new(&hook)
+            .success()
+            .expect("run installed post-receive hook");
+
+        assert!(temporary.path().join("user-hook-ran").exists());
     }
 
     #[test]
