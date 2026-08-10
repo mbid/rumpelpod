@@ -246,6 +246,11 @@ fn write_code_server_settings(user_data_dir: &Path, executable: &Path) {
     .expect("write code-server settings");
 }
 
+// TODO: Get rid of this wrapper and its fakes. Only real end-to-end
+// behavior counts as tested: the merge should actually run (the pod
+// needs to commit a DESCRIPTION, and the assertions must tolerate the
+// workspace changing under code-server), and the action log should be
+// replaced by asserting the commands' real effects.
 fn write_extension_rumpel_wrapper(directory: &Path) -> PathBuf {
     let executable = directory.join("rumpel-vscode-test");
     fs::write(
