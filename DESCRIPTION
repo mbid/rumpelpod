@@ -1,0 +1,6 @@
+Expose daemon APIs for the VS Code extension
+
+Add the review and event contracts needed by the alpha VS Code client
+while keeping extension sources and extension-specific build machinery
+out of this branch. Align daemon installation, pipeline coverage, and
+integration tests with the extracted server-side functionality.
