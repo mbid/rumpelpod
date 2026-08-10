@@ -2263,6 +2263,7 @@ impl DaemonServer {
             let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, record.id, db::PodStatus::Ready)?;
         }
+        self.emit_status_changed(repo_path, &pod_name.0);
 
         // Re-establish forwarded ports from DB only if the daemon
         // doesn't already hold live forwards for this pod.  Without
@@ -2461,6 +2462,7 @@ impl DaemonServer {
             let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, record.id, db::PodStatus::Ready)?;
         }
+        self.emit_status_changed(repo_path, &pod_name.0);
 
         // Tunnel must come up before container-serve: the latter runs
         // git fetch during its startup and needs the host reachable.
@@ -2612,10 +2614,13 @@ impl DaemonServer {
             )?
         };
 
+        self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
+
         let mark_error = |e: anyhow::Error| -> anyhow::Error {
             if let Ok(conn) = self.db.lock() {
                 let _ = db::update_pod_status(&conn, pod_id, db::PodStatus::Error);
             }
+            self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
             e
         };
         let pod_connection = self
@@ -2706,6 +2711,7 @@ impl DaemonServer {
             let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
         }
+        self.emit_status_changed(repo_path, &pod_name.0);
 
         // Set up exec-proxy listeners for devcontainer forwardPorts.
         let forward_ports = devcontainer.forward_ports.as_deref().unwrap_or(&[]);
@@ -3170,10 +3176,13 @@ impl DaemonServer {
             )?
         };
 
+        self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
+
         let mark_error = |e: anyhow::Error| -> anyhow::Error {
             if let Ok(conn) = self.db.lock() {
                 let _ = db::update_pod_status(&conn, pod_id, db::PodStatus::Error);
             }
+            self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
             e
         };
         let pod_connection = self
@@ -3322,6 +3331,7 @@ impl DaemonServer {
                 })?
             }
         };
+        self.emit_status_changed(&repo_path, &pod_name.0);
         pod_connection.set_forwarded_ports(port_forward_handles);
         pod_connection.ensure_event_loop();
 
