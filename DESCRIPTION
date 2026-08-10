@@ -15,4 +15,6 @@ pod becomes ready so untouched branches are not omitted after removing
 recovery work from the events stream.
 
 Cover autonomous and manual recovery for local Docker, SSH, and
-Kubernetes without using rumpel enter as the repair trigger.
+Kubernetes without using rumpel enter as the repair trigger. Verify
+manual reconnect restores a runtime-added port forward without changing
+its local port.

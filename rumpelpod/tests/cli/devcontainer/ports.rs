@@ -421,6 +421,66 @@ fn forward_port_persists_across_pod_restart() {
 }
 
 #[test]
+fn forward_port_is_restored_after_manual_reconnect() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_ports(&repo, "");
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "fp-reconnect", "--", "true"])
+        .success()
+        .expect("rumpel enter failed");
+
+    pod_command(&repo, &daemon)
+        .args(["forward-port", "fp-reconnect:9850"])
+        .success()
+        .expect("rumpel forward-port failed");
+
+    start_echo_server_in_container(&repo, &daemon, "fp-reconnect", 9850);
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["ports", "fp-reconnect"])
+        .success()
+        .expect("rumpel ports failed before reconnect");
+    let listing = String::from_utf8_lossy(&stdout);
+    let local_port = extract_local_port(&listing, 9850);
+
+    let response = try_echo(local_port, "before reconnect");
+    assert_eq!(
+        response.as_deref(),
+        Some("before reconnect"),
+        "expected forward to work before reconnect, got {response:?}"
+    );
+
+    pod_command(&repo, &daemon)
+        .args(["reconnect", "fp-reconnect"])
+        .success()
+        .expect("rumpel reconnect failed");
+
+    let stdout = pod_command(&repo, &daemon)
+        .args(["ports", "fp-reconnect"])
+        .success()
+        .expect("rumpel ports failed after reconnect");
+    let listing = String::from_utf8_lossy(&stdout);
+    let reconnected_local_port = extract_local_port(&listing, 9850);
+    assert_eq!(
+        reconnected_local_port, local_port,
+        "manual reconnect changed the persisted local port"
+    );
+
+    let response = try_echo(reconnected_local_port, "after reconnect");
+    assert_eq!(
+        response.as_deref(),
+        Some("after reconnect"),
+        "expected forward to work after reconnect, got {response:?}"
+    );
+}
+
+#[test]
 fn forward_port_subcommand_explicit_local_port() {
     let repo = TestRepo::new();
 
