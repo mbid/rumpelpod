@@ -43,6 +43,8 @@ mod merge;
 mod network;
 #[path = "cli/pi/mod.rs"]
 mod pi;
+#[path = "cli/pipeline.rs"]
+mod pipeline;
 #[path = "cli/podman.rs"]
 mod podman;
 #[path = "cli/prune.rs"]

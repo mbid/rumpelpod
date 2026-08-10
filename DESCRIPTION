@@ -6,6 +6,9 @@ changes in native VS Code multi-diff editors. Run CLI commands under a
 packaged node-pty binding. Pod creation, lifecycle output, and
 interactive sessions share the CLI's established terminal behavior.
 
+Deny Rust warnings through inherited workspace lints so pipeline builds
+preserve the target-specific flags required for runnable musl binaries.
+
 Expose typed daemon endpoints for list and review snapshots plus live
 invalidation events. Have the extension consume them directly over the
 Unix socket without JSON CLI modes or an event subprocess. Notify review

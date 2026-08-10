@@ -5,6 +5,9 @@
 resolver = "2"
 members = ["rumpelpod", "tools"]
 
+[workspace.lints.rust]
+warnings = "deny"
+
 [profile.dev]
 opt-level = "z"
 debug = 0

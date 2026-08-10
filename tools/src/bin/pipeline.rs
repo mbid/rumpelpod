@@ -111,6 +111,14 @@ fn run_cmd(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
+fn pipeline_cargo_cmd() -> Command {
+    let mut command = tools::cargo_cmd();
+    // Global flags replace target-specific Cargo configuration instead of
+    // extending it, which can make the musl payloads fail before main.
+    command.env_remove("RUSTFLAGS");
+    command
+}
+
 fn wait_for_devcontainer_user_manager() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -171,7 +179,7 @@ fn install_devcontainer_daemon(release: bool) -> Result<()> {
     let profile_args: &[&str] = if release { &["--release"] } else { &[] };
     for (target, _) in LINUX_RUMPEL_TARGETS {
         run_cmd(
-            tools::cargo_cmd()
+            pipeline_cargo_cmd()
                 .args([
                     "build",
                     "-p",
@@ -181,8 +189,7 @@ fn install_devcontainer_daemon(release: bool) -> Result<()> {
                     "--target",
                     target,
                 ])
-                .args(profile_args)
-                .env("RUSTFLAGS", "-D warnings"),
+                .args(profile_args),
         )?;
     }
 
@@ -302,30 +309,28 @@ fn run() -> Result<ExitCode> {
     };
 
     eprintln!("=== Checking formatting ===");
-    run_cmd(tools::cargo_cmd().args(["fmt", "--", "--check"]))?;
+    run_cmd(pipeline_cargo_cmd().args(["fmt", "--", "--check"]))?;
 
     let profile_args: &[&str] = if release { &["--release"] } else { &[] };
 
     eprintln!("\n=== Building (with tests, no warnings) ===");
     run_cmd(
-        tools::cargo_cmd()
+        pipeline_cargo_cmd()
             .args(["build", "--all-targets"])
-            .args(profile_args)
-            .env("RUSTFLAGS", "-D warnings"),
+            .args(profile_args),
     )?;
 
     install_devcontainer_daemon(release)?;
 
     eprintln!("\n=== Running clippy (no warnings) ===");
     run_cmd(
-        tools::cargo_cmd()
+        pipeline_cargo_cmd()
             .args(["clippy", "--all-targets"])
-            .args(profile_args)
-            .env("RUSTFLAGS", "-D warnings"),
+            .args(profile_args),
     )?;
 
     eprintln!("\n=== Checking VS Code extension ===");
-    run_cmd(tools::cargo_cmd().args(["vscode", "--check"]))?;
+    run_cmd(pipeline_cargo_cmd().args(["vscode", "--check"]))?;
 
     // Only xtest output is recorded to the log file.  The other
     // pipeline steps are cheap and deterministic; the log exists so
@@ -337,7 +342,7 @@ fn run() -> Result<ExitCode> {
     let log_path_display = log_path.display();
     eprintln!("\n=== Running tests (log: {log_path_display}) ===");
 
-    let mut xtest_cmd = tools::cargo_cmd();
+    let mut xtest_cmd = pipeline_cargo_cmd();
     xtest_cmd.arg("xtest");
     if release {
         xtest_cmd.arg("--release");
