@@ -1,0 +1,10 @@
+Add the docker compose support design document
+
+COMPOSE-DESIGN.md records the design for dockerComposeFile support:
+the rendered compose config as persisted model, compose project name
+equal to the PodId, prepared image layered on the agent service's
+image, docker cp injection of the static rumpel binary into sidecars,
+direct per-container exec for port forwarding so the untrusted agent
+never mediates host-to-sidecar traffic, stripping of published
+ports:, and the spec-conformant overrideCommand default. No code
+changes yet.
