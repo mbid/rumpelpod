@@ -1,0 +1,14 @@
+Run the devcontainer privileged, not under sysbox
+
+Sysbox is no longer required to run systemd and nested container
+engines in the devcontainer; plain runc with --privileged works both
+locally and on stock GitHub runners. This drops the sysbox install
+from CI and the sysbox requirement from the contributor docs.
+
+Under plain runc, nested container storage cannot live on the pod's
+own overlayfs root (the kernel refuses overlay-upon-overlay), so
+/var/lib/containers and /var/lib/docker each get a named volume, both
+in devcontainer.json (keyed per pod via devcontainerId) and in
+ci/run-pipeline.sh. The image also masks getty.target, since a
+privileged pod sees the host's VT devices, and overrides podman's
+tmpfiles entry so docker-group members can reach the rootful socket.

@@ -38,11 +38,10 @@ Rumpelpod. The `.devcontainer/` directory defines an image with the Rust
 toolchain (and musl cross-compile targets), Docker, k3d, helm, and the
 LLM agent CLIs preinstalled, ready for `cargo pipeline`.
 
-The dev container needs the
-[sysbox](https://github.com/nestybox/sysbox) runtime on the host.
-Rumpelpod's tests run a Docker daemon and k3d clusters inside the
-container, which sysbox supports without privileged mode. The default
-`runc` runtime is not sufficient.
+The dev container runs privileged (see `runArgs` in
+`.devcontainer/devcontainer.json`): Rumpelpod's tests run a Docker
+daemon and k3d clusters inside the container, which the default
+unprivileged `runc` configuration does not allow.
 
 #### Testing
 
