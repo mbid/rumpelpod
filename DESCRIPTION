@@ -8,6 +8,8 @@ enter.
 Back off pod repair attempts and pause them after repeated failures
 while the host remains reachable. A re-established shared host
 connection immediately resumes every non-stopped pod on that host.
+Back off unavailable host probes with jitter while keeping healthy
+checks and demand-triggered probes responsive.
 
 Add rumpel reconnect to replace one pod's tunnels, proxies, and port
 forwards on demand. Its --host flag also replaces the shared host

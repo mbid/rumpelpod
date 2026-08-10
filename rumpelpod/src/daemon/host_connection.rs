@@ -211,14 +211,33 @@ impl HostConnectionRegistry {
     }
 }
 
-/// How often the background monitors verify liveness and re-attempt
-/// bring-up when down.
+/// How often the background monitors verify liveness while connected.
 const HEALTH_INTERVAL: Duration = Duration::from_secs(15);
 
-/// SSH monitor reconnect backoff while the host is down.  Capped low so
-/// the user's terminal reconnects promptly once the host is reachable.
-const SSH_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
-const SSH_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const HOST_PROBE_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const HOST_PROBE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+struct HostProbeBackoff {
+    delay: Duration,
+}
+
+impl HostProbeBackoff {
+    fn new() -> Self {
+        Self {
+            delay: HOST_PROBE_INITIAL_BACKOFF,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.delay = HOST_PROBE_INITIAL_BACKOFF;
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = crate::jitter(self.delay);
+        self.delay = std::cmp::min(self.delay.saturating_mul(2), HOST_PROBE_MAX_BACKOFF);
+        delay
+    }
+}
 
 /// Per-host connection handle, behind `Arc` in the registry.
 pub enum HostConnection {
@@ -504,7 +523,7 @@ impl SshConnection {
 /// (e.g. when a pod loop sees its endpoint fail).  Holds only a `Weak`
 /// so the connection can drop and abort it.
 async fn ssh_monitor(weak: Weak<SshConnection>, probe: Arc<Notify>) {
-    let mut backoff = SSH_INITIAL_BACKOFF;
+    let mut backoff = HostProbeBackoff::new();
     loop {
         let Some(conn) = weak.upgrade() else { return };
         let key = conn.key();
@@ -526,12 +545,10 @@ async fn ssh_monitor(weak: Weak<SshConnection>, probe: Arc<Notify>) {
         drop(conn);
 
         let wait = if connected {
-            backoff = SSH_INITIAL_BACKOFF;
+            backoff.reset();
             HEALTH_INTERVAL
         } else {
-            let current = backoff;
-            backoff = std::cmp::min(backoff.saturating_mul(2), SSH_MAX_BACKOFF);
-            current
+            backoff.next_delay()
         };
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
@@ -740,13 +757,21 @@ impl K8sConnection {
     }
 }
 
-/// Background monitor for a k8s connection: a periodic
-/// `ensure_client` ping that doubles as liveness check and
-/// reconnect attempt.  `request_probe` wakes it early.
+/// Background monitor for a k8s connection. `request_probe` wakes it early.
 async fn k8s_monitor(weak: Weak<K8sConnection>, probe: Arc<Notify>) {
+    let mut backoff = HostProbeBackoff::new();
     loop {
+        let Some(conn) = weak.upgrade() else { return };
+        let wait = if conn.status() == HostStatus::Connected {
+            backoff.reset();
+            HEALTH_INTERVAL
+        } else {
+            backoff.next_delay()
+        };
+        drop(conn);
+
         tokio::select! {
-            _ = tokio::time::sleep(HEALTH_INTERVAL) => {}
+            _ = tokio::time::sleep(wait) => {}
             _ = probe.notified() => {}
         }
         let Some(conn) = weak.upgrade() else { return };
@@ -779,6 +804,28 @@ fn args_to_strings(args: &[OsString]) -> Vec<String> {
     args.iter()
         .map(|arg| arg.to_string_lossy().to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_host_probe_backoff_caps_at_thirty_seconds() {
+        let mut backoff = HostProbeBackoff::new();
+
+        for seconds in [1, 2, 4, 8, 16, 30, 30] {
+            let upper = Duration::from_secs(seconds);
+            let delay = backoff.next_delay();
+            assert!(delay >= upper.div_f64(2.0));
+            assert!(delay <= upper);
+        }
+
+        backoff.reset();
+        let delay = backoff.next_delay();
+        assert!(delay >= Duration::from_millis(500));
+        assert!(delay <= HOST_PROBE_INITIAL_BACKOFF);
+    }
 }
 
 #[cfg(test)]
