@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Build the devcontainer image, boot it under sysbox, check out the
+# Build the devcontainer image, boot it privileged, check out the
 # commit under test, and run the release test pipeline inside it. This
 # keeps the CI workflow thin and makes the exact CI sequence
-# reproducible locally: run it with sysbox installed and the same
+# reproducible locally: run it with docker and the same
 # REPO_URL/COMMIT to mirror what the runners do.
 #
 # The commit under test is fetched straight from its origin over the
@@ -38,14 +38,20 @@ docker build \
   --tag rumpelpod-dev \
   "$repo_root"
 
-# Sysbox lets the container run systemd and nested containers (docker,
-# podman, k3d) without --privileged, the same as local development.
+# --privileged lets the container run systemd and nested containers
+# (docker, podman, k3d), the same as local development
+# (devcontainer.json). Nested container storage must not live on the
+# container's own overlayfs root -- the kernel refuses
+# overlay-upon-overlay -- so both engines get named volumes, mirroring
+# the devcontainer.json mounts. The runner is fresh per job, so fixed
+# volume names are fine here.
 # Forwarding the runner's CI variable lets the entrypoint skip
 # development-only services such as browser VS Code.
 docker run --detach --name devcontainer \
-  --runtime=sysbox-runc \
+  --privileged \
   --env CI \
   --volume rumpelpod-podman-storage:/var/lib/containers \
+  --volume rumpelpod-docker-storage:/var/lib/docker \
   rumpelpod-dev
 
 cleanup() {
@@ -103,8 +109,9 @@ docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
 # Copy out the tested release binary for the host's own architecture.
 # The pipeline cross-builds both linux targets, so pick the native one.
 # Stream it out with `docker exec ... cat` rather than `docker cp`:
-# under sysbox the latter fails to find this runtime-written, cargo
-# hard-linked file on the arm64 runner, while a normal exec reads it.
+# cp resolves paths through the storage driver and has failed to find
+# this runtime-written, cargo hard-linked file, while a normal exec
+# reads it through the live mount regardless of runtime.
 if [ -n "$STAGING_DIR" ]; then
   case "$(dpkg --print-architecture)" in
     amd64)
@@ -126,8 +133,9 @@ if [ -n "$STAGING_DIR" ]; then
   docker exec --user user --workdir /workspaces/rumpelpod devcontainer \
     cat "target/$triple/release/rumpel" >"$STAGING_DIR/$name"
   chmod +x "$STAGING_DIR/$name"
-  # The compatibility builder uses host Docker. Stop the sysbox test container
-  # first so both container stacks never compete for the runner at once.
+  # The compatibility builder uses host Docker. Stop the privileged test
+  # container first so both container stacks never compete for the runner at
+  # once.
   docker stop devcontainer >/dev/null
   vsix_output=$(mktemp -d)
   DOCKER_BUILDKIT=1 docker build \

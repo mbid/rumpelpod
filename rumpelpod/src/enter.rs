@@ -142,8 +142,8 @@ pub fn determine_host(repo_root: &Path, host_override: Option<Host>) -> Result<H
     })
 }
 
-/// Collect `${localEnv:VAR}` values from the local environment so the
-/// daemon can substitute them when it loads devcontainer.json.
+/// Collect `${localEnv:VAR}` / `${env:VAR}` values from the local environment
+/// so the daemon can substitute them when it loads devcontainer.json.
 ///
 /// The daemon cannot do this itself because it does not have access to
 /// the user's shell environment.  This is the only reason the client

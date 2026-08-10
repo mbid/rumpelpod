@@ -57,7 +57,7 @@ part of container boot. It serves a dedicated `anyhow` 1.0.102 demo repository
 from `/workspaces/anyhow-demo` at port 3000 without depending on devcontainer
 lifecycle commands. This keeps the live editor outside the rumpelpod source
 checkout: pods created through the extension use the demo's ordinary Rust
-devcontainer and do not try to nest Sysbox inside Sysbox. The demo is seeded
+devcontainer instead of nesting another copy of this development container. The demo is seeded
 from Cargo's pinned registry source during the image build; later `cargo
 vscode` runs preserve its pods and working tree.
 

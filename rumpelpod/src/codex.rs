@@ -13,7 +13,8 @@
 //!   - Pod launch or reconnect happens only when neither path is available.
 //!     The TUI survives Ctrl-a d, so subsequent invocations
 //!     reattach and replay the previous conversation instead of
-//!     landing on the welcome screen.
+//!     landing on the welcome screen. A replacement frontend resumes the last
+//!     remote thread, while the first frontend starts a new one.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -233,6 +234,11 @@ fn build_codex_spec(
         "--remote-auth-token-env".to_string(),
         CODEX_PROXY_TOKEN_ENV.to_string(),
     ];
+    // Codex starts a new remote thread when there is nothing to resume, so every
+    // spawned frontend can use the same command and survive incomplete state
+    // notifications or an app-server restart.
+    cmd.push("resume".to_string());
+    cmd.push("--last".to_string());
     cmd.extend(codex_args);
 
     Ok(Some(SessionSpec {

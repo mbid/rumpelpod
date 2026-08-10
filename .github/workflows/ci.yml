@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build and test the release binaries, then publish them on tags. The
-# linux jobs run the full pipeline inside the devcontainer under sysbox
+# linux jobs run the full pipeline inside the privileged devcontainer
 # (via ci/run-pipeline.sh) and stage the very binary the tests ran
 # against; macos builds release-only because its runners have no docker
 # daemon for the pod tests. The release job assembles those staged
@@ -41,14 +41,6 @@ jobs:
             /usr/local/share/boost
           sudo docker image prune --all --force
 
-      - name: Install sysbox
-        run: |
-          arch=$(dpkg --print-architecture)
-          curl -fsSL \
-            "https://github.com/nestybox/sysbox/releases/download/v0.7.0/sysbox-ce_0.7.0.linux_${arch}.deb" \
-            -o /tmp/sysbox-ce.deb
-          sudo apt-get install --yes /tmp/sysbox-ce.deb
-
       - name: Run pipeline and stage release artifacts
         env:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
@@ -78,14 +70,6 @@ jobs:
             /opt/hostedtoolcache/CodeQL \
             /usr/local/share/boost
           sudo docker image prune --all --force
-
-      - name: Install sysbox
-        run: |
-          arch=$(dpkg --print-architecture)
-          curl -fsSL \
-            "https://github.com/nestybox/sysbox/releases/download/v0.7.0/sysbox-ce_0.7.0.linux_${arch}.deb" \
-            -o /tmp/sysbox-ce.deb
-          sudo apt-get install --yes /tmp/sysbox-ce.deb
 
       - name: Run pipeline and stage release artifacts
         env:

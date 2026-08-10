@@ -52,12 +52,13 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         procps \
         unzip
 
-# Rootless Podman cannot create its user namespace under this outer sandbox.
-# Use Podman's rootful API service. The devcontainer runtime creates a
-# dedicated volume at /var/lib/containers; without it, Podman's rootful storage
-# stays on the outer overlay root and falls back to fuse-overlayfs, which cannot
-# run without /dev/fuse. Host networking avoids /dev/net/tun during Dockerfile
-# RUN steps.
+# Use Podman's rootful API service rather than rootless mode; rootless
+# user namespaces are not available in every environment this image runs
+# in (e.g. plain runc build containers). devcontainer.json mounts a
+# dedicated volume at /var/lib/containers; without it, Podman's rootful
+# storage would sit on the pod's own overlay root, where the kernel
+# refuses nested overlayfs. Host networking avoids /dev/net/tun during
+# Dockerfile RUN steps.
 RUN mkdir -p \
         /etc/containers \
         /etc/systemd/system/podman.socket.d \
@@ -78,6 +79,13 @@ RUN mkdir -p \
         'DirectoryMode=0755' \
         > /etc/systemd/system/podman.socket.d/rumpelpod.conf \
     && systemctl enable podman.socket
+
+# The packaged tmpfiles entry (D! /run/podman 0700) recreates the socket
+# directory at every boot with a mode that keeps docker-group members from
+# traversing to the socket, defeating the SocketGroup setup above. Earliest
+# file wins for duplicate tmpfiles paths, hence the 00- prefix.
+RUN printf 'd /run/podman 0755 root root -\n' \
+        > /etc/tmpfiles.d/00-rumpelpod-podman.conf
 
 # Docker daemon config for the nested k3d setup:
 # - insecure-registries: the k3d built-in registry speaks HTTP. The
@@ -163,8 +171,12 @@ RUN curl -fsSL https://musl.libc.org/releases/musl-1.2.5.tar.gz | tar xz -C /tmp
     done && \
     rm -rf /tmp/musl-1.2.5 /tmp/musl-build-*
 
+# getty.target is masked because a privileged pod sees the host's VT
+# devices in /dev; getty units would otherwise try to grab the host
+# console (and fail, leaving the system degraded).
 RUN echo "ReadKMsg=no" >> /etc/systemd/journald.conf \
     && systemctl mask \
+        getty.target \
         proc-sys-fs-binfmt_misc.automount \
         apparmor.service \
         tmp.mount \
