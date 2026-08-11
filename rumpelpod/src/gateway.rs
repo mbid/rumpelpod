@@ -39,7 +39,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -294,13 +294,33 @@ fn install_host_hook(
 
     let hook_path = hooks_dir.join(hook_name);
 
-    let existing = match fs::read_to_string(&hook_path) {
-        Ok(existing) => Some(existing),
+    let metadata = match fs::symlink_metadata(&hook_path) {
+        Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             let hook_path = hook_path.display();
-            return Err(error).with_context(|| format!("Failed to read hook: {hook_path}"));
+            return Err(error).with_context(|| format!("Failed to inspect hook: {hook_path}"));
         }
+    };
+    if let Some(metadata) = &metadata {
+        let hook_path = hook_path.display();
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow::Error::msg(format!(
+                "Refusing to install managed hook over symbolic link: {hook_path}"
+            )));
+        }
+        if metadata.nlink() > 1 {
+            return Err(anyhow::Error::msg(format!(
+                "Refusing to install managed hook over multiply linked file: {hook_path}"
+            )));
+        }
+    }
+    let existing = match &metadata {
+        Some(_) => Some(fs::read_to_string(&hook_path).with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to read hook: {hook_path}")
+        })?),
+        None => None,
     };
     let content = if let Some(existing) = &existing {
         let cleaned = strip_host_hooks(existing);
@@ -373,7 +393,7 @@ fn combine_host_hook(existing: &str, block: &str, placement: HostHookPlacement) 
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::symlink;
 
     use super::*;
 
@@ -476,5 +496,58 @@ mod tests {
 
         assert!(format!("{error:#}").contains("Failed to read hook"));
         assert_eq!(fs::read(&hook).expect("read preserved hook"), original);
+    }
+
+    #[test]
+    fn installing_host_hook_rejects_user_symlink() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let target = hooks.join("shared-post-receive");
+        let hook = hooks.join("post-receive");
+        let original = "#!/bin/sh\nprintf 'user hook\\n'\n";
+        fs::write(&target, original).expect("write hook target");
+        symlink("shared-post-receive", &hook).expect("link user hook");
+        let block =
+            "# Installed by rumpelpod (host post-receive)\nrumpel git-hook host-post-receive\n";
+
+        let error = install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
+            .expect_err("symlinked hook must be rejected");
+
+        assert!(format!("{error:#}").contains("symbolic link"));
+        assert!(
+            fs::symlink_metadata(&hook)
+                .expect("read installed hook metadata")
+                .file_type()
+                .is_symlink(),
+            "installation replaced the user hook symlink"
+        );
+        let installed = fs::read_to_string(&target).expect("read installed hook target");
+        assert_eq!(installed, original);
+    }
+
+    #[test]
+    fn installing_host_hook_rejects_multiply_linked_file() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let target = hooks.join("shared-post-receive");
+        let hook = hooks.join("post-receive");
+        let original = "#!/bin/sh\nprintf 'user hook\\n'\n";
+        fs::write(&target, original).expect("write hook target");
+        fs::hard_link(&target, &hook).expect("link user hook");
+        let block =
+            "# Installed by rumpelpod (host post-receive)\nrumpel git-hook host-post-receive\n";
+
+        let error = install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
+            .expect_err("multiply linked hook must be rejected");
+
+        assert!(format!("{error:#}").contains("multiply linked file"));
+        assert_eq!(
+            fs::read_to_string(&hook).expect("read preserved hook"),
+            original
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("read preserved hook target"),
+            original
+        );
     }
 }
