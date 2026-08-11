@@ -3525,6 +3525,97 @@ fn pods_see_each_others_branches() {
 }
 
 #[test]
+fn gateway_tunnel_recovers_without_reenter() {
+    println!("xtest:timeout=240");
+    if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
+        executor::skip_test();
+        return;
+    }
+
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "RUN apk add --no-cache procps", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+    let pod_name = "tunnel-supervisor";
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "true"])
+        .success()
+        .expect("initial enter failed");
+
+    let container_id = {
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "-q",
+                "--filter",
+                &format!("label=dev.rumpelpod.name={pod_name}"),
+            ])
+            .success()
+            .expect("docker ps failed");
+        String::from_utf8_lossy(&output)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+    assert!(!container_id.is_empty(), "container not found");
+
+    Command::new("docker")
+        .args([
+            "exec",
+            &container_id,
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            TEST_REPO_PATH,
+            "commit",
+            "--allow-empty",
+            "-m",
+            "pending tunnel recovery",
+        ])
+        .success()
+        .expect("creating pending commit failed");
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            &container_id,
+            "git",
+            "-C",
+            TEST_REPO_PATH,
+            "rev-parse",
+            "HEAD",
+        ])
+        .success()
+        .expect("reading pending commit failed");
+    let pending_commit = String::from_utf8_lossy(&output).trim().to_string();
+    let expected_ref = format!("refs/rumpelpod/{pod_name}@{pod_name}");
+    assert_ne!(
+        get_pod_ref_commit(repo.path(), &expected_ref).as_deref(),
+        Some(pending_commit.as_str()),
+        "hook-free commit should still be pending",
+    );
+
+    Command::new("docker")
+        .args(["exec", &container_id, "pkill", "-f", "rumpel tunnel-server"])
+        .success()
+        .expect("killing tunnel-server failed");
+
+    assert!(
+        wait_for_ref_commit_until(
+            repo.path(),
+            &expected_ref,
+            &pending_commit,
+            std::time::Duration::from_secs(60),
+        ),
+        "supervised tunnel did not recover the pending commit",
+    );
+}
+
+#[test]
 fn gateway_reconnect_push() {
     // The reconnect steps poke the running container directly with
     // `docker exec`, so only the localhost Docker executor applies.
@@ -3535,8 +3626,7 @@ fn gateway_reconnect_push() {
         return;
     }
     // Commits made while the daemon is down should be pushed to the
-    // host when the daemon reconnects.  The pod's /events endpoint
-    // triggers a push of all local branches on each new connection.
+    // host when the daemon reconnects and refreshes the git gateway.
     let repo = TestRepo::new();
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
@@ -3632,8 +3722,8 @@ fn gateway_reconnect_push() {
         "host should not have the offline commit yet"
     );
 
-    // Restart the daemon and re-enter the pod.  The daemon connects to
-    // /events, which causes the pod to push all branches.
+    // Restart the daemon and re-enter the pod. Rebuilding the tunnel
+    // refreshes the gateway and queues a push of all branches.
     let daemon = TestDaemon::start(&home);
     pod_command(&repo, &daemon)
         .args(["enter", "--create", pod_name, "--", "true"])
@@ -3747,7 +3837,7 @@ fn gateway_daemon_restart_pushes_without_reenter() {
 
     // Restart the daemon -- do NOT re-enter the pod.  The daemon
     // should restore connections to running pods on startup and the
-    // /events handler pushes all branches on connect.
+    // gateway refresh queues a push of all branches.
     let _daemon = TestDaemon::start(&home);
 
     wait_for_ref_commit(repo.path(), &expected_ref, &offline_commit);

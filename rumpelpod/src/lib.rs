@@ -8,6 +8,7 @@ mod codex;
 mod command_ext;
 pub(crate) mod completions;
 pub mod config;
+mod connect_cmd;
 mod container_exec;
 mod cp;
 mod devcontainer;
@@ -176,6 +177,9 @@ pub fn run() -> Result<()> {
         }
         Command::Recreate(ref cmd) => {
             recreate::recreate(cmd)?;
+        }
+        Command::Connect(ref cmd) => {
+            connect_cmd::connect(cmd)?;
         }
         Command::Fork(ref cmd) => {
             fork::fork(cmd)?;

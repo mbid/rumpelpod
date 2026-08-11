@@ -1424,10 +1424,8 @@ fn k8s_node_selector_and_tolerations() {
     );
 }
 
-// Historically disabled: after killing the tunnel-server, the daemon
-// reconnects the tunnel but the git gateway port cached by the pod was
-// stale, so git fetch failed with "Could not connect to server".  We
-// restore this to verify current behavior.
+// A dead tunnel must be replaced and flush pending refs without an enter
+// command or another client-side backend round trip.
 #[test]
 fn k8s_tunnel_reconnect() {
     println!("xtest:timeout=300");
@@ -1479,6 +1477,46 @@ fn k8s_tunnel_reconnect() {
         "could not find k8s pod for {pod_name}",
     );
 
+    // Leave a commit pending without invoking the reference hook. The
+    // replacement tunnel must trigger its recovery push without another
+    // client command.
+    Command::new("kubectl")
+        .args(["--context", &executor.context])
+        .args(["--namespace", &executor.namespace])
+        .args([
+            "exec",
+            &k8s_pod_name,
+            "--",
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            TEST_REPO_PATH,
+            "commit",
+            "--allow-empty",
+            "-m",
+            "pending tunnel recovery",
+        ])
+        .success()
+        .expect("creating pending commit failed");
+    let output = Command::new("kubectl")
+        .args(["--context", &executor.context])
+        .args(["--namespace", &executor.namespace])
+        .args([
+            "exec",
+            &k8s_pod_name,
+            "--",
+            "git",
+            "-C",
+            TEST_REPO_PATH,
+            "rev-parse",
+            "HEAD",
+        ])
+        .success()
+        .expect("reading pending commit failed");
+    let pending_commit = String::from_utf8_lossy(&output).trim().to_string();
+    let expected_ref = format!("refs/rumpelpod/{pod_name}@{pod_name}");
+
     // Kill the tunnel-server inside the pod so the mux task detects a broken pipe.
     let pkill_status = Command::new("kubectl")
         .args(["--context", &executor.context])
@@ -1498,23 +1536,24 @@ fn k8s_tunnel_reconnect() {
         "pkill should find and kill tunnel-server",
     );
 
-    // Retry until the daemon notices the dead tunnel and reconnects.
+    // No enter or other rumpel command drives recovery from this point.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
-        let output = pod_command(&repo, &daemon)
-            .args(["enter", pod_name, "--", "echo", "reconnected"])
+        let output = Command::new("git")
+            .args(["rev-parse", &expected_ref])
+            .current_dir(repo.path())
             .output()
-            .expect("retry enter failed to execute");
+            .expect("git rev-parse failed");
 
         if output.status.success()
-            && String::from_utf8_lossy(&output.stdout).trim() == "reconnected"
+            && String::from_utf8_lossy(&output.stdout).trim() == pending_commit
         {
             break;
         }
 
         assert!(
             std::time::Instant::now() < deadline,
-            "tunnel reconnection did not succeed within 60s, last stderr: {}",
+            "tunnel recovery did not push within 60s, last stderr: {}",
             String::from_utf8_lossy(&output.stderr),
         );
 
@@ -1522,13 +1561,9 @@ fn k8s_tunnel_reconnect() {
     }
 }
 
-// K8s mirror of gateway_reconnect_push: a commit made while the daemon
-// is down should be pushed to the host on the next reconnect,
-// regardless of which pod is re-entered.  Kills the daemon, makes an
-// offline commit inside pod A via kubectl exec, then creates pod B in
-// the same cluster+namespace and asserts pod A's commit still lands
-// on the host.  The daemon reconnects sibling k8s pods on any enter
-// into the same cluster+namespace, so touching pod B heals pod A.
+// K8s mirror of gateway_daemon_restart_pushes_without_reenter: a commit
+// made while the daemon is down should be pushed when daemon-owned
+// tunnel supervision resumes, without another client command.
 #[test]
 fn k8s_gateway_reconnect_push() {
     println!("xtest:timeout=300");
@@ -1543,8 +1578,6 @@ fn k8s_gateway_reconnect_push() {
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
 
     let pod_a = "reconnect-push-a";
-    let pod_b = "reconnect-push-b";
-
     pod_command(&repo, &daemon)
         .args(["enter", "--create", pod_a, "--", "echo", "setup"])
         .success()
@@ -1645,14 +1678,10 @@ fn k8s_gateway_reconnect_push() {
         "host should not have the offline commit yet",
     );
 
-    // Restart the daemon and enter a *different* pod in the same
-    // cluster+namespace.  Entering pod B should also reconnect pod A,
-    // whose /events handler then pushes the offline commit.
-    let daemon = TestDaemon::start(&home);
-    pod_command(&repo, &daemon)
-        .args(["enter", "--create", pod_b, "--", "true"])
-        .success()
-        .expect("enter of pod B after restart failed");
+    // Restart the daemon but issue no rumpel command. The daemon should
+    // restore pod A's tunnel and the gateway refresh should queue the push.
+    let _daemon = TestDaemon::start(&home);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
 
     loop {
         let out = Command::new("git")
@@ -1663,6 +1692,10 @@ fn k8s_gateway_reconnect_push() {
         if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == offline_commit {
             return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon restart did not recover pod A's git tunnel within 60s",
+        );
         std::thread::sleep(Duration::from_millis(250));
     }
 }

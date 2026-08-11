@@ -9,6 +9,8 @@ mod codex;
 mod common;
 #[path = "cli/completions.rs"]
 mod completions;
+#[path = "cli/connect.rs"]
+mod connect;
 #[path = "cli/container_name.rs"]
 mod container_name;
 #[path = "cli/cp.rs"]
