@@ -867,6 +867,7 @@ struct ResolvedLaunch {
     compose_services: Vec<String>,
     git_setup: GitSetupParams,
     local_env_vars: HashMap<String, String>,
+    client_env: HashMap<String, String>,
     /// Docker mount list with bind mounts on remote hosts already
     /// converted to named volumes.  Unused by the k8s path, which
     /// builds its own mount spec.
@@ -2233,6 +2234,7 @@ impl DaemonServer {
             &mounts,
             host,
             docker_socket.as_deref(),
+            &HashMap::new(),
         )?))
     }
 
@@ -2595,6 +2597,7 @@ impl DaemonServer {
                         &mounts,
                         docker_host,
                         docker_socket.as_deref(),
+                        &HashMap::new(),
                     ) {
                         Ok(project) => Some(project),
                         Err(e) => return ReconnectPodResult::Unavailable(e),
@@ -3438,6 +3441,7 @@ impl DaemonServer {
             inject_system_prompt,
             description_file,
             mut local_env_vars,
+            client_env,
             ssh_auth_sock,
         } = params;
         let requested_host = docker_host;
@@ -3643,7 +3647,7 @@ impl DaemonServer {
                 &docker_host,
                 docker_socket.as_deref(),
                 ssh_auth_sock.as_deref(),
-                &local_env_vars,
+                &client_env,
             )?;
             if docker_host.is_remote() {
                 model.validate_remote_bind_mounts()?;
@@ -3686,7 +3690,7 @@ impl DaemonServer {
                     docker_socket.as_deref(),
                     ssh_auth_sock.as_deref(),
                     &[],
-                    &local_env_vars,
+                    &client_env,
                     &build_tx,
                 )?;
             }
@@ -3844,6 +3848,7 @@ impl DaemonServer {
                 compose_services,
                 git_setup,
                 local_env_vars,
+                client_env,
                 mounts,
                 bind_sources,
                 container_repo_path,
@@ -3866,6 +3871,7 @@ impl DaemonServer {
         repo_path: PathBuf,
         docker_host: Host,
         local_env_vars: HashMap<String, String>,
+        client_env: HashMap<String, String>,
         source_image: String,
         source_devcontainer_json: String,
         source_agent_service: String,
@@ -3996,6 +4002,7 @@ impl DaemonServer {
                 compose_services,
                 git_setup,
                 local_env_vars,
+                client_env,
                 mounts,
                 bind_sources,
                 container_repo_path,
@@ -4034,6 +4041,7 @@ impl DaemonServer {
             compose_services,
             git_setup,
             local_env_vars,
+            client_env,
             mounts,
             bind_sources,
             container_repo_path,
@@ -4083,6 +4091,7 @@ impl DaemonServer {
                 &mounts,
                 &docker_host,
                 docker_socket.as_deref(),
+                &client_env,
             )?),
             (None, None) => None,
             (Some(_), None) | (None, Some(_)) => {
@@ -4338,6 +4347,7 @@ impl DaemonServer {
             new_name,
             repo_path,
             allow_processing,
+            client_env,
         } = request;
 
         crate::cli::validate_pod_name(&new_name)
@@ -4514,6 +4524,7 @@ impl DaemonServer {
             repo_path.clone(),
             docker_host,
             local_env_vars,
+            client_env,
             source_record.image.clone(),
             source_record.devcontainer_json.clone(),
             source_record.agent_service.clone(),

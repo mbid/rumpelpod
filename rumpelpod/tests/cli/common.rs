@@ -561,6 +561,7 @@ pub fn launch_pod_via_daemon(repo: &TestRepo, daemon: &TestDaemon, pod_name: &st
                 .inject_system_prompt,
             description_file: None,
             local_env_vars: HashMap::new(),
+            client_env: HashMap::new(),
             ssh_auth_sock: None,
         })
         .expect("launch pod request failed");

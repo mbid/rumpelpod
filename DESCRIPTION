@@ -1,0 +1,7 @@
+Forward client environment to Docker Compose
+
+Pass the environment of launch, recreate, and fork commands through the
+daemon API. Compose can then use interpolation and environment-backed
+secrets like direct Docker Compose, including with remote Docker hosts.
+Keep the forwarded values ephemeral instead of storing them with pod
+configuration or passing them into the pod environment.
