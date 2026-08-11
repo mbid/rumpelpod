@@ -8,10 +8,11 @@ interactive sessions share the CLI's established terminal behavior.
 Expose forwarded ports through the extension. Open Dev Container
 `openPreview` ports automatically in a restricted VS Code preview tab
 in the pod review's editor group. Prefix preview tabs with the pod name
-so related tabs remain recognizable. The preview gives untrusted pages
-an opaque origin and no access to VS Code or workspace resources. Keep
-external browser opening explicit and offer both destinations from the
-pod menu and Command Palette.
+and append each new pod's tabs to keep existing pod tab blocks intact.
+Keep replacement review tabs at their prior position. The preview gives
+untrusted pages an opaque origin and no access to VS Code or workspace
+resources. Keep external browser opening explicit and offer both
+destinations from the pod menu and Command Palette.
 Resolve preview attributes from each pod's stored Dev Container
 snapshot so the forwarded-port database schema stays unchanged.
 

@@ -35,8 +35,11 @@ active pod and its launched agent set, then reopens that pod's current review.
 
 Forwarded ports are available from the pod actions menu and the Command
 Palette. `Open port in VS Code...` uses a restricted webview tab in the same
-editor group as the pod review and prefixes the tab with the pod name. Its
-nested page has an opaque origin and cannot navigate the VS Code tab, open
+editor group as the pod review and prefixes the tab with the pod name. New
+review and preview tabs are appended at the end of that editor group so opening
+another pod does not split an existing pod's tabs. Review refreshes retain their
+existing tab position. The nested page has an opaque origin and cannot navigate
+the VS Code tab, open
 popups, download files, or access VS Code and workspace
 resources. Sites that need cookies, browser storage, or those blocked features
 can instead use `Open port in browser...`, which is always an explicit action.

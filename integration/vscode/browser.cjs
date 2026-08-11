@@ -804,7 +804,7 @@ async function assertEditorTabsVisible(page) {
     );
 }
 
-async function waitForForwardedPreviews(page, previews, podName) {
+async function waitForForwardedPreviewTabs(page, previews, podName) {
     const tabs = previews.map(({ label }) =>
         page.locator(".tab:visible").filter({ hasText: `${podName}: ${label}` }),
     );
@@ -829,6 +829,11 @@ async function waitForForwardedPreviews(page, previews, podName) {
         true,
         "automatic forwarded previews took focus from the review",
     );
+    return { reviewTab, tabs };
+}
+
+async function waitForForwardedPreviews(page, previews, podName) {
+    const { reviewTab, tabs } = await waitForForwardedPreviewTabs(page, previews, podName);
     for (const [index, preview] of previews.entries()) {
         await tabs[index].click();
         const deadline = Date.now() + 30_000;
@@ -991,6 +996,32 @@ async function assertOpenReviews(page, activePodName, openPodNames) {
     }
 }
 
+async function assertPodTabsAppended(page, previousPodName, appendedPodName) {
+    const labels = await page
+        .locator(".editor-group-container:visible .tabs-container .tab:visible")
+        .allTextContents();
+    const previousIndexes = labels
+        .map((label, index) => ({ index, label }))
+        .filter(({ label }) =>
+            label.startsWith(`${previousPodName} (`) ||
+            label.startsWith(`${previousPodName}: `),
+        )
+        .map(({ index }) => index);
+    const appendedIndexes = labels
+        .map((label, index) => ({ index, label }))
+        .filter(({ label }) =>
+            label.startsWith(`${appendedPodName} (`) ||
+            label.startsWith(`${appendedPodName}: `),
+        )
+        .map(({ index }) => index);
+    assert(previousIndexes.length > 0, `previous pod tabs were missing: ${JSON.stringify(labels)}`);
+    assert(appendedIndexes.length > 0, `appended pod tabs were missing: ${JSON.stringify(labels)}`);
+    assert(
+        Math.min(...appendedIndexes) > Math.max(...previousIndexes),
+        `new pod tabs split the previous pod's tab block: ${JSON.stringify(labels)}`,
+    );
+}
+
 async function assertNoNativeAgentEditor(page, podName) {
     const labels = await openEditorLabels(page, podName);
     assert(
@@ -1049,6 +1080,7 @@ async function main() {
     );
     const inactivePodContent = `${podContent} while file active`;
     const finalPodContent = `${podContent} after close`;
+    const refreshedPodContent = `${podContent} after creating another pod`;
     const repoRoot = requiredEnvironment("RUMPELPOD_VSCODE_REPO_ROOT");
     const rumpel = requiredEnvironment("RUMPELPOD_VSCODE_RUMPEL");
     const socket = requiredEnvironment("RUMPELPOD_DAEMON_SOCKET");
@@ -1477,6 +1509,15 @@ async function main() {
             "creating a pod kept the closed auxiliary shell alive",
         );
         await waitForEmptyReview(page, createdPodName);
+        await waitForForwardedPreviewTabs(
+            page,
+            [
+                { content: previewContent, label: "Browser fixture" },
+                { content: secondPreviewContent, label: "Second browser fixture" },
+            ],
+            createdPodName,
+        );
+        await assertPodTabsAppended(page, podName, createdPodName);
         await assertOpenReviews(page, createdPodName, [podName, createdPodName]);
         assert(
             await retainedReviewTab.evaluate((element) => element.isConnected),
@@ -1530,13 +1571,32 @@ async function main() {
         );
         await restoredPodTerminal.dispose();
         await previousPodTerminal.dispose();
-        const switchedDiff = await waitForReview(
+        await waitForReview(
             page,
             podName,
             changedFile,
             originalContent,
             finalPodContent,
         );
+        runPodFollowupCommit(
+            rumpel,
+            repoRoot,
+            home,
+            socket,
+            podName,
+            changedFile,
+            refreshedPodContent,
+        );
+        await waitForStatusRepository(page, podName, "ahead 4");
+        await waitForAgentRepositoryState(page, switchedView, "ahead 4");
+        const switchedDiff = await waitForReview(
+            page,
+            podName,
+            changedFile,
+            originalContent,
+            refreshedPodContent,
+        );
+        await assertPodTabsAppended(page, podName, createdPodName);
         const activeRestoredReview = page
             .locator(".tab.active:visible")
             .filter({ hasText: podName });
@@ -1604,7 +1664,7 @@ async function main() {
             podName,
             changedFile,
             originalContent,
-            finalPodContent,
+            refreshedPodContent,
         );
         await assertSidebarAndDiffGeometry(page, restoredView.terminal, restoredDiff);
         assert.equal(

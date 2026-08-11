@@ -3,6 +3,8 @@
 
 import * as vscode from "vscode";
 
+import { moveActiveTabToEnd } from "./tabs";
+
 interface PortPreview {
   readonly panel: vscode.WebviewPanel;
   readonly podKey: string;
@@ -67,6 +69,9 @@ export class PortPreviews implements vscode.Disposable {
         }
       });
     }
+    // panel.active establishes the tab's identity here. Remote extension hosts
+    // may expose its Tab.input as unknown instead of TabInputWebview.
+    await moveActiveTabToEnd((tab) => tab.label === panel.title);
     return true;
   }
 
