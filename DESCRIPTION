@@ -30,7 +30,7 @@ Persist only allowlisted agent credentials for those services. Install
 no daemon service in the image: the first pipeline run installs its
 freshly built native daemon and cross-architecture pod payloads after
 systemd is available. Let browser VS Code start independently and
-reconnect when that daemon appears. Let CI boots mask the browser
+reconnect when that daemon appears. Let CI boot mask the browser
 service. Use the same complete devcontainer image in development and CI,
 and report startup logs when its entrypoint fails. Pin the arm64
 code-server archive to its published digest. Keep the timing-sensitive

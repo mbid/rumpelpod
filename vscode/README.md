@@ -51,15 +51,17 @@ installs both, and restarts the browser workspace:
 cargo vscode
 ```
 
-The devcontainer image installs the development daemon and extension, then a
-lingering systemd user session starts the daemon socket and browser service as
-part of container boot. It serves a dedicated `anyhow` 1.0.102 demo repository
+The devcontainer image installs the extension and browser service but no daemon
+unit. A lingering systemd user session starts the browser service during
+container boot. The first `cargo pipeline` installs and starts the freshly built
+daemon and its cross-architecture pod payloads; the browser reconnects when the
+daemon socket appears. It serves a dedicated `anyhow` 1.0.102 demo repository
 from `/workspaces/anyhow-demo` at port 3000 without depending on devcontainer
 lifecycle commands. This keeps the live editor outside the rumpelpod source
 checkout: pods created through the extension use the demo's ordinary Rust
-devcontainer instead of nesting another copy of this development container. The demo is seeded
-from Cargo's pinned registry source during the image build; later `cargo
-vscode` runs preserve its pods and working tree.
+devcontainer instead of nesting another copy of this development container. The
+demo is seeded from Cargo's pinned registry source during the image build; later
+`cargo vscode` runs preserve its pods and working tree.
 
 The server is unauthenticated and its address is fixed to the container
 loopback interface, so it cannot be exposed on a container network interface.
