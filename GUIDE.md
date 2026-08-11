@@ -173,53 +173,13 @@ Set `workspaceFolder` in `devcontainer.json` to ensure rumpelpod uses the same p
 { "workspaceFolder": "/workspaces/your-project" }
 ```
 
-### Docker Compose devcontainers
-
-With the Docker engine, `dockerComposeFile`, `service`, and `runServices`
-create a Compose project for each rumpelpod pod. The project name is the
-pod's generated container identifier, so networks and volumes do not
-collide between pods. The service named by `service` is the agent
-container; the remaining services are sidecars.
-
-Rumpelpod uses `docker compose config` to merge and interpolate the source
-files, then stores that rendered model with the pod. Reconnect, stop,
-delete, and fork therefore do not depend on the original Compose files
-remaining unchanged. Compose support requires the Docker Compose plugin
-and is not available with Podman or Kubernetes.
-
-Compose bind mounts are supported on local Docker. They are rejected for
-remote Docker hosts because a source path on the client would otherwise be
-interpreted on the remote machine; use named volumes or bake those files into
-an image instead.
-
-Compose devcontainers keep their service command by default. Set
-`"overrideCommand": true` to replace the agent service's entrypoint and
-command with rumpelpod's keepalive. `ports:` entries are removed from all
-services because fixed engine-host ports collide between pods and do not
-work correctly with remote engines; declare host access with
-`forwardPorts` instead. Explicit `container_name` values are also removed
-so separate pods created from the same Compose file do not collide.
-
-```jsonc
-{
-  "dockerComposeFile": "compose.yaml",
-  "service": "dev",
-  "runServices": ["dev", "database"],
-  "forwardPorts": [3000, "database:5432"]
-}
-```
-
-Numeric forwarding entries target the agent service. A string must use
-`service:port` and targets that sidecar directly; traffic is never proxied
-through the agent container. `rumpel forward-port --service database dev:5432`
-adds the same kind of sidecar forward at runtime.
-
 ### Devcontainer deviations
 
 A handful of fields are either architecturally incompatible with rumpelpod or deliberately left out.
 Rumpelpod ignores them with a warning when they appear.
 
 - `features` and `overrideFeatureInstallOrder`: use a Dockerfile to install the equivalent packages.
+- `dockerComposeFile`, `service`, `runServices`: rumpelpod operates on single containers.
 - `workspaceMount`: rumpelpod syncs the workspace via git rather than bind-mounting it.
 - `appPort`: use `forwardPorts` instead, so that rumpelpod's port tracking can remap across pods.
 - `shutdownAction`: containers stay running between sessions and are only removed explicitly with `rumpel delete`.
@@ -368,9 +328,6 @@ Each fork starts from the same context and continues independently.
 `forwardPorts` in `devcontainer.json` exposes container ports to the local machine.
 Prefer it over `appPort` or raw `runArgs: ["-p", ...]` entries, because rumpelpod tracks forwarded ports and remaps them when several pods request the same port.
 The remapped ports are shown by `rumpel ports`.
-For Compose pods, use a numeric entry for the agent service or
-`"service:port"` for a sidecar. String entries have no other meaning and
-invalid entries fail pod creation.
 
 ### Copying files
 
