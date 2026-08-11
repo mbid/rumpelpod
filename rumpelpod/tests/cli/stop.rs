@@ -4,10 +4,66 @@
 //! Integration tests for the `rumpel stop` subcommand (multi-pod support).
 
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use rumpelpod::CommandExt;
+use rusqlite::Connection;
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::{executor_supports_stop, ExecutorResources};
+
+#[test]
+fn stop_invalid_stored_compose_config_does_not_strand_pod() {
+    if !executor_supports_stop() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "stop-compose-error", "--", "true"])
+        .success()
+        .expect("create pod for stop error test");
+    let database = home.path().join("state/rumpelpod/db.sqlite");
+    let conn = Connection::open(&database).expect("open daemon database");
+    conn.execute(
+        "UPDATE pods SET agent_service = 'agent', compose_config = '{' WHERE name = 'stop-compose-error'",
+        [],
+    )
+    .expect("corrupt stored Compose model");
+
+    let output = pod_command(&repo, &daemon)
+        .args(["stop", "--wait", "stop-compose-error"])
+        .output()
+        .expect("stop pod with corrupt Compose model");
+    assert!(!output.status.success());
+    let status: String = conn
+        .query_row(
+            "SELECT status FROM pods WHERE name = 'stop-compose-error'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read pod status after failed stop");
+    assert_eq!(status, "ready");
+
+    conn.execute(
+        "UPDATE pods SET agent_service = '', compose_config = '' WHERE name = 'stop-compose-error'",
+        [],
+    )
+    .expect("restore single-container metadata");
+    pod_command(&repo, &daemon)
+        .args(["connect", "stop-compose-error"])
+        .success()
+        .expect("failed stop should preserve the live connection");
+    pod_command(&repo, &daemon)
+        .args(["delete", "--force", "--wait", "stop-compose-error"])
+        .success()
+        .expect("delete stop error test pod");
+}
 
 #[test]
 fn stop_multiple_pods() {
@@ -162,7 +218,7 @@ fn stop_sends_reconnect_stopped_event() {
             .expect("pod_reconnect_events failed");
         for event in stream {
             let event = event.expect("error reading reconnect event");
-            let done = matches!(event, ReconnectEvent::Stopped | ReconnectEvent::Connected);
+            let done = matches!(event, ReconnectEvent::Stopped);
             let _ = tx.send(event);
             if done {
                 break;
@@ -181,13 +237,19 @@ fn stop_sends_reconnect_stopped_event() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let event = rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("no event from reconnect stream after stop");
-    assert!(
-        matches!(event, ReconnectEvent::Stopped),
-        "expected Stopped event, got {event:?}"
-    );
+    // The event loop may publish an initial or in-flight recovery event
+    // after this subscriber attaches. The stop contract is that the
+    // stream eventually terminates with Stopped.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = rx
+            .recv_timeout(remaining)
+            .expect("no Stopped event from reconnect stream after stop");
+        if matches!(event, ReconnectEvent::Stopped) {
+            break;
+        }
+    }
 }
 
 /// When a pod has already been stopped, subscribing to its reconnect

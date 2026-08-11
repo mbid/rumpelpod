@@ -300,7 +300,7 @@ Inside a pod, the local repository's branches are visible as the `host` remote, 
 A pod can fetch another pod's work with `git fetch rumpelpod`.
 
 Synchronization goes through the local machine, so remote pods cannot push or see each other's branches while the local machine is offline.
-Reconnecting to a pod (via `rumpel enter` or `rumpel claude`) automatically pushes any commits that were made while disconnected.
+Rumpel automatically restores pod connections when connectivity returns.
 
 ### Forking pods
 

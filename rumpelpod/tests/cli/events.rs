@@ -12,7 +12,7 @@ use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, 
 use crate::executor::ExecutorResources;
 
 #[test]
-fn events_reports_pod_commit_after_user_post_receive_hook() {
+fn events_report_pod_status_and_commit_after_user_post_receive_hook() {
     let repo = TestRepo::new();
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
@@ -33,12 +33,6 @@ fn events_reports_pod_commit_after_user_post_receive_hook() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&hook_path, permissions).expect("make user hook executable");
 
-    let pod_name = "event-commit";
-    pod_command(&repo, &daemon)
-        .args(["enter", "--create", pod_name, "--", "echo", "setup"])
-        .success()
-        .expect("launch test pod");
-
     let client = DaemonClient::new_unix(&daemon.socket_path);
     let mut events = client.daemon_events().expect("subscribe to daemon events");
     assert_eq!(
@@ -55,6 +49,33 @@ fn events_reports_pod_commit_after_user_post_receive_hook() {
                 return;
             }
         }
+    });
+    let wait_for_event = |expected: DaemonEvent| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for daemon event: {expected:?}"
+            );
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let event = event_rx
+                .recv_timeout(remaining)
+                .expect("receive daemon event")
+                .expect("read daemon event");
+            if event == expected {
+                return;
+            }
+        }
+    };
+
+    let pod_name = "event-commit";
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "echo", "setup"])
+        .success()
+        .expect("launch test pod");
+    wait_for_event(DaemonEvent::PodStatusChanged {
+        repository: repo.path().to_string_lossy().into_owned(),
+        pod: pod_name.to_string(),
     });
 
     pod_command(&repo, &daemon)
@@ -73,28 +94,23 @@ fn events_reports_pod_commit_after_user_post_receive_hook() {
         .success()
         .expect("commit in pod");
 
-    let expected = DaemonEvent::PodReviewChanged {
+    wait_for_event(DaemonEvent::PodReviewChanged {
         repository: repo.path().to_string_lossy().into_owned(),
         pod: pod_name.to_string(),
-    };
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for pod review event"
-        );
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let event = event_rx
-            .recv_timeout(remaining)
-            .expect("receive pod review event")
-            .expect("read pod review event");
-        if event == expected {
-            break;
-        }
-    }
+    });
 
     assert!(
         repo.path().join(".git/user-post-receive-ran").exists(),
         "rumpelpod post-receive hook prevented the user hook"
     );
+
+    while event_rx.try_recv().is_ok() {}
+    pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "--force", pod_name])
+        .success()
+        .expect("delete test pod");
+    wait_for_event(DaemonEvent::PodStatusChanged {
+        repository: repo.path().to_string_lossy().into_owned(),
+        pod: pod_name.to_string(),
+    });
 }

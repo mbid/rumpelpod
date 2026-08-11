@@ -38,7 +38,8 @@
 //! via `gitrevisions(7)` shorthand rule 2 (`refs/<refname>`).
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -227,7 +228,8 @@ pub fn install_host_hooks(repo_path: &Path) -> Result<()> {
 
     let post_receive_block = format!(
         "{HOST_POST_RECEIVE_COMMENT}\n\
-         {rumpel_exe} git-hook host-post-receive --repo-path {escaped_repo_path}\n"
+         {rumpel_exe} git-hook host-post-receive --repo-path {escaped_repo_path} || \
+         printf '%s\\n' 'warning: failed to notify the rumpelpod daemon' >&2\n"
     );
     install_host_hook(
         &hooks_dir,
@@ -292,33 +294,75 @@ fn install_host_hook(
 
     let hook_path = hooks_dir.join(hook_name);
 
-    let existing = match fs::read_to_string(&hook_path) {
-        Ok(existing) => Some(existing),
+    let metadata = match fs::symlink_metadata(&hook_path) {
+        Ok(metadata) => Some(metadata),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
             let hook_path = hook_path.display();
-            return Err(error).with_context(|| format!("Failed to read hook: {hook_path}"));
+            return Err(error).with_context(|| format!("Failed to inspect hook: {hook_path}"));
         }
     };
-    if let Some(existing) = existing {
-        let cleaned = strip_host_hooks(&existing);
-        let combined = combine_host_hook(&cleaned, block, placement);
-        fs::write(&hook_path, combined).with_context(|| {
+    if let Some(metadata) = &metadata {
+        let hook_path = hook_path.display();
+        if metadata.file_type().is_symlink() {
+            return Err(anyhow::Error::msg(format!(
+                "Refusing to install managed hook over symbolic link: {hook_path}"
+            )));
+        }
+        if metadata.nlink() > 1 {
+            return Err(anyhow::Error::msg(format!(
+                "Refusing to install managed hook over multiply linked file: {hook_path}"
+            )));
+        }
+    }
+    let existing = match &metadata {
+        Some(_) => Some(fs::read_to_string(&hook_path).with_context(|| {
             let hook_path = hook_path.display();
-            format!("Failed to update hook: {hook_path}")
-        })?;
+            format!("Failed to read hook: {hook_path}")
+        })?),
+        None => None,
+    };
+    let content = if let Some(existing) = &existing {
+        let cleaned = strip_host_hooks(existing);
+        combine_host_hook(&cleaned, block, placement)
     } else {
-        let content = format!("#!/bin/sh\n{block}");
-        fs::write(&hook_path, content).with_context(|| {
-            let hook_path = hook_path.display();
-            format!("Failed to write hook: {hook_path}")
-        })?;
+        format!("#!/bin/sh\n{block}")
+    };
+    if existing.as_deref() != Some(&content) {
+        write_hook_atomically(&hook_path, &content)?;
     }
 
     let mut perms = fs::metadata(&hook_path)?.permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&hook_path, perms)?;
 
+    Ok(())
+}
+
+fn write_hook_atomically(hook_path: &Path, content: &str) -> Result<()> {
+    let hooks_dir = hook_path.parent().context("hook path has no parent")?;
+    let mut staged = tempfile::NamedTempFile::new_in(hooks_dir).with_context(|| {
+        let hook_path = hook_path.display();
+        format!("Failed to stage hook update: {hook_path}")
+    })?;
+    staged.write_all(content.as_bytes()).with_context(|| {
+        let hook_path = hook_path.display();
+        format!("Failed to write staged hook: {hook_path}")
+    })?;
+    let mut permissions = staged.as_file().metadata()?.permissions();
+    permissions.set_mode(0o755);
+    staged.as_file().set_permissions(permissions)?;
+    staged.as_file().sync_all().with_context(|| {
+        let hook_path = hook_path.display();
+        format!("Failed to sync staged hook: {hook_path}")
+    })?;
+    staged
+        .persist(hook_path)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            let hook_path = hook_path.display();
+            format!("Failed to install hook: {hook_path}")
+        })?;
     Ok(())
 }
 
@@ -349,6 +393,8 @@ fn combine_host_hook(existing: &str, block: &str, placement: HostHookPlacement) 
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::symlink;
+
     use super::*;
 
     #[test]
@@ -363,10 +409,18 @@ mod tests {
 
         install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
             .expect("install rumpelpod post-receive hook");
+        let installed_inode = fs::metadata(&hook).expect("read installed metadata").ino();
         install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
             .expect("reinstall rumpelpod post-receive hook");
 
         let installed = fs::read_to_string(&hook).expect("read installed hook");
+        assert_eq!(
+            fs::metadata(&hook)
+                .expect("read reinstalled metadata")
+                .ino(),
+            installed_inode,
+            "an unchanged hook was rewritten"
+        );
         assert!(installed.starts_with("#!/bin/sh\n"));
         let notification_position = installed
             .find(HOST_POST_RECEIVE_COMMENT)
@@ -401,6 +455,33 @@ mod tests {
     }
 
     #[test]
+    fn post_receive_notification_failure_does_not_prevent_user_hook() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let hook = hooks.join("post-receive");
+        let user_notification = temporary.path().join("user-hook-ran");
+        let user_notification =
+            crate::devcontainer::shell_escape(&user_notification.to_string_lossy());
+        fs::write(
+            &hook,
+            format!("#!/bin/sh -e\nprintf user > {user_notification}\n"),
+        )
+        .expect("write user hook");
+        let block = format!(
+            "{HOST_POST_RECEIVE_COMMENT}\n\
+             false || printf '%s\\n' 'notification failed' >&2\n"
+        );
+
+        install_host_hook(hooks, "post-receive", &block, HostHookPlacement::BeforeUser)
+            .expect("install rumpelpod post-receive hook");
+        Command::new(&hook)
+            .success()
+            .expect("run installed post-receive hook");
+
+        assert!(temporary.path().join("user-hook-ran").exists());
+    }
+
+    #[test]
     fn installing_host_hook_does_not_replace_non_utf8_user_hook() {
         let temporary = tempfile::tempdir().expect("create hook directory");
         let hooks = temporary.path();
@@ -415,5 +496,58 @@ mod tests {
 
         assert!(format!("{error:#}").contains("Failed to read hook"));
         assert_eq!(fs::read(&hook).expect("read preserved hook"), original);
+    }
+
+    #[test]
+    fn installing_host_hook_rejects_user_symlink() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let target = hooks.join("shared-post-receive");
+        let hook = hooks.join("post-receive");
+        let original = "#!/bin/sh\nprintf 'user hook\\n'\n";
+        fs::write(&target, original).expect("write hook target");
+        symlink("shared-post-receive", &hook).expect("link user hook");
+        let block =
+            "# Installed by rumpelpod (host post-receive)\nrumpel git-hook host-post-receive\n";
+
+        let error = install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
+            .expect_err("symlinked hook must be rejected");
+
+        assert!(format!("{error:#}").contains("symbolic link"));
+        assert!(
+            fs::symlink_metadata(&hook)
+                .expect("read installed hook metadata")
+                .file_type()
+                .is_symlink(),
+            "installation replaced the user hook symlink"
+        );
+        let installed = fs::read_to_string(&target).expect("read installed hook target");
+        assert_eq!(installed, original);
+    }
+
+    #[test]
+    fn installing_host_hook_rejects_multiply_linked_file() {
+        let temporary = tempfile::tempdir().expect("create hook directory");
+        let hooks = temporary.path();
+        let target = hooks.join("shared-post-receive");
+        let hook = hooks.join("post-receive");
+        let original = "#!/bin/sh\nprintf 'user hook\\n'\n";
+        fs::write(&target, original).expect("write hook target");
+        fs::hard_link(&target, &hook).expect("link user hook");
+        let block =
+            "# Installed by rumpelpod (host post-receive)\nrumpel git-hook host-post-receive\n";
+
+        let error = install_host_hook(hooks, "post-receive", block, HostHookPlacement::BeforeUser)
+            .expect_err("multiply linked hook must be rejected");
+
+        assert!(format!("{error:#}").contains("multiply linked file"));
+        assert_eq!(
+            fs::read_to_string(&hook).expect("read preserved hook"),
+            original
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("read preserved hook target"),
+            original
+        );
     }
 }

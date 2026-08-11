@@ -290,6 +290,23 @@ fn find_rumpel_binaries() -> Result<Vec<(String, PathBuf)>> {
     Ok(binaries)
 }
 
+pub(crate) fn find_rumpel_binary(architecture: &str) -> Result<PathBuf> {
+    let filename = match architecture {
+        "amd64" => "rumpel-linux-amd64",
+        "arm64" => "rumpel-linux-arm64",
+        _ => {
+            return Err(anyhow::anyhow!(
+                "unsupported architecture '{architecture}'; expected amd64 or arm64"
+            ));
+        }
+    };
+    find_rumpel_binaries()?
+        .into_iter()
+        .find(|(name, _)| name == filename)
+        .map(|(_, path)| path)
+        .with_context(|| format!("{filename} was not found next to the rumpel executable"))
+}
+
 /// Compute a deterministic tag for the prepared image.
 ///
 /// Inputs hashed: base image tag, rumpel version, container repo path,

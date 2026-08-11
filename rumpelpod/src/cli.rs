@@ -223,6 +223,13 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Recreate(RecreateCommand),
 
+    /// Ensure the daemon is connected to a running pod.
+    ///
+    /// Probes the host and pod immediately. Healthy connections are left
+    /// unchanged, while failed or missing connections are restored.
+    #[command(verbatim_doc_comment)]
+    Connect(ConnectCommand),
+
     /// Spawn a new pod by cloning an existing, running one.
     #[command(verbatim_doc_comment)]
     Fork(ForkCommand),
@@ -520,6 +527,13 @@ pub struct RecreateCommand {
 }
 
 #[derive(Args)]
+pub struct ConnectCommand {
+    /// Name of the pod to connect
+    #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
+    pub name: String,
+}
+
+#[derive(Args)]
 pub struct ForkCommand {
     /// Name of the existing pod to fork from
     #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
@@ -587,6 +601,10 @@ pub struct ForwardPortCommand {
     /// Optional label, shown in `rumpel ports`.
     #[arg(long)]
     pub label: Option<String>,
+
+    /// Compose service to forward. Defaults to the agent service.
+    #[arg(long, value_name = "SERVICE")]
+    pub service: Option<String>,
 
     /// Pod and container port to forward, e.g. `dev:8080`.
     #[arg(value_name = "POD:PORT", value_parser = parse_pod_port_spec)]

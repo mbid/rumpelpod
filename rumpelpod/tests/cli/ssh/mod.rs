@@ -19,7 +19,8 @@ use indoc::{formatdoc, indoc};
 use tempfile::TempDir;
 
 use crate::common::{
-    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_USER_UID,
+    pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo, TEST_REPO_PATH,
+    TEST_USER_UID,
 };
 use crate::executor::ExecutorResources;
 use rumpelpod::CommandExt;
@@ -195,35 +196,6 @@ impl SshRemoteHost {
         host
     }
 
-    /// Restart the remote host container.
-    ///
-    /// If `home` is provided, also verifies that SSH is connectable using
-    /// the config in `home/.ssh/config`.  This catches cases where sshd is
-    /// up but not yet accepting connections.
-    pub fn restart(&mut self, home: Option<&Path>) {
-        Command::new("docker")
-            .args(["restart", &self.container_id])
-            .success()
-            .expect("Failed to restart remote host container");
-
-        // Wait for services to come back up
-        self.wait_for_services();
-
-        // Update IP address in case it changed
-        self.ip_address = get_container_ip(&self.container_id).expect("Failed to get container IP");
-        if self.published_port.is_some() {
-            self.published_port = Some(
-                get_published_port(&self.container_id, 22)
-                    .expect("Failed to get published SSH port"),
-            );
-        }
-
-        // Verify SSH is actually connectable from outside, not just listening
-        if let Some(home) = home {
-            self.wait_for_ssh_connectivity(&home.join(".ssh").join("config"));
-        }
-    }
-
     /// Wait until we can actually execute a command over SSH.
     ///
     /// This is stronger than checking that sshd is listening: it verifies the
@@ -250,11 +222,6 @@ impl SshRemoteHost {
         } else {
             format!("ssh://{}@{}", SSH_USER, self.ip_address)
         }
-    }
-
-    /// Get the container's IP address (for the ignored reconnect test).
-    pub fn ip_address(&self) -> &str {
-        &self.ip_address
     }
 
     /// Get the SSH host identifier used in SSH config Host directives.
@@ -890,11 +857,11 @@ fn ssh_uses_user_config_for_omitted_port() {
     );
 }
 
-/// Skipped on macOS: the sshd container restart + tunnel reconnection
-/// through Colima's VM networking layer times out reliably.
+/// Skipped on macOS because the nested SSH host fixture is not reliable
+/// through Colima's VM networking layer.
 #[test]
 fn ssh_reconnect_test() {
-    println!("xtest:timeout=215");
+    println!("xtest:timeout=300");
     if cfg!(target_os = "macos") {
         crate::executor::skip_test();
         return;
@@ -908,12 +875,12 @@ fn ssh_reconnect_test() {
         crate::executor::skip_test();
         return;
     }
-    // This test needs direct access to the SshRemoteHost to restart it,
+    // This test needs direct access to the SshRemoteHost to kill existing transports,
     // so it sets up SSH infrastructure manually rather than via ExecutorResources.
     let home = TestHome::new();
-    let mut remote = SshRemoteHost::start();
+    let remote = SshRemoteHost::start();
     write_ssh_config(&home, &[&remote]);
-    let daemon = TestDaemon::start(&home);
+    let mut daemon = TestDaemon::start(&home);
 
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
@@ -946,16 +913,103 @@ fn ssh_reconnect_test() {
     );
     assert_eq!(stdout.trim(), "hello from remote");
 
-    // Restart the remote host, verifying SSH connectivity before proceeding.
-    // This ensures the daemon can reconnect immediately rather than racing
-    // against sshd startup.
-    let old_ip = remote.ip_address().to_string();
-    remote.restart(Some(home.path()));
-    assert_eq!(
-        remote.ip_address(),
-        old_ip,
-        "IP address changed after restart, test cannot proceed"
-    );
+    daemon.kill();
+    let daemon = TestDaemon::start(&home);
+    pod_command(&repo, &daemon)
+        .args(["connect", pod_name])
+        .success()
+        .expect("establishing missing pod routes after daemon startup failed");
+
+    let ssh_config = home.path().join(".ssh/config");
+    let inner_container = remote
+        .ssh_command(
+            &ssh_config,
+            &[
+                "docker",
+                "ps",
+                "-q",
+                "--filter",
+                &format!("label=dev.rumpelpod.name={pod_name}"),
+            ],
+        )
+        .expect("finding remote pod failed");
+    let inner_container = String::from_utf8_lossy(&inner_container).trim().to_string();
+    assert!(!inner_container.is_empty(), "remote pod not found");
+    remote
+        .ssh_command(
+            &ssh_config,
+            &[
+                "docker",
+                "exec",
+                &inner_container,
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                TEST_REPO_PATH,
+                "commit",
+                "--allow-empty",
+                "-m",
+                "pending-host-recovery",
+            ],
+        )
+        .expect("creating pending remote commit failed");
+    let pending_commit = remote
+        .ssh_command(
+            &ssh_config,
+            &[
+                "docker",
+                "exec",
+                &inner_container,
+                "git",
+                "-C",
+                TEST_REPO_PATH,
+                "rev-parse",
+                "HEAD",
+            ],
+        )
+        .expect("reading pending remote commit failed");
+    let pending_commit = String::from_utf8_lossy(&pending_commit).trim().to_string();
+    let expected_ref = format!("refs/rumpelpod/{pod_name}@{pod_name}");
+
+    // Kill established sshd children but leave the listener, nested Docker,
+    // and pod running. New connections remain available while every daemon
+    // transport, including the git tunnel, has to be replaced.
+    Command::new("docker")
+        .args([
+            "exec",
+            &remote.container_id,
+            "sh",
+            "-c",
+            "for pid in $(pgrep sshd); do [ \"$pid\" = 1 ] || kill -9 \"$pid\"; done",
+        ])
+        .success()
+        .expect("terminating existing SSH transports failed");
+    remote.wait_for_ssh_connectivity(&ssh_config);
+
+    pod_command(&repo, &daemon)
+        .args(["connect", pod_name])
+        .success()
+        .expect("connecting through the restored SSH host failed");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let output = Command::new("git")
+            .args(["rev-parse", &expected_ref])
+            .current_dir(repo.path())
+            .output()
+            .expect("git rev-parse failed");
+        if output.status.success()
+            && String::from_utf8_lossy(&output.stdout).trim() == pending_commit
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "connect did not recover the git tunnel"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
 
     // Try to enter again
     let output = pod_command(&repo, &daemon)

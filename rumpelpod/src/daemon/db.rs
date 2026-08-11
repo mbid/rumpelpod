@@ -88,6 +88,10 @@ pub struct PodRecord {
     /// Raw devcontainer.json source captured at pod creation. Forks parse
     /// this for mounts/ports/user instead of re-reading the host file.
     pub devcontainer_json: String,
+    /// Empty for single-container pods; otherwise the Compose agent service.
+    pub agent_service: String,
+    /// Empty for single-container pods; otherwise rendered Compose JSON.
+    pub compose_config: String,
     /// JSON array of "KEY=VALUE" strings -- the --local-env arguments
     /// the pod was created with.
     pub local_env: String,
@@ -122,6 +126,8 @@ const SCHEMA_SQL: &str = indoc! {"
         token TEXT NOT NULL,
         image TEXT NOT NULL,
         devcontainer_json TEXT NOT NULL,
+        agent_service TEXT NOT NULL,
+        compose_config TEXT NOT NULL,
         local_env TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -134,6 +140,7 @@ const SCHEMA_SQL: &str = indoc! {"
     CREATE TABLE forwarded_ports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         pod_id INTEGER NOT NULL REFERENCES pods(id) ON DELETE CASCADE,
+        service TEXT NOT NULL,
         container_port INTEGER NOT NULL,
         local_port INTEGER NOT NULL,
         label TEXT NOT NULL DEFAULT ''
@@ -149,6 +156,18 @@ const SCHEMA_SQL: &str = indoc! {"
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
     );
+"};
+
+const PRE_COMPOSE_SCHEMA_HASH: &str =
+    "ec97b2b08dddd29a2db5e026fb8bdaf2f2458743a797d713dcf72ad98b40d80e";
+
+const PRE_COMPOSE_MIGRATION_SQL: &str = indoc! {"
+    ALTER TABLE pods
+        ADD COLUMN agent_service TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pods
+        ADD COLUMN compose_config TEXT NOT NULL DEFAULT '';
+    ALTER TABLE forwarded_ports
+        ADD COLUMN service TEXT NOT NULL DEFAULT '';
 "};
 
 fn get_schema_hash() -> String {
@@ -171,7 +190,7 @@ pub fn open_db(path: &Path) -> Result<Connection> {
         return create_and_init_db(path);
     }
 
-    let conn = Connection::open(path).with_context(|| {
+    let mut conn = Connection::open(path).with_context(|| {
         let path = path.display();
         format!("failed to open database at {path}")
     })?;
@@ -191,6 +210,10 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     match stored_hash {
         Ok(hash) => {
             if hash != current_hash {
+                if hash == PRE_COMPOSE_SCHEMA_HASH {
+                    migrate_pre_compose_schema(&mut conn, &current_hash)?;
+                    return Ok(conn);
+                }
                 let path = path.display();
                 return Err(anyhow::anyhow!(
                     "database schema mismatch\n\
@@ -219,6 +242,28 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     }
 
     Ok(conn)
+}
+
+fn migrate_pre_compose_schema(conn: &mut Connection, current_hash: &str) -> Result<()> {
+    let tx = conn
+        .transaction()
+        .context("starting pre-Compose database migration")?;
+    tx.execute_batch(PRE_COMPOSE_MIGRATION_SQL)
+        .context("adding Compose database columns")?;
+    let updated = tx
+        .execute(
+            "UPDATE db_meta SET value = ? WHERE key = 'schema_version'",
+            [current_hash],
+        )
+        .context("recording migrated database schema")?;
+    if updated != 1 {
+        return Err(anyhow::anyhow!(
+            "database migration updated {updated} schema version rows; expected one"
+        ));
+    }
+    tx.commit()
+        .context("committing pre-Compose database migration")?;
+    Ok(())
 }
 
 fn create_and_init_db(path: &Path) -> Result<Connection> {
@@ -265,6 +310,33 @@ pub fn create_pod(
     devcontainer_json: &str,
     local_env: &str,
 ) -> Result<PodId> {
+    create_pod_with_compose(
+        conn,
+        repo_path,
+        name,
+        host,
+        token,
+        image,
+        devcontainer_json,
+        "",
+        "",
+        local_env,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_pod_with_compose(
+    conn: &Connection,
+    repo_path: &Path,
+    name: &str,
+    host: &Host,
+    token: &str,
+    image: &str,
+    devcontainer_json: &str,
+    agent_service: &str,
+    compose_config: &str,
+    local_env: &str,
+) -> Result<PodId> {
     let now = Utc::now().to_rfc3339();
     let repo_path_str = repo_path.to_string_lossy();
     let host_json = serde_json::to_string(host).context("failed to serialize host")?;
@@ -272,8 +344,8 @@ pub fn create_pod(
     conn.execute(
         "INSERT INTO pods
             (repo_path, name, host, status, token, image, devcontainer_json,
-             local_env, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             agent_service, compose_config, local_env, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rusqlite::params![
             repo_path_str,
             name,
@@ -282,6 +354,8 @@ pub fn create_pod(
             token,
             image,
             devcontainer_json,
+            agent_service,
+            compose_config,
             local_env,
             now,
             now
@@ -305,7 +379,17 @@ pub fn update_pod_status(conn: &Connection, id: PodId, status: PodStatus) -> Res
 
 fn row_to_pod_record(row: &rusqlite::Row) -> rusqlite::Result<PodRecord> {
     let status_str: String = row.get(4)?;
-    let status = PodStatus::from_str(&status_str).unwrap_or(PodStatus::Error);
+    let status = PodStatus::from_str(&status_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown pod status '{status_str}'"),
+            )
+            .into(),
+        )
+    })?;
     Ok(PodRecord {
         id: PodId(row.get(0)?),
         repo_path: row.get(1)?,
@@ -315,9 +399,11 @@ fn row_to_pod_record(row: &rusqlite::Row) -> rusqlite::Result<PodRecord> {
         token: row.get(5)?,
         image: row.get(6)?,
         devcontainer_json: row.get(7)?,
-        local_env: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        agent_service: row.get(8)?,
+        compose_config: row.get(9)?,
+        local_env: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
     })
 }
 
@@ -327,7 +413,7 @@ pub fn get_pod(conn: &Connection, repo_path: &Path, name: &str) -> Result<Option
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, local_env, created_at, updated_at
+            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, agent_service, compose_config, local_env, created_at, updated_at
              FROM pods WHERE repo_path = ? AND name = ?",
         )
         .context("failed to prepare query")?;
@@ -347,7 +433,7 @@ pub fn get_pod(conn: &Connection, repo_path: &Path, name: &str) -> Result<Option
 pub fn get_pod_by_id(conn: &Connection, id: PodId) -> Result<Option<PodRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, local_env, created_at, updated_at
+            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, agent_service, compose_config, local_env, created_at, updated_at
              FROM pods WHERE id = ?",
         )
         .context("failed to prepare query")?;
@@ -366,7 +452,7 @@ pub fn get_pod_by_id(conn: &Connection, id: PodId) -> Result<Option<PodRecord>> 
 pub fn get_pod_by_token(conn: &Connection, token: &str) -> Result<Option<PodRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, local_env, created_at, updated_at
+            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, agent_service, compose_config, local_env, created_at, updated_at
              FROM pods WHERE token = ?",
         )
         .context("failed to prepare query")?;
@@ -385,7 +471,7 @@ pub fn get_pod_by_token(conn: &Connection, token: &str) -> Result<Option<PodReco
 pub fn list_pods_by_status(conn: &Connection, status: PodStatus) -> Result<Vec<PodRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, local_env, created_at, updated_at
+            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, agent_service, compose_config, local_env, created_at, updated_at
              FROM pods WHERE status = ?
              ORDER BY repo_path ASC, name ASC",
         )
@@ -409,7 +495,7 @@ pub fn list_pods(conn: &Connection, repo_path: &Path) -> Result<Vec<PodRecord>> 
 
     let mut stmt = conn
         .prepare(
-            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, local_env, created_at, updated_at
+            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, agent_service, compose_config, local_env, created_at, updated_at
              FROM pods WHERE repo_path = ?
              ORDER BY name ASC",
         )
@@ -431,7 +517,7 @@ pub fn list_pods(conn: &Connection, repo_path: &Path) -> Result<Vec<PodRecord>> 
 pub fn list_all_pods(conn: &Connection) -> Result<Vec<PodRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, local_env, created_at, updated_at
+            "SELECT id, repo_path, name, host, status, token, image, devcontainer_json, agent_service, compose_config, local_env, created_at, updated_at
              FROM pods
              ORDER BY repo_path ASC, name ASC",
         )
@@ -484,6 +570,7 @@ pub fn mark_claude_config_copied(conn: &Connection, id: PodId) -> Result<()> {
 }
 
 pub struct ForwardedPort {
+    pub service: String,
     pub container_port: u16,
     pub local_port: u16,
     pub label: String,
@@ -492,14 +579,15 @@ pub struct ForwardedPort {
 pub fn insert_forwarded_port(
     conn: &Connection,
     pod_id: PodId,
+    service: &str,
     container_port: u16,
     local_port: u16,
     label: &str,
 ) -> Result<()> {
     conn.execute(
-        "INSERT INTO forwarded_ports (pod_id, container_port, local_port, label)
-         VALUES (?, ?, ?, ?)",
-        rusqlite::params![pod_id.0, container_port, local_port, label],
+        "INSERT INTO forwarded_ports (pod_id, service, container_port, local_port, label)
+         VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![pod_id.0, service, container_port, local_port, label],
     )
     .context("inserting forwarded port")?;
     Ok(())
@@ -508,18 +596,19 @@ pub fn insert_forwarded_port(
 pub fn list_forwarded_ports(conn: &Connection, pod_id: PodId) -> Result<Vec<ForwardedPort>> {
     let mut stmt = conn
         .prepare(
-            "SELECT container_port, local_port, label
+            "SELECT service, container_port, local_port, label
              FROM forwarded_ports WHERE pod_id = ?
-             ORDER BY container_port",
+             ORDER BY service, container_port",
         )
         .context("preparing forwarded ports query")?;
 
     let ports = stmt
         .query_map(rusqlite::params![pod_id.0], |row| {
             Ok(ForwardedPort {
-                container_port: row.get(0)?,
-                local_port: row.get(1)?,
-                label: row.get(2)?,
+                service: row.get(0)?,
+                container_port: row.get(1)?,
+                local_port: row.get(2)?,
+                label: row.get(3)?,
             })
         })
         .context("querying forwarded ports")?

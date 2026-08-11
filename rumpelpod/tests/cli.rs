@@ -9,10 +9,14 @@ mod codex;
 mod common;
 #[path = "cli/completions.rs"]
 mod completions;
+#[path = "cli/connect.rs"]
+mod connect;
 #[path = "cli/container_name.rs"]
 mod container_name;
 #[path = "cli/cp.rs"]
 mod cp;
+#[path = "cli/db_migration.rs"]
+mod db_migration;
 #[path = "cli/delete.rs"]
 mod delete;
 #[path = "cli/description_hook.rs"]

@@ -90,11 +90,9 @@ pub struct PodServerState {
     pub codex_state: tokio::sync::watch::Sender<Option<super::types::CodexState>>,
     /// Whether the codex state monitor task has been spawned.
     pub codex_monitor_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Serializes recovery pushes triggered on /events connections.
-    /// At launch the daemon's listener and a command's readiness probe
-    /// can both connect and find the ref unpushed; without this they
-    /// would race two `git push`es on the gateway, one losing the ref
-    /// lock and logging an alarming (though harmless) error.
+    /// Serializes recovery pushes triggered by gateway refreshes.
+    /// Replacement tunnel servers can overlap while a connection is unstable.
+    /// Only one should decide and push the outstanding refs at a time.
     pub push_gate: std::sync::Arc<tokio::sync::Semaphore>,
     /// Fully resolved environment: base container env + probed shell env +
     /// resolved remoteEnv.  Used for lifecycle commands, Claude, and Codex.
@@ -465,6 +463,10 @@ fn run_setup(
             })
             .expect("submodule setup failed");
         }
+
+        // Existing branches do not trigger the newly installed reference
+        // hook, so the first setup must publish them before the pod is ready.
+        recover_push(repo_path, pod_name).expect("initial pod branch push failed");
     } else {
         progress("refreshing git remotes...");
         git_setup::refresh_gateway_urls_impl(&git_setup::GitGatewayRefreshRequest {
@@ -473,6 +475,13 @@ fn run_setup(
             token: token.to_string(),
         })
         .expect("gateway refresh failed");
+        let repo_path = repo_path.to_path_buf();
+        let pod_name = pod_name.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = recover_push(&repo_path, &pod_name) {
+                eprintln!("gateway recovery push failed: {e:#}");
+            }
+        });
     }
 
     // -- Run lifecycle commands --
@@ -566,11 +575,6 @@ async fn refresh_gateway_base_url(state: &PodServerState, base_url: String) -> R
     Ok(())
 }
 
-async fn refresh_gateway_from_tunnel_port_file(state: &PodServerState) -> Result<()> {
-    let port = crate::port_file::read_required(Path::new(crate::port_file::TUNNEL_PORT_FILE))?;
-    refresh_gateway_base_url(state, format!("http://127.0.0.1:{port}")).await
-}
-
 async fn gateway_refresh_handler(
     State(state): State<PodServerState>,
     Json(req): Json<RefreshGatewayRequest>,
@@ -578,6 +582,7 @@ async fn gateway_refresh_handler(
     refresh_gateway_base_url(&state, req.base_url)
         .await
         .map_err(err_json)?;
+    queue_recover_push(state);
     ok_json(serde_json::json!({}))
 }
 
@@ -775,26 +780,14 @@ fn ref_matches(repo_path: &Path, refname: &str, sha: &str) -> Result<bool> {
     }
 }
 
-/// Force-push pod branches to the gateway, but only when local refs
-/// show the gateway is behind.  Best-effort: failures are logged and
-/// retried on the next /events connection or the next commit's
-/// hook-push.
-fn recover_push(repo_path: &Path, pod_name: &str) {
-    match needs_push(repo_path, pod_name) {
-        Ok(false) => return,
-        Ok(true) => {}
-        Err(e) => {
-            eprintln!("events: deciding whether to push failed: {e:#}");
-            return;
-        }
+/// Force-push pod branches to the gateway only when local refs show the
+/// gateway is behind. Returning failures lets initial setup fail explicitly
+/// while background refreshes can log them for later retry.
+fn recover_push(repo_path: &Path, pod_name: &str) -> Result<()> {
+    if !needs_push(repo_path, pod_name)? {
+        return Ok(());
     }
-    let skip_lfs_pre_push = match crate::git::prepare_lfs_for_rumpelpod_push(repo_path, pod_name) {
-        Ok(skip) => skip,
-        Err(e) => {
-            eprintln!("events: git lfs push failed: {e:#}");
-            return;
-        }
-    };
+    let skip_lfs_pre_push = crate::git::prepare_lfs_for_rumpelpod_push(repo_path, pod_name)?;
     let mut command = Command::new("git");
     command
         .args(["push", "rumpelpod", "--force", "--quiet"])
@@ -806,26 +799,42 @@ fn recover_push(repo_path: &Path, pod_name: &str) {
     if skip_lfs_pre_push {
         command.env("GIT_LFS_SKIP_PUSH", "1");
     }
-    match command.output() {
-        Ok(output) if !output.status.success() => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let status = output.status;
-            eprintln!("events: git push rumpelpod exited {status}: {stderr}");
-        }
-        Err(e) => eprintln!("events: git push rumpelpod failed: {e}"),
-        Ok(_) => {}
+    let output = command.output().context("running gateway recovery push")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let status = output.status;
+        return Err(anyhow::anyhow!(
+            "git push rumpelpod exited {status}: {stderr}"
+        ));
     }
+    Ok(())
+}
+
+fn queue_recover_push(state: PodServerState) {
+    tokio::spawn(async move {
+        let repo_path = state.repo_path.lock().await.clone();
+        let Some(repo_path) = repo_path else { return };
+        let Ok(permit) = state.push_gate.clone().acquire_owned().await else {
+            return;
+        };
+        let pod_name = state.pod_name.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            recover_push(&repo_path, &pod_name)
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("gateway recovery push failed: {e:#}"),
+            Err(e) => eprintln!("gateway recovery push task panicked: {e}"),
+        }
+    });
 }
 
 /// SSE endpoint the daemon connects to while a pod is running.
 ///
-/// On each new connection the pod recovers any branches the gateway
-/// has not seen -- e.g. hook-pushes that failed while the gateway was
-/// down.  Whether a push is owed is decided from local refs alone
-/// (see `needs_push`) and the push itself runs on a background task,
-/// so the `state` event is sent immediately, carrying the current
-/// claude session state, followed by periodic keepalives and
-/// claude_state change events.
+/// The state greeting carries the current agent session state, followed
+/// by periodic keepalives and state change events.
 async fn events_handler(State(state): State<PodServerState>) -> Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
 
@@ -865,33 +874,6 @@ async fn events_handler(State(state): State<PodServerState>) -> Response {
         // sees it.  Subsequent connections (re-entry) get None and
         // succeed, matching the old behavior.
         let lifecycle_error = state_for_task.lifecycle_error.lock().unwrap().take();
-
-        // Recover any branches the gateway has not seen.  The decision
-        // is made from local refs only and the push runs on a
-        // background task, so the greeting below never waits on it.
-        let repo_path = state_for_task.repo_path.lock().await.clone();
-        if let Some(repo_path) = repo_path {
-            let gate = state_for_task.push_gate.clone();
-            let pod_name = state_for_task.pod_name.clone();
-            let state_for_refresh = state_for_task.clone();
-            tokio::spawn(async move {
-                let Ok(permit) = gate.acquire_owned().await else {
-                    return;
-                };
-                if let Err(e) = refresh_gateway_from_tunnel_port_file(&state_for_refresh).await {
-                    eprintln!("events: refreshing gateway URL failed: {e:#}");
-                    return;
-                }
-                let result = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    recover_push(&repo_path, &pod_name);
-                })
-                .await;
-                if let Err(e) = result {
-                    eprintln!("events: recovery push task panicked: {e}");
-                }
-            });
-        }
 
         // Send state greeting.
         let current_claude = *state_for_task.claude_state.borrow();
@@ -1322,7 +1304,7 @@ fn build_state_response(repo_path: &Path) -> Result<StateResponse> {
 /// POST /git/push -- push every local branch to the rumpelpod remote.
 ///
 /// Forks call this on the source pod before they fetch from the host:
-/// pod-only branches (never pushed since the last events reconnect)
+/// pod-only branches (never pushed since the last gateway recovery)
 /// only land on the host after this push, and the new pod's
 /// `extra_host_fetch` needs them present.
 async fn git_push_handler(
