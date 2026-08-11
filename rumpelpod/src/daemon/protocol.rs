@@ -178,6 +178,8 @@ pub struct PodInfo {
 /// Information about a forwarded port.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortInfo {
+    /// Empty for a single-container pod; otherwise the Compose service.
+    pub service: String,
     pub container_port: u16,
     pub local_port: u16,
     pub label: String,
@@ -331,6 +333,8 @@ struct ListPortsResponse {
 pub struct AddForwardedPortRequest {
     pub pod_name: PodName,
     pub repo_path: PathBuf,
+    /// Compose target. None selects the agent service.
+    pub service: Option<String>,
     pub container_port: u16,
     /// If `Some`, the daemon attempts to bind exactly this host port and
     /// errors out if it is unavailable.  `None` lets the daemon pick a

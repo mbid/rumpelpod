@@ -16,12 +16,17 @@ pub fn ports(cmd: &PortsCommand) -> Result<()> {
     let pod_name = PodName::new(cmd.name.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let ports = client.list_ports(pod_name, repo_root)?;
 
-    println!("{:<12} {:<8} LABEL", "CONTAINER", "LOCAL");
+    println!("{:<24} {:<8} LABEL", "TARGET", "LOCAL");
     for p in &ports {
         let container_port = p.container_port;
         let local_port = p.local_port;
         let label = &p.label;
-        println!("{container_port:<12} {local_port:<8} {label}");
+        let target = if p.service.is_empty() {
+            container_port.to_string()
+        } else {
+            format!("{}:{container_port}", p.service)
+        };
+        println!("{target:<24} {local_port:<8} {label}");
     }
 
     Ok(())
@@ -36,6 +41,7 @@ pub fn forward_port(cmd: &ForwardPortCommand) -> Result<()> {
     let request = AddForwardedPortRequest {
         pod_name,
         repo_path: repo_root,
+        service: cmd.service.clone(),
         container_port: cmd.target.container_port,
         local_port: cmd.local_port,
         label: cmd.label.clone().unwrap_or_default(),
@@ -44,7 +50,12 @@ pub fn forward_port(cmd: &ForwardPortCommand) -> Result<()> {
 
     let container_port = info.container_port;
     let local_port = info.local_port;
-    println!("forwarded container port {container_port} to local port {local_port}");
+    let target = if info.service.is_empty() {
+        container_port.to_string()
+    } else {
+        format!("{}:{container_port}", info.service)
+    };
+    println!("forwarded container port {target} to local port {local_port}");
 
     Ok(())
 }

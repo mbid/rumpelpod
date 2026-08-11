@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod build_paths;
+mod compose;
 mod env;
 mod image;
 mod initialize_command;

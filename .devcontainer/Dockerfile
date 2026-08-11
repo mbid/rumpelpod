@@ -45,6 +45,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         locales \
         gnupg \
         docker.io \
+        docker-compose \
         podman \
         kubectl \
         screen \

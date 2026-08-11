@@ -242,35 +242,39 @@ impl Executor {
     }
 
     /// Remove a pod.  Idempotent: succeeds if the pod is already gone.
-    pub fn delete(&self, id: &PodId) -> Result<()> {
+    pub fn delete<T: AsRef<str> + ?Sized>(&self, id: &T) -> Result<()> {
         match &self.inner {
-            Inner::Docker(d) => docker_delete(d, id),
-            Inner::Kubernetes(k) => k.client.delete_pod(id.as_str()),
+            Inner::Docker(d) => docker_delete(d, id.as_ref()),
+            Inner::Kubernetes(k) => k.client.delete_pod(id.as_ref()),
         }
     }
 
     /// Current pod status.  Returns `Gone` when the pod no longer
     /// exists on the backend.
-    pub fn status(&self, id: &PodId) -> Result<PodStatus> {
+    pub fn status<T: AsRef<str> + ?Sized>(&self, id: &T) -> Result<PodStatus> {
         match &self.inner {
-            Inner::Docker(d) => docker_status(d, id),
-            Inner::Kubernetes(k) => k.client.get_pod_status(id.as_str()),
+            Inner::Docker(d) => docker_status(d, id.as_ref()),
+            Inner::Kubernetes(k) => k.client.get_pod_status(id.as_ref()),
         }
     }
 
     /// Run a command inside the pod, wait for it to finish, and
     /// collect output.  Enters as the image's USER on both backends;
     /// there is no override, matching k8s's constraint.
-    pub fn exec(&self, id: &PodId, req: ExecRequest) -> Result<ExecOutput> {
+    pub fn exec<T: AsRef<str> + ?Sized>(&self, id: &T, req: ExecRequest) -> Result<ExecOutput> {
         block_on(self.exec_async(id, req))
     }
 
     /// Async variant of [`Self::exec`].  Use from within a tokio task
     /// so the call doesn't re-enter the shared runtime.
-    pub async fn exec_async(&self, id: &PodId, req: ExecRequest) -> Result<ExecOutput> {
+    pub async fn exec_async<T: AsRef<str> + ?Sized>(
+        &self,
+        id: &T,
+        req: ExecRequest,
+    ) -> Result<ExecOutput> {
         match &self.inner {
-            Inner::Docker(d) => docker_exec(d, id, req).await,
-            Inner::Kubernetes(k) => k8s_exec(k, id, req).await,
+            Inner::Docker(d) => docker_exec(d, id.as_ref(), req).await,
+            Inner::Kubernetes(k) => k8s_exec(k, id.as_ref(), req).await,
         }
     }
 
@@ -279,29 +283,33 @@ impl Executor {
     /// servers (e.g. container-serve).  Docker uses `detach: true`;
     /// kubernetes fakes it by backgrounding under `sh -c`, which
     /// means stdin/stdout/stderr are all discarded.
-    pub fn exec_detached(&self, id: &PodId, req: ExecRequest) -> Result<()> {
+    pub fn exec_detached<T: AsRef<str> + ?Sized>(&self, id: &T, req: ExecRequest) -> Result<()> {
         match &self.inner {
-            Inner::Docker(d) => docker_exec_detached(d, id, req),
-            Inner::Kubernetes(k) => k8s_exec_detached(k, id, req),
+            Inner::Docker(d) => docker_exec_detached(d, id.as_ref(), req),
+            Inner::Kubernetes(k) => k8s_exec_detached(k, id.as_ref(), req),
         }
     }
 
     /// Start a command inside the pod and return split stdin/stdout/stderr
     /// streams.  The session stays live until the returned `ExecStreams`
     /// is dropped.
-    pub async fn exec_streaming(&self, id: &PodId, cmd: Vec<String>) -> Result<ExecStreams> {
+    pub async fn exec_streaming<T: AsRef<str> + ?Sized>(
+        &self,
+        id: &T,
+        cmd: Vec<String>,
+    ) -> Result<ExecStreams> {
         match &self.inner {
-            Inner::Docker(d) => docker_exec_streaming(d, id, cmd).await,
-            Inner::Kubernetes(k) => k8s_exec_streaming(k, id, cmd).await,
+            Inner::Docker(d) => docker_exec_streaming(d, id.as_ref(), cmd).await,
+            Inner::Kubernetes(k) => k8s_exec_streaming(k, id.as_ref(), cmd).await,
         }
     }
 
     /// Stop a running pod without removing it.  Errors on
     /// kubernetes, which has no analogue -- the only way to stop
     /// a k8s pod is to delete it.
-    pub fn stop(&self, id: &PodId) -> Result<()> {
+    pub fn stop<T: AsRef<str> + ?Sized>(&self, id: &T) -> Result<()> {
         match &self.inner {
-            Inner::Docker(d) => docker_stop(d, id),
+            Inner::Docker(d) => docker_stop(d, id.as_ref()),
             Inner::Kubernetes(_) => {
                 anyhow::bail!("stop not supported on kubernetes, delete the pod instead")
             }
@@ -310,9 +318,9 @@ impl Executor {
 
     /// Start a stopped pod.  Errors on kubernetes for the same
     /// reason as `stop`.
-    pub fn start(&self, id: &PodId) -> Result<()> {
+    pub fn start<T: AsRef<str> + ?Sized>(&self, id: &T) -> Result<()> {
         match &self.inner {
-            Inner::Docker(d) => docker_start(d, id),
+            Inner::Docker(d) => docker_start(d, id.as_ref()),
             Inner::Kubernetes(_) => {
                 anyhow::bail!("start not supported on kubernetes, launch a new pod instead")
             }
@@ -341,15 +349,15 @@ impl Executor {
     /// `opts.user_root` is docker-only; kubernetes has no analogue and
     /// silently ignores it (matching how `Executor::exec` handles
     /// image USER).
-    pub fn exec_interactive(
+    pub fn exec_interactive<T: AsRef<str> + ?Sized>(
         &self,
-        id: &PodId,
+        id: &T,
         cmd: &[String],
         opts: ExecInteractiveOptions,
     ) -> Result<std::process::ExitStatus> {
         match &self.inner {
-            Inner::Docker(d) => docker_exec_interactive(d, id, cmd, opts),
-            Inner::Kubernetes(k) => k8s_exec_interactive(k, id, cmd, opts),
+            Inner::Docker(d) => docker_exec_interactive(d, id.as_ref(), cmd, opts),
+            Inner::Kubernetes(k) => k8s_exec_interactive(k, id.as_ref(), cmd, opts),
         }
     }
 
@@ -494,11 +502,11 @@ fn docker_stderr(output: &std::process::Output) -> String {
 
 fn docker_inspect_container(
     backend: &DockerBackend,
-    id: &PodId,
+    id: &str,
 ) -> Result<Option<DockerContainerInspect>> {
     let mut command = backend.command();
     let output = command
-        .args(["container", "inspect", id.as_str()])
+        .args(["container", "inspect", id])
         .output()
         .context("running docker container inspect")?;
     if !output.status.success() {
@@ -523,10 +531,10 @@ fn docker_exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
-fn docker_delete(backend: &DockerBackend, id: &PodId) -> Result<()> {
+fn docker_delete(backend: &DockerBackend, id: &str) -> Result<()> {
     let mut command = backend.command();
     let output = command
-        .args(["rm", "-f", id.as_str()])
+        .args(["rm", "-f", id])
         .output()
         .context("running docker rm")?;
     if output.status.success() || docker_not_found(&output) {
@@ -536,7 +544,7 @@ fn docker_delete(backend: &DockerBackend, id: &PodId) -> Result<()> {
     Err(anyhow::anyhow!("docker rm failed: {stderr}"))
 }
 
-fn docker_status(backend: &DockerBackend, id: &PodId) -> Result<PodStatus> {
+fn docker_status(backend: &DockerBackend, id: &str) -> Result<PodStatus> {
     let Some(container) = docker_inspect_container(backend, id)? else {
         return Ok(PodStatus::Gone);
     };
@@ -551,7 +559,7 @@ fn docker_status(backend: &DockerBackend, id: &PodId) -> Result<PodStatus> {
     }
 }
 
-async fn docker_exec(backend: &DockerBackend, id: &PodId, req: ExecRequest) -> Result<ExecOutput> {
+async fn docker_exec(backend: &DockerBackend, id: &str, req: ExecRequest) -> Result<ExecOutput> {
     let mut command = backend.tokio_command();
     command.arg("exec");
     if req.stdin.is_some() {
@@ -564,7 +572,7 @@ async fn docker_exec(backend: &DockerBackend, id: &PodId, req: ExecRequest) -> R
         command.arg("--env");
         command.arg(format!("{key}={value}"));
     }
-    command.arg(id.as_str());
+    command.arg(id);
     command.args(&req.cmd);
     if req.stdin.is_some() {
         command.stdin(Stdio::piped());
@@ -598,7 +606,7 @@ async fn docker_exec(backend: &DockerBackend, id: &PodId, req: ExecRequest) -> R
     })
 }
 
-async fn k8s_exec(backend: &K8sBackend, id: &PodId, req: ExecRequest) -> Result<ExecOutput> {
+async fn k8s_exec(backend: &K8sBackend, id: &str, req: ExecRequest) -> Result<ExecOutput> {
     use k8s_openapi::api::core::v1::Pod;
     use kube::api::{Api, AttachParams};
     use tokio::io::AsyncReadExt;
@@ -624,7 +632,7 @@ async fn k8s_exec(backend: &K8sBackend, id: &PodId, req: ExecRequest) -> Result<
 
     let mut attached = pods
         .exec(
-            id.as_str(),
+            id,
             req.cmd,
             &AttachParams::default()
                 .stdout(true)
@@ -667,13 +675,13 @@ async fn k8s_exec(backend: &K8sBackend, id: &PodId, req: ExecRequest) -> Result<
 
 async fn docker_exec_streaming(
     backend: &DockerBackend,
-    id: &PodId,
+    id: &str,
     cmd: Vec<String>,
 ) -> Result<ExecStreams> {
     let mut command = backend.tokio_command();
     command.arg("exec");
     command.arg("-i");
-    command.arg(id.as_str());
+    command.arg(id);
     command.args(cmd);
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
@@ -695,7 +703,7 @@ async fn docker_exec_streaming(
 
 async fn k8s_exec_streaming(
     backend: &K8sBackend,
-    id: &PodId,
+    id: &str,
     cmd: Vec<String>,
 ) -> Result<ExecStreams> {
     use k8s_openapi::api::core::v1::Pod;
@@ -706,7 +714,7 @@ async fn k8s_exec_streaming(
 
     let mut attached = pods
         .exec(
-            id.as_str(),
+            id,
             cmd,
             &AttachParams::default()
                 .stdin(true)
@@ -824,7 +832,7 @@ fn docker_launch(backend: &DockerBackend, id: &PodId, spec: PodSpec) -> Result<S
 
     let stdout = command.success().context("creating container")?;
     let container_id = String::from_utf8_lossy(&stdout).trim().to_string();
-    docker_start(backend, id).context("starting container")?;
+    docker_start(backend, id.as_str()).context("starting container")?;
     Ok(container_id)
 }
 
@@ -920,7 +928,7 @@ fn k8s_launch(backend: &K8sBackend, id: &PodId, spec: PodSpec) -> Result<()> {
     Ok(())
 }
 
-fn docker_exec_detached(backend: &DockerBackend, id: &PodId, req: ExecRequest) -> Result<()> {
+fn docker_exec_detached(backend: &DockerBackend, id: &str, req: ExecRequest) -> Result<()> {
     if req.stdin.is_some() {
         return Err(anyhow::anyhow!(
             "executor::exec_detached does not support stdin on docker"
@@ -936,13 +944,13 @@ fn docker_exec_detached(backend: &DockerBackend, id: &PodId, req: ExecRequest) -
         command.arg("--env");
         command.arg(format!("{key}={value}"));
     }
-    command.arg(id.as_str());
+    command.arg(id);
     command.args(req.cmd);
     command.success().context("starting detached docker exec")?;
     Ok(())
 }
 
-fn k8s_exec_detached(backend: &K8sBackend, id: &PodId, req: ExecRequest) -> Result<()> {
+fn k8s_exec_detached(backend: &K8sBackend, id: &str, req: ExecRequest) -> Result<()> {
     // kube-rs exec has no detach flag.  Approximate it by wrapping
     // the command under `sh -c '<cmd> </dev/null >/tmp/exec.log 2>&1 &'`,
     // which returns as soon as sh backgrounds the child.  Output is
@@ -978,10 +986,10 @@ fn k8s_exec_detached(backend: &K8sBackend, id: &PodId, req: ExecRequest) -> Resu
     Ok(())
 }
 
-fn docker_stop(backend: &DockerBackend, id: &PodId) -> Result<()> {
+fn docker_stop(backend: &DockerBackend, id: &str) -> Result<()> {
     let mut command = backend.command();
     let output = command
-        .args(["stop", "--time", "0", id.as_str()])
+        .args(["stop", "--time", "0", id])
         .output()
         .context("running docker stop")?;
     if output.status.success() || docker_not_found(&output) {
@@ -991,10 +999,10 @@ fn docker_stop(backend: &DockerBackend, id: &PodId) -> Result<()> {
     Err(anyhow::anyhow!("docker stop failed: {stderr}"))
 }
 
-fn docker_start(backend: &DockerBackend, id: &PodId) -> Result<()> {
+fn docker_start(backend: &DockerBackend, id: &str) -> Result<()> {
     let mut command = backend.command();
     command
-        .args(["start", id.as_str()])
+        .args(["start", id])
         .success()
         .context("starting container")?;
     Ok(())
@@ -1002,7 +1010,7 @@ fn docker_start(backend: &DockerBackend, id: &PodId) -> Result<()> {
 
 fn docker_exec_interactive(
     backend: &DockerBackend,
-    id: &PodId,
+    id: &str,
     cmd: &[String],
     opts: ExecInteractiveOptions,
 ) -> Result<std::process::ExitStatus> {
@@ -1017,14 +1025,14 @@ fn docker_exec_interactive(
     if opts.tty {
         c.arg("-t");
     }
-    c.arg(id.as_str());
+    c.arg(id);
     c.args(cmd);
     c.status().context("spawning docker exec")
 }
 
 fn k8s_exec_interactive(
     backend: &K8sBackend,
-    id: &PodId,
+    id: &str,
     cmd: &[String],
     opts: ExecInteractiveOptions,
 ) -> Result<std::process::ExitStatus> {
@@ -1041,7 +1049,7 @@ fn k8s_exec_interactive(
     } else {
         c.arg("-i");
     }
-    c.arg(id.as_str());
+    c.arg(id);
     c.arg("--");
     c.args(cmd);
     c.status().context("spawning kubectl exec")

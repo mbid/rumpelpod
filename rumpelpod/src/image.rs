@@ -729,7 +729,7 @@ fn compute_image_tag(
 /// the typical setup where the context is the repo root.  Projects
 /// that need `.git/` baked into the image cannot rely on rumpelpod
 /// caching anyway.
-fn hash_context_dir(hasher: &mut Sha256, context_path: &Path) -> Result<()> {
+pub(crate) fn hash_context_dir(hasher: &mut Sha256, context_path: &Path) -> Result<()> {
     let walker = WalkDir::new(context_path)
         .sort_by_file_name()
         .into_iter()

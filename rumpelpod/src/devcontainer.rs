@@ -587,9 +587,6 @@ impl DevContainer {
         let fields: &[(&str, bool)] = &[
             ("workspaceMount", self.workspace_mount.is_some()),
             ("appPort", self.app_port.is_some()),
-            ("dockerComposeFile", self.docker_compose_file.is_some()),
-            ("service", self.service.is_some()),
-            ("runServices", self.run_services.is_some()),
             ("features", self.features.is_some()),
             (
                 "overrideFeatureInstallOrder",

@@ -116,6 +116,12 @@ impl std::fmt::Display for PodId {
     }
 }
 
+impl AsRef<str> for PodId {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// DNS-1123 label set as the container's hostname.
 ///
 /// Same shape as `PodId` but derived from the pod name alone (no

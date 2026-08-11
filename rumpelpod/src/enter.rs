@@ -387,8 +387,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
             context, namespace, ..
         } => crate::executor::Executor::kubernetes(context, namespace)?,
     };
-    let pod_id = crate::executor::PodId::new(result.container_id.0.clone())
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let container_id = result.container_id.0.clone();
 
     // The host subdir may not exist in the container yet.  Docker only;
     // on k8s the emptyDir mounts come up owned by the container user so
@@ -399,7 +398,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     {
         let mkdir_status = executor
             .exec_interactive(
-                &pod_id,
+                &container_id,
                 &[
                     "mkdir".to_string(),
                     "-p".to_string(),
@@ -424,7 +423,7 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     // the actual command.  Kubernetes has no --user override so the
     // executor ignores user_root there and enters as the image USER.
     let status = executor.exec_interactive(
-        &pod_id,
+        &container_id,
         &exec_cmd,
         crate::executor::ExecInteractiveOptions {
             tty: std::io::stdin().is_terminal(),
