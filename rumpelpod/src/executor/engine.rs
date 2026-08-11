@@ -176,15 +176,20 @@ impl Executor {
     /// directly.
     pub fn new(conn: &HostConnection) -> Result<Self> {
         match conn {
-            HostConnection::Localhost(local) => match local.engine() {
-                ContainerEngine::Docker => {
-                    Self::docker(&default_docker_socket(), ContainerEngine::Docker)
+            HostConnection::Localhost(local) => {
+                local
+                    .ensure_connected()
+                    .context("opening local engine connection")?;
+                match local.engine() {
+                    ContainerEngine::Docker => {
+                        Self::docker(&default_docker_socket(), ContainerEngine::Docker)
+                    }
+                    ContainerEngine::Podman => Self::podman(),
+                    ContainerEngine::Auto => {
+                        panic!("localhost connection has unresolved container engine auto")
+                    }
                 }
-                ContainerEngine::Podman => Self::podman(),
-                ContainerEngine::Auto => {
-                    panic!("localhost connection has unresolved container engine auto")
-                }
-            },
+            }
             HostConnection::Ssh(ssh) => {
                 ssh.ensure_connected()
                     .context("opening ssh engine transport")?;
