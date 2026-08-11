@@ -428,6 +428,13 @@ struct PodReviewChangedRequest {
     pod_name: String,
 }
 
+/// Request body for ensuring a daemon connection to a pod.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConnectPodRequest {
+    pub pod_name: String,
+    pub repo_path: PathBuf,
+}
+
 /// Error response body.
 #[derive(Debug, Serialize, Deserialize)]
 struct ErrorResponse {
@@ -521,6 +528,10 @@ pub trait Daemon: Send + Sync + 'static {
     // The forward is recorded in the database and re-bound on
     // reconnect, just like a devcontainer-declared one.
     fn add_forwarded_port(&self, request: AddForwardedPortRequest) -> Result<PortInfo>;
+
+    // POST /pod/connect
+    // Probe the host and pod, restoring only failed or missing connections.
+    fn connect_pod(&self, request: ConnectPodRequest) -> Result<()>;
 
     // PUT /pod/claude-config
     // Ensure Claude Code config files are present in the container.
@@ -913,6 +924,20 @@ impl Daemon for DaemonClient {
             });
             Err(anyhow::anyhow!("{}", error.error))
         }
+    }
+
+    fn connect_pod(&self, request: ConnectPodRequest) -> Result<()> {
+        let url = self.url.join("/pod/connect")?;
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
+
+        let _: serde_json::Value = read_sse_result(response, "connecting to pod")?;
+        Ok(())
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
@@ -1610,6 +1635,18 @@ async fn add_forwarded_port_handler<D: Daemon>(
     }
 }
 
+/// Handler for POST /pod/connect endpoint.
+async fn connect_pod_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ConnectPodRequest>,
+) -> Response {
+    let name = request.pod_name.clone();
+    streaming_result_response(format!("connecting to pod '{name}'..."), move || {
+        daemon.connect_pod(request)?;
+        Ok(serde_json::Value::Null)
+    })
+}
+
 /// Handler for PUT /pod/claude-config endpoint.
 async fn ensure_claude_config_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
@@ -1843,6 +1880,7 @@ where
             "/pod/ports",
             get(list_ports_handler::<D>).post(add_forwarded_port_handler::<D>),
         )
+        .route("/pod/connect", post(connect_pod_handler::<D>))
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .route("/pod/pi-config", put(ensure_pi_config_handler::<D>))
         .route("/pod/ssh-agent", post(ensure_ssh_agent_handler::<D>))

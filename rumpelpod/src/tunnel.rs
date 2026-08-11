@@ -545,6 +545,18 @@ pub async fn start_tunnel(
     }
 }
 
+/// Attempt to start a tunnel once.
+///
+/// Background repair uses a single attempt so an unavailable or removed
+/// pod cannot pin a worker forever.  The supervisor owns retry timing.
+pub(crate) async fn try_start_tunnel(
+    executor: &Executor,
+    pod_id: &PodId,
+    target_addr: &str,
+) -> Result<TunnelHandle> {
+    start_tunnel_inner(executor, pod_id, target_addr).await
+}
+
 async fn start_tunnel_inner(
     executor: &Executor,
     pod_id: &PodId,

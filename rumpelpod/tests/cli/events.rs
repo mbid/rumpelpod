@@ -103,4 +103,14 @@ fn events_report_pod_status_and_commit_after_user_post_receive_hook() {
         repo.path().join(".git/user-post-receive-ran").exists(),
         "rumpelpod post-receive hook prevented the user hook"
     );
+
+    while event_rx.try_recv().is_ok() {}
+    pod_command(&repo, &daemon)
+        .args(["delete", "--wait", "--force", pod_name])
+        .success()
+        .expect("delete test pod");
+    wait_for_event(DaemonEvent::PodStatusChanged {
+        repository: repo.path().to_string_lossy().into_owned(),
+        pod: pod_name.to_string(),
+    });
 }
