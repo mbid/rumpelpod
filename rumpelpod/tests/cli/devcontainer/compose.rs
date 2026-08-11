@@ -97,6 +97,101 @@ fn forwarded_local_port(repo: &TestRepo, daemon: &TestDaemon, pod_name: &str, ta
 }
 
 #[test]
+fn compose_build_cache_reuses_images_and_tracks_context_content() {
+    println!("xtest:timeout=300");
+    if !require_local_compose() {
+        return;
+    }
+
+    let repo = TestRepo::new();
+    write_compose_devcontainer(&repo, r#"["sleep", "infinity"]"#, "", "", "");
+    let marker = repo.path().join(".devcontainer/cache-marker.txt");
+    fs::write(&marker, "version-1\n").expect("write compose cache marker");
+    let dockerfile = repo.path().join(".devcontainer/Dockerfile");
+    let mut contents = fs::read_to_string(&dockerfile).expect("read compose Dockerfile");
+    contents.push_str(
+        "COPY .devcontainer/cache-marker.txt /cache-marker.txt\nRUN echo compose-cache-build-marker > /build-marker\n",
+    );
+    fs::write(&dockerfile, contents).expect("extend compose Dockerfile");
+
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let first = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "compose-cache-1",
+            "--",
+            "cat",
+            "/cache-marker.txt",
+        ])
+        .output()
+        .expect("create first compose cache pod");
+    assert!(first.status.success());
+    let first_stdout = String::from_utf8_lossy(&first.stdout);
+    let first_stderr = String::from_utf8_lossy(&first.stderr);
+    assert_eq!(first_stdout.lines().last(), Some("version-1"));
+    let first_output = format!("{first_stdout}{first_stderr}");
+    assert!(
+        first_output.contains("compose-cache-build-marker"),
+        "first pod should run the Compose build: {first_output}"
+    );
+
+    let second = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "compose-cache-2",
+            "--",
+            "cat",
+            "/cache-marker.txt",
+        ])
+        .output()
+        .expect("create second compose cache pod");
+    assert!(second.status.success());
+    let second_stdout = String::from_utf8_lossy(&second.stdout);
+    let second_stderr = String::from_utf8_lossy(&second.stderr);
+    assert_eq!(second_stdout.lines().last(), Some("version-1"));
+    let second_output = format!("{second_stdout}{second_stderr}");
+    assert!(
+        !second_output.contains("compose-cache-build-marker"),
+        "second pod should reuse the Compose image: {second_output}"
+    );
+
+    fs::write(&marker, "version-2\n").expect("update compose cache marker");
+    let third = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "compose-cache-3",
+            "--",
+            "cat",
+            "/cache-marker.txt",
+        ])
+        .output()
+        .expect("create third compose cache pod");
+    assert!(third.status.success());
+    let third_stdout = String::from_utf8_lossy(&third.stdout);
+    let third_stderr = String::from_utf8_lossy(&third.stderr);
+    assert_eq!(third_stdout.lines().last(), Some("version-2"));
+    let third_output = format!("{third_stdout}{third_stderr}");
+    assert!(
+        third_output.contains("compose-cache-build-marker"),
+        "changed context should rerun the Compose build: {third_output}"
+    );
+
+    for pod in ["compose-cache-1", "compose-cache-2", "compose-cache-3"] {
+        pod_command(&repo, &daemon)
+            .args(["delete", "--force", "--wait", pod])
+            .success()
+            .expect("delete compose cache project");
+    }
+}
+
+#[test]
 fn compose_sidecar_forward_survives_project_restart() {
     println!("xtest:timeout=240");
     if !require_local_compose() {

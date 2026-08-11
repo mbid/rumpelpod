@@ -3228,13 +3228,25 @@ impl DaemonServer {
                     .as_ref()
                     .map(|_| selected.as_slice()),
             )?;
-            let mut needs_build = false;
+            let mut build_services = Vec::new();
             for target in model.services() {
                 if model.service_has_build(&target)? {
-                    needs_build = true;
+                    build_services.push(target);
                 }
             }
-            if needs_build {
+            build_services.sort_unstable();
+            let cache_tags = model.build_cache_tags()?;
+            let cache_hit = match &cache_tags {
+                Some(tags) => build_services.iter().all(|target| {
+                    crate::image::image_exists(
+                        &tags[target],
+                        &docker_host,
+                        docker_socket.as_deref(),
+                    )
+                }),
+                None => false,
+            };
+            if !build_services.is_empty() && !cache_hit {
                 source.build(
                     project_id.as_str(),
                     &docker_host,
@@ -3243,19 +3255,40 @@ impl DaemonServer {
                     &local_env_vars,
                     &build_tx,
                 )?;
-                let services = model.services();
-                for built_service in services {
-                    if model.service_has_build(&built_service)? {
-                        let image = source.service_image_id(
-                            project_id.as_str(),
+            }
+            let mut built_images = Vec::new();
+            for built_service in &build_services {
+                let image_hint = if cache_hit {
+                    cache_tags
+                        .as_ref()
+                        .and_then(|tags| tags.get(built_service))
+                        .map(String::as_str)
+                } else {
+                    model.service_image_optional(built_service)?
+                };
+                let image = source.service_image_id(
+                    project_id.as_str(),
+                    &docker_host,
+                    docker_socket.as_deref(),
+                    built_service,
+                    image_hint,
+                )?;
+                if !cache_hit {
+                    if let Some(tag) = cache_tags.as_ref().and_then(|tags| tags.get(built_service))
+                    {
+                        source.tag_service_image(
                             &docker_host,
                             docker_socket.as_deref(),
-                            &built_service,
-                            model.service_image_optional(&built_service)?,
+                            built_service,
+                            &image,
+                            tag,
                         )?;
-                        model.set_built_service_image(&built_service, image)?;
                     }
                 }
+                built_images.push((built_service.clone(), image));
+            }
+            for (built_service, image) in built_images {
+                model.set_built_service_image(&built_service, image)?;
             }
             for published_service in model.published_port_services() {
                 build_tx
@@ -3267,7 +3300,7 @@ impl DaemonServer {
             let image = model.service_image(&service)?.to_string();
             (
                 Image(image),
-                needs_build,
+                !build_services.is_empty() && !cache_hit,
                 Some(model),
                 Some(service),
                 selected,

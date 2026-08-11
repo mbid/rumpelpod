@@ -3,7 +3,7 @@
 
 //! Docker Compose model rendering and project lifecycle.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -12,12 +12,14 @@ use std::process::{Command, Output};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::config::{ContainerEngine, Host};
 use crate::devcontainer::{DevContainer, MountObject, MountType, StringOrArray};
 use crate::image::{apply_docker_host, OutputLine};
 
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
+const BUILD_CACHE_DOMAIN: &[u8] = b"rumpelpod compose build cache v1";
 
 pub struct Source {
     files: Vec<PathBuf>,
@@ -115,6 +117,23 @@ impl Source {
         Ok(image_id)
     }
 
+    pub fn tag_service_image(
+        &self,
+        host: &Host,
+        docker_socket: Option<&Path>,
+        service: &str,
+        image: &str,
+        tag: &str,
+    ) -> Result<()> {
+        let mut command = docker_command(host, docker_socket)?;
+        let output = command
+            .args(["image", "tag", image, tag])
+            .output()
+            .with_context(|| format!("tagging compose service '{service}' build cache image"))?;
+        checked_output(output, "docker image tag")?;
+        Ok(())
+    }
+
     fn apply(&self, command: &mut Command, project_name: &str) {
         command.args(["--project-name", project_name]);
         for file in &self.files {
@@ -172,6 +191,160 @@ impl Model {
             .service(service)?
             .get("build")
             .is_some_and(|build| !build.is_null()))
+    }
+
+    /// Compute project-independent tags for the images produced by Compose.
+    ///
+    /// A single project fingerprint deliberately covers every build service:
+    /// Compose can make one service's output depend on another through build
+    /// contexts, so invalidating the project as a unit avoids reusing a stale
+    /// dependent image. Remote contexts and secret or SSH inputs remain mutable
+    /// without a local content digest and therefore retain Compose's normal
+    /// build behavior.
+    pub fn build_cache_tags(&self) -> Result<Option<BTreeMap<String, String>>> {
+        let services = self
+            .value
+            .get("services")
+            .and_then(Value::as_object)
+            .expect("services checked while parsing compose model");
+        let mut build_services: Vec<&str> = services
+            .iter()
+            .filter_map(|(name, service)| {
+                service
+                    .get("build")
+                    .is_some_and(|build| !build.is_null())
+                    .then_some(name.as_str())
+            })
+            .collect();
+        build_services.sort_unstable();
+
+        let mut hasher = Sha256::new();
+        hasher.update(BUILD_CACHE_DOMAIN);
+        let mut contexts = BTreeSet::new();
+        let mut dockerfiles = BTreeSet::new();
+        for service_name in &build_services {
+            let service = &services[*service_name];
+            let build = service.get("build").expect("build service selected above");
+            let build_object = build.as_object().with_context(|| {
+                format!("compose service '{service_name}' has a non-object build configuration")
+            })?;
+            hash_json_value(&mut hasher, &Value::String((*service_name).to_string()));
+            hash_json_value(&mut hasher, build);
+            if let Some(platform) = service.get("platform") {
+                hasher.update(b"service platform");
+                hash_json_value(&mut hasher, platform);
+            }
+            if build_object
+                .get("secrets")
+                .is_some_and(|value| !value.is_null())
+                || build_object
+                    .get("ssh")
+                    .is_some_and(|value| !value.is_null())
+            {
+                return Ok(None);
+            }
+
+            let context = build_object
+                .get("context")
+                .and_then(Value::as_str)
+                .with_context(|| {
+                    format!("compose service '{service_name}' build has no context path")
+                })?;
+            let Some(context_path) = local_build_context(context, false)? else {
+                return Ok(None);
+            };
+            contexts.insert(context_path.clone());
+
+            if build_object.get("dockerfile_inline").is_none() {
+                let dockerfile = build_object
+                    .get("dockerfile")
+                    .map(|value| {
+                        value.as_str().with_context(|| {
+                            format!("compose service '{service_name}' has a non-string dockerfile")
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or("Dockerfile");
+                dockerfiles.insert(context_path.join(dockerfile));
+            }
+
+            if let Some(additional_contexts) = build_object.get("additional_contexts") {
+                let values: Vec<&str> = match additional_contexts {
+                    Value::Object(entries) => entries
+                        .values()
+                        .map(|value| {
+                            value.as_str().with_context(|| {
+                                format!(
+                                    "compose service '{service_name}' has a non-string additional build context"
+                                )
+                            })
+                        })
+                        .collect::<Result<_>>()?,
+                    Value::Array(entries) => entries
+                        .iter()
+                        .map(|value| {
+                            let entry = value.as_str().with_context(|| {
+                                format!(
+                                    "compose service '{service_name}' has a non-string additional build context"
+                                )
+                            })?;
+                            entry.split_once('=').map(|(_, path)| path).with_context(|| {
+                                format!(
+                                    "compose service '{service_name}' has an invalid additional build context '{entry}'"
+                                )
+                            })
+                        })
+                        .collect::<Result<_>>()?,
+                    Value::Null => Vec::new(),
+                    Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+                        return Err(anyhow::anyhow!(
+                            "compose service '{service_name}' has invalid additional build contexts"
+                        ));
+                    }
+                };
+                for value in values {
+                    if let Some(path) = local_build_context(value, true)? {
+                        contexts.insert(path);
+                    } else if !value.starts_with("service:") {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+
+        for context in contexts {
+            hasher.update(b"context");
+            hasher.update(context.as_os_str().as_encoded_bytes());
+            crate::image::hash_context_dir(&mut hasher, &context).with_context(|| {
+                let context = context.display();
+                format!("hashing compose build context at {context}")
+            })?;
+        }
+        for dockerfile in dockerfiles {
+            hasher.update(b"dockerfile");
+            hasher.update(dockerfile.as_os_str().as_encoded_bytes());
+            let contents = fs::read(&dockerfile).with_context(|| {
+                let dockerfile = dockerfile.display();
+                format!("reading compose Dockerfile at {dockerfile}")
+            })?;
+            hasher.update((contents.len() as u64).to_le_bytes());
+            hasher.update(contents);
+        }
+
+        let project_digest = hasher.finalize();
+        let mut tags = BTreeMap::new();
+        for service_name in build_services {
+            let mut service_hasher = Sha256::new();
+            service_hasher.update(BUILD_CACHE_DOMAIN);
+            service_hasher.update(project_digest);
+            service_hasher.update(service_name.as_bytes());
+            let digest = service_hasher.finalize();
+            tags.insert(
+                service_name.to_string(),
+                format!("rumpelpod-compose-{}", hex::encode(&digest[..8])),
+            );
+        }
+        Ok(Some(tags))
     }
 
     pub fn service_image(&self, service: &str) -> Result<&str> {
@@ -235,6 +408,61 @@ impl Model {
             .and_then(Value::as_object)
             .and_then(|services| services.get(service))
             .with_context(|| format!("compose service '{service}' does not exist"))
+    }
+}
+
+fn local_build_context(value: &str, allow_service: bool) -> Result<Option<PathBuf>> {
+    if allow_service && value.starts_with("service:") {
+        return Ok(None);
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        return Ok(None);
+    }
+    if !path.is_dir() {
+        let path = path.display();
+        return Err(anyhow::anyhow!(
+            "compose build context '{path}' is not a directory"
+        ));
+    }
+    Ok(Some(path))
+}
+
+fn hash_json_value(hasher: &mut Sha256, value: &Value) {
+    match value {
+        Value::Null => hasher.update(b"null"),
+        Value::Bool(value) => {
+            hasher.update(b"bool");
+            hasher.update([u8::from(*value)]);
+        }
+        Value::Number(value) => {
+            let value = value.to_string();
+            hasher.update(b"number");
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        Value::String(value) => {
+            hasher.update(b"string");
+            hasher.update((value.len() as u64).to_le_bytes());
+            hasher.update(value.as_bytes());
+        }
+        Value::Array(values) => {
+            hasher.update(b"array");
+            hasher.update((values.len() as u64).to_le_bytes());
+            for value in values {
+                hash_json_value(hasher, value);
+            }
+        }
+        Value::Object(values) => {
+            hasher.update(b"object");
+            hasher.update((values.len() as u64).to_le_bytes());
+            let mut keys: Vec<&String> = values.keys().collect();
+            keys.sort_unstable();
+            for key in keys {
+                hash_json_value(hasher, &Value::String(key.clone()));
+                hash_json_value(hasher, &values[key]);
+            }
+        }
     }
 }
 
@@ -775,6 +1003,7 @@ pub fn validate_selected_services(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn model() -> Model {
         Model::parse(
@@ -849,6 +1078,87 @@ mod tests {
         assert!(!model.service_has_build("agent").unwrap());
         assert!(model.json().contains("\"image\":\"sha256:abc\""));
         assert!(model.json().contains("\"pull_policy\":\"never\""));
+    }
+
+    #[test]
+    fn build_cache_tags_follow_all_local_build_inputs() {
+        let context = tempfile::tempdir().unwrap();
+        fs::write(context.path().join("Dockerfile"), "FROM scratch\n").unwrap();
+        fs::write(context.path().join("marker"), "one\n").unwrap();
+        let context_path = context.path().display().to_string();
+        let first = Model::parse(
+            json!({
+                "name": "first-project",
+                "services": {
+                    "agent": {"build": {"context": context_path}},
+                    "sidecar": {"build": {"context": context_path, "args": {"MODE": "test"}}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .build_cache_tags()
+        .unwrap()
+        .unwrap();
+
+        let same_inputs = Model::parse(
+            json!({
+                "name": "second-project",
+                "services": {
+                    "sidecar": {"build": {"args": {"MODE": "test"}, "context": context_path}},
+                    "agent": {"build": {"context": context_path}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .build_cache_tags()
+        .unwrap()
+        .unwrap();
+        assert_eq!(first, same_inputs);
+
+        let changed_platform = Model::parse(
+            json!({
+                "services": {
+                    "agent": {"platform": "linux/arm64", "build": {"context": context_path}},
+                    "sidecar": {"build": {"context": context_path, "args": {"MODE": "test"}}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .build_cache_tags()
+        .unwrap()
+        .unwrap();
+        assert_ne!(first["agent"], changed_platform["agent"]);
+        assert_ne!(first["sidecar"], changed_platform["sidecar"]);
+
+        fs::write(context.path().join("marker"), "two\n").unwrap();
+        let changed = Model::parse(
+            json!({
+                "services": {
+                    "agent": {"build": {"context": context_path}},
+                    "sidecar": {"build": {"context": context_path, "args": {"MODE": "test"}}}
+                }
+            })
+            .to_string(),
+        )
+        .unwrap()
+        .build_cache_tags()
+        .unwrap()
+        .unwrap();
+        assert_ne!(first["agent"], changed["agent"]);
+        assert_ne!(first["sidecar"], changed["sidecar"]);
+    }
+
+    #[test]
+    fn remote_build_contexts_do_not_short_circuit_compose() {
+        let model = Model::parse(
+            r#"{"services":{"agent":{"build":{"context":"https://example.com/repo.git"}}}}"#
+                .to_string(),
+        )
+        .unwrap();
+        assert!(model.build_cache_tags().unwrap().is_none());
     }
 
     #[test]
