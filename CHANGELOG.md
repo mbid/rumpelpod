@@ -7,12 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Docker Compose devcontainers with persisted merged models, project-wide
-  lifecycle management, sidecar-aware port forwarding, and direct binary
-  injection into sidecars.
-
 ## [0.1.0] - TBD
 
 ### Added
