@@ -1,0 +1,6 @@
+Expose VS Code port metadata through the daemon
+
+Return Dev Container protocol and auto-forward attributes from the pod's
+stored configuration so the existing VS Code extension can safely open
+forwarded ports. Keep the forwarded-port database schema unchanged while
+covering metadata fidelity and legacy migration compatibility.
