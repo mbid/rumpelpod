@@ -9,13 +9,13 @@ interactive sessions share the CLI's established terminal behavior.
 Deny Rust warnings through inherited workspace lints so pipeline builds
 preserve the target-specific flags required for runnable musl binaries.
 
-Expose typed daemon endpoints for list and review snapshots plus live
-invalidation events. Have the extension consume them directly over the
-Unix socket without JSON CLI modes or an event subprocess. Notify review
-clients from a bounded host post-receive hook while preserving user
-hooks and custom daemon sockets. Keep this as the only new
-terminal-related rumpel core surface. Do not retain the abandoned
-daemon PTY streaming routes or API.
+Generate editor protocol typings from the daemon's list and review
+snapshots plus live invalidation events. Have the extension consume
+those endpoints directly over the Unix socket without JSON CLI modes or
+an event subprocess. Keep the extension-specific rumpel core surface
+limited to type exports; use the daemon and CLI lifecycle behavior
+shared with main.
+Do not retain the abandoned daemon PTY streaming routes or API.
 
 Publish separate Linux x64, Linux arm64, and macOS arm64 VSIX assets.
 Build them in existing platform jobs. Preserve the multi-binary rumpel

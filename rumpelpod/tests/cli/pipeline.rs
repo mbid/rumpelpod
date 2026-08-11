@@ -64,6 +64,10 @@ fn devcontainer_defers_daemon_install_to_pipeline() {
         "the image did not arrange a user manager at container boot"
     );
     assert!(
+        dockerfile.contains("docker-compose"),
+        "the combined development image could not run Compose pod tests"
+    );
+    assert!(
         !dockerfile.contains("system-install")
             && !dockerfile.contains("rumpelpod.socket")
             && !dockerfile.contains("rumpelpod.service"),
