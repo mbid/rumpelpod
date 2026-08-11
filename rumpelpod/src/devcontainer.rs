@@ -458,7 +458,7 @@ pub enum ShutdownAction {
 }
 
 /// Port protocol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PortProtocol {
     Http,
@@ -466,7 +466,7 @@ pub enum PortProtocol {
 }
 
 /// Action when a port is auto-forwarded.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum OnAutoForward {
     Notify,
