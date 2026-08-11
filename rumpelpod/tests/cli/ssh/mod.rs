@@ -888,6 +888,9 @@ fn ssh_reconnect_test() {
             ControlMaster auto
             ControlPath {control_path}
             ControlPersist 10m
+            ServerAliveInterval 1
+            ServerAliveCountMax 2
+            TCPKeepAlive yes
 
     "#, control_path = control_path.display()});
     std::fs::write(&ssh_config, ssh_config_content).unwrap();
@@ -1047,7 +1050,8 @@ fn ssh_reconnect_test() {
     // A suspended laptop can leave the local control master responsive to
     // mux requests while its remote transport no longer makes progress.
     // Stop only the established sshd children so a new TCP connection can
-    // still reach the listener after the daemon retires that master.
+    // still reach the listener after OpenSSH's keepalive policy closes the
+    // unresponsive master.
     Command::new("docker")
         .args([
             "exec",
@@ -1066,7 +1070,7 @@ fn ssh_reconnect_test() {
         .expect("connecting through a stalled SSH control master failed");
     assert!(
         reconnect_started.elapsed() < Duration::from_secs(75),
-        "stalled SSH recovery exceeded the bounded probe and control-master reset"
+        "stalled SSH recovery exceeded the configured server-alive timeout"
     );
 
     let output = pod_command(&repo, &daemon)
