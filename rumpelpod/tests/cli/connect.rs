@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use indoc::formatdoc;
 use rumpelpod::CommandExt;
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
@@ -214,4 +216,96 @@ fn connect_does_not_start_a_stopped_pod() {
         .success()
         .expect("inspecting stopped pod failed");
     assert_eq!(String::from_utf8_lossy(&output).trim(), "false");
+}
+
+#[test]
+fn connect_does_not_race_a_stop_in_progress() {
+    println!("xtest:timeout=300");
+    if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
+        executor::skip_test();
+        return;
+    }
+
+    let repo = TestRepo::new();
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let docker_path = fs::canonicalize(home.bin_dir().join("docker"))
+        .expect("resolving the real docker binary failed");
+    fs::remove_file(home.bin_dir().join("docker")).expect("removing docker symlink failed");
+    let stop_started = home.path().join("stop-started");
+    let release_stop = home.path().join("release-stop");
+    let wrapper = formatdoc! {r#"
+        #!/bin/sh
+        for arg in "$@"; do
+            if [ "$arg" = "stop" ]; then
+                touch "{stop_started}"
+                while [ ! -e "{release_stop}" ]; do
+                    sleep 0.1
+                done
+                break
+            fi
+        done
+        exec "{docker_path}" "$@"
+        "#,
+        stop_started = stop_started.display(),
+        release_stop = release_stop.display(),
+        docker_path = docker_path.display(),
+    };
+    let wrapper_path = home.bin_dir().join("docker");
+    fs::write(&wrapper_path, wrapper).expect("writing docker wrapper failed");
+    let mut permissions = fs::metadata(&wrapper_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper_path, permissions)
+        .expect("making docker wrapper executable failed");
+
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "connect-stopping", "--", "true"])
+        .success()
+        .expect("creating pod failed");
+    let container = container_id("connect-stopping");
+
+    pod_command(&repo, &daemon)
+        .args(["stop", "connect-stopping"])
+        .success()
+        .expect("starting background stop failed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !stop_started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "docker stop did not reach the test barrier"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let output = pod_command(&repo, &daemon)
+        .args(["connect", "connect-stopping"])
+        .output()
+        .expect("running connect failed");
+    fs::write(&release_stop, "").expect("releasing docker stop failed");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let inspect = Command::new(&docker_path)
+            .args(["inspect", "--format", "{{.State.Running}}", &container])
+            .success()
+            .expect("inspecting stopped pod failed");
+        if String::from_utf8_lossy(&inspect).trim() == "false" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background docker stop did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("pod 'connect-stopping' is stopping"),
+        "unexpected stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

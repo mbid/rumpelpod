@@ -404,8 +404,8 @@ pub struct DaemonServer {
     pty_sessions: crate::pty_session::PtySessions,
     /// Backend container ids served by plain `list` (no --sync).
     container_ids: Arc<Mutex<ContainerIdCache>>,
-    /// Serializes create and recreate decisions for each logical pod.
-    launch_locks: Arc<PodLaunchLocks>,
+    /// Serializes lifecycle decisions for each logical pod.
+    lifecycle_locks: Arc<PodLifecycleLocks>,
 }
 
 /// Cache of backend container ids, keyed by (repo path, pod name).
@@ -426,15 +426,15 @@ struct ContainerIdCache {
 }
 
 #[derive(Default)]
-struct PodLaunchLocks {
-    locks: Mutex<HashMap<PodLaunchKey, Weak<PodLaunchLock>>>,
+struct PodLifecycleLocks {
+    locks: Mutex<HashMap<PodLifecycleKey, Weak<PodLifecycleLock>>>,
 }
 
-type PodLaunchKey = (PathBuf, String);
-type PodLaunchLock = Mutex<()>;
+type PodLifecycleKey = (PathBuf, String);
+type PodLifecycleLock = Mutex<()>;
 
-impl PodLaunchLocks {
-    fn for_pod(&self, repo_path: &Path, pod_name: &str) -> Arc<PodLaunchLock> {
+impl PodLifecycleLocks {
+    fn for_pod(&self, repo_path: &Path, pod_name: &str) -> Arc<PodLifecycleLock> {
         let key = (repo_path.to_path_buf(), pod_name.to_string());
         let mut locks = self.locks.lock().unwrap();
         locks.retain(|_, lock| lock.strong_count() > 0);
@@ -2350,6 +2350,18 @@ impl DaemonServer {
             db::get_pod(&conn, &repo_path, &pod_name.0)?
                 .with_context(|| format!("pod '{}' not found", pod_name.0))?
         };
+        match record.status {
+            db::PodStatus::Ready | db::PodStatus::Initializing | db::PodStatus::Error => {}
+            db::PodStatus::Stopping => {
+                return Err(anyhow::anyhow!("pod '{}' is stopping", pod_name.0));
+            }
+            db::PodStatus::Deleting => {
+                return Err(anyhow::anyhow!("pod '{}' is being deleted", pod_name.0));
+            }
+            db::PodStatus::DeleteFailed => {
+                return Err(anyhow::anyhow!("pod '{}' could not be deleted", pod_name.0));
+            }
+        }
         let host: Host =
             serde_json::from_str(&record.host).context("parsing stored host for pod")?;
         let host = host
@@ -2511,10 +2523,9 @@ impl DaemonServer {
         }
 
         // Re-establish forwarded ports from DB only if the daemon
-        // doesn't already hold live forwards for this pod.  Without
-        // this, a second `rumpel enter` would drop the existing
-        // forwards vec and break any TCP connections a user has open
-        // against them.
+        // doesn't already hold live forwards for this pod.  Replacing
+        // the handles during repeated connection setup would break TCP
+        // connections users have open against them.
         if !pod_connection.has_forwarded_ports() {
             let conn = self.db.lock().unwrap();
             let handles = setup_port_forwarding(
@@ -2769,10 +2780,10 @@ impl DaemonServer {
 
         let _pod = PodClient::new(&container_url, &token, RetryPolicy::UserBlocking)?;
 
-        // Set up port forwarding for existing container on re-entry.
-        // Skip if handles for this pod are already held; otherwise a
-        // second `rumpel enter` would drop live forwards and break
-        // TCP connections the user has open.  Even when the devcontainer
+        // Set up port forwarding for an existing container.  Skip if
+        // handles for this pod are already held; replacing them during
+        // repeated connection setup would break live TCP connections.
+        // Even when the devcontainer
         // declares no `forwardPorts`, the DB may carry rows from
         // `rumpel forward-port`, so let `setup_port_forwarding`
         // discover them.
@@ -3915,7 +3926,7 @@ impl DaemonServer {
             }
 
             // 2. Delete the pod
-            Daemon::delete_pod(self, pod_name.clone(), repo_path.clone(), true)?;
+            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true)?;
 
             // 3. Create new pod (call impl directly to avoid nested thread)
             let launch_result =
@@ -4017,7 +4028,7 @@ impl DaemonServer {
             }
 
             // 2. Delete the container synchronously so launch_pod can reuse the name
-            Daemon::delete_pod(self, pod_name.clone(), repo_path.clone(), true)?;
+            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true)?;
         }
 
         // 3. Create new pod (call impl directly to avoid nested thread)
@@ -4216,157 +4227,7 @@ impl DaemonServer {
         connection.ensure_codex_proxy(container_url, container_token)
     }
 
-    fn sync_list_pod_refs(&self, repo_path: &Path, pods: &[db::PodRecord]) -> Result<()> {
-        for pod in pods {
-            match pod.status {
-                db::PodStatus::Ready => {}
-                db::PodStatus::Initializing
-                | db::PodStatus::Error
-                | db::PodStatus::Stopping
-                | db::PodStatus::Deleting
-                | db::PodStatus::DeleteFailed => continue,
-            }
-
-            let connection_status = self.pod_connections.status(repo_path, &pod.name);
-            match connection_status {
-                Some(PodConnectionStatus::Connected) | Some(PodConnectionStatus::Connecting) => {}
-                Some(PodConnectionStatus::HostDisconnected)
-                | Some(PodConnectionStatus::PodDisconnected)
-                | Some(PodConnectionStatus::Stopped)
-                | None => continue,
-            }
-
-            let Some(endpoint) = self.pod_connections.endpoint(repo_path, &pod.name) else {
-                continue;
-            };
-            let client = PodClient::new_with_timeout(
-                &endpoint.url,
-                &endpoint.token,
-                Duration::from_secs(10),
-            )
-            .with_context(|| {
-                let name = &pod.name;
-                format!("creating sync client for pod '{name}'")
-            })?;
-            client.git_push().with_context(|| {
-                let name = &pod.name;
-                format!("syncing refs from pod '{name}'")
-            })?;
-        }
-
-        Ok(())
-    }
-}
-
-pub(crate) fn generate_codex_proxy_token() -> String {
-    let bytes: [u8; 32] = rand::random();
-    hex::encode(bytes)
-}
-
-impl Daemon for DaemonServer {
-    type Progress = ServerLaunchProgress;
-
-    fn launch_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let this = self.clone();
-        let handle = std::thread::spawn(move || {
-            let launch_lock = this
-                .launch_locks
-                .for_pod(&params.repo_path, &params.pod_name.0);
-            let _guard = launch_lock.lock().unwrap();
-            this.launch_pod_impl(params, tx, InitializeMode::IfCreating)
-        });
-        Ok(ServerLaunchProgress {
-            rx: Some(rx),
-            handle: Some(handle),
-        })
-    }
-
-    fn recreate_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let this = self.clone();
-        let handle = std::thread::spawn(move || {
-            let launch_lock = this
-                .launch_locks
-                .for_pod(&params.repo_path, &params.pod_name.0);
-            let _guard = launch_lock.lock().unwrap();
-            this.recreate_pod_impl(params, tx)
-        });
-        Ok(ServerLaunchProgress {
-            rx: Some(rx),
-            handle: Some(handle),
-        })
-    }
-
-    fn fork_pod(&self, request: ForkPodRequest) -> Result<ServerLaunchProgress> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let this = self.clone();
-        let handle = std::thread::spawn(move || this.fork_pod_impl(request, tx));
-        Ok(ServerLaunchProgress {
-            rx: Some(rx),
-            handle: Some(handle),
-        })
-    }
-
-    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
-        let conn = self.db.lock().unwrap();
-        let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
-
-        // Reject k8s pods up-front so the error names this command's
-        // alternative rather than the executor's generic "stop not
-        // supported on kubernetes".
-        let host = match pod_record.as_ref() {
-            Some(record) => serde_json::from_str::<Host>(&record.host)?,
-            None => Host::Localhost {
-                engine: ContainerEngine::Auto,
-            }
-            .resolve_container_tools()?,
-        };
-        if let Host::Kubernetes { .. } = &host {
-            return Err(anyhow::anyhow!(
-                "Kubernetes pods cannot be stopped. \
-                 Use 'rumpel delete {}' instead.",
-                pod_name.0
-            ));
-        }
-        if let Some(ref record) = pod_record {
-            db::update_pod_status(&conn, record.id, db::PodStatus::Stopping)?;
-        }
-        drop(conn);
-
-        self.pod_connections.stop_events(&repo_path, &pod_name.0);
-        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
-
-        let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
-        let executor = self.host_executor(&host)?;
-
-        if wait {
-            let result = executor.stop(&pod_id);
-            let conn = self.db.lock().unwrap();
-            if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
-                let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
-            }
-            result?;
-        } else {
-            let db = self.db.clone();
-            let repo_path = repo_path.clone();
-            let pod_name = pod_name.clone();
-            std::thread::spawn(move || {
-                if let Err(e) = executor.stop(&pod_id) {
-                    let name = &pod_name.0;
-                    error!("failed to stop pod '{name}': {e}");
-                }
-                let conn = db.lock().unwrap();
-                if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
-                    let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
-                }
-            });
-        }
-
-        Ok(())
-    }
-
-    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
+    fn delete_pod_impl(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let conn = self.db.lock().unwrap();
         let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
         if let Some(ref record) = pod_record {
@@ -4463,6 +4324,164 @@ impl Daemon for DaemonServer {
         }
 
         Ok(())
+    }
+
+    fn sync_list_pod_refs(&self, repo_path: &Path, pods: &[db::PodRecord]) -> Result<()> {
+        for pod in pods {
+            match pod.status {
+                db::PodStatus::Ready => {}
+                db::PodStatus::Initializing
+                | db::PodStatus::Error
+                | db::PodStatus::Stopping
+                | db::PodStatus::Deleting
+                | db::PodStatus::DeleteFailed => continue,
+            }
+
+            let connection_status = self.pod_connections.status(repo_path, &pod.name);
+            match connection_status {
+                Some(PodConnectionStatus::Connected) | Some(PodConnectionStatus::Connecting) => {}
+                Some(PodConnectionStatus::HostDisconnected)
+                | Some(PodConnectionStatus::PodDisconnected)
+                | Some(PodConnectionStatus::Stopped)
+                | None => continue,
+            }
+
+            let Some(endpoint) = self.pod_connections.endpoint(repo_path, &pod.name) else {
+                continue;
+            };
+            let client = PodClient::new_with_timeout(
+                &endpoint.url,
+                &endpoint.token,
+                Duration::from_secs(10),
+            )
+            .with_context(|| {
+                let name = &pod.name;
+                format!("creating sync client for pod '{name}'")
+            })?;
+            client.git_push().with_context(|| {
+                let name = &pod.name;
+                format!("syncing refs from pod '{name}'")
+            })?;
+        }
+
+        Ok(())
+    }
+}
+
+pub(crate) fn generate_codex_proxy_token() -> String {
+    let bytes: [u8; 32] = rand::random();
+    hex::encode(bytes)
+}
+
+impl Daemon for DaemonServer {
+    type Progress = ServerLaunchProgress;
+
+    fn launch_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let this = self.clone();
+        let handle = std::thread::spawn(move || {
+            let lifecycle_lock = this
+                .lifecycle_locks
+                .for_pod(&params.repo_path, &params.pod_name.0);
+            let _guard = lifecycle_lock.lock().unwrap();
+            this.launch_pod_impl(params, tx, InitializeMode::IfCreating)
+        });
+        Ok(ServerLaunchProgress {
+            rx: Some(rx),
+            handle: Some(handle),
+        })
+    }
+
+    fn recreate_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let this = self.clone();
+        let handle = std::thread::spawn(move || {
+            let lifecycle_lock = this
+                .lifecycle_locks
+                .for_pod(&params.repo_path, &params.pod_name.0);
+            let _guard = lifecycle_lock.lock().unwrap();
+            this.recreate_pod_impl(params, tx)
+        });
+        Ok(ServerLaunchProgress {
+            rx: Some(rx),
+            handle: Some(handle),
+        })
+    }
+
+    fn fork_pod(&self, request: ForkPodRequest) -> Result<ServerLaunchProgress> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let this = self.clone();
+        let handle = std::thread::spawn(move || this.fork_pod_impl(request, tx));
+        Ok(ServerLaunchProgress {
+            rx: Some(rx),
+            handle: Some(handle),
+        })
+    }
+
+    fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
+        let lifecycle_lock = self.lifecycle_locks.for_pod(&repo_path, &pod_name.0);
+        let _guard = lifecycle_lock.lock().unwrap();
+        let conn = self.db.lock().unwrap();
+        let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
+
+        // Reject k8s pods up-front so the error names this command's
+        // alternative rather than the executor's generic "stop not
+        // supported on kubernetes".
+        let host = match pod_record.as_ref() {
+            Some(record) => serde_json::from_str::<Host>(&record.host)?,
+            None => Host::Localhost {
+                engine: ContainerEngine::Auto,
+            }
+            .resolve_container_tools()?,
+        };
+        if let Host::Kubernetes { .. } = &host {
+            return Err(anyhow::anyhow!(
+                "Kubernetes pods cannot be stopped. \
+                 Use 'rumpel delete {}' instead.",
+                pod_name.0
+            ));
+        }
+        if let Some(ref record) = pod_record {
+            db::update_pod_status(&conn, record.id, db::PodStatus::Stopping)?;
+        }
+        drop(conn);
+
+        self.pod_connections.stop_events(&repo_path, &pod_name.0);
+        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
+
+        let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
+        let executor = self.host_executor(&host)?;
+
+        if wait {
+            let result = executor.stop(&pod_id);
+            let conn = self.db.lock().unwrap();
+            if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
+                let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
+            }
+            result?;
+        } else {
+            let db = self.db.clone();
+            let repo_path = repo_path.clone();
+            let pod_name = pod_name.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = executor.stop(&pod_id) {
+                    let name = &pod_name.0;
+                    error!("failed to stop pod '{name}': {e}");
+                }
+                let conn = db.lock().unwrap();
+                if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
+                    let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
+                }
+            });
+        }
+
+        Ok(())
+    }
+
+    fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
+        let lifecycle_lock = self.lifecycle_locks.for_pod(&repo_path, &pod_name.0);
+        let _guard = lifecycle_lock.lock().unwrap();
+        self.delete_pod_impl(pod_name, repo_path, wait)
     }
 
     fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>> {
@@ -4775,10 +4794,10 @@ impl Daemon for DaemonServer {
     }
 
     fn connect_pod(&self, request: ConnectPodRequest) -> Result<()> {
-        let launch_lock = self
-            .launch_locks
+        let lifecycle_lock = self
+            .lifecycle_locks
             .for_pod(&request.repo_path, &request.pod_name);
-        let _guard = launch_lock.lock().unwrap();
+        let _guard = lifecycle_lock.lock().unwrap();
         self.connect_pod_impl(request)
     }
 
@@ -4958,7 +4977,7 @@ pub fn run_daemon() -> Result<()> {
         pod_connections,
         pty_sessions: crate::pty_session::PtySessions::new(),
         container_ids: Arc::new(Mutex::new(ContainerIdCache::default())),
-        launch_locks: Arc::new(PodLaunchLocks::default()),
+        lifecycle_locks: Arc::new(PodLifecycleLocks::default()),
     };
 
     // Re-establish connections to pods that were running before we

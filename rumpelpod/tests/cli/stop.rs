@@ -4,7 +4,7 @@
 //! Integration tests for the `rumpel stop` subcommand (multi-pod support).
 
 use std::fs;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::common::{pod_command, write_test_devcontainer, TestDaemon, TestHome, TestRepo};
 use crate::executor::{executor_supports_stop, ExecutorResources};
@@ -162,7 +162,7 @@ fn stop_sends_reconnect_stopped_event() {
             .expect("pod_reconnect_events failed");
         for event in stream {
             let event = event.expect("error reading reconnect event");
-            let done = matches!(event, ReconnectEvent::Stopped | ReconnectEvent::Connected);
+            let done = matches!(event, ReconnectEvent::Stopped);
             let _ = tx.send(event);
             if done {
                 break;
@@ -181,13 +181,19 @@ fn stop_sends_reconnect_stopped_event() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let event = rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("no event from reconnect stream after stop");
-    assert!(
-        matches!(event, ReconnectEvent::Stopped),
-        "expected Stopped event, got {event:?}"
-    );
+    // The event loop may publish an initial or in-flight recovery event
+    // after this subscriber attaches. The stop contract is that the
+    // stream eventually terminates with Stopped.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = rx
+            .recv_timeout(remaining)
+            .expect("no Stopped event from reconnect stream after stop");
+        if matches!(event, ReconnectEvent::Stopped) {
+            break;
+        }
+    }
 }
 
 /// When a pod has already been stopped, subscribing to its reconnect

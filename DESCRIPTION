@@ -3,7 +3,7 @@ Add supervised and on-demand pod connections
 Recover dead git tunnels as daemon-owned pod resources after transport
 outages, tunnel process failures, and daemon restarts. Serialize
 foreground and background setup so recovery cannot race a concurrent
-enter.
+enter, stop, or delete.
 
 Back off pod repair attempts and pause them after repeated failures
 while the host remains reachable. A re-established shared host
