@@ -1089,6 +1089,81 @@ fn ssh_reconnect_test() {
     );
 }
 
+/// A host disconnect must discard the daemon-side Codex frontend. Otherwise
+/// a later invocation reattaches to a TUI whose proxy still uses the dead SSH
+/// transport and waits forever.
+#[test]
+fn codex_reconnects_after_ssh_transport_stall() {
+    println!("xtest:timeout=480");
+    if cfg!(target_os = "macos") {
+        crate::executor::skip_test();
+        return;
+    }
+    if !matches!(
+        crate::executor::executor_mode(),
+        crate::executor::ExecutorMode::Docker | crate::executor::ExecutorMode::Ssh
+    ) {
+        crate::executor::skip_test();
+        return;
+    }
+
+    let home = TestHome::new();
+    crate::codex::common::setup_controlled_home(&home);
+    let remote = SshRemoteHost::start();
+    write_ssh_config(&home, &[&remote]);
+    let ssh_config = home.path().join(".ssh/config");
+    let mut ssh_config_content = std::fs::read_to_string(&ssh_config).unwrap();
+    let control_path = home.path().join("ssh-control-%C");
+    ssh_config_content.push_str(&formatdoc! {r#"
+        Host *
+            ControlMaster auto
+            ControlPath {control_path}
+            ControlPersist 10m
+            ServerAliveInterval 1
+            ServerAliveCountMax 2
+            TCPKeepAlive yes
+
+    "#, control_path = control_path.display()});
+    std::fs::write(&ssh_config, ssh_config_content).unwrap();
+    let daemon = TestDaemon::start_with_local_llm_clis(&home);
+
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+    let config = serde_json::to_string(&serde_json::json!({"host": remote.ssh_spec()})).unwrap();
+    std::fs::write(repo.path().join(".rumpelpod.json"), config).unwrap();
+
+    let pod_name = "codex-ssh-reconnect";
+    let mut first =
+        crate::codex::common::CodexSession::spawn_named(&repo, &daemon, home.path(), pod_name, &[]);
+    first.dismiss_dialogs_with_timeout(Duration::from_secs(60));
+    first.send_with_timeout(
+        "What is the capital of France? Reply with just the city name, nothing else.",
+        Duration::from_secs(30),
+    );
+    first.wait_for_with_timeout("Paris", Duration::from_secs(45));
+
+    Command::new("docker")
+        .args(["pause", &remote.container_id])
+        .success()
+        .expect("pausing the SSH host failed");
+    first.wait_for_exit_with_timeout(Duration::from_secs(60));
+
+    Command::new("docker")
+        .args(["unpause", &remote.container_id])
+        .success()
+        .expect("resuming the SSH host failed");
+    remote.wait_for_ssh_connectivity(&ssh_config);
+
+    let mut second =
+        crate::codex::common::CodexSession::spawn_named(&repo, &daemon, home.path(), pod_name, &[]);
+    second.dismiss_dialogs_with_timeout(Duration::from_secs(60));
+    second.send_with_timeout(
+        "What git remote has other pods? One word, all uppercase.",
+        Duration::from_secs(30),
+    );
+    second.wait_for_with_timeout("RUMPELPOD", Duration::from_secs(45));
+}
+
 #[test]
 fn ssh_unavailable_reentry_preserves_pod_record() {
     println!("xtest:timeout=215");
