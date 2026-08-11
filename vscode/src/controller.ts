@@ -5,9 +5,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
-import type { PodInfo } from "./generated/protocol";
+import type { PodInfo, PortInfo } from "./generated/protocol";
 import { AGENTS, agentDescription, agentLabel, type AgentKind } from "./agents";
 import { SshPassphraseRequiredError, type Repository, type RumpelpodModel } from "./model";
+import type { PortPreviews } from "./ports";
 import type { ReviewDocuments } from "./review";
 import type {
   AgentMenuOption,
@@ -24,9 +25,14 @@ interface ActivePod {
   readonly repository: Repository;
 }
 
+interface PortPick extends vscode.QuickPickItem {
+  readonly port: PortInfo;
+}
+
 export class RumpelpodController {
   private active: ActivePod | undefined;
   private agentLaunches = Promise.resolve();
+  private automaticPreviewGeneration: number | undefined;
   private modeEntries = Promise.resolve();
   private podOperations = Promise.resolve();
   private reviewUpdates = Promise.resolve();
@@ -37,6 +43,7 @@ export class RumpelpodController {
     private readonly model: RumpelpodModel,
     private readonly terminals: AgentTerminals,
     private readonly reviewDocuments: ReviewDocuments,
+    private readonly portPreviews: PortPreviews,
     private readonly status: vscode.StatusBarItem,
   ) {}
 
@@ -84,6 +91,7 @@ export class RumpelpodController {
       );
       this.updateStatus();
       await this.revealActiveReview();
+      await this.tryAutomaticPortPreview(selected);
     });
     this.modeEntries = result.catch(() => {});
     return result;
@@ -123,6 +131,7 @@ export class RumpelpodController {
       const info = pods.find((pod) => pod.name === selected.pod);
       this.active = { ...active, info };
       this.updateStatus();
+      await this.tryAutomaticPortPreview(this.active);
     });
   }
 
@@ -215,6 +224,12 @@ export class RumpelpodController {
         return;
       case "openPod":
         await this.openPodSelection(action.repository, action.pod);
+        return;
+      case "openPort":
+        await this.openForwardedPort(false);
+        return;
+      case "openPortExternal":
+        await this.openForwardedPort(true);
         return;
       case "openShell":
         this.openActiveShell();
@@ -309,6 +324,7 @@ export class RumpelpodController {
         `The ${pod.name} pod is open, but its review is not available: ${message}`,
       );
     }
+    await this.tryAutomaticPortPreview(selected);
   }
 
   public async launchAgentMenu(request?: number): Promise<void> {
@@ -371,6 +387,104 @@ export class RumpelpodController {
       selected.repository,
       selected.pod,
       this.model.executable(),
+    );
+  }
+
+  public async openForwardedPort(external: boolean): Promise<void> {
+    const selected = this.requireActivePod("opening a forwarded port from");
+    if (selected.info?.status !== "Running") {
+      throw new Error(`pod '${selected.pod}' is not running`);
+    }
+    const port = await this.pickForwardedPort(selected);
+    if (port === undefined || this.currentSelection(selected) === undefined) {
+      return;
+    }
+    if (external) {
+      const resolved = await vscode.env.asExternalUri(localPortUri(port));
+      if (this.currentSelection(selected) === undefined) {
+        return;
+      }
+      const opened = await vscode.env.openExternal(resolved);
+      if (!opened) {
+        throw new Error(`the external browser did not open ${portDisplayName(port)}`);
+      }
+      return;
+    }
+    await this.openPortPreview(selected, port, false);
+  }
+
+  private async pickForwardedPort(selected: ActivePod): Promise<PortInfo | undefined> {
+    const ports = await this.model.listPorts(selected.repository, selected.pod);
+    if (this.currentSelection(selected) === undefined) {
+      return undefined;
+    }
+    if (ports.length === 0) {
+      void vscode.window.showInformationMessage(
+        `Pod '${selected.pod}' does not expose any forwarded ports.`,
+      );
+      return undefined;
+    }
+    if (ports.length === 1) {
+      return ports[0];
+    }
+    const picked = await vscode.window.showQuickPick<PortPick>(
+      ports.map((port) => ({
+        description: localPortUri(port).toString(true),
+        detail: `Forwards ${portTarget(port)}`,
+        label: portDisplayName(port),
+        port,
+      })),
+      {
+        placeHolder: `Select a forwarded port from ${selected.pod}`,
+        title: "Open Forwarded Port",
+      },
+    );
+    return picked?.port;
+  }
+
+  private async tryAutomaticPortPreview(selected: ActivePod): Promise<void> {
+    if (
+      selected.info?.status !== "Running" ||
+      this.automaticPreviewGeneration === selected.generation ||
+      this.currentSelection(selected) === undefined
+    ) {
+      return;
+    }
+    try {
+      const ports = await this.model.listPorts(selected.repository, selected.pod);
+      if (this.currentSelection(selected) === undefined) {
+        return;
+      }
+      const previews = ports.filter((port) => port.on_auto_forward === "openPreview");
+      for (const preview of previews) {
+        await this.openPortPreview(selected, preview, true);
+      }
+      this.automaticPreviewGeneration = selected.generation;
+    } catch (error) {
+      this.model.logError(`opening the automatic port preview for ${selected.pod}`, error);
+      const message = errorMessage(error);
+      void vscode.window.showWarningMessage(
+        `The ${selected.pod} pod is open, but its port preview is not available: ${message}`,
+      );
+    }
+  }
+
+  private async openPortPreview(
+    selected: ActivePod,
+    port: PortInfo,
+    preserveFocus: boolean,
+  ): Promise<void> {
+    const resolved = await vscode.env.asExternalUri(localPortUri(port));
+    if (this.currentSelection(selected) === undefined) {
+      return;
+    }
+    this.portPreviews.open(
+      selected.repository.root,
+      selected.pod,
+      portTarget(port),
+      portDisplayName(port),
+      resolved,
+      preserveFocus,
     );
   }
 
@@ -576,6 +690,7 @@ export class RumpelpodController {
         : this.model.forgetRememberedPod(selected.repository, selected.pod),
       this.reviewDocuments.close(selected.repository, selected.pod),
     ];
+    this.portPreviews.close(selected.repository.root, selected.pod);
     if (this.currentSelection(selected) !== undefined) {
       this.selectionGeneration += 1;
       this.active = undefined;
@@ -762,4 +877,21 @@ function validatePodName(value: string): string | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function localPortUri(port: PortInfo): vscode.Uri {
+  return vscode.Uri.from({
+    authority: `127.0.0.1:${port.local_port}`,
+    scheme: port.protocol ?? "http",
+  });
+}
+
+function portDisplayName(port: PortInfo): string {
+  return port.label.length > 0 ? port.label : `Port ${portTarget(port)}`;
+}
+
+function portTarget(port: PortInfo): string {
+  return port.service.length === 0
+    ? String(port.container_port)
+    : `${port.service}:${port.container_port}`;
 }

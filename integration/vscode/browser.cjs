@@ -783,7 +783,11 @@ async function waitForReview(page, podName, changedFile, originalContent, podCon
         `review retained the verbose title: ${title}`,
     );
     await assertEditorTabsVisible(page);
-    const editorText = await page.locator(".editor-instance:visible").last().textContent();
+    const editorText = await page
+        .locator(".editor-instance:visible")
+        .filter({ has: page.locator(".monaco-diff-editor:visible") })
+        .last()
+        .textContent();
     assert(editorText?.includes(changedFile), `review did not label ${changedFile}`);
     assert(editorText?.includes(ADDED_FILE), `review did not label ${ADDED_FILE}`);
     return diffEditors.first();
@@ -792,11 +796,42 @@ async function waitForReview(page, podName, changedFile, originalContent, podCon
 async function assertEditorTabsVisible(page) {
     await page
         .locator(".editor-group-container .tabs-and-actions-container:visible")
+        .first()
         .waitFor({ state: "visible", timeout: 30_000 });
     assert(
         (await page.locator(".editor-group-container .tabs-container .tab:visible").count()) > 0,
         "the extension hid VS Code's editor tabs for the entire window",
     );
+}
+
+async function waitForForwardedPreview(page, content) {
+    const tab = page.locator(".tab:visible").filter({ hasText: "Browser fixture" });
+    await tab.waitFor({ state: "visible", timeout: 30_000 });
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+        for (const frame of page.frames()) {
+            if (
+                await frame
+                    .locator('iframe[sandbox="allow-forms allow-scripts"]')
+                    .count()
+                    .catch(() => 0)
+            ) {
+                for (const child of frame.childFrames()) {
+                    if (
+                        (await child.locator("body").textContent().catch(() => ""))?.includes(content)
+                    ) {
+                        assert(
+                            (await page.locator(".editor-group-container:visible").count()) >= 2,
+                            "the forwarded preview did not open beside the review",
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        await page.waitForTimeout(100);
+    }
+    throw new Error(`forwarded port preview did not render content: ${content}`);
 }
 
 async function verifyReviewFocusAndCloseLifecycle(
@@ -977,6 +1012,7 @@ async function main() {
     const changedFile = requiredEnvironment("RUMPELPOD_VSCODE_CHANGED_FILE");
     const originalContent = requiredEnvironment("RUMPELPOD_VSCODE_ORIGINAL_CONTENT");
     const podContent = requiredEnvironment("RUMPELPOD_VSCODE_POD_CONTENT");
+    const previewContent = requiredEnvironment("RUMPELPOD_VSCODE_PREVIEW_CONTENT");
     const inactivePodContent = `${podContent} while file active`;
     const finalPodContent = `${podContent} after close`;
     const repoRoot = requiredEnvironment("RUMPELPOD_VSCODE_REPO_ROOT");
@@ -1040,6 +1076,7 @@ async function main() {
             "cleared input sent through the embedded xterm",
         );
         await waitForEmptyReview(page, podName);
+        await waitForForwardedPreview(page, previewContent);
         await assertNoNativeAgentEditor(page, podName);
         assert(
             !(await page.title()).includes("-review.txt"),
@@ -1327,6 +1364,8 @@ async function main() {
         const moreLabels = await popoverRows(morePopover).allTextContents();
         assert(
             moreLabels.some((label) => label.includes("View diff")) &&
+                moreLabels.some((label) => label.includes("Open port in VS Code")) &&
+                moreLabels.some((label) => label.includes("Open port in browser")) &&
                 moreLabels.some((label) => label.includes("Refresh pod")) &&
                 moreLabels.some((label) => label.includes("Add SSH key")) &&
                 moreLabels.some((label) => label.includes("Stop pod")) &&
@@ -1339,8 +1378,18 @@ async function main() {
             2,
             "pod action menu did not group secondary and lifecycle actions",
         );
-        await page.keyboard.press("Escape");
-        await morePopover.waitFor({ state: "hidden", timeout: 30_000 });
+        const externalPagePromise = context.waitForEvent("page", { timeout: 30_000 });
+        await selectPopoverOption(morePopover, "Open port in browser");
+        const externalPage = await externalPagePromise;
+        await externalPage.locator("body").filter({ hasText: previewContent }).waitFor({
+            state: "visible",
+            timeout: 30_000,
+        });
+        assert(
+            externalPage.url().startsWith("http://") || externalPage.url().startsWith("https://"),
+            `external forwarded port used an unexpected URL: ${externalPage.url()}`,
+        );
+        await externalPage.close();
 
         const createPod = page
             .locator('.part.sidebar:visible [aria-label="Create Pod"]')
@@ -1446,8 +1495,11 @@ async function main() {
             originalContent,
             finalPodContent,
         );
+        const activeRestoredReview = page
+            .locator(".tab.active:visible")
+            .filter({ hasText: podName });
         assert(
-            (await retainedReviewTab.getAttribute("class"))?.split(" ").includes("active"),
+            (await activeRestoredReview.count()) === 1,
             "switching pods did not focus its existing review tab",
         );
         await assertOpenReviews(page, podName, [podName, createdPodName]);

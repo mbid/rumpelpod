@@ -4,7 +4,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 
-import type { PodInfo, ReviewPlan } from "./generated/protocol";
+import type { PodInfo, PortInfo, ReviewPlan } from "./generated/protocol";
 import { isAgentKind, type AgentKind } from "./agents";
 import type { RumpelpodDaemon } from "./daemon";
 import { ProcessError, runProcess } from "./process";
@@ -57,6 +57,10 @@ export class RumpelpodModel {
 
   public async review(repository: Repository, pod: string): Promise<ReviewPlan> {
     return this.daemon.review(repository.root, pod);
+  }
+
+  public async listPorts(repository: Repository, pod: string): Promise<readonly PortInfo[]> {
+    return this.daemon.listPorts(repository.root, pod);
   }
 
   public async mergePod(repository: Repository, pod: string): Promise<void> {

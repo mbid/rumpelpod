@@ -26,6 +26,8 @@ const CREATED_POD_NAME: &str = "vscode-created";
 const CHANGED_FILE: &str = "browser-diff.txt";
 const ORIGINAL_CONTENT: &str = "content from the host";
 const POD_CONTENT: &str = "content from the pod";
+const PREVIEW_CONTENT: &str = "rumpelpod forwarded preview";
+const PREVIEW_PORT: u16 = 18765;
 struct CodeServer {
     child: Child,
 }
@@ -298,6 +300,7 @@ fn run_browser_assertions(
         .env("RUMPELPOD_VSCODE_CHANGED_FILE", CHANGED_FILE)
         .env("RUMPELPOD_VSCODE_ORIGINAL_CONTENT", ORIGINAL_CONTENT)
         .env("RUMPELPOD_VSCODE_POD_CONTENT", POD_CONTENT)
+        .env("RUMPELPOD_VSCODE_PREVIEW_CONTENT", PREVIEW_CONTENT)
         .env("RUMPELPOD_VSCODE_REPO_ROOT", repo.path())
         .env("RUMPELPOD_VSCODE_RUMPEL", daemon.bin_dir.join("rumpel"))
         .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
@@ -782,8 +785,13 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
         format!("{ORIGINAL_CONTENT}\n"),
     )
     .expect("write initial file");
+    fs::write(
+        repo.path().join("index.html"),
+        format!("<!doctype html><title>Rumpelpod preview</title>{PREVIEW_CONTENT}\n"),
+    )
+    .expect("write forwarded preview fixture");
     Command::new("git")
-        .args(["add", CHANGED_FILE])
+        .args(["add", CHANGED_FILE, "index.html"])
         .current_dir(repo.path())
         .success()
         .expect("stage initial file");
@@ -794,11 +802,33 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     home.link_local_bins(&["ssh-agent", "ssh-add"]);
     let executor = ExecutorResources::setup(&home);
     let daemon = TestDaemon::start_with_local_llm_clis(&home);
-    write_test_devcontainer(&repo, "", "");
+    let port_config = formatdoc! {r#",
+        "forwardPorts": [{PREVIEW_PORT}],
+        "portsAttributes": {{
+            "{PREVIEW_PORT}": {{
+                "label": "Browser fixture",
+                "protocol": "http",
+                "onAutoForward": "openPreview"
+            }}
+        }}
+    "#};
+    write_test_devcontainer(&repo, "RUN apk add --no-cache socat\n", &port_config);
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).expect("write rumpelpod config");
 
     pod_command(&repo, &daemon)
-        .args(["enter", "--create", POD_NAME, "--", "echo", "setup"])
+        .args([
+            "enter",
+            "--create",
+            POD_NAME,
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "nohup sh -c 'while true; do printf \"HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}\" | socat - TCP-LISTEN:{PREVIEW_PORT},reuseaddr; done' >/tmp/rumpelpod-preview.log 2>&1 &",
+                PREVIEW_CONTENT.len(),
+                PREVIEW_CONTENT,
+            ),
+        ])
         .success()
         .expect("launch test pod");
 

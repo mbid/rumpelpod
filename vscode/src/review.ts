@@ -203,16 +203,18 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       } satisfies OpenMultiDiffEditorOptions,
     );
     let tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-    // Another editor can grab focus between the open command and this
-    // point; unpinning acts on the active editor, so only unpin what is
-    // provably the review just opened.
+    // Editor commands act on the active editor, which another operation can
+    // replace between awaits, so only change a tab proven to be this review.
     if (tab?.isPinned === true && isSnapshotReviewTab(tab, snapshot)) {
-      await vscode.commands.executeCommand("workbench.action.unpinEditor");
-      tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+      tab = await changeReviewTab("workbench.action.unpinEditor", snapshot, tab.group);
+    }
+    if (tab?.isPreview === true && isSnapshotReviewTab(tab, snapshot)) {
+      tab = await changeReviewTab("workbench.action.keepEditor", snapshot, tab.group);
     }
     if (
       tab === undefined ||
       tab.isPinned ||
+      tab.isPreview ||
       !isSnapshotReviewTab(tab, snapshot)
     ) {
       throw new Error(`VS Code did not open the review for pod '${snapshot.pod}'`);
@@ -227,16 +229,45 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
       if (current !== undefined) {
         await this.closeReviewNow(key, current);
       }
+      // VS Code can restore a populated tab before this extension rebuilds its
+      // in-memory record, so cleanup also identifies its review file URIs.
+      const restored = vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .filter((tab) => isPodReviewTab(tab, repository.root, pod));
+      if (restored.length > 0) {
+        await vscode.window.tabGroups.close(restored, true);
+        for (const tab of restored) {
+          this.evictTab(tab);
+        }
+      }
     });
   }
 
   private async closeReviewNow(key: string, review: ReviewTab): Promise<void> {
     this.reviews.delete(key);
-    const tabs = vscode.window.tabGroups.all.flatMap((group) =>
-      group.tabs.filter((tab) => isSameReviewTab(tab, review)),
-    );
-    if (tabs.length > 0) {
-      await vscode.window.tabGroups.close(tabs, true);
+    if (review.resources.length === 0) {
+      // Empty multi-diff tab inputs omit their source URI, so asking the
+      // editor service for that source is the only exact lookup after reload.
+      await vscode.commands.executeCommand(
+        "_workbench.openMultiDiffEditor",
+        {
+          multiDiffSourceUri: vscode.Uri.parse(review.source),
+          resources: review.resources,
+          title: review.pod,
+        } satisfies OpenMultiDiffEditorOptions,
+      );
+      const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+      if (tab === undefined || !isSnapshotReviewTab(tab, review)) {
+        throw new Error(`VS Code did not find the review for pod '${review.pod}'`);
+      }
+      await vscode.window.tabGroups.close(tab, true);
+    } else {
+      const tabs = vscode.window.tabGroups.all.flatMap((group) =>
+        group.tabs.filter((tab) => isSameReviewTab(tab, review))
+      );
+      if (tabs.length > 0) {
+        await vscode.window.tabGroups.close(tabs, true);
+      }
     }
     this.evict(review);
   }
@@ -368,6 +399,18 @@ function isSameReviewTab(tab: vscode.Tab, review: ReviewTab): boolean {
     return false;
   }
   return isSnapshotReviewTab(tab, review);
+}
+
+async function changeReviewTab(
+  command: string,
+  snapshot: ReviewSnapshot,
+  group: vscode.TabGroup,
+): Promise<vscode.Tab | undefined> {
+  await vscode.commands.executeCommand(command);
+  const changed = group.activeTab;
+  return changed !== undefined && isSnapshotReviewTab(changed, snapshot)
+    ? changed
+    : undefined;
 }
 
 function isSnapshotReviewTab(tab: vscode.Tab, snapshot: ReviewSnapshot): boolean {

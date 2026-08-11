@@ -7,6 +7,7 @@ import { RumpelpodController } from "./controller";
 import { RumpelpodDaemon } from "./daemon";
 import { DaemonEvents } from "./events";
 import { RumpelpodModel } from "./model";
+import { PortPreviews } from "./ports";
 import { ReviewDocuments } from "./review";
 import { AGENT_VIEW_ID, AgentTerminals, type AgentViewAction } from "./terminal";
 
@@ -25,16 +26,18 @@ export function activate(context: vscode.ExtensionContext): void {
   const reviews = new ReviewDocuments((operation, error) => {
     model.logError(operation, error);
   });
+  const previews = new PortPreviews();
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.name = "Rumpelpod Active Pod";
   status.command = "rumpelpod.showPods";
-  const controller = new RumpelpodController(model, terminals, reviews, status);
+  const controller = new RumpelpodController(model, terminals, reviews, previews, status);
   const events = new DaemonEvents(daemon, model, controller);
 
   context.subscriptions.push(
     output,
     terminals,
     reviews,
+    previews,
     status,
     events,
     terminals.onDidShow(() => {
@@ -65,6 +68,14 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("rumpelpod.openActiveShell", () =>
       runCommand(model, "opening a pod shell", async () => controller.openActiveShell()),
+    ),
+    vscode.commands.registerCommand("rumpelpod.openForwardedPort", () =>
+      runCommand(model, "opening a forwarded port in VS Code", () =>
+        controller.openForwardedPort(false)),
+    ),
+    vscode.commands.registerCommand("rumpelpod.openForwardedPortExternal", () =>
+      runCommand(model, "opening a forwarded port in an external browser", () =>
+        controller.openForwardedPort(true)),
     ),
     vscode.commands.registerCommand("rumpelpod.mergeActivePod", () =>
       runCommand(model, "merging the active pod", () => controller.mergeActivePod()),
@@ -102,6 +113,8 @@ function dismissFailedMenu(terminals: AgentTerminals, action: AgentViewAction): 
     case "createPod":
     case "addSshKey":
     case "openPod":
+    case "openPort":
+    case "openPortExternal":
     case "openShell":
     case "refresh":
     case "launchAgent":
@@ -129,6 +142,10 @@ function viewActionContext(action: AgentViewAction): string {
       return "merging the active pod";
     case "openPod":
       return "selecting a pod";
+    case "openPort":
+      return "opening a forwarded port in VS Code";
+    case "openPortExternal":
+      return "opening a forwarded port in an external browser";
     case "openShell":
       return "opening a pod shell";
     case "podMenu":

@@ -4,10 +4,14 @@
 import * as http from "node:http";
 import * as path from "node:path";
 
-import type { DaemonEvent, PodInfo, ReviewPlan } from "./generated/protocol";
+import type { DaemonEvent, PodInfo, PortInfo, ReviewPlan } from "./generated/protocol";
 
 interface ListPodsResponse {
   readonly pods: readonly PodInfo[];
+}
+
+interface ListPortsResponse {
+  readonly ports: readonly PortInfo[];
 }
 
 interface SseMessage {
@@ -49,6 +53,20 @@ export class RumpelpodDaemon {
       isReviewPlan,
       `preparing review for '${pod}'`,
     );
+  }
+
+  public async listPorts(repository: string, pod: string): Promise<readonly PortInfo[]> {
+    const response = await this.requestJson(
+      "GET",
+      "/pod/ports",
+      {
+        pod_name: pod,
+        repo_path: repository,
+      },
+      isListPortsResponse,
+      `listing forwarded ports for '${pod}'`,
+    );
+    return response.ports;
   }
 
   public events(onEvent: (event: DaemonEvent) => void): DaemonEventStream {
@@ -148,6 +166,67 @@ export class RumpelpodDaemon {
         reject(error);
       };
 
+      request.on("error", fail);
+      request.end(body);
+    });
+  }
+
+  private requestJson<T>(
+    method: "GET" | "POST",
+    endpoint: string,
+    value: object,
+    validator: Validator<T>,
+    operation: string,
+  ): Promise<T> {
+    const body = JSON.stringify(value);
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const succeed = (result: T): void => {
+        if (!settled) {
+          settled = true;
+          resolve(result);
+        }
+      };
+      const fail = (error: unknown): void => {
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+      };
+      const request = http.request(
+        {
+          socketPath: this.socketPath,
+          path: endpoint,
+          method,
+          headers: {
+            "content-length": Buffer.byteLength(body),
+            "content-type": "application/json",
+          },
+        },
+        (response) => {
+          if (response.statusCode !== 200) {
+            readHttpError(response, operation, fail);
+            return;
+          }
+          let responseBody = "";
+          response.setEncoding("utf8");
+          response.on("data", (chunk: string) => {
+            responseBody += chunk;
+          });
+          response.on("error", fail);
+          response.on("end", () => {
+            try {
+              const result: unknown = JSON.parse(responseBody);
+              if (!validator(result)) {
+                throw new Error(`rumpelpod daemon returned an invalid result while ${operation}`);
+              }
+              succeed(result);
+            } catch (error) {
+              fail(error);
+            }
+          });
+        },
+      );
       request.on("error", fail);
       request.end(body);
     });
@@ -330,6 +409,63 @@ function isListPodsResponse(value: unknown): value is ListPodsResponse {
     Array.isArray(value.pods) &&
     value.pods.every(isPodInfo)
   );
+}
+
+function isListPortsResponse(value: unknown): value is ListPortsResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "ports" in value &&
+    Array.isArray(value.ports) &&
+    value.ports.every(isPortInfo)
+  );
+}
+
+function isPortInfo(value: unknown): value is PortInfo {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "service" in value &&
+    "container_port" in value &&
+    "local_port" in value &&
+    "label" in value &&
+    "protocol" in value &&
+    "on_auto_forward" in value &&
+    typeof value.service === "string" &&
+    isPortNumber(value.container_port) &&
+    isPortNumber(value.local_port) &&
+    typeof value.label === "string" &&
+    isPortProtocol(value.protocol) &&
+    isOnAutoForward(value.on_auto_forward)
+  );
+}
+
+function isPortNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65_535;
+}
+
+function isPortProtocol(value: unknown): value is PortInfo["protocol"] {
+  switch (value) {
+    case null:
+    case "http":
+    case "https":
+      return true;
+  }
+  return false;
+}
+
+function isOnAutoForward(value: unknown): value is PortInfo["on_auto_forward"] {
+  switch (value) {
+    case null:
+    case "notify":
+    case "openBrowser":
+    case "openBrowserOnce":
+    case "openPreview":
+    case "silent":
+    case "ignore":
+      return true;
+  }
+  return false;
 }
 
 function isPodInfo(value: unknown): value is PodInfo {

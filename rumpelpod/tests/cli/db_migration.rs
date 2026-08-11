@@ -128,15 +128,24 @@ fn pre_compose_database_preserves_data_and_accepts_new_pods() {
         )
         .expect("read migrated legacy pod");
     assert_eq!(legacy_compose, (String::new(), String::new()));
-    let legacy_port: (String, u16, u16) = conn
+    let legacy_port: (String, u16, u16, Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT service, container_port, local_port FROM forwarded_ports
+            "SELECT service, container_port, local_port, protocol, on_auto_forward
+             FROM forwarded_ports
              WHERE pod_id = ?",
             [legacy_pod_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .expect("read migrated legacy forwarded port");
-    assert_eq!(legacy_port, (String::new(), 8080, 60000));
+    assert_eq!(legacy_port, (String::new(), 8080, 60000, None, None));
 
     let new_pod_compose: (String, String) = conn
         .query_row(

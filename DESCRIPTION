@@ -5,6 +5,12 @@ Attach agent and shell sessions in sidebar xterm terminals. Show pod
 changes in native VS Code multi-diff editors. Run CLI commands under a
 packaged node-pty binding. Pod creation, lifecycle output, and
 interactive sessions share the CLI's established terminal behavior.
+Expose forwarded ports through the extension. Open Dev Container
+`openPreview` ports automatically in a restricted VS Code preview
+beside the pod review. The preview gives untrusted pages an opaque
+origin and no access to VS Code or workspace resources. Keep external
+browser opening explicit and offer both destinations from the pod menu
+and Command Palette.
 
 Deny Rust warnings through inherited workspace lints so pipeline builds
 preserve the target-specific flags required for runnable musl binaries.

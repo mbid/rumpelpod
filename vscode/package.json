@@ -78,6 +78,20 @@
         "enablement": "rumpelpod.hasActivePod"
       },
       {
+        "command": "rumpelpod.openForwardedPort",
+        "title": "Open Forwarded Port in VS Code",
+        "category": "Rumpelpod",
+        "icon": "$(preview)",
+        "enablement": "rumpelpod.hasActivePod"
+      },
+      {
+        "command": "rumpelpod.openForwardedPortExternal",
+        "title": "Open Forwarded Port in External Browser",
+        "category": "Rumpelpod",
+        "icon": "$(link-external)",
+        "enablement": "rumpelpod.hasActivePod"
+      },
+      {
         "command": "rumpelpod.mergeActivePod",
         "title": "Merge Active Pod",
         "category": "Rumpelpod",

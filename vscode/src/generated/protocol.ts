@@ -4,5 +4,6 @@
 // Rust is the source of truth for these API types.
 export type { DaemonEvent } from "./DaemonEvent";
 export type { PodInfo } from "./PodInfo";
+export type { PortInfo } from "./PortInfo";
 export type { ReviewFile } from "./ReviewFile";
 export type { ReviewPlan } from "./ReviewPlan";

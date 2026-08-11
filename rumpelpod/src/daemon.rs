@@ -1476,22 +1476,24 @@ fn setup_port_forwarding(
             } else {
                 format!("{}:{container_port}", target.service)
             };
-            let label = ports_attributes
+            let attributes = ports_attributes
                 .get(&attribute_key)
                 .or_else(|| ports_attributes.get(&container_port.to_string()))
-                .or(other_ports_attributes.as_ref())
-                .and_then(|a| a.label.as_deref())
+                .or(other_ports_attributes.as_ref());
+            let label = attributes
+                .and_then(|attributes| attributes.label.as_deref())
                 .unwrap_or("")
                 .to_string();
 
-            db::insert_forwarded_port(
-                conn,
-                db_pod_id,
-                &target.service,
+            let port = db::ForwardedPort {
+                service: target.service.clone(),
                 container_port,
                 local_port,
-                &label,
-            )?;
+                label,
+                protocol: attributes.and_then(|attributes| attributes.protocol),
+                on_auto_forward: attributes.and_then(|attributes| attributes.on_auto_forward),
+            };
+            db::insert_forwarded_port(conn, db_pod_id, &port)?;
 
             let container = forwarding_container(
                 &target.service,
@@ -5562,6 +5564,8 @@ impl Daemon for DaemonServer {
                 container_port: p.container_port,
                 local_port: p.local_port,
                 label: p.label,
+                protocol: p.protocol,
+                on_auto_forward: p.on_auto_forward,
             })
             .collect())
     }
@@ -5675,14 +5679,15 @@ impl Daemon for DaemonServer {
 
         {
             let conn = self.db.lock().unwrap();
-            db::insert_forwarded_port(
-                &conn,
-                db_pod_id,
-                &service,
+            let port = db::ForwardedPort {
+                service: service.clone(),
                 container_port,
-                actual_local_port,
-                &label,
-            )?;
+                local_port: actual_local_port,
+                label: label.clone(),
+                protocol: None,
+                on_auto_forward: None,
+            };
+            db::insert_forwarded_port(&conn, db_pod_id, &port)?;
         }
 
         let handle = crate::exec_proxy::start_exec_proxy_on_listener_in_container(
@@ -5698,6 +5703,8 @@ impl Daemon for DaemonServer {
             container_port,
             local_port: actual_local_port,
             label,
+            protocol: None,
+            on_auto_forward: None,
         })
     }
 

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use ts_rs::TS;
 
 /// A devcontainer.json configuration.
 ///
@@ -458,16 +459,18 @@ pub enum ShutdownAction {
 }
 
 /// Port protocol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export_to = "PortProtocol.ts")]
 pub enum PortProtocol {
     Http,
     Https,
 }
 
 /// Action when a port is auto-forwarded.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export_to = "OnAutoForward.ts")]
 pub enum OnAutoForward {
     Notify,
     OpenBrowser,

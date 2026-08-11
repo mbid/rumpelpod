@@ -56,6 +56,8 @@ export type AgentViewAction =
   | { readonly type: "deletePod" }
   | { readonly type: "mergePod" }
   | { readonly type: "openShell" }
+  | { readonly type: "openPort" }
+  | { readonly type: "openPortExternal" }
   | { readonly pod: string; readonly repository: string; readonly type: "openPod" }
   | { readonly request: number; readonly type: "podMenu" }
   | { readonly type: "refresh" }
@@ -744,6 +746,8 @@ export class AgentTerminals implements vscode.WebviewViewProvider, vscode.Dispos
       case "deletePod":
       case "mergePod":
       case "openPod":
+      case "openPort":
+      case "openPortExternal":
       case "openShell":
       case "podMenu":
       case "refresh":
@@ -1290,6 +1294,8 @@ function isViewMessage(value: unknown): value is ViewMessage {
     case "addSshKey":
     case "deletePod":
     case "mergePod":
+    case "openPort":
+    case "openPortExternal":
     case "refresh":
     case "stopPod":
     case "viewDiff":

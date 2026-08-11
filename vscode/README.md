@@ -33,6 +33,18 @@ review surface instead of leaving the previous editor visible. VS Code restores
 ordinary review editors across browser reloads; the extension restores the last
 active pod and its launched agent set, then reopens that pod's current review.
 
+Forwarded ports are available from the pod actions menu and the Command
+Palette. `Open port in VS Code...` uses a restricted webview in an editor group
+beside the review. Its nested page has an opaque origin and cannot navigate the
+VS Code tab, open popups, download files, or access VS Code and workspace
+resources. Sites that need cookies, browser storage, or those blocked features
+can instead use `Open port in browser...`, which is always an explicit action.
+A Dev Container port marked with
+`"onAutoForward": "openPreview"` opens automatically beside the review without
+taking focus; `"protocol": "https"` selects HTTPS, otherwise HTTP is used.
+The `openBrowser` and `openBrowserOnce` actions do not launch an external
+browser automatically.
+
 Merging, stopping, or deleting the selected pod clears the sidebar selection,
 detaches its sessions, forgets it as the last active pod, and closes its review
 wherever that tab is open.

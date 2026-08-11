@@ -552,7 +552,12 @@ function renderMoreMenu(): void {
   list.className = "popover-options";
   list.setAttribute("role", "menu");
   const groups = [
-    [["View diff", "viewDiff"], ["Refresh pod", "refresh"]],
+    [
+      ["View diff", "viewDiff"],
+      ["Open port in VS Code...", "openPort"],
+      ["Open port in browser...", "openPortExternal"],
+      ["Refresh pod", "refresh"],
+    ],
     [["Add SSH key...", "addSshKey"]],
     [["Stop pod", "stopPod"], ["Delete pod...", "deletePod"]],
   ] as const;
