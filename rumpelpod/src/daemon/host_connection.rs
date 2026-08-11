@@ -7,14 +7,14 @@
 //! cluster).  The connection owns whatever state is needed to talk
 //! to that host:
 //!
-//! * `Localhost`: nothing.  Always considered up.
+//! * `Localhost`: direct container engine probes.
 //! * `Ssh`: direct `ssh ... <engine> system dial-stdio` probes.  Docker
 //!   clients create their own SSH-backed transports; podman clients go
 //!   through a per-host `PodmanSshProxy` owned by the connection.
 //! * `Kubernetes`: a cached `kube` client.
 //!
 //! Callers (typically `Executor::new`) can trigger a short liveness
-//! probe before using a remote host.  Each remote connection also runs
+//! probe before using a host.  Each connection also runs
 //! a single background monitor that owns reconnection and liveness for
 //! that host: one retry loop per host, not one per pod.  The monitor
 //! publishes liveness on a `watch` channel that pod loops wait on, and
@@ -149,7 +149,7 @@ impl HostConnectionRegistry {
     }
 
     /// Look up an existing connection or build a new one for `host`.
-    /// New remote connections start out down; their background monitor
+    /// New connections start out down; their background monitor
     /// brings them up, and callers can also force an immediate probe
     /// via `HostConnection::ensure_connected` (e.g. `Executor::new`).
     pub fn get_or_create(&self, host: &Host) -> Result<Arc<HostConnection>> {
@@ -186,7 +186,7 @@ impl HostConnectionRegistry {
 
     /// Return a live connection for `host` without creating one.  Used
     /// by paths like `list_pods` that should not implicitly start new
-    /// remote connections.
+    /// connections.
     pub fn get(&self, host: &Host) -> Option<Arc<HostConnection>> {
         let host = host.clone().resolve_docker_engine().ok()?;
         let key = HostKey::from_host(&host);
@@ -247,9 +247,7 @@ pub enum HostConnection {
 }
 
 impl HostConnection {
-    /// Spawn a new connection.  Localhost is trivial and emits a
-    /// single `Connected` event; SSH and Kubernetes each spawn a
-    /// background monitor that owns liveness and reconnection.
+    /// Spawn a connection with one background liveness monitor for its host.
     pub fn new(host: &Host, events_tx: HostConnectionEventTx) -> Result<Self> {
         match host {
             Host::Localhost { engine } => Ok(HostConnection::Localhost(LocalhostConnection::new(
@@ -306,21 +304,21 @@ impl HostConnection {
     }
 
     /// Ask the per-host monitor to probe now instead of waiting out its
-    /// heartbeat.  No-op for localhost.
+    /// heartbeat.
     pub fn request_probe(&self) {
         match self {
-            HostConnection::Localhost(_) => {}
+            HostConnection::Localhost(c) => c.request_probe(),
             HostConnection::Ssh(c) => c.request_probe(),
             HostConnection::Kubernetes(c) => c.request_probe(),
         }
     }
 
-    /// Verify the host connection.  Localhost is trivial, SSH runs a
-    /// real dial-stdio ping, and Kubernetes reuses a cached client when
-    /// it still answers.
+    /// Verify the host connection. Localhost probes the engine, SSH runs
+    /// a dial-stdio ping, and Kubernetes reuses a cached client when it
+    /// still answers.
     pub fn ensure_connected(&self) -> Result<()> {
         match self {
-            HostConnection::Localhost(_) => Ok(()),
+            HostConnection::Localhost(c) => c.ensure_connected(),
             HostConnection::Ssh(c) => c.ensure_connected(),
             HostConnection::Kubernetes(c) => c.ensure_client().map(|_| ()),
         }
@@ -343,26 +341,27 @@ impl Drop for AbortOnDrop {
 
 pub struct LocalhostConnection {
     engine: ContainerEngine,
-    // Held only so a future caller can read the events tx if
-    // needed; today the constructor uses it once and the field
-    // exists to mirror the other variants.
-    _events_tx: HostConnectionEventTx,
-    /// Permanently `Connected`; lets pod loops subscribe uniformly.
+    events_tx: HostConnectionEventTx,
     status_tx: watch::Sender<HostStatus>,
+    probe: Arc<Notify>,
+    bring_up: Mutex<()>,
+    _monitor: AbortOnDrop,
 }
 
 impl LocalhostConnection {
     fn new(engine: ContainerEngine, events_tx: HostConnectionEventTx) -> Arc<Self> {
-        // Emit Connected once so the daemon's reader handles
-        // localhost uniformly with the other variants.
-        let _ = events_tx.send(HostConnectionEvent::Connected(HostKey::Localhost {
-            engine,
-        }));
-        let (status_tx, _) = watch::channel(HostStatus::Connected);
-        Arc::new(Self {
-            engine,
-            _events_tx: events_tx,
-            status_tx,
+        let (status_tx, _) = watch::channel(HostStatus::Disconnected);
+        let probe = Arc::new(Notify::new());
+        Arc::new_cyclic(|weak: &Weak<LocalhostConnection>| {
+            let task = RUNTIME.spawn(localhost_monitor(weak.clone(), probe.clone()));
+            Self {
+                engine,
+                events_tx,
+                status_tx,
+                probe,
+                bring_up: Mutex::new(()),
+                _monitor: AbortOnDrop(task),
+            }
         })
     }
 
@@ -372,6 +371,113 @@ impl LocalhostConnection {
 
     fn subscribe(&self) -> watch::Receiver<HostStatus> {
         self.status_tx.subscribe()
+    }
+
+    fn request_probe(&self) {
+        self.probe.notify_one();
+    }
+
+    fn set_status(&self, status: HostStatus) {
+        let changed = self.status_tx.send_if_modified(|current| {
+            if *current == status {
+                false
+            } else {
+                *current = status;
+                true
+            }
+        });
+        if changed {
+            let key = HostKey::Localhost {
+                engine: self.engine,
+            };
+            let event = match status {
+                HostStatus::Connected => HostConnectionEvent::Connected(key),
+                HostStatus::Disconnected => HostConnectionEvent::Disconnected(key),
+            };
+            let _ = self.events_tx.send(event);
+        }
+    }
+
+    pub fn ensure_connected(&self) -> Result<()> {
+        let _guard = self.bring_up.lock().unwrap();
+        if ping_local_engine(self.engine) {
+            self.set_status(HostStatus::Connected);
+            return Ok(());
+        }
+
+        self.set_status(HostStatus::Disconnected);
+        let engine = self.engine.binary_name();
+        Err(anyhow::anyhow!(
+            "local {engine} engine failed to answer within {PING_TIMEOUT:?}"
+        ))
+    }
+}
+
+async fn localhost_monitor(weak: Weak<LocalhostConnection>, probe: Arc<Notify>) {
+    let mut backoff = HostProbeBackoff::new();
+    let mut wait = HEALTH_INTERVAL;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => {}
+            _ = probe.notified() => {}
+        }
+        let Some(conn) = weak.upgrade() else { return };
+        let key = HostKey::Localhost {
+            engine: conn.engine,
+        };
+        let conn_for_probe = conn.clone();
+        let connected =
+            match tokio::task::spawn_blocking(move || conn_for_probe.ensure_connected()).await {
+                Ok(Ok(())) => true,
+                Ok(Err(e)) => {
+                    debug!("{key}: local engine monitor probe failed: {e:#}");
+                    false
+                }
+                Err(e) => {
+                    debug!("{key}: local engine monitor task join error: {e}");
+                    false
+                }
+            };
+        drop(conn);
+
+        wait = if connected {
+            backoff.reset();
+            HEALTH_INTERVAL
+        } else {
+            backoff.next_delay()
+        };
+    }
+}
+
+fn ping_local_engine(engine: ContainerEngine) -> bool {
+    match engine {
+        ContainerEngine::Docker | ContainerEngine::Podman => {}
+        ContainerEngine::Auto => {
+            panic!("localhost connection has unresolved container engine auto")
+        }
+    }
+    match RUNTIME.block_on(async {
+        timeout(PING_TIMEOUT, async {
+            TokioCommand::new(engine.binary_name())
+                .arg("info")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .status()
+                .await
+        })
+        .await
+    }) {
+        Ok(Ok(status)) => status.success(),
+        Ok(Err(e)) => {
+            debug!("local engine probe failed: {e}");
+            false
+        }
+        Err(_) => {
+            debug!("local engine probe timed out after {PING_TIMEOUT:?}");
+            false
+        }
     }
 }
 

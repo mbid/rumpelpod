@@ -43,6 +43,10 @@ fn tunnel_server_pid(container_id: &str) -> Option<String> {
     process_pid(container_id, "/opt/rumpelpod/bin/rumpel tunnel-server")
 }
 
+fn container_server_pid(container_id: &str) -> Option<String> {
+    process_pid(container_id, "/opt/rumpelpod/bin/rumpel container-serve")
+}
+
 fn wait_for_new_tunnel_server(container_id: &str, old_pid: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -60,17 +64,14 @@ fn wait_for_new_tunnel_server(container_id: &str, old_pid: &str) -> String {
 }
 
 fn stop_container_server(container_id: &str) {
-    let pid = process_pid(container_id, "/opt/rumpelpod/bin/rumpel container-serve")
-        .expect("container server not running");
+    let pid = container_server_pid(container_id).expect("container server not running");
     Command::new("docker")
         .args(["exec", container_id, "kill", &pid])
         .success()
         .expect("stopping container server failed");
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    while process_pid(container_id, "/opt/rumpelpod/bin/rumpel container-serve").as_deref()
-        == Some(pid.as_str())
-    {
+    while container_server_pid(container_id).as_deref() == Some(pid.as_str()) {
         assert!(
             Instant::now() < deadline,
             "container server in '{container_id}' did not stop"
@@ -103,8 +104,10 @@ fn connect_preserves_healthy_transport_and_repairs_a_failed_pod() {
 
     let container_a = container_id("connect-a");
     let container_b = container_id("connect-b");
-    let tunnel_a = tunnel_server_pid(&container_a).expect("pod A tunnel server not running");
+    let mut tunnel_a = tunnel_server_pid(&container_a).expect("pod A tunnel server not running");
     let tunnel_b = tunnel_server_pid(&container_b).expect("pod B tunnel server not running");
+    let container_server_a =
+        container_server_pid(&container_a).expect("pod A container server not running");
 
     pod_command(&repo, &daemon)
         .args(["connect", "connect-a"])
@@ -121,12 +124,31 @@ fn connect_preserves_healthy_transport_and_repairs_a_failed_pod() {
         "connect replaced a sibling pod's healthy tunnel"
     );
 
+    Command::new("docker")
+        .args(["exec", &container_a, "kill", &tunnel_a])
+        .success()
+        .expect("stopping tunnel server failed");
+    pod_command(&repo, &daemon)
+        .args(["connect", "connect-a"])
+        .success()
+        .expect("repairing a failed git connection failed");
+    tunnel_a = wait_for_new_tunnel_server(&container_a, &tunnel_a);
+    assert_eq!(
+        container_server_pid(&container_a).as_deref(),
+        Some(container_server_a.as_str()),
+        "repairing the git connection replaced a healthy pod server"
+    );
+
     stop_container_server(&container_a);
     pod_command(&repo, &daemon)
         .args(["connect", "connect-a"])
         .success()
         .expect("repairing a failed pod connection failed");
-    wait_for_new_tunnel_server(&container_a, &tunnel_a);
+    assert_eq!(
+        tunnel_server_pid(&container_a).as_deref(),
+        Some(tunnel_a.as_str()),
+        "repairing the pod server replaced a healthy git connection"
+    );
     assert_eq!(
         tunnel_server_pid(&container_b).as_deref(),
         Some(tunnel_b.as_str()),
@@ -153,19 +175,43 @@ fn connect_rejects_an_unknown_pod() {
 }
 
 #[test]
-fn connect_has_no_host_flag() {
+fn connect_does_not_start_a_stopped_pod() {
+    if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
+        executor::skip_test();
+        return;
+    }
+
     let repo = TestRepo::new();
     let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
     let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "connect-stopped", "--", "true"])
+        .success()
+        .expect("creating pod failed");
+    let container = container_id("connect-stopped");
+    pod_command(&repo, &daemon)
+        .args(["stop", "--wait", "connect-stopped"])
+        .success()
+        .expect("stopping pod failed");
 
     let output = pod_command(&repo, &daemon)
-        .args(["connect", "missing", "--host"])
+        .args(["connect", "connect-stopped"])
         .output()
         .expect("running connect failed");
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--host'"),
+        String::from_utf8_lossy(&output.stderr).contains("pod 'connect-stopped' is stopped"),
         "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+
+    let output = Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}", &container])
+        .success()
+        .expect("inspecting stopped pod failed");
+    assert_eq!(String::from_utf8_lossy(&output).trim(), "false");
 }

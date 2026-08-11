@@ -476,22 +476,11 @@ impl PodConnection {
         self.host_conn.lock().unwrap().status() == HostStatus::Connected
     }
 
-    /// Manual repair must discard pod-scoped routes without disrupting the
-    /// host connection shared by sibling pods or their local key material.
-    pub fn reset_pod_transport(&self) {
-        let _setup = self.git_tunnel_setup.lock().unwrap();
-        self.stop_event_loop();
+    /// A failed pod probe invalidates the server route without proving that
+    /// independent resources such as git tunnels and port forwards are dead.
+    pub fn prepare_pod_server_repair(&self) {
+        self.remove_pod_server();
         self.repair_state.resume();
-
-        let mut resources = self.resources.lock().unwrap();
-        resources.pod_server = None;
-        resources.git_tunnel = None;
-        resources.supervise_git_tunnel = false;
-        resources.validate_pod_before_git_tunnel_repair = false;
-        resources.forwarded_ports = None;
-        resources.codex_proxy = None;
-        drop(resources);
-
         let status = if self.host_is_connected() {
             PodConnectionStatus::PodDisconnected
         } else {
@@ -504,6 +493,7 @@ impl PodConnection {
     /// A host reset must release the old monitor from each pod while preserving
     /// endpoint listeners that can reconnect through the replacement.
     pub fn replace_host_connection(&self, host_conn: Arc<HostConnection>) {
+        let _setup = self.git_tunnel_setup.lock().unwrap();
         self.stop_event_loop();
         self.repair_state.resume();
         let connected = host_conn.status() == HostStatus::Connected;
@@ -687,6 +677,7 @@ impl PodConnection {
         if self.status() == PodConnectionStatus::Stopped {
             return;
         }
+        let _setup = self.git_tunnel_setup.lock().unwrap();
         self.repair_state.signal();
         *self.status.lock().unwrap() = PodConnectionStatus::HostDisconnected;
         let mut resources = self.resources.lock().unwrap();

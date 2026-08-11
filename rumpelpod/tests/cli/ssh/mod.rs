@@ -877,7 +877,7 @@ fn ssh_reconnect_test() {
     let home = TestHome::new();
     let remote = SshRemoteHost::start();
     write_ssh_config(&home, &[&remote]);
-    let daemon = TestDaemon::start(&home);
+    let mut daemon = TestDaemon::start(&home);
 
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
@@ -909,6 +909,13 @@ fn ssh_reconnect_test() {
         stderr
     );
     assert_eq!(stdout.trim(), "hello from remote");
+
+    daemon.kill();
+    let daemon = TestDaemon::start(&home);
+    pod_command(&repo, &daemon)
+        .args(["connect", pod_name])
+        .success()
+        .expect("establishing missing pod routes after daemon startup failed");
 
     let ssh_config = home.path().join(".ssh/config");
     let inner_container = remote
@@ -976,6 +983,11 @@ fn ssh_reconnect_test() {
         .success()
         .expect("terminating existing SSH transports failed");
     remote.wait_for_ssh_connectivity(&ssh_config);
+
+    pod_command(&repo, &daemon)
+        .args(["connect", pod_name])
+        .success()
+        .expect("connecting through the restored SSH host failed");
 
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {

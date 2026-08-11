@@ -391,8 +391,8 @@ pub struct DaemonServer {
     /// Port the localhost git HTTP server is listening on (tunnel target).
     localhost_server_port: u16,
     /// Per-host connection objects (one per localhost / ssh remote /
-    /// k8s cluster).  Tracks SSH liveness and cached kube clients;
-    /// emits Connected/Disconnected events on the registry's central
+    /// k8s cluster). Tracks engine and transport liveness and caches remote
+    /// clients. Emits Connected/Disconnected events on the registry's central
     /// channel.
     host_connections: Arc<HostConnectionRegistry>,
     /// Per-pod connections and host-side runtime handles.
@@ -451,6 +451,12 @@ impl PodLaunchLocks {
 enum InitializeMode {
     IfCreating,
     AlreadyRun,
+}
+
+#[derive(Clone, Copy)]
+struct ReconnectOptions {
+    repair_pod_server: bool,
+    start_stopped: bool,
 }
 
 /// Sanitize a string for use as a container hostname (RFC 1123):
@@ -2221,7 +2227,7 @@ impl DaemonServer {
         devcontainer: &DevContainer,
         local_env_vars: &HashMap<String, String>,
         record: &db::PodRecord,
-        repair_pod_server: bool,
+        options: ReconnectOptions,
     ) -> ReconnectPodResult {
         if let Err(e) = gateway::install_host_hooks(repo_path) {
             return ReconnectPodResult::Unavailable(e);
@@ -2269,7 +2275,7 @@ impl DaemonServer {
                     &container_repo_path,
                     local_env_vars,
                     record,
-                    repair_pod_server,
+                    options.repair_pod_server,
                 );
                 let result = match result {
                     Ok(result) => result,
@@ -2324,7 +2330,7 @@ impl DaemonServer {
                     &ports_attributes,
                     &other_ports_attributes,
                     record,
-                    repair_pod_server,
+                    options,
                 ) {
                     Ok(result) => ReconnectPodResult::Connected(Box::new(result)),
                     Err(e) => ReconnectPodResult::Unavailable(e),
@@ -2386,34 +2392,47 @@ impl DaemonServer {
                 connection
             }
         };
-        drop(host_connection);
-
         if let Some(connection) = self.pod_connections.get(&repo_path, &pod_name.0) {
             match connection.probe() {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    connection.enable_git_tunnel_supervision();
+                    connection.ensure_event_loop();
+                    if !connection.git_tunnel_is_alive() {
+                        let executor = crate::executor::Executor::new(&host_connection)
+                            .context("opening host connection for git tunnel")?;
+                        let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
+                        self.ensure_git_tunnel(&connection, &executor, &pod_id)
+                            .context("restoring git tunnel")?;
+                    }
+                    return Ok(());
+                }
                 Err(e) => {
                     log::warn!("pod probe for '{}' failed: {e:#}", pod_name.0);
-                    connection.reset_pod_transport();
-                    self.cleanup_codex_runtime(&repo_path, &pod_name.0);
+                    connection.prepare_pod_server_repair();
                 }
             }
         }
 
-        match self.reconnect_pod(
+        let result = match self.reconnect_pod(
             &pod_name,
             &repo_path,
             &host,
             &devcontainer,
             &local_env_vars,
             &record,
-            true,
+            ReconnectOptions {
+                repair_pod_server: true,
+                start_stopped: false,
+            },
         ) {
             ReconnectPodResult::Connected(_) => Ok(()),
             ReconnectPodResult::Gone(e) => Err(e.context(format!("pod '{}' is gone", pod_name.0))),
             ReconnectPodResult::Unavailable(e) => {
                 Err(e.context(format!("connecting to pod '{}' failed", pod_name.0)))
             }
-        }
+        };
+        drop(host_connection);
+        result
     }
 
     /// Reconnect to an existing k8s pod.
@@ -2639,9 +2658,31 @@ impl DaemonServer {
         ports_attributes: &HashMap<String, devcontainer::PortAttributes>,
         other_ports_attributes: &Option<devcontainer::PortAttributes>,
         record: &db::PodRecord,
-        repair_pod_server: bool,
+        options: ReconnectOptions,
     ) -> Result<LaunchResult> {
-        let was_stopped = status != PodStatus::Running;
+        let was_stopped = match status {
+            PodStatus::Running => false,
+            PodStatus::Stopped if options.start_stopped => true,
+            PodStatus::Stopped => {
+                return Err(anyhow::anyhow!(
+                    "pod '{}' is stopped; use 'rumpel enter {}' to start it",
+                    pod_name.0,
+                    pod_name.0
+                ));
+            }
+            PodStatus::Gone => {
+                return Err(anyhow::anyhow!("container '{pod_id}' not found"));
+            }
+            PodStatus::Disconnected
+            | PodStatus::Stopping
+            | PodStatus::Deleting
+            | PodStatus::Broken => {
+                return Err(anyhow::anyhow!(
+                    "pod '{}' is not available (status: {status:?})",
+                    pod_name.0
+                ));
+            }
+        };
         if was_stopped {
             executor.start(pod_id)?;
         }
@@ -2695,7 +2736,7 @@ impl DaemonServer {
             container_repo_path,
             &pod_name.0,
             local_env_vars,
-            repair_pod_server,
+            options.repair_pod_server,
         )?;
         let container_url = endpoint.url.clone();
         if pod_server_route_changed {
@@ -3026,7 +3067,10 @@ impl DaemonServer {
                         &devcontainer,
                         &local_env_vars,
                         &existing,
-                        false,
+                        ReconnectOptions {
+                            repair_pod_server: false,
+                            start_stopped: true,
+                        },
                     ) {
                         ReconnectPodResult::Connected(result) => return Ok(*result),
                         ReconnectPodResult::Gone(e) => {
@@ -4707,6 +4751,10 @@ impl Daemon for DaemonServer {
     }
 
     fn connect_pod(&self, request: ConnectPodRequest) -> Result<()> {
+        let launch_lock = self
+            .launch_locks
+            .for_pod(&request.repo_path, &request.pod_name);
+        let _guard = launch_lock.lock().unwrap();
         self.connect_pod_impl(request)
     }
 
