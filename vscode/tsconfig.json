@@ -1,7 +1,5 @@
 {
   "compilerOptions": {
-    "allowSyntheticDefaultImports": false,
-    "esModuleInterop": false,
     "forceConsistentCasingInFileNames": true,
     "lib": [
       "ES2023"

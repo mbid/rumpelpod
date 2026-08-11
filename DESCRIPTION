@@ -22,10 +22,11 @@ Build them in existing platform jobs. Preserve the multi-binary rumpel
 tarball and installer. Build Linux bindings in a pinned Bullseye image.
 Reject bindings above the supported glibc baseline. Keep normal pipeline
 extension checks local so they do not start nested Docker builds.
-Declare extension development dependencies with wildcard ranges and use
-the npm lockfile as the reproducible source of exact versions. Refresh
-that graph to the latest stable direct dependencies and patched
-transitive releases.
+Declare extension development dependencies with npm's latest dist-tag,
+apart from the VS Code type range that its packager requires. Use the
+lockfile as the reproducible source of exact versions. Refresh that
+graph to the latest stable direct dependencies and patched transitive
+releases.
 
 Provide a loopback-only live code-server workspace backed by a small
 anyhow demo repository and lingering user services. Run demo pods as a

@@ -546,6 +546,58 @@ fn vscode_package_is_native_and_published_for_each_release_platform() {
 }
 
 #[test]
+fn vscode_development_dependencies_are_resolved_from_stable_tags() {
+    let root = workspace_root();
+    let package: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("vscode/package.json")).expect("read extension manifest"),
+    )
+    .expect("parse extension manifest");
+    let dependencies = package["devDependencies"]
+        .as_object()
+        .expect("extension devDependencies object");
+    for (name, requested) in dependencies {
+        let expected = match name.as_str() {
+            "@types/vscode" => "*",
+            "@playwright/test" | "@types/node" | "@vscode/vsce" | "@xterm/addon-fit"
+            | "@xterm/xterm" | "esbuild" | "node-pty" | "typescript" => "latest",
+            dependency => panic!("unexpected extension development dependency: {dependency}"),
+        };
+        assert_eq!(
+            requested.as_str(),
+            Some(expected),
+            "{name} did not use the expected stable dependency selector"
+        );
+    }
+
+    let lock: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("vscode/package-lock.json"))
+            .expect("read extension lockfile"),
+    )
+    .expect("parse extension lockfile");
+    assert_eq!(
+        lock["packages"][""]["devDependencies"], package["devDependencies"],
+        "the lockfile root did not preserve the manifest selectors"
+    );
+    let locked_packages = lock["packages"]
+        .as_object()
+        .expect("extension lockfile packages object");
+    for name in dependencies.keys() {
+        let path = format!("node_modules/{name}");
+        let version = locked_packages
+            .get(&path)
+            .and_then(|entry| entry["version"].as_str())
+            .unwrap_or_else(|| panic!("lockfile did not pin {name}"));
+        assert!(
+            version
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_digit()),
+            "lockfile version for {name} was not concrete: {version}"
+        );
+    }
+}
+
+#[test]
 fn vscode_server_is_unauthenticated_and_loopback_only() {
     let root = workspace_root();
     let temporary = tempfile::tempdir().expect("create VS Code service test directory");

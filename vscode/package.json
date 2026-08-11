@@ -145,14 +145,14 @@
     "package": "npm run check && npm run build && node smoke-native.mjs && node package.mjs"
   },
   "devDependencies": {
-    "@playwright/test": "*",
-    "@types/node": "*",
+    "@playwright/test": "latest",
+    "@types/node": "latest",
     "@types/vscode": "*",
-    "@vscode/vsce": "*",
-    "@xterm/addon-fit": "*",
-    "@xterm/xterm": "*",
-    "esbuild": "*",
-    "node-pty": "*",
-    "typescript": "*"
+    "@vscode/vsce": "latest",
+    "@xterm/addon-fit": "latest",
+    "@xterm/xterm": "latest",
+    "esbuild": "latest",
+    "node-pty": "latest",
+    "typescript": "latest"
   }
 }
