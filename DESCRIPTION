@@ -11,6 +11,10 @@ configuration and local context contents are unchanged. Keep remote
 contexts and secret or SSH inputs on Compose's normal build path because
 their current contents cannot be represented by a local cache key.
 
+Migrate pre-Compose databases in place so existing pods and forwarded
+ports remain available while new single-container and Compose pods use
+the expanded metadata schema.
+
 Keep projects safe to run concurrently by stripping published ports
 and fixed container names, preserve project-relative networks and
 volumes across forks, and follow the Compose overrideCommand default.

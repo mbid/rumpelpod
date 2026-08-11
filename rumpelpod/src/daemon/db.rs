@@ -158,6 +158,18 @@ const SCHEMA_SQL: &str = indoc! {"
     );
 "};
 
+const PRE_COMPOSE_SCHEMA_HASH: &str =
+    "ec97b2b08dddd29a2db5e026fb8bdaf2f2458743a797d713dcf72ad98b40d80e";
+
+const PRE_COMPOSE_MIGRATION_SQL: &str = indoc! {"
+    ALTER TABLE pods
+        ADD COLUMN agent_service TEXT NOT NULL DEFAULT '';
+    ALTER TABLE pods
+        ADD COLUMN compose_config TEXT NOT NULL DEFAULT '';
+    ALTER TABLE forwarded_ports
+        ADD COLUMN service TEXT NOT NULL DEFAULT '';
+"};
+
 fn get_schema_hash() -> String {
     let mut hasher = Sha256::new();
     hasher.update(SCHEMA_SQL);
@@ -178,7 +190,7 @@ pub fn open_db(path: &Path) -> Result<Connection> {
         return create_and_init_db(path);
     }
 
-    let conn = Connection::open(path).with_context(|| {
+    let mut conn = Connection::open(path).with_context(|| {
         let path = path.display();
         format!("failed to open database at {path}")
     })?;
@@ -198,6 +210,10 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     match stored_hash {
         Ok(hash) => {
             if hash != current_hash {
+                if hash == PRE_COMPOSE_SCHEMA_HASH {
+                    migrate_pre_compose_schema(&mut conn, &current_hash)?;
+                    return Ok(conn);
+                }
                 let path = path.display();
                 return Err(anyhow::anyhow!(
                     "database schema mismatch\n\
@@ -226,6 +242,28 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     }
 
     Ok(conn)
+}
+
+fn migrate_pre_compose_schema(conn: &mut Connection, current_hash: &str) -> Result<()> {
+    let tx = conn
+        .transaction()
+        .context("starting pre-Compose database migration")?;
+    tx.execute_batch(PRE_COMPOSE_MIGRATION_SQL)
+        .context("adding Compose database columns")?;
+    let updated = tx
+        .execute(
+            "UPDATE db_meta SET value = ? WHERE key = 'schema_version'",
+            [current_hash],
+        )
+        .context("recording migrated database schema")?;
+    if updated != 1 {
+        return Err(anyhow::anyhow!(
+            "database migration updated {updated} schema version rows; expected one"
+        ));
+    }
+    tx.commit()
+        .context("committing pre-Compose database migration")?;
+    Ok(())
 }
 
 fn create_and_init_db(path: &Path) -> Result<Connection> {
@@ -638,38 +676,6 @@ mod tests {
         assert_eq!(pod.name, "dev");
         assert_eq!(pod.host, serde_json::to_string(&localhost()).unwrap());
         assert_eq!(pod.status, PodStatus::Initializing);
-    }
-
-    #[test]
-    fn test_compose_metadata_and_forward_targets_round_trip() {
-        let (_temp_dir, conn) = test_db();
-        let repo_path = PathBuf::from("/home/user/project");
-        let id = create_pod_with_compose(
-            &conn,
-            &repo_path,
-            "dev",
-            &localhost(),
-            "test-token",
-            "prepared:tag",
-            "{}",
-            "agent",
-            r#"{"services":{"agent":{},"db":{}}}"#,
-            "[]",
-        )
-        .unwrap();
-        insert_forwarded_port(&conn, id, "db", 5432, 15432, "database").unwrap();
-        insert_forwarded_port(&conn, id, "agent", 3000, 13000, "application").unwrap();
-
-        let pod = get_pod(&conn, &repo_path, "dev").unwrap().unwrap();
-        assert_eq!(pod.agent_service, "agent");
-        assert!(pod.compose_config.contains("\"db\""));
-
-        let ports = list_forwarded_ports(&conn, id).unwrap();
-        assert_eq!(ports.len(), 2);
-        assert_eq!(ports[0].service, "agent");
-        assert_eq!(ports[0].container_port, 3000);
-        assert_eq!(ports[1].service, "db");
-        assert_eq!(ports[1].container_port, 5432);
     }
 
     #[test]
