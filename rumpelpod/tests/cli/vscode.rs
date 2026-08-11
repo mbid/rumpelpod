@@ -715,6 +715,17 @@ fn vscode_demo_workspace_uses_standard_runtime() {
         "demo devcontainer requested an outer-container runtime"
     );
     assert_eq!(config["userEnvProbe"], "none");
+    assert_eq!(config["forwardPorts"], serde_json::json!([8000]));
+    assert_eq!(config["portsAttributes"]["8000"]["protocol"], "http");
+    assert_eq!(
+        config["portsAttributes"]["8000"]["onAutoForward"],
+        "openPreview"
+    );
+    assert_eq!(
+        config["postStartCommand"],
+        "sh .devcontainer/start-preview.sh"
+    );
+    assert_eq!(config["waitFor"], "postStartCommand");
     let dockerfile = fs::read_to_string(workspace.join(".devcontainer/Dockerfile"))
         .expect("read demo Dockerfile");
     assert!(
@@ -729,9 +740,87 @@ fn vscode_demo_workspace_uses_standard_runtime() {
          --dangerously-skip-permissions under root"
     );
     assert!(
+        dockerfile.contains("git python3 sudo"),
+        "demo image did not include the preview server runtime"
+    );
+    assert!(
         !dockerfile.contains("sysbox"),
         "demo Dockerfile requested Sysbox"
     );
+    let preview = fs::read_to_string(workspace.join(".devcontainer/preview.py"))
+        .expect("read demo preview server");
+    assert!(
+        preview.contains("ThreadingHTTPServer((\"0.0.0.0\", PREVIEW_PORT)"),
+        "preview server was not reachable through the forwarded port"
+    );
+    let preview_start = fs::read_to_string(workspace.join(".devcontainer/start-preview.sh"))
+        .expect("read demo preview startup script");
+    assert!(
+        preview_start.contains("if preview_is_ready; then"),
+        "preview startup was not idempotent"
+    );
+    let preview_page = fs::read_to_string(workspace.join(".devcontainer/index.html"))
+        .expect("read demo preview page");
+    assert!(
+        preview_page.contains("Anyhow pod preview"),
+        "demo preview page was missing"
+    );
+    let preview_port = reserve_loopback_port();
+    let preview_state_dir = temporary.path().join("preview-state");
+    fs::create_dir_all(&preview_state_dir).expect("create preview server state directory");
+    Command::new("sh")
+        .arg("-c")
+        .arg(indoc! {r#"
+            set -eu
+            pid_file="$RUMPELPOD_PREVIEW_STATE_DIR/anyhow-preview-$RUMPELPOD_PREVIEW_PORT.pid"
+            cleanup() {
+                if [ ! -f "$pid_file" ]; then
+                    return
+                fi
+                preview_pid=$(cat "$pid_file")
+                if [ "$preview_pid" = "$$" ]; then
+                    return
+                fi
+                if ! kill "$preview_pid"; then
+                    echo "could not stop test preview server PID $preview_pid" >&2
+                    return 1
+                fi
+            }
+            trap cleanup EXIT
+
+            sh .devcontainer/start-preview.sh
+            first_pid=$(cat "$pid_file")
+            sh .devcontainer/start-preview.sh
+            second_pid=$(cat "$pid_file")
+            if [ "$first_pid" != "$second_pid" ]; then
+                echo "second startup replaced preview server PID $first_pid with $second_pid" >&2
+                exit 1
+            fi
+
+            kill "$first_pid"
+            attempts=0
+            while kill -0 "$first_pid" 2>/dev/null && [ "$attempts" -lt 50 ]; do
+                attempts=$((attempts + 1))
+                sleep 0.1
+            done
+            if kill -0 "$first_pid" 2>/dev/null; then
+                echo "preview server PID $first_pid did not stop" >&2
+                exit 1
+            fi
+            printf '%s\n' "$$" > "$pid_file"
+            sh .devcontainer/start-preview.sh
+            restarted_pid=$(cat "$pid_file")
+            if [ "$restarted_pid" = "$$" ]; then
+                echo "startup trusted a stale PID belonging to the calling shell" >&2
+                exit 1
+            fi
+            python3 -c 'import os, urllib.request; port = os.environ["RUMPELPOD_PREVIEW_PORT"]; content = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1).read(); assert b"Anyhow pod preview" in content'
+        "#})
+        .env("RUMPELPOD_PREVIEW_PORT", preview_port.to_string())
+        .env("RUMPELPOD_PREVIEW_STATE_DIR", &preview_state_dir)
+        .current_dir(&workspace)
+        .success()
+        .expect("restart the generated preview server and request its page");
     assert!(!workspace.join(".cargo-ok").exists());
     assert!(!workspace.join(".cargo_vcs_info.json").exists());
     let status = Command::new("git")

@@ -49,7 +49,17 @@ cat > "$staging/.devcontainer/devcontainer.json" <<'EOF'
     },
     "workspaceFolder": "/workspace/anyhow",
     "containerUser": "user",
-    "userEnvProbe": "none"
+    "userEnvProbe": "none",
+    "forwardPorts": [8000],
+    "portsAttributes": {
+        "8000": {
+            "label": "Anyhow live preview",
+            "protocol": "http",
+            "onAutoForward": "openPreview"
+        }
+    },
+    "postStartCommand": "sh .devcontainer/start-preview.sh",
+    "waitFor": "postStartCommand"
 }
 EOF
 # Claude refuses --dangerously-skip-permissions under root, so demo pods
@@ -58,11 +68,197 @@ cat > "$staging/.devcontainer/Dockerfile" <<'EOF'
 FROM rust:1.96.1-slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git sudo \
+    && apt-get install -y --no-install-recommends ca-certificates git python3 sudo \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -s /bin/bash user \
     && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/user
+EOF
+cat > "$staging/.devcontainer/preview.py" <<'EOF'
+#!/usr/bin/env python3
+
+import os
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+PREVIEW_DIRECTORY = Path(__file__).parent
+PREVIEW_PORT = int(os.environ.get("RUMPELPOD_PREVIEW_PORT", "8000"))
+
+
+class PreviewHandler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=PREVIEW_DIRECTORY, **kwargs)
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+
+server = ThreadingHTTPServer(("0.0.0.0", PREVIEW_PORT), PreviewHandler)
+server.serve_forever()
+EOF
+cat > "$staging/.devcontainer/start-preview.sh" <<'EOF'
+#!/bin/sh
+
+set -eu
+
+preview_port=${RUMPELPOD_PREVIEW_PORT:-8000}
+preview_state_dir=${RUMPELPOD_PREVIEW_STATE_DIR:-/tmp}
+preview_pid_file="$preview_state_dir/anyhow-preview-$preview_port.pid"
+preview_log="$preview_state_dir/anyhow-preview-$preview_port.log"
+
+case "$preview_port" in
+    ''|*[!0-9]*)
+        echo "invalid preview port: $preview_port" >&2
+        exit 1
+        ;;
+esac
+mkdir -p "$preview_state_dir"
+
+preview_is_ready() {
+    python3 - "$preview_port" <<'PY'
+import sys
+import urllib.error
+import urllib.request
+
+
+url = f"http://127.0.0.1:{sys.argv[1]}/"
+try:
+    with urllib.request.urlopen(url, timeout=0.2) as response:
+        content = response.read().decode("utf-8")
+except (OSError, UnicodeDecodeError, urllib.error.URLError):
+    sys.exit(1)
+if response.status != 200 or "Anyhow pod preview" not in content:
+    sys.exit(1)
+PY
+}
+
+preview_process_matches() {
+    python3 - "$1" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+
+process = Path("/proc") / sys.argv[1]
+try:
+    arguments = (process / "cmdline").read_bytes().split(b"\0")
+    working_directory = Path(os.readlink(process / "cwd")).resolve()
+except OSError:
+    sys.exit(1)
+if (
+    b".devcontainer/preview.py" not in arguments
+    or working_directory != Path.cwd().resolve()
+):
+    sys.exit(1)
+PY
+}
+
+wait_until_ready() {
+    preview_pid=$1
+    attempts=0
+    while [ "$attempts" -lt 50 ]; do
+        if preview_is_ready; then
+            return 0
+        fi
+        if ! kill -0 "$preview_pid" 2>/dev/null; then
+            return 1
+        fi
+        attempts=$((attempts + 1))
+        sleep 0.1
+    done
+    return 1
+}
+
+if preview_is_ready; then
+    exit 0
+fi
+
+if [ -f "$preview_pid_file" ]; then
+    IFS= read -r preview_pid < "$preview_pid_file"
+    case "$preview_pid" in
+        ''|*[!0-9]*)
+            echo "invalid preview server PID in $preview_pid_file" >&2
+            exit 1
+            ;;
+    esac
+    if kill -0 "$preview_pid" 2>/dev/null \
+        && preview_process_matches "$preview_pid"; then
+        if wait_until_ready "$preview_pid"; then
+            exit 0
+        fi
+        echo "preview server PID $preview_pid did not become ready" >&2
+        exit 1
+    fi
+    rm -f "$preview_pid_file"
+fi
+
+nohup python3 .devcontainer/preview.py </dev/null >"$preview_log" 2>&1 &
+preview_pid=$!
+printf '%s\n' "$preview_pid" > "$preview_pid_file"
+if wait_until_ready "$preview_pid"; then
+    exit 0
+fi
+
+status=0
+if kill -0 "$preview_pid" 2>/dev/null; then
+    if ! kill "$preview_pid" 2>/dev/null; then
+        echo "could not stop failed preview server PID $preview_pid" >&2
+    fi
+fi
+wait "$preview_pid" || status=$?
+rm -f "$preview_pid_file"
+echo "preview server failed to become ready (status $status)" >&2
+if [ -s "$preview_log" ]; then
+    cat "$preview_log" >&2
+fi
+exit 1
+EOF
+cat > "$staging/.devcontainer/index.html" <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Anyhow live preview</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            font-family: system-ui, sans-serif;
+        }
+        body {
+            display: grid;
+            min-height: 100vh;
+            margin: 0;
+            place-items: center;
+            background: #18212f;
+            color: #f5f7fa;
+        }
+        main {
+            max-width: 38rem;
+            margin: 2rem;
+            padding: 2.5rem;
+            border: 1px solid #46566f;
+            border-radius: 1rem;
+            background: #222e40;
+            box-shadow: 0 1rem 3rem #0005;
+        }
+        code {
+            color: #8dd8ff;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>Anyhow pod preview</h1>
+        <p>This page is served by <code>.devcontainer/preview.py</code>
+           from inside the rumpelpod.</p>
+        <p>Port 8000 uses <code>onAutoForward: openPreview</code>, so the
+           Rumpelpod extension opens it in VS Code automatically.</p>
+    </main>
+</body>
+</html>
 EOF
 
 git -C "$staging" init --quiet --initial-branch main

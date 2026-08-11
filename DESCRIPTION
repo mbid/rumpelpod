@@ -39,6 +39,8 @@ transitive releases.
 Provide a loopback-only live code-server workspace backed by a small
 anyhow demo repository and lingering user services. Run demo pods as a
 non-root user because Claude rejects its permission bypass under root.
+Give the demo a Python-served preview page whose declared HTTP port
+opens automatically beside the review.
 Persist only allowlisted agent credentials for those services. Install
 no daemon service in the image: the first pipeline run installs its
 freshly built native daemon and cross-architecture pod payloads after
