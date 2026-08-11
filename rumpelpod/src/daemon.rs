@@ -531,11 +531,13 @@ fn load_and_resolve_devcontainer(
     repo_path: &Path,
     pod_name: &str,
     local_env: &HashMap<String, String>,
-) -> Result<(DevContainer, bool)> {
+) -> Result<(DevContainer, PathBuf, bool)> {
     let (mut devcontainer, devcontainer_dir) = DevContainer::find_and_load(repo_path)?
         .unwrap_or_else(|| (DevContainer::default(), repo_path.to_path_buf()));
 
-    let used_default_image = devcontainer.image.is_none() && !devcontainer.has_build();
+    let used_default_image = devcontainer.docker_compose_file.is_none()
+        && devcontainer.image.is_none()
+        && !devcontainer.has_build();
     // The default-image fallback deliberately happens later in
     // `launch_pod_impl`, past the reentry check: a reconnect does
     // not need the embedded Dockerfile staged at all.
@@ -548,7 +550,7 @@ fn load_and_resolve_devcontainer(
         .context("resolving --env-file from runArgs")?;
 
     let devcontainer = resolve_devcontainer_vars(devcontainer, repo_path, pod_name, local_env);
-    Ok((devcontainer, used_default_image))
+    Ok((devcontainer, devcontainer_dir, used_default_image))
 }
 
 /// Format a single-line `hostRequirements: ...` summary for the progress
@@ -817,6 +819,9 @@ struct ResolvedLaunch {
     raw_devcontainer_json: String,
     image: Image,
     image_built: bool,
+    compose_model: Option<crate::compose::Model>,
+    agent_service: Option<String>,
+    compose_services: Vec<String>,
     git_setup: GitSetupParams,
     local_env_vars: HashMap<String, String>,
     /// Docker mount list with bind mounts on remote hosts already
@@ -1280,17 +1285,97 @@ fn is_overlay2_setup_error(err: &anyhow::Error) -> bool {
     false
 }
 
-/// Parse a Port spec into the numeric container port.
-fn resolve_port_number(port: &Port) -> Option<u16> {
+struct ForwardTarget {
+    service: String,
+    container_port: u16,
+}
+
+fn resolve_forward_target(
+    port: &Port,
+    agent_service: Option<&str>,
+    compose_model: Option<&crate::compose::Model>,
+) -> Result<ForwardTarget> {
     match port {
-        Port::Number(n) => Some(*n),
+        Port::Number(0) => Err(anyhow::anyhow!(
+            "forwardPorts entries must use a non-zero port"
+        )),
+        Port::Number(container_port) => Ok(ForwardTarget {
+            service: agent_service.unwrap_or("").to_string(),
+            container_port: *container_port,
+        }),
         Port::String(s) => {
-            if let Some((_host, container)) = s.split_once(':') {
-                container.parse().ok()
-            } else {
-                s.parse().ok()
+            let model = compose_model.context(format!(
+                "string forwardPorts entry '{s}' requires a dockerComposeFile pod and must use '<service>:<port>'"
+            ))?;
+            let agent_service = agent_service.context(
+                "compose forwardPorts validation is missing the configured agent service",
+            )?;
+            let (service, raw_port) = s.split_once(':').with_context(|| {
+                format!("invalid forwardPorts entry '{s}': expected '<service>:<port>'")
+            })?;
+            if service.is_empty() || raw_port.is_empty() || raw_port.contains(':') {
+                return Err(anyhow::anyhow!(
+                    "invalid forwardPorts entry '{s}': expected '<service>:<port>'"
+                ));
             }
+            model.validate_service(service)?;
+            if service == agent_service {
+                return Err(anyhow::anyhow!(
+                    "forwardPorts entry '{s}' names the agent service; use the numeric port form instead"
+                ));
+            }
+            let container_port: u16 = raw_port.parse().with_context(|| {
+                format!("invalid port '{raw_port}' in forwardPorts entry '{s}'")
+            })?;
+            if container_port == 0 {
+                return Err(anyhow::anyhow!(
+                    "invalid forwardPorts entry '{s}': port must be non-zero"
+                ));
+            }
+            Ok(ForwardTarget {
+                service: service.to_string(),
+                container_port,
+            })
         }
+    }
+}
+
+fn validate_declared_forward_ports(
+    ports: &[Port],
+    agent_service: Option<&str>,
+    compose_model: Option<&crate::compose::Model>,
+    selected_services: Option<&[String]>,
+) -> Result<()> {
+    for port in ports {
+        let target = resolve_forward_target(port, agent_service, compose_model)?;
+        if !target.service.is_empty()
+            && selected_services.is_some_and(|services| !services.contains(&target.service))
+        {
+            return Err(anyhow::anyhow!(
+                "forwardPorts targets compose service '{}', but runServices does not start it",
+                target.service
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn forwarding_container(
+    service: &str,
+    agent_container: &str,
+    agent_service: Option<&str>,
+    compose_project: Option<&crate::compose::Project>,
+) -> Result<String> {
+    match (compose_project, agent_service) {
+        (Some(_), Some(agent)) if service == agent => Ok(agent_container.to_string()),
+        (Some(project), Some(_)) => project.one_service_container(service),
+        (None, None) if service.is_empty() => Ok(agent_container.to_string()),
+        (Some(_), None) | (None, Some(_)) => Err(anyhow::anyhow!(
+            "compose port forwarding is missing its project or agent service"
+        )),
+        (None, None) => Err(anyhow::anyhow!(
+            "single-container pod has an invalid stored forwarding service '{service}'"
+        )),
     }
 }
 
@@ -1309,14 +1394,18 @@ fn resolve_port_number(port: &Port) -> Option<u16> {
 ///
 /// Returns the listener handles; the caller must keep them alive
 /// (dropping cancels the listener).
+#[allow(clippy::too_many_arguments)]
 fn setup_port_forwarding(
     conn: &Connection,
     executor: &crate::executor::Executor,
-    pod_id: &crate::executor::PodId,
+    agent_container: &str,
     db_pod_id: db::PodId,
     forward_ports: &[Port],
     ports_attributes: &std::collections::HashMap<String, PortAttributes>,
     other_ports_attributes: &Option<PortAttributes>,
+    agent_service: Option<&str>,
+    compose_model: Option<&crate::compose::Model>,
+    compose_project: Option<&crate::compose::Project>,
 ) -> Result<Vec<crate::exec_proxy::ExecProxyHandle>> {
     let existing = db::list_forwarded_ports(conn, db_pod_id)?;
     let allocated_globally: std::collections::HashSet<u16> =
@@ -1329,32 +1418,48 @@ fn setup_port_forwarding(
     if existing.is_empty() {
         let mut reserved = allocated_globally;
         for port_spec in forward_ports {
-            let container_port = match resolve_port_number(port_spec) {
-                Some(p) => p,
-                None => {
-                    log::warn!("skipping invalid port spec: {port_spec:?}");
-                    continue;
-                }
-            };
+            let target = resolve_forward_target(port_spec, agent_service, compose_model)?;
+            let container_port = target.container_port;
 
             let listener = block_on(bind_near(container_port, &reserved))
                 .context("binding host listener for forwardPorts entry")?;
             let local_port = listener.local_addr()?.port();
             reserved.insert(local_port);
 
+            let attribute_key = if target.service.is_empty()
+                || agent_service.is_some_and(|agent| agent == target.service)
+            {
+                container_port.to_string()
+            } else {
+                format!("{}:{container_port}", target.service)
+            };
             let label = ports_attributes
-                .get(&container_port.to_string())
+                .get(&attribute_key)
+                .or_else(|| ports_attributes.get(&container_port.to_string()))
                 .or(other_ports_attributes.as_ref())
                 .and_then(|a| a.label.as_deref())
                 .unwrap_or("")
                 .to_string();
 
-            db::insert_forwarded_port(conn, db_pod_id, container_port, local_port, &label)?;
+            db::insert_forwarded_port(
+                conn,
+                db_pod_id,
+                &target.service,
+                container_port,
+                local_port,
+                &label,
+            )?;
 
-            let handle = crate::exec_proxy::start_exec_proxy_on_listener(
+            let container = forwarding_container(
+                &target.service,
+                agent_container,
+                agent_service,
+                compose_project,
+            )?;
+            let handle = crate::exec_proxy::start_exec_proxy_on_listener_in_container(
                 listener,
                 executor.clone(),
-                pod_id.clone(),
+                container,
                 container_port,
             )?;
             handles.push(handle);
@@ -1378,17 +1483,28 @@ fn setup_port_forwarding(
             if actual != saved.local_port {
                 conn.execute(
                     "UPDATE forwarded_ports SET local_port = ? \
-                     WHERE pod_id = ? AND container_port = ?",
-                    rusqlite::params![actual, i64::from(db_pod_id), saved.container_port],
+                     WHERE pod_id = ? AND service = ? AND container_port = ?",
+                    rusqlite::params![
+                        actual,
+                        i64::from(db_pod_id),
+                        saved.service,
+                        saved.container_port
+                    ],
                 )
                 .context("updating forwarded_ports.local_port after rebind")?;
             }
             reserved.insert(actual);
 
-            let handle = crate::exec_proxy::start_exec_proxy_on_listener(
+            let container = forwarding_container(
+                &saved.service,
+                agent_container,
+                agent_service,
+                compose_project,
+            )?;
+            let handle = crate::exec_proxy::start_exec_proxy_on_listener_in_container(
                 listener,
                 executor.clone(),
-                pod_id.clone(),
+                container,
                 saved.container_port,
             )?;
             handles.push(handle);
@@ -1872,7 +1988,7 @@ fn is_test_mode() -> bool {
 /// exec since the file lives inside the container's FS.
 fn read_container_server_port(
     executor: &crate::executor::Executor,
-    pod_id: &crate::executor::PodId,
+    container: &str,
 ) -> Result<u16> {
     // In practice the file appears within a few hundred milliseconds
     // of the container-serve exec.
@@ -1891,7 +2007,7 @@ fn read_container_server_port(
     "#};
     let out = executor
         .exec(
-            pod_id,
+            container,
             crate::executor::ExecRequest {
                 cmd: vec!["sh".into(), "-c".into(), script.into()],
                 workdir: None,
@@ -1930,7 +2046,7 @@ fn read_container_server_port(
 #[allow(clippy::too_many_arguments)]
 fn start_container_server(
     executor: &crate::executor::Executor,
-    pod_id: &crate::executor::PodId,
+    container: &str,
     container_repo_path: &Path,
     pod_name: &str,
     local_env_vars: &HashMap<String, String>,
@@ -1963,7 +2079,7 @@ fn start_container_server(
 
     executor
         .exec_detached(
-            pod_id,
+            container,
             crate::executor::ExecRequest {
                 cmd,
                 workdir: None,
@@ -2021,6 +2137,49 @@ impl DaemonServer {
     fn host_executor(&self, host: &Host) -> Result<crate::executor::Executor> {
         let conn = self.host_connections.get_or_create(host)?;
         crate::executor::Executor::new(&conn)
+    }
+
+    fn compose_project_from_record(
+        &self,
+        record: &db::PodRecord,
+        host: &Host,
+    ) -> Result<Option<crate::compose::Project>> {
+        if record.compose_config.is_empty() && record.agent_service.is_empty() {
+            return Ok(None);
+        }
+        if record.compose_config.is_empty() || record.agent_service.is_empty() {
+            return Err(anyhow::anyhow!(
+                "stored compose configuration is missing its agent service or rendered model"
+            ));
+        }
+        let repo_path = Path::new(&record.repo_path);
+        let local_env = deserialize_local_env(&record.local_env)?;
+        let devcontainer = parse_prebuilt_devcontainer(
+            &record.devcontainer_json,
+            repo_path,
+            &record.name,
+            &local_env,
+        )?;
+        let all_mounts = devcontainer.resolved_mounts()?;
+        check_no_unresolved_mount_vars(&all_mounts)?;
+        let (mounts, _) = split_bind_mounts(all_mounts, host, &record.name);
+        let logical_name = PodName(record.name.clone());
+        let project_id = crate::executor::pod_id_for(&logical_name, repo_path);
+        let host_conn = self.host_connections.get_or_create(host)?;
+        let docker_socket = self.engine_cli_socket(&host_conn)?;
+        Ok(Some(crate::compose::Project::new(
+            project_id.as_str(),
+            crate::compose::Model::parse(record.compose_config.clone())?,
+            &record.agent_service,
+            &record.name,
+            &record.image,
+            repo_path,
+            &devcontainer.container_repo_path(repo_path),
+            &devcontainer,
+            &mounts,
+            host,
+            docker_socket.as_deref(),
+        )?))
     }
 
     /// The unix socket that engine CLI invocations (builds, inspects)
@@ -2141,7 +2300,64 @@ impl DaemonServer {
                     Err(e) => return ReconnectPodResult::Unavailable(e),
                 };
                 let pod_id = crate::executor::pod_id_for(pod_name, repo_path);
-                let status = match executor.status(&pod_id) {
+                let compose_project = if record.compose_config.is_empty()
+                    && record.agent_service.is_empty()
+                {
+                    None
+                } else if !record.compose_config.is_empty() && !record.agent_service.is_empty() {
+                    let model = match crate::compose::Model::parse(record.compose_config.clone()) {
+                        Ok(model) => model,
+                        Err(e) => return ReconnectPodResult::Unavailable(e),
+                    };
+                    let all_mounts = match devcontainer.resolved_mounts() {
+                        Ok(mounts) => mounts,
+                        Err(e) => return ReconnectPodResult::Unavailable(e),
+                    };
+                    let (mounts, _) = split_bind_mounts(all_mounts, docker_host, &pod_name.0);
+                    match crate::compose::Project::new(
+                        pod_id.as_str(),
+                        model,
+                        &record.agent_service,
+                        &pod_name.0,
+                        &record.image,
+                        repo_path,
+                        &container_repo_path,
+                        devcontainer,
+                        &mounts,
+                        docker_host,
+                        docker_socket.as_deref(),
+                    ) {
+                        Ok(project) => Some(project),
+                        Err(e) => return ReconnectPodResult::Unavailable(e),
+                    }
+                } else {
+                    return ReconnectPodResult::Unavailable(anyhow::anyhow!(
+                        "stored compose configuration is missing its agent service or rendered model"
+                    ));
+                };
+                let agent_container = match compose_project.as_ref() {
+                    Some(project) => match project.service_containers(&record.agent_service) {
+                        Ok(containers) => match containers.as_slice() {
+                            [container] => container.clone(),
+                            [] => {
+                                return ReconnectPodResult::Gone(anyhow::anyhow!(
+                                    "compose agent service '{}' has no container",
+                                    record.agent_service
+                                ));
+                            }
+                            _ => {
+                                return ReconnectPodResult::Unavailable(anyhow::anyhow!(
+                                    "compose agent service '{}' has {} containers; expected exactly one",
+                                    record.agent_service,
+                                    containers.len()
+                                ));
+                            }
+                        },
+                        Err(e) => return ReconnectPodResult::Unavailable(e),
+                    },
+                    None => pod_id.as_str().to_string(),
+                };
+                let status = match executor.status(&agent_container) {
                     Ok(status) => status,
                     Err(e) => return ReconnectPodResult::Unavailable(e),
                 };
@@ -2158,7 +2374,7 @@ impl DaemonServer {
                     repo_path,
                     docker_host,
                     &executor,
-                    &pod_id,
+                    &agent_container,
                     status,
                     docker_socket,
                     &container_repo_path,
@@ -2166,6 +2382,7 @@ impl DaemonServer {
                     &forward_ports,
                     &ports_attributes,
                     &other_ports_attributes,
+                    compose_project.as_ref(),
                     record,
                 ) {
                     Ok(result) => ReconnectPodResult::Connected(Box::new(result)),
@@ -2209,7 +2426,7 @@ impl DaemonServer {
         let endpoint = match pod_connection.endpoint() {
             Some(endpoint) => endpoint,
             None => {
-                let serve_port = read_container_server_port(executor, pod_id)
+                let serve_port = read_container_server_port(executor, pod_id.as_str())
                     .context("reading server-port file for existing k8s pod")?;
                 let proxy = block_on(crate::exec_proxy::start_exec_proxy(
                     (*executor).clone(),
@@ -2235,7 +2452,7 @@ impl DaemonServer {
             let port = self.localhost_server_port;
             let tunnel = block_on(crate::tunnel::start_tunnel(
                 executor,
-                pod_id,
+                pod_id.as_str(),
                 &format!("127.0.0.1:{port}"),
             ))
             .context("starting tunnel to existing k8s pod")?;
@@ -2260,11 +2477,14 @@ impl DaemonServer {
             let handles = setup_port_forwarding(
                 &conn,
                 executor,
-                pod_id,
+                pod_id.as_str(),
                 record.id,
                 &[],
                 &std::collections::HashMap::new(),
                 &None,
+                None,
+                None,
+                None,
             )?;
             drop(conn);
             pod_connection.set_forwarded_ports(handles);
@@ -2411,7 +2631,7 @@ impl DaemonServer {
         repo_path: &Path,
         docker_host: &Host,
         executor: &crate::executor::Executor,
-        pod_id: &crate::executor::PodId,
+        agent_container: &str,
         status: PodStatus,
         docker_socket: Option<PathBuf>,
         container_repo_path: &Path,
@@ -2419,11 +2639,29 @@ impl DaemonServer {
         forward_ports: &[devcontainer::Port],
         ports_attributes: &HashMap<String, devcontainer::PortAttributes>,
         other_ports_attributes: &Option<devcontainer::PortAttributes>,
+        compose_project: Option<&crate::compose::Project>,
         record: &db::PodRecord,
     ) -> Result<LaunchResult> {
         let was_stopped = status != PodStatus::Running;
         if was_stopped {
-            executor.start(pod_id)?;
+            match compose_project {
+                Some(project) => project.start()?,
+                None => executor.start(agent_container)?,
+            }
+            if executor.status(agent_container)? != PodStatus::Running {
+                if compose_project.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "compose agent service '{}' exited instead of staying running; configure a long-running command or set overrideCommand to true",
+                        record.agent_service
+                    ));
+                }
+                return Err(anyhow::anyhow!(
+                    "container did not remain running after start"
+                ));
+            }
+        }
+        if let Some(project) = compose_project {
+            project.inject_rumpel_into_sidecars(&record.agent_service)?;
         }
 
         let token = record.token.clone();
@@ -2458,7 +2696,7 @@ impl DaemonServer {
             pod_connection.remove_git_tunnel();
             let tunnel = block_on(crate::tunnel::start_tunnel(
                 executor,
-                pod_id,
+                agent_container,
                 &format!("127.0.0.1:{localhost_server_port}"),
             ))
             .context("starting tunnel to existing docker container")?;
@@ -2468,7 +2706,7 @@ impl DaemonServer {
         if was_stopped {
             start_container_server(
                 executor,
-                pod_id,
+                agent_container,
                 container_repo_path,
                 &pod_name.0,
                 local_env_vars,
@@ -2477,14 +2715,14 @@ impl DaemonServer {
             )?;
         }
 
-        let serve_port = read_container_server_port(executor, pod_id)
+        let serve_port = read_container_server_port(executor, agent_container)
             .context("reading server-port file for existing container")?;
         let endpoint = match pod_connection.endpoint() {
             Some(endpoint) => endpoint,
             None => {
-                let proxy = block_on(crate::exec_proxy::start_exec_proxy(
+                let proxy = block_on(crate::exec_proxy::start_exec_proxy_in_container(
                     (*executor).clone(),
-                    (*pod_id).clone(),
+                    agent_container.to_string(),
                     serve_port,
                 ))
                 .context("starting exec proxy for existing container")?;
@@ -2511,11 +2749,18 @@ impl DaemonServer {
             let handles = setup_port_forwarding(
                 &conn,
                 executor,
-                pod_id,
+                agent_container,
                 record.id,
                 forward_ports,
                 ports_attributes,
                 other_ports_attributes,
+                if record.agent_service.is_empty() {
+                    None
+                } else {
+                    Some(record.agent_service.as_str())
+                },
+                compose_project.map(crate::compose::Project::model),
+                compose_project,
             )?;
             drop(conn);
             pod_connection.set_forwarded_ports(handles);
@@ -2524,7 +2769,7 @@ impl DaemonServer {
         pod_connection.ensure_event_loop();
 
         Ok(LaunchResult {
-            container_id: ContainerId(pod_id.as_str().to_string()),
+            container_id: ContainerId(agent_container.to_string()),
             // Clients reuse this socket only for localhost Docker.  The
             // SSH Podman proxy socket is daemon-internal; clients dial
             // their own proxy.
@@ -2638,7 +2883,7 @@ impl DaemonServer {
         // starts, because container-serve clones the repo at startup.
         let tunnel = block_on(crate::tunnel::start_tunnel(
             &executor,
-            &exec_pod_id,
+            exec_pod_id.as_str(),
             &format!("127.0.0.1:{}", self.localhost_server_port),
         ))
         .map_err(|e| mark_error(e.context("starting tunnel to k8s pod")))?;
@@ -2652,7 +2897,7 @@ impl DaemonServer {
             .ok();
         start_container_server(
             &executor,
-            &exec_pod_id,
+            exec_pod_id.as_str(),
             &container_repo_path,
             &pod_name.0,
             local_env_vars,
@@ -2665,7 +2910,7 @@ impl DaemonServer {
         // /opt/rumpelpod/server-port; read it before building the
         // exec proxy so the per-connection `rumpel tcp-proxy` targets
         // the right loopback port.
-        let serve_port = read_container_server_port(&executor, &exec_pod_id)
+        let serve_port = read_container_server_port(&executor, exec_pod_id.as_str())
             .map_err(|e| mark_error(e.context("reading server-port file from new k8s pod")))?;
         let proxy = block_on(crate::exec_proxy::start_exec_proxy(
             executor.clone(),
@@ -2707,11 +2952,14 @@ impl DaemonServer {
             setup_port_forwarding(
                 &conn,
                 &executor,
-                &exec_pod_id,
+                exec_pod_id.as_str(),
                 pod_id,
                 forward_ports,
                 &ports_attributes,
                 other_ports_attributes,
+                None,
+                None,
+                None,
             )?
         };
         pod_connection.set_forwarded_ports(handles);
@@ -2806,31 +3054,62 @@ impl DaemonServer {
                     .resolve_docker_engine()
                     .context("resolving container engine for existing pod")?;
                 drop(conn);
-                let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
-                let status = self
-                    .host_executor(&existing_host)
-                    .and_then(|executor| executor.status(&pod_id))
-                    .with_context(|| {
-                        format!("checking existing pod '{}' before reconnect", pod_name.0)
-                    })?;
+                let is_compose = !existing.compose_config.is_empty();
+                let status = if is_compose {
+                    PodStatus::Running
+                } else {
+                    let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
+                    self.host_executor(&existing_host)
+                        .and_then(|executor| executor.status(&pod_id))
+                        .with_context(|| {
+                            format!("checking existing pod '{}' before reconnect", pod_name.0)
+                        })?
+                };
                 if status == PodStatus::Gone {
                     log::warn!("existing pod is gone, will recreate");
                     self.forget_gone_pod(&repo_path, &pod_name.0)?;
                 } else {
-                    let (devcontainer, _) =
-                        load_and_resolve_devcontainer(&repo_path, &pod_name.0, &local_env_vars)?;
+                    let reconnect_local_env = if is_compose {
+                        deserialize_local_env(&existing.local_env)?
+                    } else {
+                        local_env_vars.clone()
+                    };
+                    let devcontainer = if is_compose {
+                        parse_prebuilt_devcontainer(
+                            &existing.devcontainer_json,
+                            &repo_path,
+                            &pod_name.0,
+                            &reconnect_local_env,
+                        )?
+                    } else {
+                        load_and_resolve_devcontainer(
+                            &repo_path,
+                            &pod_name.0,
+                            &reconnect_local_env,
+                        )?
+                        .0
+                    };
                     match self.reconnect_pod(
                         &pod_name,
                         &repo_path,
                         &existing_host,
                         &devcontainer,
-                        &local_env_vars,
+                        &reconnect_local_env,
                         &existing,
                     ) {
                         ReconnectPodResult::Connected(result) => return Ok(*result),
                         ReconnectPodResult::Gone(e) => {
                             log::warn!("existing pod is gone, will recreate: {e:#}");
-                            self.forget_gone_pod(&repo_path, &pod_name.0)?;
+                            if is_compose {
+                                Daemon::delete_pod(
+                                    self,
+                                    pod_name.clone(),
+                                    repo_path.clone(),
+                                    true,
+                                )?;
+                            } else {
+                                self.forget_gone_pod(&repo_path, &pod_name.0)?;
+                            }
                         }
                         ReconnectPodResult::Unavailable(e) => {
                             return Err(e.context(format!(
@@ -2859,7 +3138,7 @@ impl DaemonServer {
             }
             InitializeMode::AlreadyRun => {}
         }
-        let (mut devcontainer, used_default_image) =
+        let (mut devcontainer, devcontainer_dir, used_default_image) =
             load_and_resolve_devcontainer(&repo_path, &pod_name.0, &local_env_vars)?;
         let raw_devcontainer_json =
             DevContainer::find_raw(&repo_path)?.unwrap_or_else(|| "{}".to_string());
@@ -2912,37 +3191,156 @@ impl DaemonServer {
         build_tx
             .send(OutputLine::Stderr("resolving image...".into()))
             .ok();
-        // The default image is staged into a moving tempdir, so its tag
-        // must ignore the context path; every real context is at the
-        // stable repo root and folds its path into the tag so distinct
-        // repos do not collide on one cached image.
-        let path_tagging = if used_default_image {
-            crate::image::ContextPathTagging::Ignore
+        let compose_source = devcontainer
+            .docker_compose_file
+            .as_ref()
+            .map(|files| crate::compose::Source::new(files, &devcontainer_dir))
+            .transpose()?;
+        let (base_image, base_built, compose_model, agent_service, compose_services) = if let Some(
+            source,
+        ) =
+            compose_source.as_ref()
+        {
+            if devcontainer.image.is_some() || devcontainer.has_build() {
+                return Err(anyhow::anyhow!(
+                    "dockerComposeFile cannot be combined with image or build in devcontainer.json"
+                ));
+            }
+            let service = devcontainer
+                .service
+                .clone()
+                .context("devcontainer.json with dockerComposeFile must set the agent service")?;
+            let project_id = crate::executor::pod_id_for(&pod_name, &repo_path);
+            let mut model = source.render(
+                project_id.as_str(),
+                &docker_host,
+                docker_socket.as_deref(),
+                &local_env_vars,
+            )?;
+            let selected = crate::compose::selected_services(&devcontainer, &service);
+            crate::compose::validate_selected_services(&model, &service, &selected)?;
+            validate_declared_forward_ports(
+                devcontainer.forward_ports.as_deref().unwrap_or(&[]),
+                Some(&service),
+                Some(&model),
+                devcontainer
+                    .run_services
+                    .as_ref()
+                    .map(|_| selected.as_slice()),
+            )?;
+            let mut needs_build = false;
+            for target in model.services() {
+                if model.service_has_build(&target)? {
+                    needs_build = true;
+                }
+            }
+            if needs_build {
+                source.build(
+                    project_id.as_str(),
+                    &docker_host,
+                    docker_socket.as_deref(),
+                    &[],
+                    &local_env_vars,
+                    &build_tx,
+                )?;
+                let services = model.services();
+                for built_service in services {
+                    if model.service_has_build(&built_service)? {
+                        let image = source.service_image_id(
+                            project_id.as_str(),
+                            &docker_host,
+                            docker_socket.as_deref(),
+                            &built_service,
+                            model.service_image_optional(&built_service)?,
+                        )?;
+                        model.set_built_service_image(&built_service, image)?;
+                    }
+                }
+            }
+            for published_service in model.published_port_services() {
+                build_tx
+                        .send(OutputLine::Stderr(format!(
+                            "warning: compose service '{published_service}' publishes host ports; rumpelpod removes them, use forwardPorts instead"
+                        )))
+                        .ok();
+            }
+            let image = model.service_image(&service)?.to_string();
+            (
+                Image(image),
+                needs_build,
+                Some(model),
+                Some(service),
+                selected,
+            )
         } else {
-            crate::image::ContextPathTagging::Include
+            if devcontainer.service.is_some() {
+                return Err(anyhow::anyhow!(
+                    "devcontainer service requires dockerComposeFile"
+                ));
+            }
+            if devcontainer.run_services.is_some() {
+                return Err(anyhow::anyhow!(
+                    "devcontainer runServices requires dockerComposeFile"
+                ));
+            }
+            validate_declared_forward_ports(
+                devcontainer.forward_ports.as_deref().unwrap_or(&[]),
+                None,
+                None,
+                None,
+            )?;
+            // The default image is staged into a moving tempdir, so its tag
+            // must ignore the context path; every real context is at the
+            // stable repo root and folds its path into the tag so distinct
+            // repos do not collide on one cached image.
+            let path_tagging = if used_default_image {
+                crate::image::ContextPathTagging::Ignore
+            } else {
+                crate::image::ContextPathTagging::Include
+            };
+            let build_result = crate::image::resolve_image(
+                &devcontainer,
+                &docker_host,
+                &repo_path,
+                &crate::image::BuildFlags::default(),
+                path_tagging,
+                make_build_output(&build_tx),
+                docker_socket.as_deref(),
+                ssh_auth_sock.as_deref(),
+            )?;
+            (
+                build_result.image,
+                build_result.built,
+                None,
+                None,
+                Vec::new(),
+            )
         };
-        let build_result = crate::image::resolve_image(
-            &devcontainer,
-            &docker_host,
-            &repo_path,
-            &crate::image::BuildFlags::default(),
-            path_tagging,
-            make_build_output(&build_tx),
-            docker_socket.as_deref(),
-            ssh_auth_sock.as_deref(),
-        )?;
         let host_remotes = crate::git::get_remotes(&repo_path).unwrap_or_default();
         let build_options = devcontainer.build_options();
+        let compose_service_user = match (&compose_model, &agent_service) {
+            (Some(model), Some(service)) => model.service_user_optional(service)?,
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "compose image preparation is missing its agent service or rendered model"
+                ));
+            }
+        };
+        let compose_service_user = compose_service_user
+            .and_then(|user| user.split(':').next())
+            .filter(|user| !user.is_empty());
+        let prepared_user = devcontainer.user().or(compose_service_user);
         build_tx
             .send(OutputLine::Stderr("preparing image...".into()))
             .ok();
         let container_env_keys = container_env_keys_sorted(&devcontainer);
         let prepared = crate::prepared_image::build_prepared_image(
-            &build_result.image,
+            &base_image,
             &docker_host,
             &git_dir,
             &container_repo_path,
-            devcontainer.user(),
+            prepared_user,
             &host_remotes,
             &mount_targets,
             claude_cli_path.as_deref(),
@@ -2959,7 +3357,7 @@ impl DaemonServer {
             make_build_output(&build_tx),
         )?;
         let image = prepared.image;
-        let image_built = build_result.built || prepared.built;
+        let image_built = base_built || prepared.built;
 
         gateway::install_host_hooks(&repo_path)?;
 
@@ -2974,6 +3372,9 @@ impl DaemonServer {
                 raw_devcontainer_json,
                 image,
                 image_built,
+                compose_model,
+                agent_service,
+                compose_services,
                 git_setup,
                 local_env_vars,
                 mounts,
@@ -3000,6 +3401,8 @@ impl DaemonServer {
         local_env_vars: HashMap<String, String>,
         source_image: String,
         source_devcontainer_json: String,
+        source_agent_service: String,
+        source_compose_config: String,
         source_env: HashMap<String, String>,
         git_setup: GitSetupParams,
         build_tx: std::sync::mpsc::Sender<crate::image::OutputLine>,
@@ -3044,6 +3447,56 @@ impl DaemonServer {
         check_no_unresolved_mount_vars(&all_mounts)?;
         let (mounts, bind_sources) = split_bind_mounts(all_mounts, &docker_host, &pod_name.0);
         let container_repo_path = devcontainer.container_repo_path(&repo_path);
+        let compose_model = if source_compose_config.is_empty() {
+            None
+        } else {
+            Some(crate::compose::Model::parse(source_compose_config)?)
+        };
+        let agent_service = if source_agent_service.is_empty() {
+            None
+        } else {
+            Some(source_agent_service)
+        };
+        let compose_services = match (&compose_model, &agent_service) {
+            (Some(model), Some(service)) => {
+                let selected = crate::compose::selected_services(&devcontainer, service);
+                crate::compose::validate_selected_services(model, service, &selected)?;
+                validate_declared_forward_ports(
+                    devcontainer.forward_ports.as_deref().unwrap_or(&[]),
+                    Some(service),
+                    Some(model),
+                    devcontainer
+                        .run_services
+                        .as_ref()
+                        .map(|_| selected.as_slice()),
+                )?;
+                selected
+            }
+            (None, None) => {
+                if devcontainer.service.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "devcontainer service requires dockerComposeFile"
+                    ));
+                }
+                if devcontainer.run_services.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "devcontainer runServices requires dockerComposeFile"
+                    ));
+                }
+                validate_declared_forward_ports(
+                    devcontainer.forward_ports.as_deref().unwrap_or(&[]),
+                    None,
+                    None,
+                    None,
+                )?;
+                Vec::new()
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "stored compose configuration is missing its agent service or rendered model"
+                ));
+            }
+        };
 
         // Keep the connection alive for the whole launch: a podman ssh
         // proxy socket returned here dies with the connection.
@@ -3064,6 +3517,9 @@ impl DaemonServer {
                 raw_devcontainer_json: source_devcontainer_json,
                 image: Image(source_image),
                 image_built: false,
+                compose_model,
+                agent_service,
+                compose_services,
                 git_setup,
                 local_env_vars,
                 mounts,
@@ -3099,6 +3555,9 @@ impl DaemonServer {
             raw_devcontainer_json,
             image,
             image_built,
+            compose_model,
+            agent_service,
+            compose_services,
             git_setup,
             local_env_vars,
             mounts,
@@ -3137,6 +3596,27 @@ impl DaemonServer {
         }
 
         let exec_pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
+        let compose_project = match (&compose_model, &agent_service) {
+            (Some(model), Some(service)) => Some(crate::compose::Project::new(
+                exec_pod_id.as_str(),
+                model.clone(),
+                service,
+                &pod_name.0,
+                &image.0,
+                &repo_path,
+                &container_repo_path,
+                &devcontainer,
+                &mounts,
+                &docker_host,
+                docker_socket.as_deref(),
+            )?),
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "compose launch is missing its agent service or rendered model"
+                ));
+            }
+        };
         let localhost_server_port = self.localhost_server_port;
 
         let token = SharedGitServerState::generate_token();
@@ -3144,7 +3624,7 @@ impl DaemonServer {
         let local_env_json = serialize_local_env(&local_env_vars);
         let pod_id = {
             let conn = self.db.lock().unwrap();
-            db::create_pod(
+            db::create_pod_with_compose(
                 &conn,
                 &repo_path,
                 &pod_name.0,
@@ -3152,6 +3632,11 @@ impl DaemonServer {
                 &token,
                 &image.0,
                 &raw_devcontainer_json,
+                agent_service.as_deref().unwrap_or(""),
+                compose_model
+                    .as_ref()
+                    .map(crate::compose::Model::json)
+                    .unwrap_or(""),
                 &local_env_json,
             )?
         };
@@ -3178,32 +3663,47 @@ impl DaemonServer {
             progress_tx
                 .send(OutputLine::Stderr("creating container...".into()))
                 .ok();
-            let spec = build_docker_pod_spec(
-                &pod_name,
-                &image,
-                &repo_path,
-                &container_repo_path,
-                docker_host
-                    .container_engine()
-                    .expect("kubernetes hosts are handled before docker launch"),
-                &devcontainer,
-                &mounts,
-                &publish_ports,
-                &progress_tx,
-            )?;
-            let backend_container_id = executor.launch(&exec_pod_id, spec)?;
+            let agent_container = if let Some(project) = compose_project.as_ref() {
+                project.up(&compose_services, &progress_tx)?;
+                let service = agent_service
+                    .as_deref()
+                    .expect("compose project always has an agent service");
+                let container = project.one_service_container(service)?;
+                if executor.status(container.as_str())? != PodStatus::Running {
+                    return Err(anyhow::anyhow!(
+                        "compose agent service '{service}' exited instead of staying running; configure a long-running command or set overrideCommand to true"
+                    ));
+                }
+                project.inject_rumpel_into_sidecars(service)?;
+                container
+            } else {
+                let spec = build_docker_pod_spec(
+                    &pod_name,
+                    &image,
+                    &repo_path,
+                    &container_repo_path,
+                    docker_host
+                        .container_engine()
+                        .expect("kubernetes hosts are handled before docker launch"),
+                    &devcontainer,
+                    &mounts,
+                    &publish_ports,
+                    &progress_tx,
+                )?;
+                executor.launch(&exec_pod_id, spec)?
+            };
             self.container_ids.lock().unwrap().ids.insert(
                 (repo_path.clone(), pod_name.0.clone()),
-                backend_container_id,
+                agent_container.clone(),
             );
-            let container_id = ContainerId(exec_pod_id.as_str().to_string());
+            let container_id = ContainerId(agent_container.clone());
 
             // Start exec tunnel so the container can reach the git HTTP
             // server on a loopback port.  Must be up before container-serve
             // starts, because container-serve clones the repo at startup.
             let tunnel = block_on(crate::tunnel::start_tunnel(
                 &executor,
-                &exec_pod_id,
+                &agent_container,
                 &format!("127.0.0.1:{localhost_server_port}"),
             ))
             .context("starting tunnel to docker container")?;
@@ -3217,7 +3717,7 @@ impl DaemonServer {
                 .ok();
             start_container_server(
                 &executor,
-                &exec_pod_id,
+                &agent_container,
                 &container_repo_path,
                 &pod_name.0,
                 &local_env_vars,
@@ -3227,11 +3727,11 @@ impl DaemonServer {
 
             // Route container-serve access through an exec proxy so we
             // don't need bridge IPs or SSH port forwards.
-            let serve_port = read_container_server_port(&executor, &exec_pod_id)
+            let serve_port = read_container_server_port(&executor, &agent_container)
                 .context("reading server-port file for new container")?;
-            let proxy = block_on(crate::exec_proxy::start_exec_proxy(
+            let proxy = block_on(crate::exec_proxy::start_exec_proxy_in_container(
                 executor.clone(),
-                exec_pod_id.clone(),
+                agent_container,
                 serve_port,
             ))
             .context("starting exec proxy for container-serve")?;
@@ -3261,7 +3761,12 @@ impl DaemonServer {
                     "overlay2 setup error, removing container and retrying: {:#}",
                     first_err
                 );
-                if let Err(e) = executor.delete(&exec_pod_id) {
+                let delete_result = if let Some(project) = compose_project.as_ref() {
+                    project.down()
+                } else {
+                    executor.delete(&exec_pod_id)
+                };
+                if let Err(e) = delete_result {
                     error!("failed to remove broken container {exec_pod_id}: {e}");
                 }
                 self.container_ids
@@ -3296,11 +3801,14 @@ impl DaemonServer {
                 setup_port_forwarding(
                     &conn,
                     &executor,
-                    &exec_pod_id,
+                    &container_id.0,
                     pod_id,
                     &forward_ports,
                     &ports_attributes,
                     &other_ports_attributes,
+                    agent_service.as_deref(),
+                    compose_model.as_ref(),
+                    compose_project.as_ref(),
                 )
                 .map_err(|e| {
                     error!("port forwarding setup failed: {e}");
@@ -3530,6 +4038,8 @@ impl DaemonServer {
             local_env_vars,
             source_record.image.clone(),
             source_record.devcontainer_json.clone(),
+            source_record.agent_service.clone(),
+            source_record.compose_config.clone(),
             source_env,
             git_setup,
             build_tx,
@@ -3703,58 +4213,85 @@ impl DaemonServer {
         // 1. Snapshot dirty files and per-agent state if container exists
         let mut patch: Option<Vec<u8>> = None;
         let mut agent_snapshots: Vec<(&'static str, Vec<u8>)> = Vec::new();
-        let copied_configs = {
+        let (copied_configs, old_record) = {
             let conn = self.db.lock().unwrap();
             match db::get_pod(&conn, &repo_path, &pod_name.0)? {
-                Some(record) => copied_agent_configs(&conn, record.id)?,
-                None => CopiedAgentConfigs::default(),
+                Some(record) => (copied_agent_configs(&conn, record.id)?, Some(record)),
+                None => (CopiedAgentConfigs::default(), None),
             }
         };
 
-        let status = executor.status(&pod_id)?;
-        let exists = status != PodStatus::Gone;
-        if exists {
-            if status == PodStatus::Running {
-                // Look up the old pod's token so we can authenticate to
-                // its server for snapshotting.
-                let old_token = {
-                    let conn = self.db.lock().unwrap();
-                    db::get_pod(&conn, &repo_path, &pod_name.0)
-                        .ok()
-                        .flatten()
-                        .map(|r| r.token)
-                };
-                if let Some(old_token) = old_token {
-                    if let Ok(serve_port) = read_container_server_port(&executor, &pod_id) {
-                        if let Ok(proxy) = block_on(crate::exec_proxy::start_exec_proxy(
-                            executor.clone(),
-                            pod_id.clone(),
-                            serve_port,
-                        )) {
-                            let port = proxy.port;
-                            let url = format!("http://127.0.0.1:{port}");
-                            if let Ok(old_pod) =
-                                PodClient::new(&url, &old_token, RetryPolicy::Background)
-                            {
-                                let p = old_pod
-                                    .git_patch_get()
-                                    .context("snapshotting dirty files")?;
-                                patch = if p.is_empty() { None } else { Some(p) };
+        let compose_project = old_record
+            .as_ref()
+            .map(|record| self.compose_project_from_record(record, &docker_host))
+            .transpose()?
+            .flatten();
+        let agent_container = match (&compose_project, &old_record) {
+            (Some(project), Some(record)) => {
+                let containers = project.service_containers(&record.agent_service)?;
+                match containers.as_slice() {
+                    [container] => Some(container.clone()),
+                    [] => None,
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "compose agent service '{}' has {} containers; expected exactly one",
+                            record.agent_service,
+                            containers.len()
+                        ));
+                    }
+                }
+            }
+            (None, _) => Some(pod_id.as_str().to_string()),
+            (Some(_), None) => {
+                return Err(anyhow::anyhow!(
+                    "compose project exists without a stored pod record"
+                ));
+            }
+        };
+        let status = match agent_container.as_deref() {
+            Some(container) => executor.status(container)?,
+            None => PodStatus::Gone,
+        };
+        if status == PodStatus::Running {
+            let agent_container = agent_container
+                .as_deref()
+                .expect("a running compose agent has a container");
+            // Look up the old pod's token so we can authenticate to
+            // its server for snapshotting.
+            let old_token = old_record.as_ref().map(|record| record.token.clone());
+            if let Some(old_token) = old_token {
+                if let Ok(serve_port) = read_container_server_port(&executor, agent_container) {
+                    if let Ok(proxy) = block_on(crate::exec_proxy::start_exec_proxy_in_container(
+                        executor.clone(),
+                        agent_container.to_string(),
+                        serve_port,
+                    )) {
+                        let port = proxy.port;
+                        let url = format!("http://127.0.0.1:{port}");
+                        if let Ok(old_pod) =
+                            PodClient::new(&url, &old_token, RetryPolicy::Background)
+                        {
+                            let p = old_pod
+                                .git_patch_get()
+                                .context("snapshotting dirty files")?;
+                            patch = if p.is_empty() { None } else { Some(p) };
 
-                                for agent in AGENT_NAMES {
-                                    if let Some(buf) = snapshot_agent_files(&old_pod, agent)
-                                        .with_context(|| format!("snapshotting {agent} state"))?
-                                    {
-                                        agent_snapshots.push((agent, buf));
-                                    }
+                            for agent in AGENT_NAMES {
+                                if let Some(buf) = snapshot_agent_files(&old_pod, agent)
+                                    .with_context(|| format!("snapshotting {agent} state"))?
+                                {
+                                    agent_snapshots.push((agent, buf));
                                 }
                             }
                         }
                     }
                 }
             }
+        }
 
-            // 2. Delete the container synchronously so launch_pod can reuse the name
+        // Delete the whole stored project even if its agent container is
+        // already gone, so compose sidecars and named volumes cannot leak.
+        if old_record.is_some() {
             Daemon::delete_pod(self, pod_name.clone(), repo_path.clone(), true)?;
         }
 
@@ -3863,10 +4400,18 @@ impl DaemonServer {
 
         let executor = self.host_executor(host)?;
         let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
-        if executor.status(&pod_id)? != PodStatus::Running {
+        let compose_project = self.compose_project_from_record(pod, host)?;
+        let agent_container = match compose_project.as_ref() {
+            Some(project) => project.one_service_container(&pod.agent_service)?,
+            None => pod_id.as_str().to_string(),
+        };
+        if executor.status(&agent_container)? != PodStatus::Running {
             return Ok(());
         }
-        let serve_port = read_container_server_port(&executor, &pod_id)
+        if let Some(project) = compose_project.as_ref() {
+            project.inject_rumpel_into_sidecars(&pod.agent_service)?;
+        }
+        let serve_port = read_container_server_port(&executor, &agent_container)
             .context("reading server-port file while restoring running pod")?;
 
         let pod_connection = self.pod_connections.get_or_create(
@@ -3877,19 +4422,40 @@ impl DaemonServer {
         )?;
         let tunnel = block_on(crate::tunnel::start_tunnel(
             &executor,
-            &pod_id,
+            &agent_container,
             &format!("127.0.0.1:{}", self.localhost_server_port),
         ))
         .context("starting docker tunnel")?;
         pod_connection.set_git_tunnel(tunnel);
 
-        let proxy = block_on(crate::exec_proxy::start_exec_proxy(
+        let proxy = block_on(crate::exec_proxy::start_exec_proxy_in_container(
             executor.clone(),
-            pod_id.clone(),
+            agent_container.clone(),
             serve_port,
         ))
         .context("starting exec proxy")?;
         pod_connection.set_pod_server(host.clone(), pod.token.clone(), proxy)?;
+
+        let handles = {
+            let conn = self.db.lock().unwrap();
+            setup_port_forwarding(
+                &conn,
+                &executor,
+                &agent_container,
+                pod.id,
+                &[],
+                &std::collections::HashMap::new(),
+                &None,
+                if pod.agent_service.is_empty() {
+                    None
+                } else {
+                    Some(pod.agent_service.as_str())
+                },
+                compose_project.as_ref().map(crate::compose::Project::model),
+                compose_project.as_ref(),
+            )?
+        };
+        pod_connection.set_forwarded_ports(handles);
         pod_connection.ensure_event_loop();
 
         Ok(())
@@ -4079,9 +4645,17 @@ impl Daemon for DaemonServer {
 
         let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
         let executor = self.host_executor(&host)?;
+        let compose_project = pod_record
+            .as_ref()
+            .map(|record| self.compose_project_from_record(record, &host))
+            .transpose()?
+            .flatten();
 
         if wait {
-            let result = executor.stop(&pod_id);
+            let result = match compose_project.as_ref() {
+                Some(project) => project.stop(),
+                None => executor.stop(&pod_id),
+            };
             let conn = self.db.lock().unwrap();
             if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
                 let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
@@ -4092,7 +4666,11 @@ impl Daemon for DaemonServer {
             let repo_path = repo_path.clone();
             let pod_name = pod_name.clone();
             std::thread::spawn(move || {
-                if let Err(e) = executor.stop(&pod_id) {
+                let result = match compose_project {
+                    Some(project) => project.stop(),
+                    None => executor.stop(&pod_id),
+                };
+                if let Err(e) = result {
                     let name = &pod_name.0;
                     error!("failed to stop pod '{name}': {e}");
                 }
@@ -4126,6 +4704,11 @@ impl Daemon for DaemonServer {
 
         let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
         let is_k8s = matches!(host, Host::Kubernetes { .. });
+        let compose_project = pod_record
+            .as_ref()
+            .map(|record| self.compose_project_from_record(record, &host))
+            .transpose()?
+            .flatten();
 
         // Drop the backend-specific handles up-front so any exec
         // sessions inside the container are cleaned up before we try
@@ -4148,7 +4731,10 @@ impl Daemon for DaemonServer {
         // non-wait path runs deletion in a background thread with
         // retries and only marks the DB record removed on success.
         if is_k8s || wait {
-            let result = executor.delete(&pod_id);
+            let result = match compose_project.as_ref() {
+                Some(project) => project.down(),
+                None => executor.delete(&pod_id),
+            };
             if result.is_ok() {
                 self.container_ids
                     .lock()
@@ -4171,7 +4757,11 @@ impl Daemon for DaemonServer {
                     if delay > 0 {
                         std::thread::sleep(std::time::Duration::from_secs(delay));
                     }
-                    match executor.delete(&pod_id) {
+                    let result = match compose_project.as_ref() {
+                        Some(project) => project.down(),
+                        None => executor.delete(&pod_id),
+                    };
+                    match result {
                         Ok(()) => {
                             container_ids
                                 .lock()
@@ -4396,7 +4986,11 @@ impl Daemon for DaemonServer {
             };
             let logical = PodName(pod_name.to_string());
             let pod_id = crate::executor::pod_id_for(&logical, repo_path);
-            let result = self.host_executor(&host).and_then(|e| e.delete(&pod_id));
+            let result = match self.compose_project_from_record(pod, &host) {
+                Ok(Some(project)) => project.down(),
+                Ok(None) => self.host_executor(&host).and_then(|e| e.delete(&pod_id)),
+                Err(e) => Err(e),
+            };
             match result {
                 Ok(()) => {
                     self.container_ids
@@ -4421,6 +5015,7 @@ impl Daemon for DaemonServer {
         Ok(ports
             .into_iter()
             .map(|p| PortInfo {
+                service: p.service,
                 container_port: p.container_port,
                 local_port: p.local_port,
                 label: p.label,
@@ -4432,34 +5027,75 @@ impl Daemon for DaemonServer {
         let AddForwardedPortRequest {
             pod_name,
             repo_path,
+            service,
             container_port,
             local_port,
             label,
         } = request;
 
-        let (db_pod_id, host, token) = {
+        let (pod_record, host, service) = {
             let conn = self.db.lock().unwrap();
             let pod_rec = db::get_pod(&conn, &repo_path, &pod_name.0)?
                 .with_context(|| format!("pod '{}' not found", pod_name.0))?;
+            let service = if pod_rec.compose_config.is_empty() {
+                if let Some(service) = service.as_deref() {
+                    return Err(anyhow::anyhow!(
+                        "--service '{service}' is valid only for dockerComposeFile pods"
+                    ));
+                }
+                String::new()
+            } else {
+                let service = service
+                    .clone()
+                    .unwrap_or_else(|| pod_rec.agent_service.clone());
+                crate::compose::Model::parse(pod_rec.compose_config.clone())?
+                    .validate_service(&service)?;
+                service
+            };
             let existing = db::list_forwarded_ports(&conn, pod_rec.id)?;
-            if let Some(dup) = existing.iter().find(|p| p.container_port == container_port) {
+            if let Some(dup) = existing
+                .iter()
+                .find(|p| p.service == service && p.container_port == container_port)
+            {
                 let local = dup.local_port;
                 let name = &pod_name.0;
                 return Err(anyhow::anyhow!(
-                    "container port {container_port} is already forwarded on pod '{name}' (local port {local})"
+                    "container port {container_port} for service '{service}' is already forwarded on pod '{name}' (local port {local})"
                 ));
             }
             let host: Host =
                 serde_json::from_str(&pod_rec.host).context("parsing stored host for pod")?;
-            (pod_rec.id, host, pod_rec.token)
+            (pod_rec, host, service)
         };
-        let pod_connection =
-            self.pod_connections
-                .get_or_create(&repo_path, &pod_name.0, host.clone(), token)?;
+        let db_pod_id = pod_record.id;
+        let pod_connection = self.pod_connections.get_or_create(
+            &repo_path,
+            &pod_name.0,
+            host.clone(),
+            pod_record.token.clone(),
+        )?;
 
         let executor = self.host_executor(&host)?;
         let exec_pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
-        let status = executor.status(&exec_pod_id)?;
+        let compose_project = self.compose_project_from_record(&pod_record, &host)?;
+        let agent_container = match compose_project.as_ref() {
+            Some(project) => project.one_service_container(&pod_record.agent_service)?,
+            None => exec_pod_id.as_str().to_string(),
+        };
+        if let Some(project) = compose_project.as_ref() {
+            project.inject_rumpel_into_sidecars(&pod_record.agent_service)?;
+        }
+        let target_container = forwarding_container(
+            &service,
+            &agent_container,
+            if pod_record.agent_service.is_empty() {
+                None
+            } else {
+                Some(&pod_record.agent_service)
+            },
+            compose_project.as_ref(),
+        )?;
+        let status = executor.status(&target_container)?;
         if status != PodStatus::Running {
             let name = &pod_name.0;
             return Err(anyhow::anyhow!(
@@ -4496,18 +5132,26 @@ impl Daemon for DaemonServer {
 
         {
             let conn = self.db.lock().unwrap();
-            db::insert_forwarded_port(&conn, db_pod_id, container_port, actual_local_port, &label)?;
+            db::insert_forwarded_port(
+                &conn,
+                db_pod_id,
+                &service,
+                container_port,
+                actual_local_port,
+                &label,
+            )?;
         }
 
-        let handle = crate::exec_proxy::start_exec_proxy_on_listener(
+        let handle = crate::exec_proxy::start_exec_proxy_on_listener_in_container(
             listener,
             executor,
-            exec_pod_id,
+            target_container,
             container_port,
         )?;
         pod_connection.add_forwarded_port(handle);
 
         Ok(PortInfo {
+            service,
             container_port,
             local_port: actual_local_port,
             label,

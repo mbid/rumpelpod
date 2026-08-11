@@ -32,7 +32,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 
-use crate::executor::{ExecRequest, ExecStreams, Executor, PodId};
+use crate::executor::{ExecRequest, ExecStreams, Executor};
 use crate::jitter;
 
 const FRAME_OPEN: u8 = 0x01;
@@ -527,17 +527,17 @@ fn spawn_host_mux(
 /// Retries on failure indefinitely (the caller can cancel).
 pub async fn start_tunnel(
     executor: &Executor,
-    pod_id: &PodId,
+    container: &str,
     target_addr: &str,
 ) -> Result<TunnelHandle> {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match start_tunnel_inner(executor, pod_id, target_addr).await {
+        match start_tunnel_inner(executor, container, target_addr).await {
             Ok(handle) => return Ok(handle),
             Err(e) => {
                 log::warn!(
-                    "tunnel to pod '{pod_id}' failed (attempt {attempt}): {e:#}. Retrying..."
+                    "tunnel to container '{container}' failed (attempt {attempt}): {e:#}. Retrying..."
                 );
                 tokio::time::sleep(jitter(std::time::Duration::from_secs(1))).await;
             }
@@ -547,7 +547,7 @@ pub async fn start_tunnel(
 
 async fn start_tunnel_inner(
     executor: &Executor,
-    pod_id: &PodId,
+    container: &str,
     target_addr: &str,
 ) -> Result<TunnelHandle> {
     // Kill any leftover tunnel-server from a previous run.  We don't
@@ -555,7 +555,7 @@ async fn start_tunnel_inner(
     // a stale process for the loopback port inside the pod.
     let _ = executor
         .exec_async(
-            pod_id,
+            container,
             ExecRequest {
                 cmd: vec![
                     "sh".into(),
@@ -576,7 +576,7 @@ async fn start_tunnel_inner(
         keepalive,
     } = executor
         .exec_streaming(
-            pod_id,
+            container,
             vec![
                 "/opt/rumpelpod/bin/rumpel".to_string(),
                 "tunnel-server".to_string(),

@@ -43,10 +43,18 @@ pub async fn start_exec_proxy(
     pod_id: PodId,
     container_port: u16,
 ) -> Result<ExecProxyHandle> {
+    start_exec_proxy_in_container(executor, pod_id.as_str().to_string(), container_port).await
+}
+
+pub async fn start_exec_proxy_in_container(
+    executor: Executor,
+    container: String,
+    container_port: u16,
+) -> Result<ExecProxyHandle> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("binding exec proxy listener")?;
-    start_exec_proxy_on_listener(listener, executor, pod_id, container_port)
+    start_exec_proxy_on_listener_in_container(listener, executor, container, container_port)
 }
 
 /// Like [`start_exec_proxy`] but takes a caller-supplied listener.
@@ -56,10 +64,10 @@ pub async fn start_exec_proxy(
 /// restarts).  Safe to call from sync code: the accept loop is
 /// spawned on the shared daemon runtime rather than the current
 /// thread's (possibly absent) tokio context.
-pub fn start_exec_proxy_on_listener(
+pub fn start_exec_proxy_on_listener_in_container(
     listener: TcpListener,
     executor: Executor,
-    pod_id: PodId,
+    container: String,
     container_port: u16,
 ) -> Result<ExecProxyHandle> {
     let port = listener.local_addr()?.port();
@@ -72,7 +80,7 @@ pub fn start_exec_proxy_on_listener(
         accept_loop(
             listener,
             executor,
-            pod_id,
+            container,
             container_port,
             cancel_rx,
             alive2,
@@ -90,7 +98,7 @@ pub fn start_exec_proxy_on_listener(
 async fn accept_loop(
     listener: TcpListener,
     executor: Executor,
-    pod_id: PodId,
+    container: String,
     container_port: u16,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
     alive: Arc<AtomicBool>,
@@ -110,10 +118,10 @@ async fn accept_loop(
         };
 
         let executor = executor.clone();
-        let pod_id = pod_id.clone();
+        let container = container.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = bridge_connection(stream, &executor, &pod_id, container_port).await {
+            if let Err(e) = bridge_connection(stream, &executor, &container, container_port).await {
                 log::debug!("exec proxy bridge ended: {e:#}");
             }
         });
@@ -125,12 +133,12 @@ async fn accept_loop(
 async fn bridge_connection(
     tcp_stream: tokio::net::TcpStream,
     executor: &Executor,
-    pod_id: &PodId,
+    container: &str,
     container_port: u16,
 ) -> Result<()> {
     let streams = executor
         .exec_streaming(
-            pod_id,
+            container,
             vec![
                 crate::daemon::RUMPEL_CONTAINER_BIN.to_string(),
                 "tcp-proxy".to_string(),

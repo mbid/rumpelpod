@@ -96,32 +96,6 @@ fn warns_on_app_port() {
 }
 
 #[test]
-fn warns_on_docker_compose_file() {
-    let repo = TestRepo::new();
-
-    write_devcontainer_with_unsupported(
-        &repo,
-        r#",
-            "dockerComposeFile": "docker-compose.yml""#,
-    );
-    let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home);
-    let daemon = TestDaemon::start(&home);
-    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
-
-    let output = pod_command(&repo, &daemon)
-        .args(["enter", "--create", "unsupported-compose", "--", "true"])
-        .output()
-        .expect("Failed to run pod command");
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("dockerComposeFile") && stderr.contains("not supported"),
-        "stderr should warn about unsupported dockerComposeFile, got: {stderr}",
-    );
-}
-
-#[test]
 fn warns_on_multiple_unsupported() {
     let repo = TestRepo::new();
 
@@ -129,9 +103,7 @@ fn warns_on_multiple_unsupported() {
         &repo,
         r#",
             "workspaceMount": "source=/host,target=/ws,type=bind",
-            "appPort": 3000,
-            "service": "web",
-            "runServices": ["web", "db"]"#,
+            "appPort": 3000"#,
     );
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
@@ -151,14 +123,6 @@ fn warns_on_multiple_unsupported() {
     assert!(
         stderr.contains("appPort"),
         "stderr should warn about appPort, got: {stderr}",
-    );
-    assert!(
-        stderr.contains("service"),
-        "stderr should warn about service, got: {stderr}",
-    );
-    assert!(
-        stderr.contains("runServices"),
-        "stderr should warn about runServices, got: {stderr}",
     );
 }
 

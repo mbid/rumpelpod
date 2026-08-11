@@ -1,6 +1,6 @@
 # Docker compose support
 
-Status: design. Nothing here is implemented yet.
+Status: implemented.
 
 Scope: the docker engine only. Podman and Kubernetes are out of scope
 for the first implementation; a section at the end records how the
@@ -21,7 +21,7 @@ machinery must keep working without granting the agent anything new.
 Rumpelpod never parses compose YAML itself. The merged and
 interpolated model is rendered once at pod creation with
 
-    docker compose -f ... -f ... config --format json
+    docker compose -f ... -f ... config --no-normalize --format json
 
 which resolves multiple files, `extends`, profiles, and environment
 interpolation with compose's own semantics. The rendered JSON is
@@ -29,6 +29,10 @@ persisted in the pod's database row, next to the stored
 devcontainer.json, so that reconnect, fork, and recreate do not depend
 on the host tree. It is also the engine-neutral internal model that a
 future Kubernetes backend would consume.
+
+`--no-normalize` keeps implicit network and volume names relative to
+the project. Normalized output embeds the original project name in
+those resources, which would make a fork share them with its source.
 
 Rumpelpod influences the project not by editing the user's files but
 by generating an additional override file passed as the last `-f`.
@@ -41,6 +45,8 @@ The compose project name is the existing PodId
 (`rumpel-<basename>-<pod>-<hash>`), which already satisfies compose's
 project name rules. One project per (repo_path, pod_name), so two pods
 on the same repo get disjoint container sets, networks, and volumes.
+The generated override resets explicit `container_name` values so they
+cannot bypass the project namespace and collide across pods.
 
 Compose labels every container with `com.docker.compose.project` and
 `com.docker.compose.service`; container discovery goes through those
@@ -68,8 +74,8 @@ The two-stage build is unchanged; only the provenance of the base
 image changes. For the agent service:
 
 - `image:` in the compose file is used as the base directly.
-- `build:` is built with `docker compose build <service>` rather than
-  by reimplementing compose build semantics in our buildx path.
+- `build:` services use Compose's `build --with-dependencies` command
+  rather than reimplementing Compose build semantics in our buildx path.
   Fidelity matters more here than our content-addressed skip; docker's
   layer cache keeps repeated builds cheap. The resulting image ID (not
   tag) is the base.
@@ -81,7 +87,9 @@ still hits the prepared image cache.
 
 The override file replaces the agent service's `image:` with the
 prepared image. Sidecar services with `build:` sections are built by
-`docker compose build` before `up --no-build`.
+`docker compose build` before `up --no-build`. Their persisted build
+entries are replaced with image IDs so reconnect and fork do not need
+the original build contexts.
 
 ## Trust model
 

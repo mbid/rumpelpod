@@ -7,6 +7,7 @@ mod cli;
 mod codex;
 mod command_ext;
 pub(crate) mod completions;
+mod compose;
 pub mod config;
 mod container_exec;
 mod cp;

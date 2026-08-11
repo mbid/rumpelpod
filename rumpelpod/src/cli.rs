@@ -588,6 +588,10 @@ pub struct ForwardPortCommand {
     #[arg(long)]
     pub label: Option<String>,
 
+    /// Compose service to forward. Defaults to the agent service.
+    #[arg(long, value_name = "SERVICE")]
+    pub service: Option<String>,
+
     /// Pod and container port to forward, e.g. `dev:8080`.
     #[arg(value_name = "POD:PORT", value_parser = parse_pod_port_spec)]
     pub target: PodPortSpec,

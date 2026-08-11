@@ -116,6 +116,31 @@ fn forward_single_port() {
 }
 
 #[test]
+fn string_forward_port_requires_compose_service() {
+    let repo = TestRepo::new();
+
+    write_devcontainer_with_ports(&repo, r#""forwardPorts": ["9101"],"#);
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "fwd-invalid-string", "--", "true"])
+        .output()
+        .expect("run pod with invalid string forward");
+    assert!(
+        !output.status.success(),
+        "invalid forwardPorts entry succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requires a dockerComposeFile pod") && stderr.contains("<service>:<port>"),
+        "invalid forwardPorts error was not actionable: {stderr}"
+    );
+}
+
+#[test]
 fn forward_multiple_ports() {
     let repo = TestRepo::new();
 
