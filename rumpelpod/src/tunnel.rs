@@ -338,6 +338,7 @@ async fn notify_container_server_gateway_port(tunnel_port: u16) -> Result<()> {
 /// Handle for an active tunnel.  Dropping this cancels the tunnel.
 pub struct TunnelHandle {
     alive: Arc<AtomicBool>,
+    target_container: String,
     _cancel_tx: tokio::sync::watch::Sender<bool>,
 }
 
@@ -346,6 +347,10 @@ impl TunnelHandle {
     /// WebSocket/pipe to the pod breaks or the task is cancelled.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed)
+    }
+
+    pub fn target_container(&self) -> &str {
+        &self.target_container
     }
 }
 
@@ -665,6 +670,7 @@ async fn start_tunnel_inner(
 
     Ok(TunnelHandle {
         alive,
+        target_container: container.to_string(),
         _cancel_tx: cancel_tx,
     })
 }

@@ -293,6 +293,15 @@ impl PodConnection {
             .is_some_and(|h| h.is_alive())
     }
 
+    pub fn pod_server_targets_different_container(&self, container: &str) -> bool {
+        self.resources
+            .lock()
+            .unwrap()
+            .pod_server
+            .as_ref()
+            .is_some_and(|handle| handle.target_container() != container)
+    }
+
     pub fn remove_pod_server(&self) {
         self.resources.lock().unwrap().pod_server = None;
         self.stop_event_loop();
@@ -367,6 +376,15 @@ impl PodConnection {
             .git_tunnel
             .as_ref()
             .is_some_and(|h| h.is_alive())
+    }
+
+    pub fn git_tunnel_targets_container(&self, container: &str) -> bool {
+        self.resources
+            .lock()
+            .unwrap()
+            .git_tunnel
+            .as_ref()
+            .is_some_and(|handle| handle.target_container() == container)
     }
 
     pub fn remove_git_tunnel(&self) {
@@ -528,6 +546,25 @@ impl PodConnection {
 
     pub fn has_forwarded_ports(&self) -> bool {
         self.resources.lock().unwrap().forwarded_ports.is_some()
+    }
+
+    pub fn forwarded_ports_target_containers_match(&self, expected: &[String]) -> bool {
+        let resources = self.resources.lock().unwrap();
+        let Some(handles) = resources.forwarded_ports.as_ref() else {
+            return false;
+        };
+        let mut actual: Vec<&str> = handles
+            .iter()
+            .map(crate::exec_proxy::ExecProxyHandle::target_container)
+            .collect();
+        let mut expected: Vec<&str> = expected.iter().map(String::as_str).collect();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        actual == expected
+    }
+
+    pub fn remove_forwarded_ports(&self) {
+        self.resources.lock().unwrap().forwarded_ports = None;
     }
 
     pub fn set_forwarded_ports(&self, handles: Vec<crate::exec_proxy::ExecProxyHandle>) {

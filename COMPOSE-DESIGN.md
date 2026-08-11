@@ -76,20 +76,23 @@ image changes. For the agent service:
 - `image:` in the compose file is used as the base directly.
 - `build:` services use Compose's `build --with-dependencies` command
   rather than reimplementing Compose build semantics in our buildx path.
-  Fidelity matters more here than our content-addressed skip; docker's
-  layer cache keeps repeated builds cheap. The resulting image ID (not
-  tag) is the base.
+  Before invoking it, rumpelpod fingerprints every build service's rendered
+  configuration and local context contents. If all project-wide cache tags
+  already exist, the Compose build is skipped completely. Any changed input
+  rebuilds the whole project. Remote contexts, unresolved build arguments,
+  `pull`, `no_cache`, secrets, and SSH mounts retain Compose's normal build
+  behavior because they cannot be represented by a stable local key. The
+  resulting image ID (not tag) is the base.
 
-`build_prepared_image` runs on top of that base exactly as today. The
+`build_prepared_image` runs on top of that base exactly as today. Its
 prepared tag hash additionally covers the base image ID, which is
-content-addressed by docker itself, so an unchanged compose build
-still hits the prepared image cache.
+content-addressed by docker itself.
 
 The override file replaces the agent service's `image:` with the
-prepared image. Sidecar services with `build:` sections are built by
-`docker compose build` before `up --no-build`. Their persisted build
-entries are replaced with image IDs so reconnect and fork do not need
-the original build contexts.
+prepared image. Sidecar services with `build:` sections are either built
+together or resolved from the project cache before `up --no-build`.
+Their persisted build entries are replaced with image IDs so reconnect
+and fork do not need the original build contexts.
 
 ## Trust model
 

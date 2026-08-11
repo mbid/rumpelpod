@@ -187,6 +187,11 @@ delete, and fork therefore do not depend on the original Compose files
 remaining unchanged. Compose support requires the Docker Compose plugin
 and is not available with Podman or Kubernetes.
 
+Compose bind mounts are supported on local Docker. They are rejected for
+remote Docker hosts because a source path on the client would otherwise be
+interpreted on the remote machine; use named volumes or bake those files into
+an image instead.
+
 Compose devcontainers keep their service command by default. Set
 `"overrideCommand": true` to replace the agent service's entrypoint and
 command with rumpelpod's keepalive. `ports:` entries are removed from all

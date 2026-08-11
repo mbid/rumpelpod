@@ -24,12 +24,17 @@ pub struct ExecProxyHandle {
     /// Local port the proxy listener is bound to.
     pub port: u16,
     alive: Arc<AtomicBool>,
+    target_container: String,
     _cancel_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl ExecProxyHandle {
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed)
+    }
+
+    pub fn target_container(&self) -> &str {
+        &self.target_container
     }
 }
 
@@ -75,6 +80,7 @@ pub fn start_exec_proxy_on_listener_in_container(
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let alive = Arc::new(AtomicBool::new(true));
     let alive2 = alive.clone();
+    let target_container = container.clone();
 
     crate::async_runtime::RUNTIME.spawn(async move {
         accept_loop(
@@ -91,6 +97,7 @@ pub fn start_exec_proxy_on_listener_in_container(
     Ok(ExecProxyHandle {
         port,
         alive,
+        target_container,
         _cancel_tx: cancel_tx,
     })
 }

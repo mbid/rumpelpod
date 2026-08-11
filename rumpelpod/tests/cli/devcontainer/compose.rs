@@ -23,11 +23,19 @@ fn compose_available() -> bool {
 }
 
 fn require_local_compose() -> bool {
-    if !matches!(crate::executor::executor_mode(), ExecutorMode::Docker) || !compose_available() {
-        crate::executor::skip_test();
-        return false;
+    match crate::executor::executor_mode() {
+        ExecutorMode::Docker => {
+            assert!(
+                compose_available(),
+                "Docker-mode integration tests require the Docker Compose plugin"
+            );
+            true
+        }
+        ExecutorMode::Podman | ExecutorMode::Ssh | ExecutorMode::K8s => {
+            crate::executor::skip_test();
+            false
+        }
     }
-    true
 }
 
 fn write_compose_devcontainer(
@@ -94,6 +102,78 @@ fn forwarded_local_port(repo: &TestRepo, daemon: &TestDaemon, pod_name: &str, ta
         .expect("forwarded target is listed")
         .parse()
         .expect("local port is numeric")
+}
+
+fn compose_agent_container(repo: &TestRepo, pod_name: &str) -> String {
+    let pod_filter = format!("label=dev.rumpelpod.name={pod_name}");
+    let repo_filter = format!("label=dev.rumpelpod.repo_path={}", repo.path().display());
+    let output = Command::new("docker")
+        .args([
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--filter",
+            &pod_filter,
+            "--filter",
+            &repo_filter,
+        ])
+        .output()
+        .expect("query compose agent container");
+    assert!(
+        output.status.success(),
+        "docker container ls failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let containers: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    let [container] = containers.as_slice() else {
+        panic!("expected one compose agent container, got {containers:?}");
+    };
+    (*container).to_string()
+}
+
+fn container_label(container: &str, label: &str) -> String {
+    let format = format!("{{{{ index .Config.Labels {label:?} }}}}");
+    let output = Command::new("docker")
+        .args(["container", "inspect", "--format", &format, container])
+        .output()
+        .expect("inspect compose container label");
+    assert!(
+        output.status.success(),
+        "docker container inspect failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn compose_service_container(project: &str, service: &str) -> String {
+    let project_filter = format!("label=com.docker.compose.project={project}");
+    let service_filter = format!("label=com.docker.compose.service={service}");
+    let output = Command::new("docker")
+        .args([
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--filter",
+            &project_filter,
+            "--filter",
+            &service_filter,
+        ])
+        .output()
+        .expect("query compose service container");
+    assert!(
+        output.status.success(),
+        "docker container ls failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let containers: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+    let [container] = containers.as_slice() else {
+        panic!("expected one container for compose service '{service}', got {containers:?}");
+    };
+    (*container).to_string()
 }
 
 #[test]
@@ -192,6 +272,57 @@ fn compose_build_cache_reuses_images_and_tracks_context_content() {
 }
 
 #[test]
+fn compose_no_cache_builds_every_project() {
+    println!("xtest:timeout=300");
+    if !require_local_compose() {
+        return;
+    }
+
+    let repo = TestRepo::new();
+    write_compose_devcontainer(&repo, r#"["sleep", "infinity"]"#, "", "", "");
+    let dockerfile = repo.path().join(".devcontainer/Dockerfile");
+    let mut dockerfile_contents = fs::read_to_string(&dockerfile).expect("read Dockerfile");
+    dockerfile_contents.push_str("RUN echo compose-no-cache-marker > /no-cache-marker\n");
+    fs::write(&dockerfile, dockerfile_contents).expect("extend Dockerfile");
+    let compose_path = repo.path().join(".devcontainer/compose.yaml");
+    let compose = fs::read_to_string(&compose_path).expect("read compose file");
+    let compose = compose.replace(
+        "      dockerfile: .devcontainer/Dockerfile\n",
+        "      dockerfile: .devcontainer/Dockerfile\n      no_cache: true\n",
+    );
+    fs::write(&compose_path, compose).expect("enable no-cache Compose builds");
+
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    for pod in ["compose-no-cache-1", "compose-no-cache-2"] {
+        let output = pod_command(&repo, &daemon)
+            .args(["enter", "--create", pod, "--", "true"])
+            .output()
+            .expect("create no-cache Compose pod");
+        assert!(output.status.success());
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            combined.contains("compose-no-cache-marker"),
+            "no_cache should invoke the Compose build for {pod}: {combined}"
+        );
+    }
+
+    for pod in ["compose-no-cache-1", "compose-no-cache-2"] {
+        pod_command(&repo, &daemon)
+            .args(["delete", "--force", "--wait", pod])
+            .success()
+            .expect("delete no-cache Compose project");
+    }
+}
+
+#[test]
 fn compose_sidecar_forward_survives_project_restart() {
     println!("xtest:timeout=240");
     if !require_local_compose() {
@@ -236,6 +367,28 @@ fn compose_sidecar_forward_survives_project_restart() {
         Some("after daemon restart".into())
     );
 
+    let agent = compose_agent_container(&repo, "compose-forward");
+    let project = container_label(&agent, "com.docker.compose.project");
+    let old_sidecar = compose_service_container(&project, "db");
+    Command::new("docker")
+        .args(["compose", "--project-name", &project, "--file"])
+        .arg(repo.path().join(".devcontainer/compose.yaml"))
+        .args(["up", "--detach", "--no-build", "--force-recreate", "db"])
+        .success()
+        .expect("force-recreate compose sidecar");
+    let new_sidecar = compose_service_container(&project, "db");
+    assert_ne!(old_sidecar, new_sidecar);
+
+    pod_command(&repo, &daemon)
+        .args(["connect", "compose-forward"])
+        .success()
+        .expect("repair compose connection after sidecar recreation");
+    let local_port = forwarded_local_port(&repo, &daemon, "compose-forward", "db:19876");
+    assert_eq!(
+        try_echo(local_port, "after sidecar recreation"),
+        Some("after sidecar recreation".into())
+    );
+
     pod_command(&repo, &daemon)
         .args(["stop", "--wait", "compose-forward"])
         .success()
@@ -257,6 +410,283 @@ fn compose_sidecar_forward_survives_project_restart() {
 }
 
 #[test]
+fn compose_reenter_recreates_project_after_agent_removal() {
+    println!("xtest:timeout=240");
+    if !require_local_compose() {
+        return;
+    }
+
+    let repo = TestRepo::new();
+    write_compose_devcontainer(
+        &repo,
+        r#"["sleep", "infinity"]"#,
+        "",
+        r#"  db:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    command: ["sleep", "infinity"]"#,
+        "",
+    );
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "compose-recover", "--", "true"])
+        .success()
+        .expect("create compose recovery project");
+    let old_agent = compose_agent_container(&repo, "compose-recover");
+    let project = container_label(&old_agent, "com.docker.compose.project");
+    let old_sidecar = compose_service_container(&project, "db");
+    Command::new("docker")
+        .args(["container", "rm", "--force", &old_agent])
+        .success()
+        .expect("remove compose agent externally");
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "compose-recover", "--", "true"])
+        .success()
+        .expect("re-enter should recreate the missing compose agent");
+    let new_agent = compose_agent_container(&repo, "compose-recover");
+    let new_sidecar = compose_service_container(&project, "db");
+    assert_ne!(old_agent, new_agent);
+    assert_ne!(old_sidecar, new_sidecar);
+    let old_sidecar_status = Command::new("docker")
+        .args(["container", "inspect", &old_sidecar])
+        .status()
+        .expect("inspect old compose sidecar");
+    assert!(!old_sidecar_status.success());
+
+    pod_command(&repo, &daemon)
+        .args(["delete", "--force", "--wait", "compose-recover"])
+        .success()
+        .expect("delete recovered compose project");
+}
+
+#[test]
+fn compose_runtime_sidecar_forward_persists() {
+    println!("xtest:timeout=240");
+    if !require_local_compose() {
+        return;
+    }
+
+    let repo = TestRepo::new();
+    write_compose_devcontainer(
+        &repo,
+        r#"["sleep", "infinity"]"#,
+        "",
+        r#"  db:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    command: ["socat", "TCP-LISTEN:19877,fork,reuseaddr", "EXEC:cat"]"#,
+        "",
+    );
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let mut daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "compose-runtime", "--", "true"])
+        .success()
+        .expect("create compose runtime-forward project");
+    let unknown = pod_command(&repo, &daemon)
+        .args([
+            "forward-port",
+            "--service",
+            "unknown",
+            "compose-runtime:19877",
+        ])
+        .output()
+        .expect("try unknown compose forwarding service");
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("does not exist"));
+
+    pod_command(&repo, &daemon)
+        .args(["forward-port", "--service", "db", "compose-runtime:19877"])
+        .success()
+        .expect("add runtime sidecar forward");
+    let local_port = forwarded_local_port(&repo, &daemon, "compose-runtime", "db:19877");
+    assert_eq!(
+        try_echo(local_port, "runtime compose forward"),
+        Some("runtime compose forward".into())
+    );
+
+    daemon.kill();
+    drop(daemon);
+    let daemon = TestDaemon::start(&home);
+    let local_port = forwarded_local_port(&repo, &daemon, "compose-runtime", "db:19877");
+    assert_eq!(
+        try_echo(local_port, "restored runtime forward"),
+        Some("restored runtime forward".into())
+    );
+
+    pod_command(&repo, &daemon)
+        .args(["delete", "--force", "--wait", "compose-runtime"])
+        .success()
+        .expect("delete runtime-forward Compose project");
+}
+
+#[test]
+fn compose_remote_docker_launches_sidecars_and_rejects_bind_mounts() {
+    println!("xtest:timeout=300");
+    if !matches!(crate::executor::executor_mode(), ExecutorMode::Docker) {
+        crate::executor::skip_test();
+        return;
+    }
+    assert!(
+        compose_available(),
+        "Docker-mode integration tests require the Docker Compose plugin"
+    );
+
+    let repo = TestRepo::new();
+    write_compose_devcontainer(
+        &repo,
+        r#"["sleep", "infinity"]"#,
+        r#"    volumes:
+      - compose-data:/tmp/compose-data"#,
+        r#"  db:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    command: ["socat", "TCP-LISTEN:19881,fork,reuseaddr", "EXEC:cat"]
+volumes:
+  compose-data:"#,
+        r#",
+                "forwardPorts": ["db:19881"]"#,
+    );
+    let bind_repo = TestRepo::new();
+    write_compose_devcontainer(
+        &bind_repo,
+        r#"["sleep", "infinity"]"#,
+        r#"    volumes:
+      - ../bind-source:/tmp/bind-source"#,
+        "",
+        "",
+    );
+    fs::create_dir(bind_repo.path().join("bind-source")).expect("create bind source");
+
+    let home = TestHome::new();
+    let executor = ExecutorResources::ssh(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+    fs::write(bind_repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "compose-remote", "--", "true"])
+        .success()
+        .expect("create remote Compose project");
+    let local_port = forwarded_local_port(&repo, &daemon, "compose-remote", "db:19881");
+    assert_eq!(
+        try_echo(local_port, "remote sidecar forward"),
+        Some("remote sidecar forward".into())
+    );
+
+    let output = pod_command(&bind_repo, &daemon)
+        .args(["enter", "--create", "compose-remote-bind", "--", "true"])
+        .output()
+        .expect("try remote Compose bind mount");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not supported with a remote Docker host"),
+        "unexpected remote bind error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    pod_command(&repo, &daemon)
+        .args(["delete", "--force", "--wait", "compose-remote"])
+        .success()
+        .expect("delete remote Compose project");
+}
+
+#[test]
+fn compose_build_forwards_client_ssh_agent() {
+    println!("xtest:timeout=300");
+    if !require_local_compose() {
+        return;
+    }
+
+    let repo = TestRepo::new();
+    std::env::remove_var("SSH_AUTH_SOCK");
+    write_compose_devcontainer(&repo, r#"["sleep", "infinity"]"#, "", "", "");
+    let unique = repo.path().file_name().unwrap().to_string_lossy();
+    let dockerfile = repo.path().join(".devcontainer/Dockerfile");
+    let mut dockerfile_contents = fs::read_to_string(&dockerfile).expect("read Dockerfile");
+    dockerfile_contents.push_str(&format!(
+        "RUN --mount=type=ssh test -S \"$SSH_AUTH_SOCK\" && echo {unique:?} > /tmp/compose-ssh-agent\n"
+    ));
+    fs::write(&dockerfile, dockerfile_contents).expect("extend Compose Dockerfile");
+    let compose_path = repo.path().join(".devcontainer/compose.yaml");
+    let compose = fs::read_to_string(&compose_path).expect("read compose file");
+    let compose = compose.replace(
+        "      dockerfile: .devcontainer/Dockerfile\n",
+        "      dockerfile: .devcontainer/Dockerfile\n      ssh:\n        - default\n",
+    );
+    fs::write(&compose_path, compose).expect("enable Compose SSH forwarding");
+
+    let home = TestHome::new();
+    home.link_local_bin("ssh-agent");
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    let agent_sock = home.path().join("compose-client-agent.sock");
+    let agent_out = Command::new("ssh-agent")
+        .args(["-a"])
+        .arg(&agent_sock)
+        .output()
+        .expect("ssh-agent failed");
+    assert!(agent_out.status.success());
+    let agent_stdout = String::from_utf8_lossy(&agent_out.stdout);
+    let agent_pid: u32 = agent_stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("SSH_AGENT_PID=")
+                .and_then(|value| value.split(';').next())
+        })
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(|| panic!("parsing agent PID from: {agent_stdout}"));
+
+    let output = pod_command(&repo, &daemon)
+        .env("SSH_AUTH_SOCK", &agent_sock)
+        .args([
+            "enter",
+            "--create",
+            "compose-ssh-build",
+            "--",
+            "cat",
+            "/tmp/compose-ssh-agent",
+        ])
+        .output()
+        .expect("create Compose pod with SSH build mount");
+
+    let _ = Command::new("ssh-agent")
+        .arg("-k")
+        .env("SSH_AUTH_SOCK", &agent_sock)
+        .env("SSH_AGENT_PID", agent_pid.to_string())
+        .output();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "Compose SSH build failed: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains(unique.as_ref()),
+        "expected build marker {unique} in {stdout}"
+    );
+
+    pod_command(&repo, &daemon)
+        .args(["delete", "--force", "--wait", "compose-ssh-build"])
+        .success()
+        .expect("delete Compose SSH-build project");
+}
+
+#[test]
 fn compose_override_command_and_run_services_are_applied() {
     println!("xtest:timeout=240");
     if !require_local_compose() {
@@ -267,15 +697,22 @@ fn compose_override_command_and_run_services_are_applied() {
     write_compose_devcontainer(
         &repo,
         r#"["false"]"#,
-        "",
-        r#"  unused:
+        r#"    links:
+      - db"#,
+        r#"  db:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    command: ["socat", "TCP-LISTEN:19878,fork,reuseaddr", "EXEC:cat"]
+  unused:
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
     command: ["sleep", "infinity"]"#,
         r#",
                 "overrideCommand": true,
-                "runServices": ["agent"]"#,
+                "runServices": ["agent"],
+                "forwardPorts": ["db:19878"]"#,
     );
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
@@ -286,6 +723,11 @@ fn compose_override_command_and_run_services_are_applied() {
         .args(["enter", "--create", "compose-override", "--", "true"])
         .success()
         .expect("overrideCommand should replace the exiting compose command");
+    let local_port = forwarded_local_port(&repo, &daemon, "compose-override", "db:19878");
+    assert_eq!(
+        try_echo(local_port, "dependency forward"),
+        Some("dependency forward".into())
+    );
 
     let repo_filter = format!("label=dev.rumpelpod.repo_path={}", repo.path().display());
     let unused = Command::new("docker")

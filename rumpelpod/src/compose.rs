@@ -57,6 +57,7 @@ impl Source {
         project_name: &str,
         host: &Host,
         docker_socket: Option<&Path>,
+        ssh_auth_sock: Option<&Path>,
         local_env: &HashMap<String, String>,
     ) -> Result<Model> {
         let mut command = docker_compose_command(host, docker_socket)?;
@@ -67,6 +68,9 @@ impl Source {
         command.args(["config", "--no-normalize", "--format", "json"]);
         command.current_dir(&self.working_dir);
         command.envs(local_env);
+        if let Some(socket) = ssh_auth_sock {
+            command.env("SSH_AUTH_SOCK", socket);
+        }
         let output = command
             .output()
             .context("rendering docker compose configuration")?;
@@ -74,11 +78,13 @@ impl Source {
         Model::parse(String::from_utf8(stdout).context("compose config returned non-UTF-8 JSON")?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         &self,
         project_name: &str,
         host: &Host,
         docker_socket: Option<&Path>,
+        ssh_auth_sock: Option<&Path>,
         services: &[String],
         local_env: &HashMap<String, String>,
         progress: &std::sync::mpsc::Sender<OutputLine>,
@@ -89,6 +95,9 @@ impl Source {
         command.args(services);
         command.current_dir(&self.working_dir);
         command.envs(local_env);
+        if let Some(socket) = ssh_auth_sock {
+            command.env("SSH_AUTH_SOCK", socket);
+        }
         run_with_progress(&mut command, "docker compose build", progress)
     }
 
@@ -240,8 +249,36 @@ impl Model {
                 || build_object
                     .get("ssh")
                     .is_some_and(|value| !value.is_null())
+                || build_object.get("no_cache").and_then(Value::as_bool) == Some(true)
+                || build_object.get("pull").and_then(Value::as_bool) == Some(true)
             {
                 return Ok(None);
+            }
+            if let Some(args) = build_object.get("args") {
+                let has_unresolved_arg = match args {
+                    Value::Object(args) => args.values().any(Value::is_null),
+                    Value::Array(args) => {
+                        let mut unresolved = false;
+                        for arg in args {
+                            let arg = arg.as_str().with_context(|| {
+                                format!(
+                                    "compose service '{service_name}' has an invalid build argument"
+                                )
+                            })?;
+                            unresolved |= !arg.contains('=');
+                        }
+                        unresolved
+                    }
+                    Value::Null => false,
+                    Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+                        return Err(anyhow::anyhow!(
+                            "compose service '{service_name}' has invalid build arguments"
+                        ));
+                    }
+                };
+                if has_unresolved_arg {
+                    return Ok(None);
+                }
             }
 
             let context = build_object
@@ -378,6 +415,128 @@ impl Model {
             })
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    pub fn validate_remote_bind_mounts(&self) -> Result<()> {
+        let services = self
+            .value
+            .get("services")
+            .and_then(Value::as_object)
+            .expect("services checked while parsing compose model");
+        for (service_name, service) in services {
+            let Some(volumes) = service.get("volumes") else {
+                continue;
+            };
+            let volumes = volumes
+                .as_array()
+                .with_context(|| format!("compose service '{service_name}' has invalid volumes"))?;
+            for volume in volumes {
+                let volume = volume.as_object().with_context(|| {
+                    format!("compose service '{service_name}' has an invalid volume entry")
+                })?;
+                if volume.get("type").and_then(Value::as_str) != Some("bind") {
+                    continue;
+                }
+                let source = volume
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>");
+                return Err(anyhow::anyhow!(
+                    "compose service '{service_name}' uses bind mount '{source}', which is not supported with a remote Docker host; use a named volume or bake the files into the image"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn services_started_with(&self, selected: &[String]) -> Result<HashSet<String>> {
+        let services = self
+            .value
+            .get("services")
+            .and_then(Value::as_object)
+            .expect("services checked while parsing compose model");
+        let mut started = HashSet::new();
+        let mut pending = selected.to_vec();
+        while let Some(service_name) = pending.pop() {
+            self.validate_service(&service_name)?;
+            if !started.insert(service_name.clone()) {
+                continue;
+            }
+            let service = services[&service_name]
+                .as_object()
+                .with_context(|| format!("compose service '{service_name}' is not an object"))?;
+            if let Some(depends_on) = service.get("depends_on") {
+                match depends_on {
+                    Value::Object(dependencies) => pending.extend(dependencies.keys().cloned()),
+                    Value::Array(dependencies) => {
+                        for dependency in dependencies {
+                            pending.push(
+                                dependency
+                                    .as_str()
+                                    .with_context(|| {
+                                        format!(
+                                            "compose service '{service_name}' has an invalid depends_on entry"
+                                        )
+                                    })?
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    Value::Null => {}
+                    Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+                        return Err(anyhow::anyhow!(
+                            "compose service '{service_name}' has invalid depends_on"
+                        ));
+                    }
+                }
+            }
+            for field in ["links", "volumes_from"] {
+                let Some(references) = service.get(field) else {
+                    continue;
+                };
+                match references {
+                    Value::Array(references) => {
+                        for reference in references {
+                            let reference = reference.as_str().with_context(|| {
+                                format!(
+                                    "compose service '{service_name}' has an invalid {field} entry"
+                                )
+                            })?;
+                            if field == "volumes_from" && reference.starts_with("container:") {
+                                continue;
+                            }
+                            let dependency = reference.split(':').next().unwrap_or(reference);
+                            pending.push(dependency.to_string());
+                        }
+                    }
+                    Value::Null => {}
+                    Value::Bool(_) | Value::Number(_) | Value::Object(_) | Value::String(_) => {
+                        return Err(anyhow::anyhow!(
+                            "compose service '{service_name}' has invalid {field}"
+                        ));
+                    }
+                }
+            }
+            for field in ["ipc", "network_mode", "pid"] {
+                let Some(reference) = service.get(field) else {
+                    continue;
+                };
+                match reference {
+                    Value::String(reference) => {
+                        if let Some(dependency) = reference.strip_prefix("service:") {
+                            pending.push(dependency.to_string());
+                        }
+                    }
+                    Value::Null => {}
+                    Value::Bool(_) | Value::Number(_) | Value::Array(_) | Value::Object(_) => {
+                        return Err(anyhow::anyhow!(
+                            "compose service '{service_name}' has invalid {field}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(started)
     }
 
     pub fn set_built_service_image(&mut self, service: &str, image: String) -> Result<()> {
