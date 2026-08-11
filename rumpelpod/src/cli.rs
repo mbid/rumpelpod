@@ -875,8 +875,18 @@ pub enum GitHookSubcommand {
     /// Handle git pre-receive hook events (host repo)
     HostPreReceive,
 
+    /// Notify the daemon after host repository refs were updated
+    HostPostReceive(HostPostReceiveCommand),
+
     /// Handle git pre-commit hook events: validate the DESCRIPTION file
     PreCommitDescription(PreCommitDescriptionCommand),
+}
+
+#[derive(Args)]
+pub struct HostPostReceiveCommand {
+    /// Host repository whose pod refs were updated.
+    #[arg(long)]
+    pub repo_path: PathBuf,
 }
 
 #[derive(Subcommand)]

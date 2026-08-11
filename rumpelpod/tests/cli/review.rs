@@ -13,6 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
+use rumpelpod::daemon::protocol::{Daemon, DaemonClient, PodName};
 use rumpelpod::CommandExt;
 
 use crate::common::{
@@ -256,6 +257,69 @@ fn review_shows_new_files() {
         "Log should contain new file content, got: {}",
         log
     );
+}
+
+#[test]
+fn review_api_describes_added_deleted_and_renamed_files() {
+    let repo = TestRepo::new();
+    let deleted_file = "deleted.txt";
+    let renamed_file = "renamed-before.txt";
+    let renamed_target = "renamed-after.txt";
+    fs::write(repo.path().join(deleted_file), "delete this\n").expect("write deleted fixture");
+    fs::write(repo.path().join(renamed_file), "rename this\n").expect("write renamed fixture");
+    Command::new("git")
+        .args(["add", deleted_file, renamed_file])
+        .current_dir(repo.path())
+        .success()
+        .expect("stage review fixtures");
+    create_commit(repo.path(), "Add review JSON fixtures");
+
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+    let pod_name = "review-utf8-file";
+    let file_name = "review-\u{00e4}.txt";
+
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "echo", "setup"])
+        .success()
+        .expect("Failed to run rumpel enter");
+
+    let command = format!(
+        "rm '{deleted_file}' && git mv '{renamed_file}' '{renamed_target}' && \
+         printf '%s\\n' 'utf8 review content' > '{file_name}' && \
+         git add -A && git commit --no-verify -m 'Change review files'"
+    );
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", pod_name, "--", "sh", "-c", &command])
+        .success()
+        .expect("Failed to commit review files in pod");
+
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    let plan = client
+        .review_plan(
+            repo.path().to_path_buf(),
+            PodName::new(pod_name).expect("valid pod name"),
+            Vec::new(),
+        )
+        .expect("request review plan from daemon");
+    let files = &plan.files;
+    let file = |path: &str| {
+        files
+            .iter()
+            .find(|file| file.path == path)
+            .unwrap_or_else(|| panic!("review plan omitted '{path}': {files:?}"))
+    };
+    for path in [file_name, renamed_target] {
+        assert!(!file(path).base_exists);
+        assert!(file(path).target_exists);
+    }
+    for path in [deleted_file, renamed_file] {
+        assert!(file(path).base_exists);
+        assert!(!file(path).target_exists);
+    }
 }
 
 #[test]

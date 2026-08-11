@@ -39,9 +39,9 @@ use pod_connection::{
     PodConnection, PodConnectionRegistry, PodConnectionStatus, PodEndpoint, PodRepairBackoff,
 };
 use protocol::{
-    AddForwardedPortRequest, ConnectPodRequest, ContainerId, Daemon, EnsureClaudeConfigRequest,
-    EnsurePiConfigRequest, ForkPodRequest, Image, LaunchResult, PodInfo, PodLaunchParams, PodName,
-    PodStatus, PortInfo,
+    AddForwardedPortRequest, ConnectPodRequest, ContainerId, Daemon, DaemonEvent,
+    EnsureClaudeConfigRequest, EnsurePiConfigRequest, ForkPodRequest, Image, LaunchResult, PodInfo,
+    PodLaunchParams, PodName, PodStatus, PortInfo,
 };
 
 use crate::pod::types::{ClaudeState, CodexState, GitSetupParams};
@@ -404,6 +404,8 @@ pub struct DaemonServer {
     pty_sessions: crate::pty_session::PtySessions,
     /// Backend container ids served by plain `list` (no --sync).
     container_ids: Arc<Mutex<ContainerIdCache>>,
+    /// Invalidation stream consumed by editor integrations.
+    events_tx: tokio::sync::broadcast::Sender<DaemonEvent>,
     /// Serializes lifecycle decisions for each logical pod.
     lifecycle_locks: Arc<PodLifecycleLocks>,
 }
@@ -2171,6 +2173,17 @@ impl protocol::LaunchProgress for ServerLaunchProgress {
 }
 
 impl DaemonServer {
+    fn emit_event(&self, event: DaemonEvent) {
+        let _ = self.events_tx.send(event);
+    }
+
+    fn emit_status_changed(&self, repo_path: &Path, pod_name: &str) {
+        self.emit_event(DaemonEvent::PodStatusChanged {
+            repository: repo_path.to_string_lossy().into_owned(),
+            pod: pod_name.to_string(),
+        });
+    }
+
     /// Build an executor for `host`, ensuring the underlying host
     /// connection is up.  This is the single chokepoint by which the
     /// daemon talks to a backend; it implicitly registers the host
@@ -2847,6 +2860,7 @@ impl DaemonServer {
             let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, record.id, db::PodStatus::Ready)?;
         }
+        self.emit_status_changed(repo_path, &pod_name.0);
 
         // Re-establish forwarded ports from DB only if the daemon
         // doesn't already hold live forwards for this pod.  Replacing
@@ -3085,6 +3099,7 @@ impl DaemonServer {
             let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, record.id, db::PodStatus::Ready)?;
         }
+        self.emit_status_changed(repo_path, &pod_name.0);
 
         // Tunnel must come up before container-serve: the latter runs
         // git fetch during its startup and needs the host reachable.
@@ -3252,10 +3267,13 @@ impl DaemonServer {
             )?
         };
 
+        self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
+
         let mark_error = |e: anyhow::Error| -> anyhow::Error {
             if let Ok(conn) = self.db.lock() {
                 let _ = db::update_pod_status(&conn, pod_id, db::PodStatus::Error);
             }
+            self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
             e
         };
         let pod_connection = self
@@ -3341,6 +3359,7 @@ impl DaemonServer {
             let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
         }
+        self.emit_status_changed(repo_path, &pod_name.0);
 
         // Set up exec-proxy listeners for devcontainer forwardPorts.
         let forward_ports = devcontainer.forward_ports.as_deref().unwrap_or(&[]);
@@ -4094,10 +4113,13 @@ impl DaemonServer {
             )?
         };
 
+        self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
+
         let mark_error = |e: anyhow::Error| -> anyhow::Error {
             if let Ok(conn) = self.db.lock() {
                 let _ = db::update_pod_status(&conn, pod_id, db::PodStatus::Error);
             }
+            self.emit_status_changed(repo_path.as_ref(), &pod_name.0);
             e
         };
         let pod_connection = self
@@ -4238,12 +4260,16 @@ impl DaemonServer {
 
         let _pod = PodClient::new(&container_url, &token, RetryPolicy::UserBlocking)?;
 
-        // Mark pod as ready and set up exec-proxy listeners for
-        // devcontainer forwardPorts.
-        let port_forward_handles = {
+        {
             let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, pod_id, db::PodStatus::Ready)?;
+        }
+        self.emit_status_changed(&repo_path, &pod_name.0);
 
+        // The database snapshot is already visible, so publish its
+        // invalidation before optional listener setup can fail.
+        let port_forward_handles = {
+            let conn = self.db.lock().unwrap();
             if forward_ports.is_empty() {
                 Vec::new()
             } else {
@@ -5015,6 +5041,7 @@ impl DaemonServer {
             db::update_pod_status(&conn, record.id, db::PodStatus::Deleting)?;
         }
 
+        self.emit_status_changed(&repo_path, &pod_name.0);
         self.pod_connections.remove(&repo_path, &pod_name.0);
         self.cleanup_codex_runtime(&repo_path, &pod_name.0);
 
@@ -5049,11 +5076,14 @@ impl DaemonServer {
                 cleanup_pod_refs(&repo_path, &pod_name);
                 let conn = self.db.lock().unwrap();
                 db::delete_pod(&conn, &repo_path, &pod_name.0)?;
+                drop(conn);
+                self.emit_status_changed(&repo_path, &pod_name.0);
             }
             result?;
         } else {
             let db = self.db.clone();
             let container_ids = self.container_ids.clone();
+            let events_tx = self.events_tx.clone();
             let repo_path = repo_path.clone();
             let pod_name = pod_name.clone();
             std::thread::spawn(move || {
@@ -5077,6 +5107,11 @@ impl DaemonServer {
                             cleanup_pod_refs(&repo_path, &pod_name);
                             let conn = db.lock().unwrap();
                             let _ = db::delete_pod(&conn, &repo_path, &pod_name.0);
+                            drop(conn);
+                            let _ = events_tx.send(DaemonEvent::PodStatusChanged {
+                                repository: repo_path.to_string_lossy().into_owned(),
+                                pod: pod_name.0.clone(),
+                            });
                             return;
                         }
                         Err(e) => {
@@ -5095,6 +5130,11 @@ impl DaemonServer {
                 if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
                     let _ = db::update_pod_status(&conn, record.id, db::PodStatus::DeleteFailed);
                 }
+                drop(conn);
+                let _ = events_tx.send(DaemonEvent::PodStatusChanged {
+                    repository: repo_path.to_string_lossy().into_owned(),
+                    pod: pod_name.0,
+                });
             });
         }
 
@@ -5231,6 +5271,7 @@ impl Daemon for DaemonServer {
             db::update_pod_status(&conn, record.id, db::PodStatus::Stopping)?;
         }
 
+        self.emit_status_changed(&repo_path, &pod_name.0);
         self.pod_connections.stop_events(&repo_path, &pod_name.0);
         self.cleanup_codex_runtime(&repo_path, &pod_name.0);
 
@@ -5243,9 +5284,12 @@ impl Daemon for DaemonServer {
             if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
                 let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
             }
+            drop(conn);
+            self.emit_status_changed(&repo_path, &pod_name.0);
             result?;
         } else {
             let db = self.db.clone();
+            let events_tx = self.events_tx.clone();
             let repo_path = repo_path.clone();
             let pod_name = pod_name.clone();
             std::thread::spawn(move || {
@@ -5262,6 +5306,11 @@ impl Daemon for DaemonServer {
                 if let Ok(Some(record)) = db::get_pod(&conn, &repo_path, &pod_name.0) {
                     let _ = db::update_pod_status(&conn, record.id, db::PodStatus::Ready);
                 }
+                drop(conn);
+                let _ = events_tx.send(DaemonEvent::PodStatusChanged {
+                    repository: repo_path.to_string_lossy().into_owned(),
+                    pod: pod_name.0,
+                });
             });
         }
 
@@ -5445,6 +5494,21 @@ impl Daemon for DaemonServer {
         }
 
         Ok(pods)
+    }
+
+    fn review_plan(
+        &self,
+        repo_path: PathBuf,
+        pod_name: PodName,
+        paths: Vec<String>,
+    ) -> Result<crate::review::ReviewPlan> {
+        let conn = self.db.lock().unwrap();
+        let pod = db::get_pod(&conn, &repo_path, &pod_name.0)?;
+        drop(conn);
+        if pod.is_none() {
+            return Err(anyhow::anyhow!("pod '{pod_name}' does not exist"));
+        }
+        crate::review::build_review_plan(&repo_path, &pod_name.0, &paths)
     }
 
     fn delete_all_pods(&self) -> Result<u32> {
@@ -5733,6 +5797,23 @@ impl Daemon for DaemonServer {
     ) -> Option<tokio::sync::broadcast::Receiver<reconnect::ReconnectEvent>> {
         self.pod_connections.subscribe(repo_path, pod_name)
     }
+
+    fn subscribe_events(&self) -> Option<tokio::sync::broadcast::Receiver<DaemonEvent>> {
+        Some(self.events_tx.subscribe())
+    }
+
+    fn notify_pod_review_changed(&self, repo_path: &Path, pod_name: &str) -> Result<()> {
+        let conn = self.db.lock().unwrap();
+        if db::get_pod(&conn, repo_path, pod_name)?.is_none() {
+            return Err(anyhow::anyhow!("pod '{pod_name}' not found"));
+        }
+        drop(conn);
+        self.emit_event(DaemonEvent::PodReviewChanged {
+            repository: repo_path.to_string_lossy().into_owned(),
+            pod: pod_name.to_string(),
+        });
+        Ok(())
+    }
 }
 
 pub fn run_daemon() -> Result<()> {
@@ -5818,7 +5899,11 @@ pub fn run_daemon() -> Result<()> {
         })?
     };
 
-    let pod_connections = Arc::new(PodConnectionRegistry::new(host_connections.clone()));
+    let (events_tx, _) = tokio::sync::broadcast::channel(256);
+    let pod_connections = Arc::new(PodConnectionRegistry::new(
+        host_connections.clone(),
+        events_tx.clone(),
+    ));
 
     let daemon = DaemonServer {
         db: db.clone(),
@@ -5827,6 +5912,7 @@ pub fn run_daemon() -> Result<()> {
         pod_connections,
         pty_sessions: crate::pty_session::PtySessions::new(),
         container_ids: Arc::new(Mutex::new(ContainerIdCache::default())),
+        events_tx,
         lifecycle_locks: Arc::new(PodLifecycleLocks::default()),
     };
 

@@ -20,7 +20,7 @@ use anyhow::Result;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::serve::Listener;
 use axum::{Json, Router};
@@ -35,6 +35,7 @@ use crate::daemon::reconnect::ReconnectEvent;
 use crate::git::GitIdentity;
 use crate::image::OutputLine;
 use crate::pod::types::{ClaudeState, CodexState};
+use crate::review::ReviewPlan;
 
 /// Opaque wrapper for docker image names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +174,22 @@ pub struct PodInfo {
     pub claude_state: Option<ClaudeState>,
     /// Current Codex session state, if known.
     pub codex_state: Option<CodexState>,
+}
+
+/// State invalidations streamed by the daemon to long-lived UI clients.
+///
+/// Events identify the affected pod but deliberately do not duplicate
+/// `PodInfo` or `ReviewPlan`. Clients re-read those snapshots after an
+/// invalidation so a lagged stream can recover with a single `Resync`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonEvent {
+    /// Re-read every visible repository after subscribing or losing events.
+    Resync,
+    /// Container connectivity or agent session state changed.
+    PodStatusChanged { repository: String, pod: String },
+    /// The pod's host-side review ref changed.
+    PodReviewChanged { repository: String, pod: String },
 }
 
 /// Information about a forwarded port.
@@ -315,6 +332,14 @@ struct ListPodsResponse {
     pods: Vec<PodInfo>,
 }
 
+/// Request body for the review plan endpoint.
+#[derive(Debug, Serialize, Deserialize)]
+struct ReviewPlanRequest {
+    repo_path: PathBuf,
+    pod_name: PodName,
+    paths: Vec<String>,
+}
+
 /// Request body for list_ports endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 struct ListPortsRequest {
@@ -400,6 +425,13 @@ pub struct PodReconnectRequest {
     pub pod_name: String,
 }
 
+/// Request body used by the host post-receive hook after a pod ref update.
+#[derive(Debug, Serialize, Deserialize)]
+struct PodReviewChangedRequest {
+    repo_path: PathBuf,
+    pod_name: String,
+}
+
 /// Request body for ensuring a daemon connection to a pod.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ConnectPodRequest {
@@ -476,6 +508,15 @@ pub trait Daemon: Send + Sync + 'static {
     // Lists all pods for a given repository.
     fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>>;
 
+    // POST /review
+    // Computes immutable revisions and changed paths for reviewing a pod.
+    fn review_plan(
+        &self,
+        repo_path: PathBuf,
+        pod_name: PodName,
+        paths: Vec<String>,
+    ) -> Result<ReviewPlan>;
+
     // POST /pods/delete-all
     // Nukes all containers/pods across all repos.  Only triggers
     // removal (docker rm / kubectl delete); does not wait for
@@ -522,6 +563,16 @@ pub trait Daemon: Send + Sync + 'static {
     ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
         None
     }
+
+    // GET /events
+    // Subscribe to daemon-wide state invalidations.
+    // Returns None when the implementation holds no event stream; only
+    // the server side does, clients consume the SSE endpoint instead.
+    fn subscribe_events(&self) -> Option<tokio::sync::broadcast::Receiver<DaemonEvent>>;
+
+    // POST /events/review-changed
+    // Called by the host post-receive hook after Git committed pod refs.
+    fn notify_pod_review_changed(&self, repo_path: &Path, pod_name: &str) -> Result<()>;
 }
 
 pub struct DaemonClient {
@@ -537,8 +588,7 @@ impl DaemonClient {
         Self::new_unix_with_timeout(socket_path, None)
     }
 
-    /// Variant with a request timeout, intended for shell completion so a
-    /// stalled daemon never hangs the user's prompt.
+    /// Variant for bounded control requests such as shell completion and hooks.
     pub fn new_unix_with_timeout(socket_path: &Path, timeout: Option<Duration>) -> Self {
         let client = reqwest::blocking::Client::builder()
             .unix_socket(socket_path)
@@ -794,6 +844,29 @@ impl Daemon for DaemonClient {
         Ok(body.pods)
     }
 
+    fn review_plan(
+        &self,
+        repo_path: PathBuf,
+        pod_name: PodName,
+        paths: Vec<String>,
+    ) -> Result<ReviewPlan> {
+        let url = self.url.join("/review")?;
+        let request = ReviewPlanRequest {
+            repo_path,
+            pod_name,
+            paths,
+        };
+
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
+
+        read_sse_result(response, "preparing review")
+    }
+
     fn delete_all_pods(&self) -> Result<u32> {
         let url = self.url.join("/pods/delete-all")?;
 
@@ -926,9 +999,60 @@ impl Daemon for DaemonClient {
             Err(anyhow::anyhow!("server error: {msg}"))
         }
     }
+
+    // Clients read /events over SSE; there is no local broadcast to hand out.
+    fn subscribe_events(&self) -> Option<tokio::sync::broadcast::Receiver<DaemonEvent>> {
+        None
+    }
+
+    fn notify_pod_review_changed(&self, repo_path: &Path, pod_name: &str) -> Result<()> {
+        let url = self.url.join("/events/review-changed")?;
+        let request = PodReviewChangedRequest {
+            repo_path: repo_path.to_path_buf(),
+            pod_name: pod_name.to_string(),
+        };
+        let response = self
+            .client
+            .post(url)
+            .json(&request)
+            .send()
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let status = response.status();
+        let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+            error: "unknown error".to_string(),
+        });
+        let message = error.error;
+        Err(anyhow::anyhow!(
+            "review event endpoint returned {status}: {message}"
+        ))
+    }
 }
 
 impl DaemonClient {
+    /// Subscribe to daemon-wide state invalidations.
+    pub fn daemon_events(&self) -> Result<DaemonEventStream> {
+        let url = self.url.join("/events")?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|e| anyhow::anyhow!("failed to send request: {e}"))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let error: ErrorResponse = response.json().unwrap_or_else(|_| ErrorResponse {
+                error: "unknown error".to_string(),
+            });
+            let message = error.error;
+            return Err(anyhow::anyhow!(
+                "events endpoint returned {status}: {message}"
+            ));
+        }
+        Ok(DaemonEventStream::new(response))
+    }
+
     /// Subscribe to pod-level reconnection events (SSH + pod).
     pub fn pod_reconnect_events(
         &self,
@@ -960,6 +1084,77 @@ impl DaemonClient {
         }
 
         Ok(ReconnectStream::new(response))
+    }
+}
+
+/// SSE-backed iterator over daemon-wide state invalidations.
+pub struct DaemonEventStream {
+    lines: std::io::Lines<BufReader<reqwest::blocking::Response>>,
+}
+
+impl DaemonEventStream {
+    fn new(response: reqwest::blocking::Response) -> Self {
+        Self {
+            lines: BufReader::new(response).lines(),
+        }
+    }
+}
+
+impl Iterator for DaemonEventStream {
+    type Item = Result<DaemonEvent>;
+
+    fn next(&mut self) -> Option<Result<DaemonEvent>> {
+        read_daemon_event(&mut self.lines)
+    }
+}
+
+fn read_daemon_event(
+    lines: &mut impl Iterator<Item = std::io::Result<String>>,
+) -> Option<Result<DaemonEvent>> {
+    loop {
+        let line = match lines.next()? {
+            Ok(line) => line,
+            Err(error) => {
+                return Some(Err(anyhow::anyhow!(
+                    "failed to read daemon event stream: {error}"
+                )))
+            }
+        };
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        let Some(event_type) = line.strip_prefix("event: ") else {
+            return Some(Err(anyhow::anyhow!(
+                "unexpected daemon event stream line: {line}"
+            )));
+        };
+        if event_type != "daemon_event" {
+            return Some(Err(anyhow::anyhow!(
+                "unknown daemon event type: {event_type}"
+            )));
+        }
+        let data_line = match lines.next() {
+            Some(Ok(line)) => line,
+            Some(Err(error)) => {
+                return Some(Err(anyhow::anyhow!(
+                    "failed to read daemon event data: {error}"
+                )))
+            }
+            None => {
+                return Some(Err(anyhow::anyhow!(
+                    "daemon event stream ended before its data"
+                )))
+            }
+        };
+        let Some(data) = data_line.strip_prefix("data: ") else {
+            return Some(Err(anyhow::anyhow!(
+                "expected daemon event data, got: {data_line}"
+            )));
+        };
+        return Some(
+            serde_json::from_str(data)
+                .map_err(|error| anyhow::anyhow!("parsing daemon event: {error}")),
+        );
     }
 }
 
@@ -1398,6 +1593,16 @@ async fn list_pods_handler<D: Daemon>(
     })
 }
 
+/// Handler for POST /review endpoint.
+async fn review_plan_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ReviewPlanRequest>,
+) -> Response {
+    streaming_result_response("preparing review...".into(), move || {
+        daemon.review_plan(request.repo_path, request.pod_name, request.paths)
+    })
+}
+
 /// Handler for GET /pod/ports endpoint.
 async fn list_ports_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
@@ -1484,6 +1689,93 @@ async fn ensure_ssh_agent_handler<D: Daemon>(
             }),
         )),
     }
+}
+
+fn daemon_event_message(event: &DaemonEvent) -> String {
+    let data = serde_json::to_string(event).expect("DaemonEvent is serializable");
+    sse_event("daemon_event", &data)
+}
+
+/// Stream daemon invalidations with an initial full-refresh marker.
+///
+/// A lagged subscriber receives the same marker because the payloads are
+/// invalidations, not a replayable state log.
+fn daemon_events_sse_response(rx: tokio::sync::broadcast::Receiver<DaemonEvent>) -> Response {
+    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<String>(64);
+    tokio::spawn(forward_daemon_events(rx, event_tx));
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx)
+        .map(Ok::<_, std::convert::Infallible>);
+    Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(Body::from_stream(stream))
+        .expect("building response never fails")
+}
+
+async fn forward_daemon_events(
+    mut rx: tokio::sync::broadcast::Receiver<DaemonEvent>,
+    event_tx: tokio::sync::mpsc::Sender<String>,
+) {
+    if event_tx
+        .send(daemon_event_message(&DaemonEvent::Resync))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut keepalive = tokio::time::interval(Duration::from_secs(30));
+    keepalive.tick().await;
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                let event = match result {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        DaemonEvent::Resync
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                if event_tx.send(daemon_event_message(&event)).await.is_err() {
+                    break;
+                }
+            }
+            _ = keepalive.tick() => {
+                if event_tx.send(": keepalive\n\n".to_string()).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn daemon_events_handler<D: Daemon>(State(daemon): State<Arc<D>>) -> Response {
+    match daemon.subscribe_events() {
+        Some(rx) => daemon_events_sse_response(rx),
+        None => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: "this daemon endpoint does not serve events".to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn pod_review_changed_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<PodReviewChangedRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    daemon
+        .notify_pod_review_changed(&request.repo_path, &request.pod_name)
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("{error:#}"),
+                }),
+            )
+        })
 }
 
 /// Build an SSE response from a broadcast receiver of reconnect events.
@@ -1586,6 +1878,7 @@ where
         .route("/pod/stop", post(stop_pod_handler::<D>))
         .route("/pod", delete(delete_pod_handler::<D>))
         .route("/pod", get(list_pods_handler::<D>))
+        .route("/review", post(review_plan_handler::<D>))
         .route("/pods/delete-all", post(delete_all_pods_handler::<D>))
         .route(
             "/pod/ports",
@@ -1595,6 +1888,11 @@ where
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .route("/pod/pi-config", put(ensure_pi_config_handler::<D>))
         .route("/pod/ssh-agent", post(ensure_ssh_agent_handler::<D>))
+        .route("/events", get(daemon_events_handler::<D>))
+        .route(
+            "/events/review-changed",
+            post(pod_review_changed_handler::<D>),
+        )
         .route(
             "/pod/reconnect-events",
             post(pod_reconnect_events_handler::<D>),
@@ -1609,4 +1907,49 @@ where
             .await
             .unwrap();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn daemon_event_stream_resyncs_initially_and_after_lag() {
+        let (source_tx, source_rx) = tokio::sync::broadcast::channel(1);
+        let event = DaemonEvent::PodStatusChanged {
+            repository: "/repo".to_string(),
+            pod: "one".to_string(),
+        };
+        let _ = source_tx.send(event.clone());
+        let _ = source_tx.send(event);
+        let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(4);
+
+        let task = tokio::spawn(forward_daemon_events(source_rx, output_tx));
+        let expected = daemon_event_message(&DaemonEvent::Resync);
+        assert_eq!(output_rx.recv().await.as_deref(), Some(expected.as_str()));
+        assert_eq!(output_rx.recv().await.as_deref(), Some(expected.as_str()));
+        task.abort();
+    }
+
+    #[test]
+    fn daemon_event_parser_accepts_keepalives_and_rejects_unknown_frames() {
+        let event = DaemonEvent::PodStatusChanged {
+            repository: "/repo".to_string(),
+            pod: "one".to_string(),
+        };
+        let input = format!(": keepalive\n\n{}", daemon_event_message(&event));
+        let mut lines = BufReader::new(input.as_bytes()).lines();
+        assert_eq!(
+            read_daemon_event(&mut lines)
+                .expect("read daemon event")
+                .expect("parse daemon event"),
+            event
+        );
+
+        let mut lines = BufReader::new("event: future_event\ndata: {}\n\n".as_bytes()).lines();
+        let error = read_daemon_event(&mut lines)
+            .expect("read unknown event")
+            .expect_err("unknown event must fail");
+        assert!(format!("{error:#}").contains("unknown daemon event type: future_event"));
+    }
 }

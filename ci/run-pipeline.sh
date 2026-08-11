@@ -55,14 +55,30 @@ trap cleanup EXIT
 
 # Right after boot systemctl reports "offline" (the bus is not up yet)
 # and is-system-running --wait errors out instead of waiting; poll for
-# a real manager state before waiting on it.
+# a real manager state before waiting on it. Report the entrypoint log
+# instead of hiding the cause when the container exits during startup.
+manager_ready=0
 for _ in $(seq 60); do
+  running=$(docker inspect --format '{{.State.Running}}' devcontainer)
+  if [ "$running" != true ]; then
+    echo "devcontainer exited during startup" >&2
+    docker logs devcontainer >&2 || true
+    exit 1
+  fi
   state=$(docker exec devcontainer systemctl is-system-running 2>/dev/null || true)
   case "$state" in
-    initializing | starting | running | degraded | maintenance | stopping) break ;;
+    initializing | starting | running | degraded)
+      manager_ready=1
+      break
+      ;;
   esac
   sleep 1
 done
+if [ "$manager_ready" -ne 1 ]; then
+  echo "devcontainer systemd did not start within 60 seconds" >&2
+  docker logs devcontainer >&2 || true
+  exit 1
+fi
 timeout 300 docker exec devcontainer systemctl is-system-running --wait || true
 
 # The image ships a clone of the upstream repo with a prebuilt target/

@@ -131,6 +131,42 @@ pub fn output(cmd: &mut Command) -> Result<String> {
         .to_string())
 }
 
+/// Replace an installed binary atomically so a running process keeps its
+/// original executable while the next launch observes the new build.
+pub fn install_binary(source: &Path, destination: &Path) -> Result<()> {
+    let parent = destination.parent().with_context(|| {
+        let destination = destination.display();
+        format!("installed binary has no parent directory: {destination}")
+    })?;
+    std::fs::create_dir_all(parent).with_context(|| {
+        let parent = parent.display();
+        format!("creating installed binary directory {parent}")
+    })?;
+
+    let staged =
+        tempfile::NamedTempFile::new_in(parent).context("creating staged installed binary")?;
+    std::fs::copy(source, staged.path()).with_context(|| {
+        let source = source.display();
+        format!("staging installed binary {source}")
+    })?;
+    let permissions = std::fs::metadata(source)
+        .with_context(|| {
+            let source = source.display();
+            format!("reading installed binary permissions from {source}")
+        })?
+        .permissions();
+    std::fs::set_permissions(staged.path(), permissions)
+        .context("setting installed binary permissions")?;
+    staged
+        .persist(destination)
+        .map_err(|error| error.error)
+        .with_context(|| {
+            let destination = destination.display();
+            format!("installing binary at {destination}")
+        })?;
+    Ok(())
+}
+
 /// Run a command silently, discarding stdout and stderr.
 /// Returns Ok if the command exits successfully, Err otherwise.
 pub fn run_quiet(cmd: &mut Command) -> Result<()> {
@@ -183,7 +219,35 @@ pub fn is_xtest_prelude_line(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_xtest_jobs, split_xtest_directive_line};
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::{default_xtest_jobs, install_binary, split_xtest_directive_line};
+
+    #[test]
+    fn install_binary_atomically_replaces_existing_destination() {
+        let directory = tempfile::tempdir().expect("create binary installation directory");
+        let source = directory.path().join("source");
+        let destination = directory.path().join("bin/rumpel");
+        std::fs::write(&source, b"new binary").expect("write source binary");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o751))
+            .expect("set source binary permissions");
+        std::fs::create_dir_all(destination.parent().expect("destination parent"))
+            .expect("create destination directory");
+        std::fs::write(&destination, b"old binary").expect("write existing binary");
+
+        install_binary(&source, &destination).expect("replace installed binary");
+
+        assert_eq!(
+            std::fs::read(&destination).expect("read installed binary"),
+            b"new binary"
+        );
+        let mode = std::fs::metadata(&destination)
+            .expect("read installed binary metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o751);
+    }
 
     #[test]
     fn default_xtest_jobs_caps_only_large_hosts() {

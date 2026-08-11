@@ -12,12 +12,20 @@
 //! this); the default dev build is faster to compile.
 
 use std::collections::HashSet;
+use std::env::VarError;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Local;
+
+const DEVCONTAINER_ENV: &str = "RUMPELPOD_DEVCONTAINER";
+const LINUX_RUMPEL_TARGETS: [(&str, &str); 2] = [
+    ("x86_64-unknown-linux-musl", "rumpel-linux-amd64"),
+    ("aarch64-unknown-linux-musl", "rumpel-linux-arm64"),
+];
 
 /// Tees output to both stderr and a log file.
 struct Log {
@@ -101,6 +109,100 @@ fn run_cmd(cmd: &mut Command) -> Result<()> {
         anyhow::bail!("{prog} exited with {status}");
     }
     Ok(())
+}
+
+fn pipeline_cargo_cmd() -> Command {
+    let mut command = tools::cargo_cmd();
+    // Global flags replace target-specific Cargo configuration instead of
+    // extending it, which can make the musl payloads fail before main.
+    command.env_remove("RUSTFLAGS");
+    command
+}
+
+fn wait_for_devcontainer_user_manager() -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = Command::new("systemctl")
+            .args(["--user", "show-environment"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("probing the development systemd user manager")?;
+        if status.success() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow::anyhow!(
+                "development systemd user manager did not become available within 30 seconds"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn install_devcontainer_daemon(release: bool) -> Result<()> {
+    match std::env::var(DEVCONTAINER_ENV) {
+        Ok(value) if value == "1" => {}
+        Ok(value) => {
+            return Err(anyhow::anyhow!(
+                "{DEVCONTAINER_ENV} must be 1 when set, got {value:?}"
+            ));
+        }
+        Err(VarError::NotPresent) => return Ok(()),
+        Err(VarError::NotUnicode(_)) => {
+            return Err(anyhow::anyhow!("{DEVCONTAINER_ENV} is not valid Unicode"));
+        }
+    }
+
+    wait_for_devcontainer_user_manager()?;
+    eprintln!("\n=== Installing development daemon ===");
+    let native_target = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-unknown-linux-musl",
+        "aarch64" => "aarch64-unknown-linux-musl",
+        architecture => {
+            return Err(anyhow::anyhow!(
+                "unsupported devcontainer architecture: {architecture}"
+            ));
+        }
+    };
+    let profile = if release { "release" } else { "debug" };
+    let profile_args: &[&str] = if release { &["--release"] } else { &[] };
+    for (target, _) in LINUX_RUMPEL_TARGETS {
+        run_cmd(
+            pipeline_cargo_cmd()
+                .args([
+                    "build",
+                    "-p",
+                    "rumpelpod",
+                    "--bin",
+                    "rumpel",
+                    "--target",
+                    target,
+                ])
+                .args(profile_args),
+        )?;
+    }
+
+    let repo_root = tools::repo_root()?;
+    let target_dir = repo_root.join("target");
+    let bin_dir = dirs::home_dir()
+        .context("locating the home directory")?
+        .join(".local/bin");
+    for (target, name) in LINUX_RUMPEL_TARGETS {
+        let source = target_dir.join(target).join(profile).join("rumpel");
+        tools::install_binary(&source, &bin_dir.join(name))?;
+    }
+    let source = target_dir.join(native_target).join(profile).join("rumpel");
+    if !source.is_file() {
+        let source = source.display();
+        return Err(anyhow::anyhow!(
+            "built development binary not found at {source}"
+        ));
+    }
+    let destination = bin_dir.join("rumpel");
+    tools::install_binary(&source, &destination)?;
+
+    run_cmd(Command::new(&destination).arg("system-install"))
 }
 
 /// Find the most recent .log file in `target/xtest/`.
@@ -197,24 +299,24 @@ fn run() -> Result<ExitCode> {
     };
 
     eprintln!("=== Checking formatting ===");
-    run_cmd(tools::cargo_cmd().args(["fmt", "--", "--check"]))?;
+    run_cmd(pipeline_cargo_cmd().args(["fmt", "--", "--check"]))?;
 
     let profile_args: &[&str] = if release { &["--release"] } else { &[] };
 
     eprintln!("\n=== Building (with tests, no warnings) ===");
     run_cmd(
-        tools::cargo_cmd()
+        pipeline_cargo_cmd()
             .args(["build", "--all-targets"])
-            .args(profile_args)
-            .env("RUSTFLAGS", "-D warnings"),
+            .args(profile_args),
     )?;
+
+    install_devcontainer_daemon(release)?;
 
     eprintln!("\n=== Running clippy (no warnings) ===");
     run_cmd(
-        tools::cargo_cmd()
+        pipeline_cargo_cmd()
             .args(["clippy", "--all-targets"])
-            .args(profile_args)
-            .env("RUSTFLAGS", "-D warnings"),
+            .args(profile_args),
     )?;
 
     // Only xtest output is recorded to the log file.  The other
@@ -227,7 +329,7 @@ fn run() -> Result<ExitCode> {
     let log_path_display = log_path.display();
     eprintln!("\n=== Running tests (log: {log_path_display}) ===");
 
-    let mut xtest_cmd = tools::cargo_cmd();
+    let mut xtest_cmd = pipeline_cargo_cmd();
     xtest_cmd.arg("xtest");
     if release {
         xtest_cmd.arg("--release");

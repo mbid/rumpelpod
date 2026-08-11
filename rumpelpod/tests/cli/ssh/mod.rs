@@ -622,7 +622,8 @@ fn build_remote_podman_image() -> Result<String> {
 /// The config provides isolation from the user's SSH configuration:
 /// - Uses a separate known_hosts file inside the test home
 /// - Configures each host with its specific identity file
-/// - Sets IdentitiesOnly to prevent using ssh-agent keys
+/// - Disables the ambient SSH agent and restricts authentication to those
+///   identities
 ///
 /// Also links `ssh` and `docker` into the test home's bin dir: the
 /// daemon needs `ssh` to run remote docker dial-stdio and `docker`
@@ -643,6 +644,7 @@ pub fn write_ssh_config(home: &TestHome, hosts: &[&SshRemoteHost]) {
             StrictHostKeyChecking accept-new
             BatchMode yes
             ConnectTimeout 10
+            IdentityAgent none
 
     "#,
         known_hosts = known_hosts_path.display(),
@@ -686,6 +688,7 @@ pub fn write_ssh_alias_config(home: &TestHome, host: &SshRemoteHost, alias: &str
             StrictHostKeyChecking accept-new
             BatchMode yes
             ConnectTimeout 10
+            IdentityAgent none
 
         Host {alias}
             HostName {ssh_host}

@@ -44,7 +44,7 @@ mod pty_attach;
 mod pty_session;
 mod recreate;
 mod registry;
-mod review;
+pub mod review;
 mod service;
 mod slow_guard;
 mod ssh;
@@ -235,6 +235,9 @@ pub fn run() -> Result<()> {
             }
             GitHookSubcommand::HostPreReceive => {
                 hook::host_pre_receive()?;
+            }
+            GitHookSubcommand::HostPostReceive(ref cmd) => {
+                hook::host_post_receive(&cmd.repo_path)?;
             }
             GitHookSubcommand::PreCommitDescription(ref cmd) => {
                 hook::pre_commit_description(cmd)?;
