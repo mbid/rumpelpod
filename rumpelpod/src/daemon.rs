@@ -4996,18 +4996,22 @@ impl DaemonServer {
     }
 
     fn cleanup_codex_runtime(&self, repo_path: &Path, pod_name: &str) {
+        block_on(self.cleanup_codex_runtime_async(repo_path, pod_name));
+    }
+
+    async fn cleanup_codex_runtime_async(&self, repo_path: &Path, pod_name: &str) {
         let pod_connections = self.pod_connections.clone();
         let repo_path = repo_path.to_path_buf();
         let pod_name = pod_name.to_string();
         let session_name = crate::codex::codex_session_name(&repo_path, &pod_name);
-        let result = block_on(
-            self.pty_sessions
-                .terminate_with_cleanup(&session_name, move || {
-                    if let Some(connection) = pod_connections.get(&repo_path, &pod_name) {
-                        connection.remove_codex_proxy();
-                    }
-                }),
-        );
+        let result = self
+            .pty_sessions
+            .terminate_with_cleanup(&session_name, move || {
+                if let Some(connection) = pod_connections.get(&repo_path, &pod_name) {
+                    connection.remove_codex_proxy();
+                }
+            })
+            .await;
         if let Err(e) = result {
             error!("{e:#}");
         }
@@ -6003,13 +6007,22 @@ async fn host_event_reader(daemon: Arc<DaemonServer>, mut rx: HostConnectionEven
                 schedule_git_tunnel_repairs(&daemon);
             }
             HostConnectionEvent::Disconnected(key) => {
-                daemon.pod_connections.notify_host_disconnected(&key);
+                reset_host_pods(&daemon, &key).await;
             }
             HostConnectionEvent::GaveUp(key) => {
                 daemon.host_connections.remove(&key);
-                daemon.pod_connections.notify_host_disconnected(&key);
+                reset_host_pods(&daemon, &key).await;
             }
         }
+    }
+}
+
+async fn reset_host_pods(daemon: &DaemonServer, key: &host_connection::HostKey) {
+    let pods = daemon.pod_connections.notify_host_disconnected(key);
+    for pod in pods {
+        daemon
+            .cleanup_codex_runtime_async(pod.repo_path(), pod.pod_name())
+            .await;
     }
 }
 

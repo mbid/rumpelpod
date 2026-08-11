@@ -26,6 +26,7 @@ pub struct ExecProxyHandle {
     alive: Arc<AtomicBool>,
     target_container: String,
     _cancel_tx: tokio::sync::watch::Sender<bool>,
+    reset_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl ExecProxyHandle {
@@ -35,6 +36,12 @@ impl ExecProxyHandle {
 
     pub fn target_container(&self) -> &str {
         &self.target_container
+    }
+
+    /// End backend streams without replacing the stable local listener.
+    /// The next client connection opens a fresh executor session.
+    pub fn reset_connections(&self) {
+        self.reset_tx.send_modify(|value| *value = !*value);
     }
 }
 
@@ -78,6 +85,7 @@ pub fn start_exec_proxy_on_listener_in_container(
     let port = listener.local_addr()?.port();
 
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let (reset_tx, reset_rx) = tokio::sync::watch::channel(false);
     let alive = Arc::new(AtomicBool::new(true));
     let alive2 = alive.clone();
     let target_container = container.clone();
@@ -89,6 +97,7 @@ pub fn start_exec_proxy_on_listener_in_container(
             container,
             container_port,
             cancel_rx,
+            reset_rx,
             alive2,
         )
         .await;
@@ -99,6 +108,7 @@ pub fn start_exec_proxy_on_listener_in_container(
         alive,
         target_container,
         _cancel_tx: cancel_tx,
+        reset_tx,
     })
 }
 
@@ -108,13 +118,30 @@ async fn accept_loop(
     container: String,
     container_port: u16,
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
+    mut reset_rx: tokio::sync::watch::Receiver<bool>,
     alive: Arc<AtomicBool>,
 ) {
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let stream = tokio::select! {
+        tokio::select! {
             result = listener.accept() => {
                 match result {
-                    Ok((stream, _)) => stream,
+                    Ok((stream, _)) => {
+                        let executor = executor.clone();
+                        let container = container.clone();
+                        connections.spawn(async move {
+                            if let Err(e) = bridge_connection(
+                                stream,
+                                &executor,
+                                &container,
+                                container_port,
+                            )
+                            .await
+                            {
+                                log::debug!("exec proxy bridge ended: {e:#}");
+                            }
+                        });
+                    }
                     Err(e) => {
                         log::error!("exec proxy accept error: {e}");
                         break;
@@ -122,18 +149,23 @@ async fn accept_loop(
                 }
             }
             _ = cancel_rx.changed() => break,
-        };
-
-        let executor = executor.clone();
-        let container = container.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = bridge_connection(stream, &executor, &container, container_port).await {
-                log::debug!("exec proxy bridge ended: {e:#}");
+            changed = reset_rx.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                connections.abort_all();
             }
-        });
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(e) = result {
+                    if !e.is_cancelled() {
+                        log::error!("exec proxy bridge task failed: {e}");
+                    }
+                }
+            }
+        }
     }
 
+    connections.abort_all();
     alive.store(false, Ordering::Relaxed);
 }
 

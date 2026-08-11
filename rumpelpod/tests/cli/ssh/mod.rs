@@ -861,7 +861,7 @@ fn ssh_uses_user_config_for_omitted_port() {
 /// through Colima's VM networking layer.
 #[test]
 fn ssh_reconnect_test() {
-    println!("xtest:timeout=300");
+    println!("xtest:timeout=360");
     if cfg!(target_os = "macos") {
         crate::executor::skip_test();
         return;
@@ -880,6 +880,17 @@ fn ssh_reconnect_test() {
     let home = TestHome::new();
     let remote = SshRemoteHost::start();
     write_ssh_config(&home, &[&remote]);
+    let ssh_config = home.path().join(".ssh/config");
+    let mut ssh_config_content = std::fs::read_to_string(&ssh_config).unwrap();
+    let control_path = home.path().join("ssh-control-%C");
+    ssh_config_content.push_str(&formatdoc! {r#"
+        Host *
+            ControlMaster auto
+            ControlPath {control_path}
+            ControlPersist 10m
+
+    "#, control_path = control_path.display()});
+    std::fs::write(&ssh_config, ssh_config_content).unwrap();
     let mut daemon = TestDaemon::start(&home);
 
     let repo = TestRepo::new();
@@ -920,7 +931,12 @@ fn ssh_reconnect_test() {
         .success()
         .expect("establishing missing pod routes after daemon startup failed");
 
-    let ssh_config = home.path().join(".ssh/config");
+    let ssh_destination = remote.ssh_spec();
+    let ssh_destination = ssh_destination.strip_prefix("ssh://").unwrap();
+    Command::new(home.bin_dir().join("ssh"))
+        .args(["-O", "check", ssh_destination])
+        .success()
+        .expect("remote Docker operations did not establish an SSH control master");
     let inner_container = remote
         .ssh_command(
             &ssh_config,
@@ -1027,6 +1043,46 @@ fn ssh_reconnect_test() {
         stderr
     );
     assert_eq!(stdout.trim(), "hello again");
+
+    // A suspended laptop can leave the local control master responsive to
+    // mux requests while its remote transport no longer makes progress.
+    // Stop only the established sshd children so a new TCP connection can
+    // still reach the listener after the daemon retires that master.
+    Command::new("docker")
+        .args([
+            "exec",
+            &remote.container_id,
+            "sh",
+            "-c",
+            "for pid in $(pgrep sshd); do [ \"$pid\" = 1 ] || kill -STOP \"$pid\"; done",
+        ])
+        .success()
+        .expect("suspending established SSH transports failed");
+
+    let reconnect_started = Instant::now();
+    pod_command(&repo, &daemon)
+        .args(["connect", pod_name])
+        .success()
+        .expect("connecting through a stalled SSH control master failed");
+    assert!(
+        reconnect_started.elapsed() < Duration::from_secs(75),
+        "stalled SSH recovery exceeded the bounded probe and control-master reset"
+    );
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "echo", "after stalled master"])
+        .output()
+        .expect("rumpel enter after stalled SSH recovery failed to execute");
+    assert!(
+        output.status.success(),
+        "rumpel enter after stalled SSH recovery failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "after stalled master"
+    );
 }
 
 #[test]

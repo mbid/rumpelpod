@@ -1,0 +1,9 @@
+Recover pods after suspended SSH connections
+
+Retire unresponsive OpenSSH control masters after a bounded probe so a
+resumed daemon can establish a fresh transport. Reset active pod proxy
+streams and Codex frontends when their host disconnects. This lets every
+pod reconnect instead of retaining silently stalled children.
+
+Enable rumpelpod INFO logs in the generated systemd user service. Log
+host and pod connection transitions needed to diagnose future outages.

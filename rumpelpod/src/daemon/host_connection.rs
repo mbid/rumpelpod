@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::debug;
+use log::{debug, info, warn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, watch, Notify};
@@ -591,9 +591,14 @@ impl SshConnection {
             }
         });
         if changed {
+            let key = self.key();
+            match status {
+                HostStatus::Connected => info!("{key}: host connection established"),
+                HostStatus::Disconnected => info!("{key}: host connection lost; retrying"),
+            }
             let event = match status {
-                HostStatus::Connected => HostConnectionEvent::Connected(self.key()),
-                HostStatus::Disconnected => HostConnectionEvent::Disconnected(self.key()),
+                HostStatus::Connected => HostConnectionEvent::Connected(key),
+                HostStatus::Disconnected => HostConnectionEvent::Disconnected(key),
             };
             let _ = self.events_tx.send(event);
         }
@@ -607,9 +612,27 @@ impl SshConnection {
     pub fn ensure_connected(&self) -> Result<()> {
         let _guard = self.bring_up.lock().unwrap();
 
-        if ping_ssh_engine(&self.destination, self.engine) {
-            self.set_status(HostStatus::Connected);
-            return Ok(());
+        match ping_ssh_engine(&self.destination, self.engine) {
+            Ok(()) => {
+                self.set_status(HostStatus::Connected);
+                return Ok(());
+            }
+            Err(SshPingFailure::Failed(e)) => {
+                debug!("{}: ssh engine probe failed: {e:#}", self.key());
+            }
+            Err(SshPingFailure::TimedOut) => {
+                self.set_status(HostStatus::Disconnected);
+                info!(
+                    "{}: ssh engine probe timed out; discarding any multiplexed SSH session",
+                    self.key()
+                );
+                if terminate_ssh_control_master(&self.destination)
+                    && ping_ssh_engine(&self.destination, self.engine).is_ok()
+                {
+                    self.set_status(HostStatus::Connected);
+                    return Ok(());
+                }
+            }
         }
 
         self.set_status(HostStatus::Disconnected);
@@ -674,21 +697,76 @@ fn ssh_dial_stdio_args(destination: &str, engine: ContainerEngine) -> Vec<OsStri
     ]
 }
 
+fn ssh_control_exit_args(destination: &str) -> Vec<OsString> {
+    vec![
+        OsString::from("-o"),
+        OsString::from("BatchMode=yes"),
+        OsString::from("-O"),
+        OsString::from("exit"),
+        OsString::from(destination),
+    ]
+}
+
 /// Hard ceiling on the engine `/_ping` round-trip over SSH.
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn ping_ssh_engine(destination: &str, engine: ContainerEngine) -> bool {
+enum SshPingFailure {
+    Failed(anyhow::Error),
+    TimedOut,
+}
+
+fn ping_ssh_engine(
+    destination: &str,
+    engine: ContainerEngine,
+) -> std::result::Result<(), SshPingFailure> {
     let destination = destination.to_string();
     match RUNTIME
         .block_on(async { timeout(PING_TIMEOUT, ping_ssh_engine_inner(destination, engine)).await })
     {
-        Ok(Ok(())) => true,
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(SshPingFailure::Failed(e)),
+        Err(_) => Err(SshPingFailure::TimedOut),
+    }
+}
+
+const SSH_CONTROL_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn terminate_ssh_control_master(destination: &str) -> bool {
+    let result = RUNTIME.block_on(async {
+        timeout(
+            SSH_CONTROL_EXIT_TIMEOUT,
+            TokioCommand::new("ssh")
+                .args(ssh_control_exit_args(destination))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+    });
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            info!("ssh://{destination}: discarded multiplexed SSH session");
+            true
+        }
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            debug!(
+                "ssh://{destination}: no multiplexed SSH session could be discarded: {}",
+                stderr.trim()
+            );
+            false
+        }
         Ok(Err(e)) => {
-            debug!("ssh engine ping failed: {e:#}");
+            warn!("ssh://{destination}: failed to request SSH session exit: {e}");
             false
         }
         Err(_) => {
-            debug!("ssh engine ping timed out after {PING_TIMEOUT:?}");
+            warn!(
+                "ssh://{destination}: SSH session exit did not finish within {SSH_CONTROL_EXIT_TIMEOUT:?}"
+            );
             false
         }
     }
@@ -988,6 +1066,14 @@ mod ssh_tests {
                 "dial-stdio"
             ]
         );
+    }
+
+    #[test]
+    fn ssh_control_exit_uses_user_config() {
+        let args = args_to_strings(&ssh_control_exit_args("dev"));
+
+        assert_eq!(args, vec!["-o", "BatchMode=yes", "-O", "exit", "dev"]);
+        assert_no_rumpelpod_ssh_policy(&args);
     }
 }
 

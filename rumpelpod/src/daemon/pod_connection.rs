@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::debug;
+use log::{debug, info};
 use tokio::sync::{broadcast, watch};
 
 use crate::async_runtime::RUNTIME;
@@ -744,6 +744,10 @@ impl PodConnection {
             return;
         }
         self.repair_state.resume();
+        info!(
+            "pod connection for '{}' is reconnecting after host recovery",
+            self.key.pod_name
+        );
         replace_and_emit(
             &self.status,
             PodConnectionStatus::Connecting,
@@ -759,6 +763,10 @@ impl PodConnection {
         }
         let _setup = self.git_tunnel_setup.lock().unwrap();
         self.repair_state.signal();
+        info!(
+            "pod connection for '{}' lost its host; resetting active transports",
+            self.key.pod_name
+        );
         replace_and_emit(
             &self.status,
             PodConnectionStatus::HostDisconnected,
@@ -766,10 +774,19 @@ impl PodConnection {
             &self.key,
         );
         let mut resources = self.resources.lock().unwrap();
+        if let Some(pod_server) = resources.pod_server.as_ref() {
+            pod_server.reset_connections();
+        }
+        if let Some(forwarded_ports) = resources.forwarded_ports.as_ref() {
+            for forwarded_port in forwarded_ports {
+                forwarded_port.reset_connections();
+            }
+        }
         if resources.supervise_git_tunnel {
             resources.git_tunnel = None;
             resources.validate_pod_before_git_tunnel_repair = true;
         }
+        resources.codex_proxy = None;
         drop(resources);
         let _ = self.tx.send(ReconnectEvent::Attempting);
     }
@@ -911,13 +928,16 @@ impl PodConnectionRegistry {
         }
     }
 
-    pub fn notify_host_disconnected(&self, host: &HostKey) {
+    pub fn notify_host_disconnected(&self, host: &HostKey) -> Vec<PodConnectionKey> {
         let pods = self.pods.lock().unwrap();
+        let mut disconnected = Vec::new();
         for connection in pods.values() {
             if &*connection.host_key.lock().unwrap() == host {
                 connection.notify_host_disconnected();
+                disconnected.push(connection.key().clone());
             }
         }
+        disconnected
     }
 
     pub fn replace_host_connection(&self, host: &HostKey, host_conn: Arc<HostConnection>) {
@@ -1082,12 +1102,17 @@ fn pod_event_loop(ctx: PodEventLoop) {
             Ok((reader, greeting)) => {
                 apply_greeting(greeting);
                 replace_and_emit(&status, PodConnectionStatus::Connected, &events_tx, &key);
+                info!("pod connection for '{pod_name}' established");
                 let _ = tx.send(ReconnectEvent::Connected);
                 backoff.reset();
                 reader
             }
             Err(e) => {
-                debug!("pod event connection failed: {e:#}");
+                if backoff.failures == 0 {
+                    info!("pod connection for '{pod_name}' failed; retrying: {e:#}");
+                } else {
+                    debug!("pod event connection for '{pod_name}' failed: {e:#}");
+                }
                 replace_and_emit(
                     &status,
                     PodConnectionStatus::PodDisconnected,
@@ -1131,7 +1156,14 @@ fn pod_event_loop(ctx: PodEventLoop) {
             }
             let mut line = String::new();
             match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    info!("pod event stream for '{pod_name}' closed; reconnecting");
+                    break;
+                }
+                Err(e) => {
+                    info!("pod event stream for '{pod_name}' failed; reconnecting: {e}");
+                    break;
+                }
                 Ok(_) => {
                     let trimmed = line.trim();
                     if let Some(event_type) = trimmed.strip_prefix("event: ") {
