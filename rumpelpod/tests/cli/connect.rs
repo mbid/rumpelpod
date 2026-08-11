@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use indoc::formatdoc;
@@ -219,7 +219,7 @@ fn connect_does_not_start_a_stopped_pod() {
 }
 
 #[test]
-fn connect_does_not_race_a_stop_in_progress() {
+fn connect_rejects_and_recreate_waits_for_stop_in_progress() {
     println!("xtest:timeout=300");
     if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
         executor::skip_test();
@@ -284,23 +284,28 @@ fn connect_does_not_race_a_stop_in_progress() {
         .args(["connect", "connect-stopping"])
         .output()
         .expect("running connect failed");
-    fs::write(&release_stop, "").expect("releasing docker stop failed");
 
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let inspect = Command::new(&docker_path)
-            .args(["inspect", "--format", "{{.State.Running}}", &container])
-            .success()
-            .expect("inspecting stopped pod failed");
-        if String::from_utf8_lossy(&inspect).trim() == "false" {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "background docker stop did not finish"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    let mut recreate_command = pod_command(&repo, &daemon);
+    recreate_command
+        .args(["recreate", "connect-stopping"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut recreate = recreate_command
+        .spawn()
+        .expect("starting concurrent recreate failed");
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(
+        recreate
+            .try_wait()
+            .expect("checking recreate status failed")
+            .is_none(),
+        "recreate finished before the background stop was released"
+    );
+
+    fs::write(&release_stop, "").expect("releasing docker stop failed");
+    let recreate_output = recreate
+        .wait_with_output()
+        .expect("waiting for concurrent recreate failed");
 
     assert!(!output.status.success());
     assert!(
@@ -308,4 +313,20 @@ fn connect_does_not_race_a_stop_in_progress() {
         "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        recreate_output.status.success(),
+        "recreate failed after stop completed: {}",
+        String::from_utf8_lossy(&recreate_output.stderr)
+    );
+
+    let replacement = container_id("connect-stopping");
+    assert_ne!(
+        replacement, container,
+        "recreate did not replace the container"
+    );
+    let inspect = Command::new(&docker_path)
+        .args(["inspect", "--format", "{{.State.Running}}", &replacement])
+        .success()
+        .expect("inspecting replacement pod failed");
+    assert_eq!(String::from_utf8_lossy(&inspect).trim(), "true");
 }

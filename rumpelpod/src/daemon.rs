@@ -12,7 +12,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 use crate::image::OutputLine;
@@ -431,7 +431,39 @@ struct PodLifecycleLocks {
 }
 
 type PodLifecycleKey = (PathBuf, String);
-type PodLifecycleLock = Mutex<()>;
+
+#[derive(Default)]
+struct PodLifecycleLock {
+    held: Mutex<bool>,
+    changed: Condvar,
+}
+
+struct PodLifecycleGuard {
+    lifecycle_lock: Arc<PodLifecycleLock>,
+}
+
+impl PodLifecycleLock {
+    /// Return an owned lease so background stop/delete work can keep
+    /// the deterministic backend pod id reserved until it finishes.
+    fn acquire(self: &Arc<Self>) -> PodLifecycleGuard {
+        let mut held = self.held.lock().unwrap();
+        while *held {
+            held = self.changed.wait(held).unwrap();
+        }
+        *held = true;
+        PodLifecycleGuard {
+            lifecycle_lock: self.clone(),
+        }
+    }
+}
+
+impl Drop for PodLifecycleGuard {
+    fn drop(&mut self) {
+        let mut held = self.lifecycle_lock.held.lock().unwrap();
+        *held = false;
+        self.lifecycle_lock.changed.notify_one();
+    }
+}
 
 impl PodLifecycleLocks {
     fn for_pod(&self, repo_path: &Path, pod_name: &str) -> Arc<PodLifecycleLock> {
@@ -441,7 +473,7 @@ impl PodLifecycleLocks {
         if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
             return lock;
         }
-        let lock = Arc::new(Mutex::new(()));
+        let lock = Arc::new(PodLifecycleLock::default());
         locks.insert(key, Arc::downgrade(&lock));
         lock
     }
@@ -2339,6 +2371,17 @@ impl DaemonServer {
         }
     }
 
+    fn validate_connect_status(pod_name: &str, status: db::PodStatus) -> Result<()> {
+        match status {
+            db::PodStatus::Ready | db::PodStatus::Initializing | db::PodStatus::Error => Ok(()),
+            db::PodStatus::Stopping => Err(anyhow::anyhow!("pod '{pod_name}' is stopping")),
+            db::PodStatus::Deleting => Err(anyhow::anyhow!("pod '{pod_name}' is being deleted")),
+            db::PodStatus::DeleteFailed => {
+                Err(anyhow::anyhow!("pod '{pod_name}' could not be deleted"))
+            }
+        }
+    }
+
     fn connect_pod_impl(&self, request: ConnectPodRequest) -> Result<()> {
         let ConnectPodRequest {
             pod_name,
@@ -2350,18 +2393,7 @@ impl DaemonServer {
             db::get_pod(&conn, &repo_path, &pod_name.0)?
                 .with_context(|| format!("pod '{}' not found", pod_name.0))?
         };
-        match record.status {
-            db::PodStatus::Ready | db::PodStatus::Initializing | db::PodStatus::Error => {}
-            db::PodStatus::Stopping => {
-                return Err(anyhow::anyhow!("pod '{}' is stopping", pod_name.0));
-            }
-            db::PodStatus::Deleting => {
-                return Err(anyhow::anyhow!("pod '{}' is being deleted", pod_name.0));
-            }
-            db::PodStatus::DeleteFailed => {
-                return Err(anyhow::anyhow!("pod '{}' could not be deleted", pod_name.0));
-            }
-        }
+        Self::validate_connect_status(&pod_name.0, record.status)?;
         let host: Host =
             serde_json::from_str(&record.host).context("parsing stored host for pod")?;
         let host = host
@@ -3926,7 +3958,7 @@ impl DaemonServer {
             }
 
             // 2. Delete the pod
-            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true)?;
+            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true, None)?;
 
             // 3. Create new pod (call impl directly to avoid nested thread)
             let launch_result =
@@ -4028,7 +4060,7 @@ impl DaemonServer {
             }
 
             // 2. Delete the container synchronously so launch_pod can reuse the name
-            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true)?;
+            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true, None)?;
         }
 
         // 3. Create new pod (call impl directly to avoid nested thread)
@@ -4227,12 +4259,17 @@ impl DaemonServer {
         connection.ensure_codex_proxy(container_url, container_token)
     }
 
-    fn delete_pod_impl(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
-        let conn = self.db.lock().unwrap();
-        let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
-        if let Some(ref record) = pod_record {
-            db::update_pod_status(&conn, record.id, db::PodStatus::Deleting)?;
-        }
+    fn delete_pod_impl(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        wait: bool,
+        lifecycle_guard: Option<PodLifecycleGuard>,
+    ) -> Result<()> {
+        let pod_record = {
+            let conn = self.db.lock().unwrap();
+            db::get_pod(&conn, &repo_path, &pod_name.0)?
+        };
         let host = match pod_record.as_ref() {
             Some(record) => serde_json::from_str::<Host>(&record.host)?,
             None => Host::Localhost {
@@ -4240,13 +4277,18 @@ impl DaemonServer {
             }
             .resolve_container_tools()?,
         };
-        drop(conn);
-
-        self.pod_connections.remove(&repo_path, &pod_name.0);
-        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
 
         let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
         let is_k8s = matches!(host, Host::Kubernetes { .. });
+        let executor = self.host_executor(&host)?;
+
+        if let Some(ref record) = pod_record {
+            let conn = self.db.lock().unwrap();
+            db::update_pod_status(&conn, record.id, db::PodStatus::Deleting)?;
+        }
+
+        self.pod_connections.remove(&repo_path, &pod_name.0);
+        self.cleanup_codex_runtime(&repo_path, &pod_name.0);
 
         // Drop the backend-specific handles up-front so any exec
         // sessions inside the container are cleaned up before we try
@@ -4261,9 +4303,6 @@ impl DaemonServer {
                 }
             }
         }
-
-        let executor = self.host_executor(&host)?;
-
         // K8s delete is a quick API call, so wait inline.  Docker
         // overlay unmounts are sometimes slow and unreliable, so the
         // non-wait path runs deletion in a background thread with
@@ -4287,6 +4326,7 @@ impl DaemonServer {
             let repo_path = repo_path.clone();
             let pod_name = pod_name.clone();
             std::thread::spawn(move || {
+                let _lifecycle_guard = lifecycle_guard;
                 let delays_secs = [0, 10, 60];
                 for (attempt, &delay) in delays_secs.iter().enumerate() {
                     if delay > 0 {
@@ -4383,7 +4423,7 @@ impl Daemon for DaemonServer {
             let lifecycle_lock = this
                 .lifecycle_locks
                 .for_pod(&params.repo_path, &params.pod_name.0);
-            let _guard = lifecycle_lock.lock().unwrap();
+            let _guard = lifecycle_lock.acquire();
             this.launch_pod_impl(params, tx, InitializeMode::IfCreating)
         });
         Ok(ServerLaunchProgress {
@@ -4399,7 +4439,7 @@ impl Daemon for DaemonServer {
             let lifecycle_lock = this
                 .lifecycle_locks
                 .for_pod(&params.repo_path, &params.pod_name.0);
-            let _guard = lifecycle_lock.lock().unwrap();
+            let _guard = lifecycle_lock.acquire();
             this.recreate_pod_impl(params, tx)
         });
         Ok(ServerLaunchProgress {
@@ -4420,9 +4460,11 @@ impl Daemon for DaemonServer {
 
     fn stop_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let lifecycle_lock = self.lifecycle_locks.for_pod(&repo_path, &pod_name.0);
-        let _guard = lifecycle_lock.lock().unwrap();
-        let conn = self.db.lock().unwrap();
-        let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?;
+        let lifecycle_guard = lifecycle_lock.acquire();
+        let pod_record = {
+            let conn = self.db.lock().unwrap();
+            db::get_pod(&conn, &repo_path, &pod_name.0)?
+        };
 
         // Reject k8s pods up-front so the error names this command's
         // alternative rather than the executor's generic "stop not
@@ -4441,16 +4483,16 @@ impl Daemon for DaemonServer {
                 pod_name.0
             ));
         }
+        let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
+        let executor = self.host_executor(&host)?;
+
         if let Some(ref record) = pod_record {
+            let conn = self.db.lock().unwrap();
             db::update_pod_status(&conn, record.id, db::PodStatus::Stopping)?;
         }
-        drop(conn);
 
         self.pod_connections.stop_events(&repo_path, &pod_name.0);
         self.cleanup_codex_runtime(&repo_path, &pod_name.0);
-
-        let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
-        let executor = self.host_executor(&host)?;
 
         if wait {
             let result = executor.stop(&pod_id);
@@ -4464,6 +4506,7 @@ impl Daemon for DaemonServer {
             let repo_path = repo_path.clone();
             let pod_name = pod_name.clone();
             std::thread::spawn(move || {
+                let _lifecycle_guard = lifecycle_guard;
                 if let Err(e) = executor.stop(&pod_id) {
                     let name = &pod_name.0;
                     error!("failed to stop pod '{name}': {e}");
@@ -4480,8 +4523,8 @@ impl Daemon for DaemonServer {
 
     fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let lifecycle_lock = self.lifecycle_locks.for_pod(&repo_path, &pod_name.0);
-        let _guard = lifecycle_lock.lock().unwrap();
-        self.delete_pod_impl(pod_name, repo_path, wait)
+        let lifecycle_guard = lifecycle_lock.acquire();
+        self.delete_pod_impl(pod_name, repo_path, wait, Some(lifecycle_guard))
     }
 
     fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>> {
@@ -4794,10 +4837,16 @@ impl Daemon for DaemonServer {
     }
 
     fn connect_pod(&self, request: ConnectPodRequest) -> Result<()> {
+        {
+            let conn = self.db.lock().unwrap();
+            if let Some(record) = db::get_pod(&conn, &request.repo_path, &request.pod_name)? {
+                Self::validate_connect_status(&request.pod_name, record.status)?;
+            }
+        }
         let lifecycle_lock = self
             .lifecycle_locks
             .for_pod(&request.repo_path, &request.pod_name);
-        let _guard = lifecycle_lock.lock().unwrap();
+        let _guard = lifecycle_lock.acquire();
         self.connect_pod_impl(request)
     }
 
