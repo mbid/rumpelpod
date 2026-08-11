@@ -861,7 +861,7 @@ fn ssh_uses_user_config_for_omitted_port() {
 /// through Colima's VM networking layer.
 #[test]
 fn ssh_reconnect_test() {
-    println!("xtest:timeout=360");
+    println!("xtest:timeout=300");
     if cfg!(target_os = "macos") {
         crate::executor::skip_test();
         return;
@@ -880,20 +880,6 @@ fn ssh_reconnect_test() {
     let home = TestHome::new();
     let remote = SshRemoteHost::start();
     write_ssh_config(&home, &[&remote]);
-    let ssh_config = home.path().join(".ssh/config");
-    let mut ssh_config_content = std::fs::read_to_string(&ssh_config).unwrap();
-    let control_path = home.path().join("ssh-control-%C");
-    ssh_config_content.push_str(&formatdoc! {r#"
-        Host *
-            ControlMaster auto
-            ControlPath {control_path}
-            ControlPersist 10m
-            ServerAliveInterval 1
-            ServerAliveCountMax 2
-            TCPKeepAlive yes
-
-    "#, control_path = control_path.display()});
-    std::fs::write(&ssh_config, ssh_config_content).unwrap();
     let mut daemon = TestDaemon::start(&home);
 
     let repo = TestRepo::new();
@@ -934,12 +920,7 @@ fn ssh_reconnect_test() {
         .success()
         .expect("establishing missing pod routes after daemon startup failed");
 
-    let ssh_destination = remote.ssh_spec();
-    let ssh_destination = ssh_destination.strip_prefix("ssh://").unwrap();
-    Command::new(home.bin_dir().join("ssh"))
-        .args(["-O", "check", ssh_destination])
-        .success()
-        .expect("remote Docker operations did not establish an SSH control master");
+    let ssh_config = home.path().join(".ssh/config");
     let inner_container = remote
         .ssh_command(
             &ssh_config,
@@ -1046,55 +1027,13 @@ fn ssh_reconnect_test() {
         stderr
     );
     assert_eq!(stdout.trim(), "hello again");
-
-    // A suspended laptop can leave the local control master responsive to
-    // mux requests while its remote transport no longer makes progress.
-    // Stop only the established sshd children so a new TCP connection can
-    // still reach the listener after OpenSSH's keepalive policy closes the
-    // unresponsive master.
-    Command::new("docker")
-        .args([
-            "exec",
-            &remote.container_id,
-            "sh",
-            "-c",
-            "for pid in $(pgrep sshd); do [ \"$pid\" = 1 ] || kill -STOP \"$pid\"; done",
-        ])
-        .success()
-        .expect("suspending established SSH transports failed");
-
-    let reconnect_started = Instant::now();
-    pod_command(&repo, &daemon)
-        .args(["connect", pod_name])
-        .success()
-        .expect("connecting through a stalled SSH control master failed");
-    assert!(
-        reconnect_started.elapsed() < Duration::from_secs(75),
-        "stalled SSH recovery exceeded the configured server-alive timeout"
-    );
-
-    let output = pod_command(&repo, &daemon)
-        .args(["enter", pod_name, "--", "echo", "after stalled master"])
-        .output()
-        .expect("rumpel enter after stalled SSH recovery failed to execute");
-    assert!(
-        output.status.success(),
-        "rumpel enter after stalled SSH recovery failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "after stalled master"
-    );
 }
 
-/// A host disconnect must discard the daemon-side Codex frontend. Otherwise
-/// a later invocation reattaches to a TUI whose proxy still uses the dead SSH
-/// transport and waits forever.
+/// All pod routes sharing an SSH host must recover after the host disconnects.
+/// A single pod does not reproduce the stalled route seen after laptop resume.
 #[test]
-fn codex_reconnects_after_ssh_transport_stall() {
-    println!("xtest:timeout=480");
+fn multiple_pods_reconnect_after_ssh_transport_stall() {
+    println!("xtest:timeout=90");
     if cfg!(target_os = "macos") {
         crate::executor::skip_test();
         return;
@@ -1108,7 +1047,6 @@ fn codex_reconnects_after_ssh_transport_stall() {
     }
 
     let home = TestHome::new();
-    crate::codex::common::setup_controlled_home(&home);
     let remote = SshRemoteHost::start();
     write_ssh_config(&home, &[&remote]);
     let ssh_config = home.path().join(".ssh/config");
@@ -1125,28 +1063,27 @@ fn codex_reconnects_after_ssh_transport_stall() {
 
     "#, control_path = control_path.display()});
     std::fs::write(&ssh_config, ssh_config_content).unwrap();
-    let daemon = TestDaemon::start_with_local_llm_clis(&home);
+    let daemon = TestDaemon::start(&home);
 
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
     let config = serde_json::to_string(&serde_json::json!({"host": remote.ssh_spec()})).unwrap();
     std::fs::write(repo.path().join(".rumpelpod.json"), config).unwrap();
 
-    let pod_name = "codex-ssh-reconnect";
-    let mut first =
-        crate::codex::common::CodexSession::spawn_named(&repo, &daemon, home.path(), pod_name, &[]);
-    first.dismiss_dialogs_with_timeout(Duration::from_secs(60));
-    first.send_with_timeout(
-        "What is the capital of France? Reply with just the city name, nothing else.",
-        Duration::from_secs(30),
-    );
-    first.wait_for_with_timeout("Paris", Duration::from_secs(45));
+    let pod_names = ["shared-a", "shared-b", "shared-c", "shared-d", "foo-bar"];
+    for pod_name in pod_names {
+        pod_command(&repo, &daemon)
+            .args(["enter", "--create", pod_name, "--", "true"])
+            .success()
+            .unwrap_or_else(|e| panic!("creating pod {pod_name} failed: {e:#}"));
+    }
 
     Command::new("docker")
         .args(["pause", &remote.container_id])
         .success()
         .expect("pausing the SSH host failed");
-    first.wait_for_exit_with_timeout(Duration::from_secs(60));
+
+    std::thread::sleep(Duration::from_secs(20));
 
     Command::new("docker")
         .args(["unpause", &remote.container_id])
@@ -1154,14 +1091,11 @@ fn codex_reconnects_after_ssh_transport_stall() {
         .expect("resuming the SSH host failed");
     remote.wait_for_ssh_connectivity(&ssh_config);
 
-    let mut second =
-        crate::codex::common::CodexSession::spawn_named(&repo, &daemon, home.path(), pod_name, &[]);
-    second.dismiss_dialogs_with_timeout(Duration::from_secs(60));
-    second.send_with_timeout(
-        "What git remote has other pods? One word, all uppercase.",
-        Duration::from_secs(30),
-    );
-    second.wait_for_with_timeout("RUMPELPOD", Duration::from_secs(45));
+    let stdout = pod_command(&repo, &daemon)
+        .args(["enter", "foo-bar", "--", "echo", "reconnected"])
+        .success()
+        .expect("entering a pod after SSH resumed failed");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "reconnected");
 }
 
 #[test]

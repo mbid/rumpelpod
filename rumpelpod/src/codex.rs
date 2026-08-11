@@ -320,28 +320,11 @@ pub async fn run_codex_proxy(
     mut cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let _ = ready_tx.send(());
-    let mut connections = tokio::task::JoinSet::new();
     loop {
-        tokio::select! {
+        let stream = tokio::select! {
             result = listener.accept() => {
                 match result {
-                    Ok((stream, _)) => {
-                        let url = container_url.clone();
-                        let container_token = container_token.clone();
-                        let client_token = client_token.clone();
-                        connections.spawn(async move {
-                            if let Err(e) = proxy_connection(
-                                stream,
-                                &url,
-                                &container_token,
-                                &client_token,
-                            )
-                            .await
-                            {
-                                eprintln!("codex proxy: connection error: {e:#}");
-                            }
-                        });
-                    }
+                    Ok((stream, _)) => stream,
                     Err(e) => {
                         eprintln!("codex proxy: accept error: {e}");
                         continue;
@@ -349,16 +332,16 @@ pub async fn run_codex_proxy(
                 }
             }
             _ = cancel_rx.changed() => break,
-            Some(result) = connections.join_next(), if !connections.is_empty() => {
-                if let Err(e) = result {
-                    if !e.is_cancelled() {
-                        eprintln!("codex proxy: connection task failed: {e}");
-                    }
-                }
+        };
+        let url = container_url.clone();
+        let container_token = container_token.clone();
+        let client_token = client_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = proxy_connection(stream, &url, &container_token, &client_token).await {
+                eprintln!("codex proxy: connection error: {e:#}");
             }
-        }
+        });
     }
-    connections.abort_all();
 }
 
 async fn proxy_connection(

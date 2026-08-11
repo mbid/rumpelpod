@@ -2277,6 +2277,7 @@ impl DaemonServer {
 
     fn try_repair_git_tunnel(&self, pod_connection: &PodConnection) -> Result<()> {
         let _setup = pod_connection.git_tunnel_setup_guard();
+        let repair_epoch = pod_connection.pod_repair_epoch();
         if !pod_connection.git_tunnel_supervision_enabled()
             || pod_connection.git_tunnel_is_alive()
             || !pod_connection.host_is_connected()
@@ -2333,7 +2334,7 @@ impl DaemonServer {
             &backend_container,
             &target,
         ))?;
-        pod_connection.install_repaired_git_tunnel(tunnel);
+        pod_connection.install_repaired_git_tunnel(tunnel, repair_epoch);
         Ok(())
     }
 
@@ -4996,22 +4997,18 @@ impl DaemonServer {
     }
 
     fn cleanup_codex_runtime(&self, repo_path: &Path, pod_name: &str) {
-        block_on(self.cleanup_codex_runtime_async(repo_path, pod_name));
-    }
-
-    async fn cleanup_codex_runtime_async(&self, repo_path: &Path, pod_name: &str) {
         let pod_connections = self.pod_connections.clone();
         let repo_path = repo_path.to_path_buf();
         let pod_name = pod_name.to_string();
         let session_name = crate::codex::codex_session_name(&repo_path, &pod_name);
-        let result = self
-            .pty_sessions
-            .terminate_with_cleanup(&session_name, move || {
-                if let Some(connection) = pod_connections.get(&repo_path, &pod_name) {
-                    connection.remove_codex_proxy();
-                }
-            })
-            .await;
+        let result = block_on(
+            self.pty_sessions
+                .terminate_with_cleanup(&session_name, move || {
+                    if let Some(connection) = pod_connections.get(&repo_path, &pod_name) {
+                        connection.remove_codex_proxy();
+                    }
+                }),
+        );
         if let Err(e) = result {
             error!("{e:#}");
         }
@@ -6007,22 +6004,13 @@ async fn host_event_reader(daemon: Arc<DaemonServer>, mut rx: HostConnectionEven
                 schedule_git_tunnel_repairs(&daemon);
             }
             HostConnectionEvent::Disconnected(key) => {
-                reset_host_pods(&daemon, &key).await;
+                daemon.pod_connections.notify_host_disconnected(&key);
             }
             HostConnectionEvent::GaveUp(key) => {
                 daemon.host_connections.remove(&key);
-                reset_host_pods(&daemon, &key).await;
+                daemon.pod_connections.notify_host_disconnected(&key);
             }
         }
-    }
-}
-
-async fn reset_host_pods(daemon: &DaemonServer, key: &host_connection::HostKey) {
-    let pods = daemon.pod_connections.notify_host_disconnected(key);
-    for pod in pods {
-        daemon
-            .cleanup_codex_runtime_async(pod.repo_path(), pod.pod_name())
-            .await;
     }
 }
 

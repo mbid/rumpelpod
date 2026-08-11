@@ -516,9 +516,15 @@ impl PodConnection {
         self.repair_state.wait_for_change(epoch, delay)
     }
 
-    pub fn install_repaired_git_tunnel(&self, handle: crate::tunnel::TunnelHandle) {
+    pub fn install_repaired_git_tunnel(
+        &self,
+        handle: crate::tunnel::TunnelHandle,
+        repair_epoch: u64,
+    ) {
         let mut resources = self.resources.lock().unwrap();
-        if resources.supervise_git_tunnel {
+        // Host transitions cannot wait for a stalled repair. Reject its late
+        // result instead so it cannot overwrite the transition's cleanup.
+        if resources.supervise_git_tunnel && self.repair_state.epoch() == repair_epoch {
             resources.git_tunnel = Some(handle);
             resources.validate_pod_before_git_tunnel_repair = false;
         }
@@ -761,7 +767,8 @@ impl PodConnection {
         if self.status() == PodConnectionStatus::Stopped {
             return;
         }
-        let _setup = self.git_tunnel_setup.lock().unwrap();
+        // A repair may be queued behind another pod's SSH probe. The host
+        // transition must invalidate every pod without waiting for that work.
         self.repair_state.signal();
         info!(
             "pod connection for '{}' lost its host; resetting active transports",
@@ -774,19 +781,10 @@ impl PodConnection {
             &self.key,
         );
         let mut resources = self.resources.lock().unwrap();
-        if let Some(pod_server) = resources.pod_server.as_ref() {
-            pod_server.reset_connections();
-        }
-        if let Some(forwarded_ports) = resources.forwarded_ports.as_ref() {
-            for forwarded_port in forwarded_ports {
-                forwarded_port.reset_connections();
-            }
-        }
         if resources.supervise_git_tunnel {
             resources.git_tunnel = None;
             resources.validate_pod_before_git_tunnel_repair = true;
         }
-        resources.codex_proxy = None;
         drop(resources);
         let _ = self.tx.send(ReconnectEvent::Attempting);
     }
@@ -928,16 +926,13 @@ impl PodConnectionRegistry {
         }
     }
 
-    pub fn notify_host_disconnected(&self, host: &HostKey) -> Vec<PodConnectionKey> {
+    pub fn notify_host_disconnected(&self, host: &HostKey) {
         let pods = self.pods.lock().unwrap();
-        let mut disconnected = Vec::new();
         for connection in pods.values() {
             if &*connection.host_key.lock().unwrap() == host {
                 connection.notify_host_disconnected();
-                disconnected.push(connection.key().clone());
             }
         }
-        disconnected
     }
 
     pub fn replace_host_connection(&self, host: &HostKey, host_conn: Arc<HostConnection>) {

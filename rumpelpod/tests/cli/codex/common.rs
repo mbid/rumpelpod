@@ -340,18 +340,8 @@ impl CodexSession {
     /// Wait for the child process to exit.  Returns once the PTY reader
     /// disconnects (child exited) and the process has been reaped.
     pub fn wait_for_exit(&mut self) {
-        self.wait_for_exit_with_timeout(Duration::from_secs(10));
-    }
-
-    /// Wait for the child process to exit within a caller-provided timeout.
-    pub fn wait_for_exit_with_timeout(&mut self, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
         loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining == Duration::ZERO {
-                panic!("timed out waiting for child to exit");
-            }
-            match self.rx.recv_timeout(remaining) {
+            match self.rx.recv_timeout(Duration::from_secs(10)) {
                 Ok(bytes) => {
                     self.raw_log.extend_from_slice(&bytes);
                     self.parser.process(&bytes);

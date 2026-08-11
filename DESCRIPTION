@@ -1,9 +1,11 @@
 Recover pods after suspended SSH connections
 
-Reset active pod proxy streams and Codex frontends after OpenSSH reports
-that their host disconnected. This lets every pod reconnect instead of
-retaining silently stalled children, while leaving control-master
-detection and cleanup to OpenSSH and the user's SSH configuration.
+Process a host disconnect without waiting for in-flight per-pod tunnel
+repairs. This prevents several pods on one SSH host from serially
+blocking the host transition, while a repair epoch stops stale tunnel
+results from overwriting the disconnected state. OpenSSH and the user's
+configuration remain responsible for control-master detection and
+cleanup.
 
 Enable rumpelpod INFO logs in the generated systemd user service. Log
 host and pod connection transitions needed to diagnose future outages.
