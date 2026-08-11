@@ -120,24 +120,22 @@ fn make_build_output(
     }) as crate::image::BuildOutputFn)
 }
 
-/// Parse the source pod's stored devcontainer.json into a fully-resolved
+/// Parse a pod's stored devcontainer.json into a fully-resolved
 /// `DevContainer`, applying the same `${localEnv:...}` resolution as
 /// `load_and_resolve_devcontainer` but skipping the host-disk read.
 ///
-/// `--env-file` resolution is intentionally NOT re-run here.  Forks
-/// inherit container env vars by snapshotting the source pod's running
-/// process environment via its `/container-env` endpoint; that gives
-/// the value the source actually saw, independent of any later edits
-/// to `.env` on disk.  The caller layers that snapshot onto
-/// `dc.container_env` after this returns.
-fn parse_prebuilt_devcontainer(
+/// `--env-file` resolution is intentionally NOT re-run here. The stored
+/// source and captured local environment keep later host edits from
+/// changing the configuration associated with an existing pod. Forks
+/// separately inherit the source pod's resolved container environment.
+fn parse_stored_devcontainer(
     json: &str,
     repo_path: &Path,
     pod_name: &str,
     local_env: &HashMap<String, String>,
 ) -> Result<DevContainer> {
     let devcontainer: DevContainer =
-        json5::from_str(json).context("parsing source pod's stored devcontainer.json")?;
+        json5::from_str(json).context("parsing stored devcontainer.json")?;
     Ok(resolve_devcontainer_vars(
         devcontainer,
         repo_path,
@@ -1423,6 +1421,24 @@ fn forwarding_container(
     }
 }
 
+fn forwarded_port_attributes<'a>(
+    service: &str,
+    container_port: u16,
+    agent_service: Option<&str>,
+    ports_attributes: &'a HashMap<String, PortAttributes>,
+    other_ports_attributes: &'a Option<PortAttributes>,
+) -> Option<&'a PortAttributes> {
+    let attribute_key = if service.is_empty() || agent_service == Some(service) {
+        container_port.to_string()
+    } else {
+        format!("{service}:{container_port}")
+    };
+    ports_attributes
+        .get(&attribute_key)
+        .or_else(|| ports_attributes.get(&container_port.to_string()))
+        .or(other_ports_attributes.as_ref())
+}
+
 /// Set up exec-proxy listeners on the host for each devcontainer
 /// `forwardPorts` entry.
 ///
@@ -1470,18 +1486,15 @@ fn setup_port_forwarding(
             let local_port = listener.local_addr()?.port();
             reserved.insert(local_port);
 
-            let attribute_key = if target.service.is_empty()
-                || agent_service.is_some_and(|agent| agent == target.service)
-            {
-                container_port.to_string()
-            } else {
-                format!("{}:{container_port}", target.service)
-            };
-            let label = ports_attributes
-                .get(&attribute_key)
-                .or_else(|| ports_attributes.get(&container_port.to_string()))
-                .or(other_ports_attributes.as_ref())
-                .and_then(|a| a.label.as_deref())
+            let attributes = forwarded_port_attributes(
+                &target.service,
+                container_port,
+                agent_service,
+                ports_attributes,
+                other_ports_attributes,
+            );
+            let label = attributes
+                .and_then(|attributes| attributes.label.as_deref())
                 .unwrap_or("")
                 .to_string();
 
@@ -2209,7 +2222,7 @@ impl DaemonServer {
         }
         let repo_path = Path::new(&record.repo_path);
         let local_env = deserialize_local_env(&record.local_env)?;
-        let devcontainer = parse_prebuilt_devcontainer(
+        let devcontainer = parse_stored_devcontainer(
             &record.devcontainer_json,
             repo_path,
             &record.name,
@@ -2694,7 +2707,7 @@ impl DaemonServer {
             .resolve_docker_engine()
             .context("resolving container engine for pod")?;
         let local_env_vars = deserialize_local_env(&record.local_env)?;
-        let devcontainer = parse_prebuilt_devcontainer(
+        let devcontainer = parse_stored_devcontainer(
             &record.devcontainer_json,
             &repo_path,
             &pod_name.0,
@@ -3502,7 +3515,7 @@ impl DaemonServer {
                         local_env_vars.clone()
                     };
                     let devcontainer = if is_compose {
-                        parse_prebuilt_devcontainer(
+                        parse_stored_devcontainer(
                             &existing.devcontainer_json,
                             &repo_path,
                             &pod_name.0,
@@ -3889,7 +3902,7 @@ impl DaemonServer {
         // derived vars would silently disappear because the stored raw
         // devcontainer.json keeps `--env-file` in `runArgs` and we no
         // longer re-read it from disk.
-        let mut devcontainer = parse_prebuilt_devcontainer(
+        let mut devcontainer = parse_stored_devcontainer(
             &source_devcontainer_json,
             &repo_path,
             &pod_name.0,
@@ -5562,17 +5575,44 @@ impl Daemon for DaemonServer {
     }
 
     fn list_ports(&self, pod_name: PodName, repo_path: PathBuf) -> Result<Vec<PortInfo>> {
-        let conn = self.db.lock().unwrap();
-        let pod_rec = db::get_pod(&conn, &repo_path, &pod_name.0)?.context("pod not found")?;
-
-        let ports = db::list_forwarded_ports(&conn, pod_rec.id)?;
+        let (pod_rec, ports) = {
+            let conn = self.db.lock().unwrap();
+            let pod_rec = db::get_pod(&conn, &repo_path, &pod_name.0)?.context("pod not found")?;
+            let ports = db::list_forwarded_ports(&conn, pod_rec.id)?;
+            (pod_rec, ports)
+        };
+        let local_env = deserialize_local_env(&pod_rec.local_env)?;
+        let devcontainer = parse_stored_devcontainer(
+            &pod_rec.devcontainer_json,
+            &repo_path,
+            &pod_name.0,
+            &local_env,
+        )?;
+        let ports_attributes = devcontainer.ports_attributes.unwrap_or_default();
+        let other_ports_attributes = devcontainer.other_ports_attributes;
+        let agent_service = if pod_rec.agent_service.is_empty() {
+            None
+        } else {
+            Some(pod_rec.agent_service.as_str())
+        };
         Ok(ports
             .into_iter()
-            .map(|p| PortInfo {
-                service: p.service,
-                container_port: p.container_port,
-                local_port: p.local_port,
-                label: p.label,
+            .map(|port| {
+                let attributes = forwarded_port_attributes(
+                    &port.service,
+                    port.container_port,
+                    agent_service,
+                    &ports_attributes,
+                    &other_ports_attributes,
+                );
+                PortInfo {
+                    service: port.service,
+                    container_port: port.container_port,
+                    local_port: port.local_port,
+                    label: port.label,
+                    protocol: attributes.and_then(|attributes| attributes.protocol),
+                    on_auto_forward: attributes.and_then(|attributes| attributes.on_auto_forward),
+                }
             })
             .collect())
     }
@@ -5709,6 +5749,8 @@ impl Daemon for DaemonServer {
             container_port,
             local_port: actual_local_port,
             label,
+            protocol: None,
+            on_auto_forward: None,
         })
     }
 

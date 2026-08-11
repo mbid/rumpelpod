@@ -11,6 +11,7 @@
 //! - `rumpel ports` CLI command output
 
 use indoc::formatdoc;
+use rumpelpod::daemon::protocol::{Daemon, DaemonClient, OnAutoForward, PodName, PortProtocol};
 use rumpelpod::CommandExt;
 use std::fs;
 use std::io::{Read, Write};
@@ -221,7 +222,11 @@ fn ports_command_shows_forwarded_ports() {
         r#"
         "forwardPorts": [9300],
         "portsAttributes": {
-            "9300": { "label": "My App" }
+            "9300": {
+                "label": "My App",
+                "protocol": "https",
+                "onAutoForward": "openPreview"
+            }
         },
         "#,
     );
@@ -243,6 +248,40 @@ fn ports_command_shows_forwarded_ports() {
     let output = String::from_utf8_lossy(&stdout);
     assert!(output.contains("9300"), "Should show container port 9300");
     assert!(output.contains("My App"), "Should show label 'My App'");
+
+    write_devcontainer_with_ports(
+        &repo,
+        r#"
+        "forwardPorts": [9300],
+        "portsAttributes": {
+            "9300": {
+                "label": "Changed App",
+                "protocol": "http",
+                "onAutoForward": "silent"
+            }
+        },
+        "#,
+    );
+
+    let client = DaemonClient::new_unix(&daemon.socket_path);
+    let ports = client
+        .list_ports(
+            PodName::new("fwd-show").expect("valid test pod name"),
+            repo.path().to_path_buf(),
+        )
+        .expect("list forwarded port metadata");
+    assert_eq!(ports.len(), 1, "expected one forwarded port");
+    assert_eq!(ports[0].label, "My App");
+    assert_eq!(
+        ports[0].protocol,
+        Some(PortProtocol::Https),
+        "host edits changed the stored pod's port protocol"
+    );
+    assert_eq!(
+        ports[0].on_auto_forward,
+        Some(OnAutoForward::OpenPreview),
+        "host edits changed the stored pod's auto-forward action"
+    );
 }
 
 #[test]

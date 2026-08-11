@@ -32,6 +32,7 @@ use url::Url;
 use crate::async_runtime::block_on;
 use crate::config::Host;
 use crate::daemon::reconnect::ReconnectEvent;
+pub use crate::devcontainer::{OnAutoForward, PortProtocol};
 use crate::git::GitIdentity;
 use crate::image::OutputLine;
 use crate::pod::types::{ClaudeState, CodexState};
@@ -200,6 +201,10 @@ pub struct PortInfo {
     pub container_port: u16,
     pub local_port: u16,
     pub label: String,
+    /// URL scheme for browser consumers. HTTP is the conventional default.
+    pub protocol: Option<PortProtocol>,
+    /// Dev Container action requested when the forward becomes available.
+    pub on_auto_forward: Option<OnAutoForward>,
 }
 
 /// Everything the daemon needs to launch or recreate a pod.

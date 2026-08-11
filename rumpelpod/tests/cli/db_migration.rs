@@ -137,6 +137,24 @@ fn pre_compose_database_preserves_data_and_accepts_new_pods() {
         )
         .expect("read migrated legacy forwarded port");
     assert_eq!(legacy_port, (String::new(), 8080, 60000));
+    let forwarded_port_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(forwarded_ports)")
+        .expect("prepare forwarded port schema query")
+        .query_map([], |row| row.get(1))
+        .expect("query forwarded port schema")
+        .collect::<Result<_, _>>()
+        .expect("read forwarded port schema");
+    assert_eq!(
+        forwarded_port_columns,
+        [
+            "id",
+            "pod_id",
+            "container_port",
+            "local_port",
+            "label",
+            "service"
+        ]
+    );
 
     let new_pod_compose: (String, String) = conn
         .query_row(
