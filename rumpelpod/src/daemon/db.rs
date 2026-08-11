@@ -12,7 +12,6 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::config::Host;
-use crate::devcontainer::{OnAutoForward, PortProtocol};
 
 /// Strongly-typed wrapper for pod database IDs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,9 +143,7 @@ const SCHEMA_SQL: &str = indoc! {"
         service TEXT NOT NULL,
         container_port INTEGER NOT NULL,
         local_port INTEGER NOT NULL,
-        label TEXT NOT NULL DEFAULT '',
-        protocol TEXT,
-        on_auto_forward TEXT
+        label TEXT NOT NULL DEFAULT ''
     );
 
     CREATE INDEX idx_forwarded_ports_pod
@@ -171,10 +168,6 @@ const PRE_COMPOSE_MIGRATION_SQL: &str = indoc! {"
         ADD COLUMN compose_config TEXT NOT NULL DEFAULT '';
     ALTER TABLE forwarded_ports
         ADD COLUMN service TEXT NOT NULL DEFAULT '';
-    ALTER TABLE forwarded_ports
-        ADD COLUMN protocol TEXT;
-    ALTER TABLE forwarded_ports
-        ADD COLUMN on_auto_forward TEXT;
 "};
 
 fn get_schema_hash() -> String {
@@ -581,24 +574,20 @@ pub struct ForwardedPort {
     pub container_port: u16,
     pub local_port: u16,
     pub label: String,
-    pub protocol: Option<PortProtocol>,
-    pub on_auto_forward: Option<OnAutoForward>,
 }
 
-pub fn insert_forwarded_port(conn: &Connection, pod_id: PodId, port: &ForwardedPort) -> Result<()> {
+pub fn insert_forwarded_port(
+    conn: &Connection,
+    pod_id: PodId,
+    service: &str,
+    container_port: u16,
+    local_port: u16,
+    label: &str,
+) -> Result<()> {
     conn.execute(
-        "INSERT INTO forwarded_ports
-            (pod_id, service, container_port, local_port, label, protocol, on_auto_forward)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
-        rusqlite::params![
-            pod_id.0,
-            &port.service,
-            port.container_port,
-            port.local_port,
-            &port.label,
-            port.protocol.map(port_protocol_name),
-            port.on_auto_forward.map(on_auto_forward_name),
-        ],
+        "INSERT INTO forwarded_ports (pod_id, service, container_port, local_port, label)
+         VALUES (?, ?, ?, ?, ?)",
+        rusqlite::params![pod_id.0, service, container_port, local_port, label],
     )
     .context("inserting forwarded port")?;
     Ok(())
@@ -607,7 +596,7 @@ pub fn insert_forwarded_port(conn: &Connection, pod_id: PodId, port: &ForwardedP
 pub fn list_forwarded_ports(conn: &Connection, pod_id: PodId) -> Result<Vec<ForwardedPort>> {
     let mut stmt = conn
         .prepare(
-            "SELECT service, container_port, local_port, label, protocol, on_auto_forward
+            "SELECT service, container_port, local_port, label
              FROM forwarded_ports WHERE pod_id = ?
              ORDER BY service, container_port",
         )
@@ -620,8 +609,6 @@ pub fn list_forwarded_ports(conn: &Connection, pod_id: PodId) -> Result<Vec<Forw
                 container_port: row.get(1)?,
                 local_port: row.get(2)?,
                 label: row.get(3)?,
-                protocol: parse_port_protocol(row.get(4)?, 4)?,
-                on_auto_forward: parse_on_auto_forward(row.get(5)?, 5)?,
             })
         })
         .context("querying forwarded ports")?
@@ -629,71 +616,6 @@ pub fn list_forwarded_ports(conn: &Connection, pod_id: PodId) -> Result<Vec<Forw
         .context("reading forwarded port rows")?;
 
     Ok(ports)
-}
-
-fn port_protocol_name(protocol: PortProtocol) -> &'static str {
-    match protocol {
-        PortProtocol::Http => "http",
-        PortProtocol::Https => "https",
-    }
-}
-
-fn on_auto_forward_name(action: OnAutoForward) -> &'static str {
-    match action {
-        OnAutoForward::Notify => "notify",
-        OnAutoForward::OpenBrowser => "openBrowser",
-        OnAutoForward::OpenBrowserOnce => "openBrowserOnce",
-        OnAutoForward::OpenPreview => "openPreview",
-        OnAutoForward::Silent => "silent",
-        OnAutoForward::Ignore => "ignore",
-    }
-}
-
-fn parse_port_protocol(
-    value: Option<String>,
-    column: usize,
-) -> rusqlite::Result<Option<PortProtocol>> {
-    match value.as_deref() {
-        None => Ok(None),
-        Some("http") => Ok(Some(PortProtocol::Http)),
-        Some("https") => Ok(Some(PortProtocol::Https)),
-        Some(value) => Err(invalid_forwarded_port_value(column, "protocol", value)),
-    }
-}
-
-fn parse_on_auto_forward(
-    value: Option<String>,
-    column: usize,
-) -> rusqlite::Result<Option<OnAutoForward>> {
-    let action = match value.as_deref() {
-        None => return Ok(None),
-        Some("notify") => OnAutoForward::Notify,
-        Some("openBrowser") => OnAutoForward::OpenBrowser,
-        Some("openBrowserOnce") => OnAutoForward::OpenBrowserOnce,
-        Some("openPreview") => OnAutoForward::OpenPreview,
-        Some("silent") => OnAutoForward::Silent,
-        Some("ignore") => OnAutoForward::Ignore,
-        Some(value) => {
-            return Err(invalid_forwarded_port_value(
-                column,
-                "on_auto_forward",
-                value,
-            ))
-        }
-    };
-    Ok(Some(action))
-}
-
-fn invalid_forwarded_port_value(column: usize, field: &str, value: &str) -> rusqlite::Error {
-    rusqlite::Error::FromSqlConversionFailure(
-        column,
-        rusqlite::types::Type::Text,
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("unknown forwarded port {field} value '{value}'"),
-        )
-        .into(),
-    )
 }
 
 pub fn get_all_allocated_local_ports(conn: &Connection) -> Result<Vec<u16>> {

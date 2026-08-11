@@ -249,6 +249,20 @@ fn ports_command_shows_forwarded_ports() {
     assert!(output.contains("9300"), "Should show container port 9300");
     assert!(output.contains("My App"), "Should show label 'My App'");
 
+    write_devcontainer_with_ports(
+        &repo,
+        r#"
+        "forwardPorts": [9300],
+        "portsAttributes": {
+            "9300": {
+                "label": "Changed App",
+                "protocol": "http",
+                "onAutoForward": "silent"
+            }
+        },
+        "#,
+    );
+
     let client = DaemonClient::new_unix(&daemon.socket_path);
     let ports = client
         .list_ports(
@@ -257,8 +271,17 @@ fn ports_command_shows_forwarded_ports() {
         )
         .expect("list forwarded port metadata");
     assert_eq!(ports.len(), 1, "expected one forwarded port");
-    assert_eq!(ports[0].protocol, Some(PortProtocol::Https));
-    assert_eq!(ports[0].on_auto_forward, Some(OnAutoForward::OpenPreview));
+    assert_eq!(ports[0].label, "My App");
+    assert_eq!(
+        ports[0].protocol,
+        Some(PortProtocol::Https),
+        "host edits changed the stored pod's port protocol"
+    );
+    assert_eq!(
+        ports[0].on_auto_forward,
+        Some(OnAutoForward::OpenPreview),
+        "host edits changed the stored pod's auto-forward action"
+    );
 }
 
 #[test]

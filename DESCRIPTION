@@ -11,6 +11,8 @@ beside the pod review. The preview gives untrusted pages an opaque
 origin and no access to VS Code or workspace resources. Keep external
 browser opening explicit and offer both destinations from the pod menu
 and Command Palette.
+Resolve preview attributes from each pod's stored Dev Container
+snapshot so the forwarded-port database schema stays unchanged.
 
 Deny Rust warnings through inherited workspace lints so pipeline builds
 preserve the target-specific flags required for runnable musl binaries.
