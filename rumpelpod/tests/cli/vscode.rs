@@ -27,7 +27,9 @@ const CHANGED_FILE: &str = "browser-diff.txt";
 const ORIGINAL_CONTENT: &str = "content from the host";
 const POD_CONTENT: &str = "content from the pod";
 const PREVIEW_CONTENT: &str = "rumpelpod forwarded preview";
+const SECOND_PREVIEW_CONTENT: &str = "rumpelpod second forwarded preview";
 const PREVIEW_PORT: u16 = 18765;
+const SECOND_PREVIEW_PORT: u16 = 18766;
 struct CodeServer {
     child: Child,
 }
@@ -301,6 +303,10 @@ fn run_browser_assertions(
         .env("RUMPELPOD_VSCODE_ORIGINAL_CONTENT", ORIGINAL_CONTENT)
         .env("RUMPELPOD_VSCODE_POD_CONTENT", POD_CONTENT)
         .env("RUMPELPOD_VSCODE_PREVIEW_CONTENT", PREVIEW_CONTENT)
+        .env(
+            "RUMPELPOD_VSCODE_SECOND_PREVIEW_CONTENT",
+            SECOND_PREVIEW_CONTENT,
+        )
         .env("RUMPELPOD_VSCODE_REPO_ROOT", repo.path())
         .env("RUMPELPOD_VSCODE_RUMPEL", daemon.bin_dir.join("rumpel"))
         .env("RUMPELPOD_DAEMON_SOCKET", &daemon.socket_path)
@@ -715,15 +721,33 @@ fn vscode_demo_workspace_uses_standard_runtime() {
         "demo devcontainer requested an outer-container runtime"
     );
     assert_eq!(config["userEnvProbe"], "none");
-    assert_eq!(config["forwardPorts"], serde_json::json!([8000]));
+    assert_eq!(config["forwardPorts"], serde_json::json!([8000, 8001]));
+    assert_eq!(
+        config["portsAttributes"]["8000"]["label"],
+        "Anyhow primary preview"
+    );
     assert_eq!(config["portsAttributes"]["8000"]["protocol"], "http");
     assert_eq!(
         config["portsAttributes"]["8000"]["onAutoForward"],
         "openPreview"
     );
     assert_eq!(
-        config["postStartCommand"],
-        "sh .devcontainer/start-preview.sh"
+        config["portsAttributes"]["8001"],
+        serde_json::json!({
+            "label": "Anyhow secondary preview",
+            "protocol": "http",
+            "onAutoForward": "openPreview"
+        })
+    );
+    assert_eq!(
+        config["postStartCommand"]["primaryPreview"],
+        "RUMPELPOD_PREVIEW_PORT=8000 RUMPELPOD_PREVIEW_PAGE=index.html sh \
+         .devcontainer/start-preview.sh"
+    );
+    assert_eq!(
+        config["postStartCommand"]["secondaryPreview"],
+        "RUMPELPOD_PREVIEW_PORT=8001 RUMPELPOD_PREVIEW_PAGE=secondary.html sh \
+         .devcontainer/start-preview.sh"
     );
     assert_eq!(config["waitFor"], "postStartCommand");
     let dockerfile = fs::read_to_string(workspace.join(".devcontainer/Dockerfile"))
@@ -765,7 +789,17 @@ fn vscode_demo_workspace_uses_standard_runtime() {
         preview_page.contains("Anyhow pod preview"),
         "demo preview page was missing"
     );
+    let secondary_page = fs::read_to_string(workspace.join(".devcontainer/secondary.html"))
+        .expect("read secondary demo preview page");
+    assert!(
+        secondary_page.contains("Secondary anyhow preview"),
+        "secondary demo preview page was missing"
+    );
     let preview_port = reserve_loopback_port();
+    let mut secondary_preview_port = reserve_loopback_port();
+    while secondary_preview_port == preview_port {
+        secondary_preview_port = reserve_loopback_port();
+    }
     let preview_state_dir = temporary.path().join("preview-state");
     fs::create_dir_all(&preview_state_dir).expect("create preview server state directory");
     Command::new("sh")
@@ -774,17 +808,25 @@ fn vscode_demo_workspace_uses_standard_runtime() {
             set -eu
             pid_file="$RUMPELPOD_PREVIEW_STATE_DIR/anyhow-preview-$RUMPELPOD_PREVIEW_PORT.pid"
             cleanup() {
-                if [ ! -f "$pid_file" ]; then
-                    return
-                fi
-                preview_pid=$(cat "$pid_file")
-                if [ "$preview_pid" = "$$" ]; then
-                    return
-                fi
-                if ! kill "$preview_pid"; then
-                    echo "could not stop test preview server PID $preview_pid" >&2
-                    return 1
-                fi
+                cleanup_status=0
+                for cleanup_port in \
+                    "$RUMPELPOD_PREVIEW_PORT" \
+                    "$RUMPELPOD_SECONDARY_PREVIEW_PORT"
+                do
+                    cleanup_pid_file="$RUMPELPOD_PREVIEW_STATE_DIR/anyhow-preview-$cleanup_port.pid"
+                    if [ ! -f "$cleanup_pid_file" ]; then
+                        continue
+                    fi
+                    cleanup_pid=$(cat "$cleanup_pid_file")
+                    if [ "$cleanup_pid" = "$$" ]; then
+                        continue
+                    fi
+                    if ! kill "$cleanup_pid" 2>/dev/null; then
+                        echo "could not stop test preview server PID $cleanup_pid" >&2
+                        cleanup_status=1
+                    fi
+                done
+                return "$cleanup_status"
             }
             trap cleanup EXIT
 
@@ -796,6 +838,14 @@ fn vscode_demo_workspace_uses_standard_runtime() {
                 echo "second startup replaced preview server PID $first_pid with $second_pid" >&2
                 exit 1
             fi
+            python3 -c 'import os, urllib.request; port = os.environ["RUMPELPOD_PREVIEW_PORT"]; content = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1).read(); assert b"Anyhow pod preview" in content'
+
+            RUMPELPOD_PREVIEW_PORT="$RUMPELPOD_SECONDARY_PREVIEW_PORT" \
+                RUMPELPOD_PREVIEW_PAGE=secondary.html \
+                sh .devcontainer/start-preview.sh
+            secondary_pid_file="$RUMPELPOD_PREVIEW_STATE_DIR/anyhow-preview-$RUMPELPOD_SECONDARY_PREVIEW_PORT.pid"
+            secondary_pid=$(cat "$secondary_pid_file")
+            python3 -c 'import os, urllib.request; port = os.environ["RUMPELPOD_SECONDARY_PREVIEW_PORT"]; content = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1).read(); assert b"Secondary anyhow preview" in content'
 
             kill "$first_pid"
             attempts=0
@@ -807,16 +857,20 @@ fn vscode_demo_workspace_uses_standard_runtime() {
                 echo "preview server PID $first_pid did not stop" >&2
                 exit 1
             fi
-            printf '%s\n' "$$" > "$pid_file"
+            printf '%s\n' "$secondary_pid" > "$pid_file"
             sh .devcontainer/start-preview.sh
             restarted_pid=$(cat "$pid_file")
-            if [ "$restarted_pid" = "$$" ]; then
-                echo "startup trusted a stale PID belonging to the calling shell" >&2
+            if [ "$restarted_pid" = "$secondary_pid" ]; then
+                echo "primary startup trusted the secondary preview server PID" >&2
                 exit 1
             fi
             python3 -c 'import os, urllib.request; port = os.environ["RUMPELPOD_PREVIEW_PORT"]; content = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=1).read(); assert b"Anyhow pod preview" in content'
         "#})
         .env("RUMPELPOD_PREVIEW_PORT", preview_port.to_string())
+        .env(
+            "RUMPELPOD_SECONDARY_PREVIEW_PORT",
+            secondary_preview_port.to_string(),
+        )
         .env("RUMPELPOD_PREVIEW_STATE_DIR", &preview_state_dir)
         .current_dir(&workspace)
         .success()
@@ -892,10 +946,15 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
     let executor = ExecutorResources::setup(&home);
     let daemon = TestDaemon::start_with_local_llm_clis(&home);
     let port_config = formatdoc! {r#",
-        "forwardPorts": [{PREVIEW_PORT}],
+        "forwardPorts": [{PREVIEW_PORT}, {SECOND_PREVIEW_PORT}],
         "portsAttributes": {{
             "{PREVIEW_PORT}": {{
                 "label": "Browser fixture",
+                "protocol": "http",
+                "onAutoForward": "openPreview"
+            }},
+            "{SECOND_PREVIEW_PORT}": {{
+                "label": "Second browser fixture",
                 "protocol": "http",
                 "onAutoForward": "openPreview"
             }}
@@ -913,9 +972,11 @@ fn vscode_browser_lists_creates_and_reviews_pods() {
             "sh",
             "-c",
             &format!(
-                "nohup sh -c 'while true; do printf \"HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}\" | socat - TCP-LISTEN:{PREVIEW_PORT},reuseaddr; done' >/tmp/rumpelpod-preview.log 2>&1 &",
+                "nohup sh -c 'while true; do printf \"HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}\" | socat - TCP-LISTEN:{PREVIEW_PORT},reuseaddr; done' >/tmp/rumpelpod-preview.log 2>&1 & nohup sh -c 'while true; do printf \"HTTP/1.1 200 OK\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}\" | socat - TCP-LISTEN:{SECOND_PREVIEW_PORT},reuseaddr; done' >/tmp/rumpelpod-second-preview.log 2>&1 &",
                 PREVIEW_CONTENT.len(),
                 PREVIEW_CONTENT,
+                SECOND_PREVIEW_CONTENT.len(),
+                SECOND_PREVIEW_CONTENT,
             ),
         ])
         .success()

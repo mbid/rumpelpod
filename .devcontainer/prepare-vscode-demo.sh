@@ -50,15 +50,23 @@ cat > "$staging/.devcontainer/devcontainer.json" <<'EOF'
     "workspaceFolder": "/workspace/anyhow",
     "containerUser": "user",
     "userEnvProbe": "none",
-    "forwardPorts": [8000],
+    "forwardPorts": [8000, 8001],
     "portsAttributes": {
         "8000": {
-            "label": "Anyhow live preview",
+            "label": "Anyhow primary preview",
+            "protocol": "http",
+            "onAutoForward": "openPreview"
+        },
+        "8001": {
+            "label": "Anyhow secondary preview",
             "protocol": "http",
             "onAutoForward": "openPreview"
         }
     },
-    "postStartCommand": "sh .devcontainer/start-preview.sh",
+    "postStartCommand": {
+        "primaryPreview": "RUMPELPOD_PREVIEW_PORT=8000 RUMPELPOD_PREVIEW_PAGE=index.html sh .devcontainer/start-preview.sh",
+        "secondaryPreview": "RUMPELPOD_PREVIEW_PORT=8001 RUMPELPOD_PREVIEW_PAGE=secondary.html sh .devcontainer/start-preview.sh"
+    },
     "waitFor": "postStartCommand"
 }
 EOF
@@ -77,13 +85,14 @@ EOF
 cat > "$staging/.devcontainer/preview.py" <<'EOF'
 #!/usr/bin/env python3
 
-import os
+import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 
 PREVIEW_DIRECTORY = Path(__file__).parent
-PREVIEW_PORT = int(os.environ.get("RUMPELPOD_PREVIEW_PORT", "8000"))
+PREVIEW_PORT = int(sys.argv[1])
+PREVIEW_PAGE = sys.argv[2]
 
 
 class PreviewHandler(SimpleHTTPRequestHandler):
@@ -93,6 +102,11 @@ class PreviewHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
+
+    def do_GET(self):
+        if self.path.split("?", 1)[0] == "/":
+            self.path = f"/{PREVIEW_PAGE}"
+        super().do_GET()
 
 
 server = ThreadingHTTPServer(("0.0.0.0", PREVIEW_PORT), PreviewHandler)
@@ -104,6 +118,7 @@ cat > "$staging/.devcontainer/start-preview.sh" <<'EOF'
 set -eu
 
 preview_port=${RUMPELPOD_PREVIEW_PORT:-8000}
+preview_page=${RUMPELPOD_PREVIEW_PAGE:-index.html}
 preview_state_dir=${RUMPELPOD_PREVIEW_STATE_DIR:-/tmp}
 preview_pid_file="$preview_state_dir/anyhow-preview-$preview_port.pid"
 preview_log="$preview_state_dir/anyhow-preview-$preview_port.log"
@@ -129,26 +144,32 @@ try:
         content = response.read().decode("utf-8")
 except (OSError, UnicodeDecodeError, urllib.error.URLError):
     sys.exit(1)
-if response.status != 200 or "Anyhow pod preview" not in content:
+if response.status != 200 or "Rumpelpod preview ready" not in content:
     sys.exit(1)
 PY
 }
 
 preview_process_matches() {
-    python3 - "$1" <<'PY'
+    python3 - "$1" "$preview_port" "$preview_page" <<'PY'
 import os
 import sys
 from pathlib import Path
 
 
 process = Path("/proc") / sys.argv[1]
+expected = [
+    b".devcontainer/preview.py",
+    sys.argv[2].encode(),
+    sys.argv[3].encode(),
+]
 try:
     arguments = (process / "cmdline").read_bytes().split(b"\0")
     working_directory = Path(os.readlink(process / "cwd")).resolve()
 except OSError:
     sys.exit(1)
 if (
-    b".devcontainer/preview.py" not in arguments
+    not any(arguments[index:index + len(expected)] == expected
+            for index in range(len(arguments)))
     or working_directory != Path.cwd().resolve()
 ):
     sys.exit(1)
@@ -194,7 +215,8 @@ if [ -f "$preview_pid_file" ]; then
     rm -f "$preview_pid_file"
 fi
 
-nohup python3 .devcontainer/preview.py </dev/null >"$preview_log" 2>&1 &
+nohup python3 .devcontainer/preview.py "$preview_port" "$preview_page" \
+    </dev/null >"$preview_log" 2>&1 &
 preview_pid=$!
 printf '%s\n' "$preview_pid" > "$preview_pid_file"
 if wait_until_ready "$preview_pid"; then
@@ -256,6 +278,53 @@ cat > "$staging/.devcontainer/index.html" <<'EOF'
            from inside the rumpelpod.</p>
         <p>Port 8000 uses <code>onAutoForward: openPreview</code>, so the
            Rumpelpod extension opens it in VS Code automatically.</p>
+        <span hidden>Rumpelpod preview ready</span>
+    </main>
+</body>
+</html>
+EOF
+cat > "$staging/.devcontainer/secondary.html" <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Anyhow secondary preview</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            font-family: system-ui, sans-serif;
+        }
+        body {
+            display: grid;
+            min-height: 100vh;
+            margin: 0;
+            place-items: center;
+            background: #173229;
+            color: #f5f7fa;
+        }
+        main {
+            max-width: 38rem;
+            margin: 2rem;
+            padding: 2.5rem;
+            border: 1px solid #4d806c;
+            border-radius: 1rem;
+            background: #21483b;
+            box-shadow: 0 1rem 3rem #0005;
+        }
+        code {
+            color: #8fffcf;
+        }
+    </style>
+</head>
+<body>
+    <main>
+        <h1>Secondary anyhow preview</h1>
+        <p>This second server uses the same Python file server with
+           <code>RUMPELPOD_PREVIEW_PORT=8001</code>.</p>
+        <p>Both forwarded ports should open as tabs in the pod review's
+           editor group.</p>
+        <span hidden>Rumpelpod preview ready</span>
     </main>
 </body>
 </html>

@@ -11,31 +11,31 @@ interface PortPreview {
 export class PortPreviews implements vscode.Disposable {
   private readonly previews = new Map<string, PortPreview>();
 
-  public open(
+  public async open(
     repositoryRoot: string,
     pod: string,
     portKey: string,
     title: string,
     uri: vscode.Uri,
     preserveFocus: boolean,
-  ): void {
+    viewColumn: vscode.ViewColumn,
+  ): Promise<boolean> {
     const key = JSON.stringify([repositoryRoot, pod, portKey]);
     const existing = this.previews.get(key);
     if (existing !== undefined) {
       if (preserveFocus) {
-        existing.panel.reveal(vscode.ViewColumn.Beside, true);
-        return;
+        return false;
       }
       existing.panel.title = title;
       existing.panel.webview.html = previewHtml(title, uri);
-      existing.panel.reveal(vscode.ViewColumn.Beside, preserveFocus);
-      return;
+      existing.panel.reveal(undefined, preserveFocus);
+      return false;
     }
 
     const panel = vscode.window.createWebviewPanel(
       "rumpelpod.portPreview",
       title,
-      { preserveFocus, viewColumn: vscode.ViewColumn.Beside },
+      { preserveFocus: false, viewColumn },
       {
         enableForms: true,
         enableScripts: true,
@@ -46,6 +46,28 @@ export class PortPreviews implements vscode.Disposable {
     this.previews.set(key, { panel, podKey });
     panel.onDidDispose(() => this.previews.delete(key));
     panel.webview.html = previewHtml(title, uri);
+    if (!panel.active) {
+      await new Promise<void>((resolve, reject) => {
+        const viewSubscription = panel.onDidChangeViewState(() => {
+          if (panel.active) {
+            viewSubscription.dispose();
+            disposeSubscription.dispose();
+            resolve();
+          }
+        });
+        const disposeSubscription = panel.onDidDispose(() => {
+          viewSubscription.dispose();
+          disposeSubscription.dispose();
+          reject(new Error(`port preview '${title}' closed before it became active`));
+        });
+        if (panel.active) {
+          viewSubscription.dispose();
+          disposeSubscription.dispose();
+          resolve();
+        }
+      });
+    }
+    return true;
   }
 
   public close(repositoryRoot: string, pod: string): void {

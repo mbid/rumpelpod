@@ -804,34 +804,65 @@ async function assertEditorTabsVisible(page) {
     );
 }
 
-async function waitForForwardedPreview(page, content) {
-    const tab = page.locator(".tab:visible").filter({ hasText: "Browser fixture" });
-    await tab.waitFor({ state: "visible", timeout: 30_000 });
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-        for (const frame of page.frames()) {
-            if (
-                await frame
-                    .locator('iframe[sandbox="allow-forms allow-scripts"]')
-                    .count()
-                    .catch(() => 0)
-            ) {
-                for (const child of frame.childFrames()) {
-                    if (
-                        (await child.locator("body").textContent().catch(() => ""))?.includes(content)
-                    ) {
-                        assert(
-                            (await page.locator(".editor-group-container:visible").count()) >= 2,
-                            "the forwarded preview did not open beside the review",
-                        );
-                        return;
+async function waitForForwardedPreviews(page, previews, podName) {
+    const tabs = previews.map(({ label }) =>
+        page.locator(".tab:visible").filter({ hasText: `${podName}: ${label}` }),
+    );
+    for (const tab of tabs) {
+        await tab.waitFor({ state: "visible", timeout: 30_000 });
+    }
+    assert.equal(
+        await page.locator(".editor-group-container:visible").count(),
+        1,
+        "the forwarded previews split the review into another editor group",
+    );
+    assert(
+        (await page
+            .locator(".editor-group-container:visible .tabs-container .tab:visible")
+            .count()) >= previews.length + 1,
+        "the forwarded previews did not open as review-group tabs",
+    );
+    const reviewTab = page.locator(".tab:visible").filter({ hasText: `${podName} (` }).first();
+    await reviewTab.waitFor({ state: "visible", timeout: 30_000 });
+    assert.equal(
+        await reviewTab.evaluate((element) => element.classList.contains("active")),
+        true,
+        "automatic forwarded previews took focus from the review",
+    );
+    for (const [index, preview] of previews.entries()) {
+        await tabs[index].click();
+        const deadline = Date.now() + 30_000;
+        let loaded = false;
+        while (Date.now() < deadline && !loaded) {
+            for (const frame of page.frames()) {
+                if (
+                    await frame
+                        .locator('iframe[sandbox="allow-forms allow-scripts"]')
+                        .count()
+                        .catch(() => 0)
+                ) {
+                    for (const child of frame.childFrames()) {
+                        if (
+                            (await child.locator("body").textContent().catch(() => ""))?.includes(
+                                preview.content,
+                            )
+                        ) {
+                            loaded = true;
+                            break;
+                        }
+                    }
+                    if (loaded) {
+                        break;
                     }
                 }
             }
+            if (!loaded) {
+                await page.waitForTimeout(100);
+            }
         }
-        await page.waitForTimeout(100);
+        assert(loaded, `the forwarded preview did not render: ${preview.label}`);
     }
-    throw new Error(`forwarded port preview did not render content: ${content}`);
+    await reviewTab.click();
 }
 
 async function verifyReviewFocusAndCloseLifecycle(
@@ -952,7 +983,7 @@ async function openEditorLabels(page, expectedLabel) {
 async function assertOpenReviews(page, activePodName, openPodNames) {
     const labels = await openEditorLabels(page, activePodName);
     for (const openPodName of openPodNames) {
-        const matches = labels.filter((label) => label.includes(openPodName));
+        const matches = labels.filter((label) => label.startsWith(`${openPodName} (`));
         assert(
             matches.length === 1,
             `expected one ${openPodName} review editor: ${JSON.stringify(labels)}`,
@@ -1013,6 +1044,9 @@ async function main() {
     const originalContent = requiredEnvironment("RUMPELPOD_VSCODE_ORIGINAL_CONTENT");
     const podContent = requiredEnvironment("RUMPELPOD_VSCODE_POD_CONTENT");
     const previewContent = requiredEnvironment("RUMPELPOD_VSCODE_PREVIEW_CONTENT");
+    const secondPreviewContent = requiredEnvironment(
+        "RUMPELPOD_VSCODE_SECOND_PREVIEW_CONTENT",
+    );
     const inactivePodContent = `${podContent} while file active`;
     const finalPodContent = `${podContent} after close`;
     const repoRoot = requiredEnvironment("RUMPELPOD_VSCODE_REPO_ROOT");
@@ -1076,7 +1110,14 @@ async function main() {
             "cleared input sent through the embedded xterm",
         );
         await waitForEmptyReview(page, podName);
-        await waitForForwardedPreview(page, previewContent);
+        await waitForForwardedPreviews(
+            page,
+            [
+                { content: previewContent, label: "Browser fixture" },
+                { content: secondPreviewContent, label: "Second browser fixture" },
+            ],
+            podName,
+        );
         await assertNoNativeAgentEditor(page, podName);
         assert(
             !(await page.title()).includes("-review.txt"),
@@ -1380,6 +1421,7 @@ async function main() {
         );
         const externalPagePromise = context.waitForEvent("page", { timeout: 30_000 });
         await selectPopoverOption(morePopover, "Open port in browser");
+        await selectQuickPick(page, "Browser fixture");
         const externalPage = await externalPagePromise;
         await externalPage.locator("body").filter({ hasText: previewContent }).waitFor({
             state: "visible",
@@ -1551,6 +1593,12 @@ async function main() {
             "cleared input after browser reload",
         );
         await waitForCodexPrompt(page, restoredView.terminal, false);
+        const restoredReviewTab = page
+            .locator(".tab:visible")
+            .filter({ hasText: `${podName} (` })
+            .first();
+        await restoredReviewTab.waitFor({ state: "visible", timeout: 30_000 });
+        await restoredReviewTab.click();
         const restoredDiff = await waitForReview(
             page,
             podName,

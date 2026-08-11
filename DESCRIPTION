@@ -6,11 +6,12 @@ changes in native VS Code multi-diff editors. Run CLI commands under a
 packaged node-pty binding. Pod creation, lifecycle output, and
 interactive sessions share the CLI's established terminal behavior.
 Expose forwarded ports through the extension. Open Dev Container
-`openPreview` ports automatically in a restricted VS Code preview
-beside the pod review. The preview gives untrusted pages an opaque
-origin and no access to VS Code or workspace resources. Keep external
-browser opening explicit and offer both destinations from the pod menu
-and Command Palette.
+`openPreview` ports automatically in a restricted VS Code preview tab
+in the pod review's editor group. Prefix preview tabs with the pod name
+so related tabs remain recognizable. The preview gives untrusted pages
+an opaque origin and no access to VS Code or workspace resources. Keep
+external browser opening explicit and offer both destinations from the
+pod menu and Command Palette.
 Resolve preview attributes from each pod's stored Dev Container
 snapshot so the forwarded-port database schema stays unchanged.
 
@@ -39,8 +40,8 @@ transitive releases.
 Provide a loopback-only live code-server workspace backed by a small
 anyhow demo repository and lingering user services. Run demo pods as a
 non-root user because Claude rejects its permission bypass under root.
-Give the demo a Python-served preview page whose declared HTTP port
-opens automatically beside the review.
+Give the demo two Python-served preview pages whose declared HTTP ports
+open automatically as tabs in the review's editor group.
 Persist only allowlisted agent credentials for those services. Install
 no daemon service in the image: the first pipeline run installs its
 freshly built native daemon and cross-architecture pod payloads after

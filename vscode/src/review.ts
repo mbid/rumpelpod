@@ -120,6 +120,35 @@ export class ReviewDocuments implements vscode.TextDocumentContentProvider, vsco
     return this.enqueue(() => this.openEmptyNow(repository, pod, false));
   }
 
+  public viewColumn(repository: Repository, pod: string): vscode.ViewColumn | undefined {
+    const current = this.reviews.get(reviewKey(repository.root, pod))?.current;
+    if (current !== undefined) {
+      const open = this.findOpenTab(current);
+      if (open !== undefined) {
+        return open.group.viewColumn;
+      }
+    }
+    return vscode.window.tabGroups.all
+      .flatMap((group) => group.tabs)
+      .find((tab) => isPodReviewTab(tab, repository.root, pod))
+      ?.group.viewColumn;
+  }
+
+  public focus(repository: Repository, pod: string): Promise<void> {
+    return this.enqueue(async () => {
+      const key = reviewKey(repository.root, pod);
+      const record = this.reviews.get(key);
+      if (record === undefined) {
+        return;
+      }
+      const tab = await this.show(record.current);
+      this.reviews.set(key, {
+        current: { ...record.current, tab },
+        pending: record.pending,
+      });
+    });
+  }
+
   public async refreshEmpty(
     repository: Repository,
     pod: string,

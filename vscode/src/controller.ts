@@ -456,8 +456,12 @@ export class RumpelpodController {
         return;
       }
       const previews = ports.filter((port) => port.on_auto_forward === "openPreview");
+      let opened = false;
       for (const preview of previews) {
-        await this.openPortPreview(selected, preview, true);
+        opened = await this.openPortPreview(selected, preview, true) || opened;
+      }
+      if (opened && this.currentSelection(selected) !== undefined) {
+        await this.reviewDocuments.focus(selected.repository, selected.pod);
       }
       this.automaticPreviewGeneration = selected.generation;
     } catch (error) {
@@ -473,18 +477,20 @@ export class RumpelpodController {
     selected: ActivePod,
     port: PortInfo,
     preserveFocus: boolean,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const resolved = await vscode.env.asExternalUri(localPortUri(port));
     if (this.currentSelection(selected) === undefined) {
-      return;
+      return false;
     }
-    this.portPreviews.open(
+    return this.portPreviews.open(
       selected.repository.root,
       selected.pod,
       portTarget(port),
-      portDisplayName(port),
+      `${selected.pod}: ${portDisplayName(port)}`,
       resolved,
       preserveFocus,
+      this.reviewDocuments.viewColumn(selected.repository, selected.pod) ??
+        vscode.ViewColumn.Active,
     );
   }
 
