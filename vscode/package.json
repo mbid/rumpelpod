@@ -147,7 +147,7 @@
   "devDependencies": {
     "@playwright/test": "latest",
     "@types/node": "latest",
-    "@types/vscode": "*",
+    "@types/vscode": "1.109.0",
     "@vscode/vsce": "latest",
     "@xterm/addon-fit": "latest",
     "@xterm/xterm": "latest",

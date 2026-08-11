@@ -546,7 +546,7 @@ fn vscode_package_is_native_and_published_for_each_release_platform() {
 }
 
 #[test]
-fn vscode_development_dependencies_are_resolved_from_stable_tags() {
+fn vscode_development_dependencies_follow_lockfile_policy() {
     let root = workspace_root();
     let package: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(root.join("vscode/package.json")).expect("read extension manifest"),
@@ -557,7 +557,7 @@ fn vscode_development_dependencies_are_resolved_from_stable_tags() {
         .expect("extension devDependencies object");
     for (name, requested) in dependencies {
         let expected = match name.as_str() {
-            "@types/vscode" => "*",
+            "@types/vscode" => "1.109.0",
             "@playwright/test" | "@types/node" | "@vscode/vsce" | "@xterm/addon-fit"
             | "@xterm/xterm" | "esbuild" | "node-pty" | "typescript" => "latest",
             dependency => panic!("unexpected extension development dependency: {dependency}"),
@@ -568,6 +568,11 @@ fn vscode_development_dependencies_are_resolved_from_stable_tags() {
             "{name} did not use the expected stable dependency selector"
         );
     }
+    assert_eq!(
+        package["engines"]["vscode"].as_str(),
+        Some("^1.109.0"),
+        "the extension engine changed without its API types"
+    );
 
     let lock: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(root.join("vscode/package-lock.json"))
@@ -595,6 +600,11 @@ fn vscode_development_dependencies_are_resolved_from_stable_tags() {
             "lockfile version for {name} was not concrete: {version}"
         );
     }
+    assert_eq!(
+        locked_packages["node_modules/@types/vscode"]["version"].as_str(),
+        Some("1.109.0"),
+        "the locked VS Code API types did not match the supported editor"
+    );
 }
 
 #[test]
