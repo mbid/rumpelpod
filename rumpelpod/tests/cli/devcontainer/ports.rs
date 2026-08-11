@@ -468,7 +468,7 @@ fn forward_port_persists_across_pod_restart() {
 }
 
 #[test]
-fn forward_port_is_restored_after_connect_repairs_pod() {
+fn forward_port_is_restored_by_connect_and_survives_pod_repair() {
     if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
         executor::skip_test();
         return;
@@ -478,7 +478,7 @@ fn forward_port_is_restored_after_connect_repairs_pod() {
     write_devcontainer_with_ports(&repo, "");
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
-    let daemon = TestDaemon::start(&home);
+    let mut daemon = TestDaemon::start(&home);
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
 
     pod_command(&repo, &daemon)
@@ -505,6 +505,20 @@ fn forward_port_is_restored_after_connect_repairs_pod() {
         response.as_deref(),
         Some("before connect"),
         "expected forward to work before connect, got {response:?}"
+    );
+
+    daemon.kill();
+    let daemon = TestDaemon::start(&home);
+    pod_command(&repo, &daemon)
+        .args(["connect", "fp-connect"])
+        .success()
+        .expect("rumpel connect after daemon restart failed");
+
+    let response = try_echo(local_port, "after daemon restart");
+    assert_eq!(
+        response.as_deref(),
+        Some("after daemon restart"),
+        "expected connect to restore the forward, got {response:?}"
     );
 
     stop_container_server("fp-connect");

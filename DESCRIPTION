@@ -20,6 +20,7 @@ pod's gateway configuration. Publish every initial branch before a new
 pod becomes ready so untouched branches are not omitted after removing
 recovery work from the events stream.
 
-Cover autonomous and on-demand recovery for local Docker, SSH, and
-Kubernetes. Verify connect restores a runtime-added port forward after
-repairing a failed pod without changing its local port.
+Cover autonomous recovery for local Docker, SSH, and Kubernetes and
+on-demand recovery for Docker and SSH. Verify connect restores a
+runtime-added port forward after a daemon restart and a failed pod
+without changing its local port.

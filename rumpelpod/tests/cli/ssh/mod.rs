@@ -947,7 +947,7 @@ fn ssh_reconnect_test() {
                 "commit",
                 "--allow-empty",
                 "-m",
-                "pending-host-reconnect",
+                "pending-host-recovery",
             ],
         )
         .expect("creating pending remote commit failed");
@@ -1003,7 +1003,7 @@ fn ssh_reconnect_test() {
         }
         assert!(
             Instant::now() < deadline,
-            "git tunnel did not recover without re-entry"
+            "connect did not recover the git tunnel"
         );
         std::thread::sleep(Duration::from_millis(250));
     }

@@ -2397,12 +2397,36 @@ impl DaemonServer {
                 Ok(()) => {
                     connection.enable_git_tunnel_supervision();
                     connection.ensure_event_loop();
-                    if !connection.git_tunnel_is_alive() {
+                    let needs_git_tunnel = !connection.git_tunnel_is_alive();
+                    let needs_forwarded_ports = !connection.has_forwarded_ports();
+                    if needs_git_tunnel || needs_forwarded_ports {
                         let executor = crate::executor::Executor::new(&host_connection)
-                            .context("opening host connection for git tunnel")?;
+                            .context("opening host connection for pod resources")?;
                         let pod_id = crate::executor::pod_id_for(&pod_name, &repo_path);
-                        self.ensure_git_tunnel(&connection, &executor, &pod_id)
-                            .context("restoring git tunnel")?;
+                        if needs_git_tunnel {
+                            self.ensure_git_tunnel(&connection, &executor, &pod_id)
+                                .context("restoring git tunnel")?;
+                        }
+                        if needs_forwarded_ports {
+                            let forward_ports =
+                                devcontainer.forward_ports.clone().unwrap_or_default();
+                            let ports_attributes =
+                                devcontainer.ports_attributes.clone().unwrap_or_default();
+                            let other_ports_attributes =
+                                devcontainer.other_ports_attributes.clone();
+                            let conn = self.db.lock().unwrap();
+                            let handles = setup_port_forwarding(
+                                &conn,
+                                &executor,
+                                &pod_id,
+                                record.id,
+                                &forward_ports,
+                                &ports_attributes,
+                                &other_ports_attributes,
+                            )?;
+                            drop(conn);
+                            connection.set_forwarded_ports(handles);
+                        }
                     }
                     return Ok(());
                 }
@@ -2665,7 +2689,7 @@ impl DaemonServer {
             PodStatus::Stopped if options.start_stopped => true,
             PodStatus::Stopped => {
                 return Err(anyhow::anyhow!(
-                    "pod '{}' is stopped; use 'rumpel enter {}' to start it",
+                    "pod '{}' is stopped. Use 'rumpel enter {}' to start it",
                     pod_name.0,
                     pod_name.0
                 ));
