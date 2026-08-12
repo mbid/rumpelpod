@@ -2277,6 +2277,7 @@ impl DaemonServer {
 
     fn try_repair_git_tunnel(&self, pod_connection: &PodConnection) -> Result<()> {
         let _setup = pod_connection.git_tunnel_setup_guard();
+        let repair_epoch = pod_connection.pod_repair_epoch();
         if !pod_connection.git_tunnel_supervision_enabled()
             || pod_connection.git_tunnel_is_alive()
             || !pod_connection.host_is_connected()
@@ -2333,7 +2334,7 @@ impl DaemonServer {
             &backend_container,
             &target,
         ))?;
-        pod_connection.install_repaired_git_tunnel(tunnel);
+        pod_connection.install_repaired_git_tunnel(tunnel, repair_epoch);
         Ok(())
     }
 

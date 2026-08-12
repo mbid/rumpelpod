@@ -34,7 +34,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::debug;
+use log::{debug, info};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, watch, Notify};
@@ -591,9 +591,14 @@ impl SshConnection {
             }
         });
         if changed {
+            let key = self.key();
+            match status {
+                HostStatus::Connected => info!("{key}: host connection established"),
+                HostStatus::Disconnected => info!("{key}: host connection lost; retrying"),
+            }
             let event = match status {
-                HostStatus::Connected => HostConnectionEvent::Connected(self.key()),
-                HostStatus::Disconnected => HostConnectionEvent::Disconnected(self.key()),
+                HostStatus::Connected => HostConnectionEvent::Connected(key),
+                HostStatus::Disconnected => HostConnectionEvent::Disconnected(key),
             };
             let _ = self.events_tx.send(event);
         }

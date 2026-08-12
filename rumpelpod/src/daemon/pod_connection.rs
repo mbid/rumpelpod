@@ -18,7 +18,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::debug;
+use log::{debug, info};
 use tokio::sync::{broadcast, watch};
 
 use crate::async_runtime::RUNTIME;
@@ -516,9 +516,15 @@ impl PodConnection {
         self.repair_state.wait_for_change(epoch, delay)
     }
 
-    pub fn install_repaired_git_tunnel(&self, handle: crate::tunnel::TunnelHandle) {
+    pub fn install_repaired_git_tunnel(
+        &self,
+        handle: crate::tunnel::TunnelHandle,
+        repair_epoch: u64,
+    ) {
         let mut resources = self.resources.lock().unwrap();
-        if resources.supervise_git_tunnel {
+        // Host transitions cannot wait for a stalled repair. Reject its late
+        // result instead so it cannot overwrite the transition's cleanup.
+        if resources.supervise_git_tunnel && self.repair_state.epoch() == repair_epoch {
             resources.git_tunnel = Some(handle);
             resources.validate_pod_before_git_tunnel_repair = false;
         }
@@ -744,6 +750,10 @@ impl PodConnection {
             return;
         }
         self.repair_state.resume();
+        info!(
+            "pod connection for '{}' is reconnecting after host recovery",
+            self.key.pod_name
+        );
         replace_and_emit(
             &self.status,
             PodConnectionStatus::Connecting,
@@ -757,8 +767,13 @@ impl PodConnection {
         if self.status() == PodConnectionStatus::Stopped {
             return;
         }
-        let _setup = self.git_tunnel_setup.lock().unwrap();
+        // A repair may be queued behind another pod's SSH probe. The host
+        // transition must invalidate every pod without waiting for that work.
         self.repair_state.signal();
+        info!(
+            "pod connection for '{}' lost its host; resetting active transports",
+            self.key.pod_name
+        );
         replace_and_emit(
             &self.status,
             PodConnectionStatus::HostDisconnected,
@@ -1082,12 +1097,17 @@ fn pod_event_loop(ctx: PodEventLoop) {
             Ok((reader, greeting)) => {
                 apply_greeting(greeting);
                 replace_and_emit(&status, PodConnectionStatus::Connected, &events_tx, &key);
+                info!("pod connection for '{pod_name}' established");
                 let _ = tx.send(ReconnectEvent::Connected);
                 backoff.reset();
                 reader
             }
             Err(e) => {
-                debug!("pod event connection failed: {e:#}");
+                if backoff.failures == 0 {
+                    info!("pod connection for '{pod_name}' failed; retrying: {e:#}");
+                } else {
+                    debug!("pod event connection for '{pod_name}' failed: {e:#}");
+                }
                 replace_and_emit(
                     &status,
                     PodConnectionStatus::PodDisconnected,
@@ -1131,7 +1151,14 @@ fn pod_event_loop(ctx: PodEventLoop) {
             }
             let mut line = String::new();
             match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => {
+                    info!("pod event stream for '{pod_name}' closed; reconnecting");
+                    break;
+                }
+                Err(e) => {
+                    info!("pod event stream for '{pod_name}' failed; reconnecting: {e}");
+                    break;
+                }
                 Ok(_) => {
                     let trimmed = line.trim();
                     if let Some(event_type) = trimmed.strip_prefix("event: ") {
