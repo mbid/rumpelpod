@@ -4,4 +4,5 @@
 //! Integration tests for the `rumpel grok` subcommand.
 
 mod common;
+mod install;
 mod smoke;

@@ -69,6 +69,12 @@ struct LocalPiInfo {
     version: String,
 }
 
+/// Information about the Grok CLI on the local machine, used to pin the
+/// exact version inside the prepared image.
+struct LocalGrokInfo {
+    version: String,
+}
+
 /// npm package implementing the pi coding agent CLI.
 const PI_NPM_PACKAGE: &str = "@earendil-works/pi-coding-agent";
 
@@ -160,35 +166,58 @@ fn container_has_pi() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Whether the Grok CLI on the local machine works.  Mirrors
-/// `local_has_codex`: None means the client could not find grok, so we
-/// should not pre-install it into the prepared image.
-fn local_has_grok(grok_cli_path: Option<&Path>) -> bool {
-    let bin = match grok_cli_path {
-        Some(path) => path,
-        None => return false,
+/// Try to detect the Grok CLI on the local machine and return its version.
+///
+/// Uses the client-provided path so the daemon does not depend on its
+/// own PATH. `grok --version` outputs e.g. `grok 0.2.111 (94172f2aa4) [stable]`.
+fn detect_local_grok(grok_cli_path: Option<&Path>) -> Result<Option<LocalGrokInfo>> {
+    let Some(bin) = grok_cli_path else {
+        return Ok(None);
     };
-    Command::new(bin)
+    let output = Command::new(bin)
         .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("running {} --version", bin.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "{} --version failed with {}: {}",
+            bin.display(),
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let Some(version) = parse_grok_version(&raw) else {
+        return Err(anyhow::anyhow!(
+            "unsupported Grok version output from {}: {:?}",
+            bin.display(),
+            raw.trim()
+        ));
+    };
+    Ok(Some(LocalGrokInfo {
+        version: version.to_string(),
+    }))
 }
 
-/// Whether a Grok CLI is already available inside the build container.
-fn container_has_grok() -> bool {
-    let bin_path = Path::new(crate::daemon::GROK_CONTAINER_BIN);
-    if bin_path.exists() {
-        return true;
+/// Extract the release version while rejecting output that cannot safely be
+/// embedded in the generated Dockerfile and xAI download URL.
+fn parse_grok_version(raw: &str) -> Option<&str> {
+    let mut tokens = raw.split_whitespace();
+    if tokens.next() != Some("grok") {
+        return None;
     }
-
-    Command::new("grok")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let version = tokens.next()?;
+    if !version.chars().next().is_some_and(|ch| ch.is_ascii_digit())
+        || !version
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '+'))
+    {
+        return None;
+    }
+    Some(version)
 }
 
 /// Build-time version string that changes whenever the source or git
@@ -305,7 +334,7 @@ fn compute_prepared_tag(
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
     codex_info: Option<&LocalCodexInfo>,
-    install_grok: bool,
+    grok_info: Option<&LocalGrokInfo>,
     host_remotes: &[GitRemote],
     mount_targets: &[String],
     inject_system_prompt: bool,
@@ -329,7 +358,11 @@ fn compute_prepared_tag(
         hasher.update(info.version.as_bytes());
     }
     hasher.update(b"\0");
-    hasher.update([u8::from(install_grok)]);
+    hasher.update(b"grok\0");
+    if let Some(info) = grok_info {
+        hasher.update(info.version.as_bytes());
+    }
+    hasher.update(b"\0");
     for remote in host_remotes {
         if MANAGED_REMOTES.contains(&remote.name.as_str()) {
             continue;
@@ -382,7 +415,7 @@ fn generate_dockerfile(
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
     codex_info: Option<&LocalCodexInfo>,
-    install_grok: bool,
+    grok_info: Option<&LocalGrokInfo>,
     host_remotes: &[GitRemote],
     mount_targets: &[String],
     inject_system_prompt: bool,
@@ -406,10 +439,9 @@ fn generate_dockerfile(
         None => String::new(),
     };
 
-    let grok_flag = if install_grok {
-        " \\\n      --install-grok"
-    } else {
-        ""
+    let grok_flag = match grok_info {
+        Some(info) => format!(" \\\n      --grok-version '{}'", info.version),
+        None => String::new(),
     };
 
     let remote_flags: String = host_remotes
@@ -483,7 +515,7 @@ fn assemble_build_context(
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
     codex_info: Option<&LocalCodexInfo>,
-    install_grok: bool,
+    grok_info: Option<&LocalGrokInfo>,
     host_remotes: &[GitRemote],
     mount_targets: &[String],
     inject_system_prompt: bool,
@@ -498,7 +530,7 @@ fn assemble_build_context(
         claude_info,
         pi_info,
         codex_info,
-        install_grok,
+        grok_info,
         host_remotes,
         mount_targets,
         inject_system_prompt,
@@ -642,7 +674,7 @@ pub fn build_prepared_image(
     let claude_info = detect_local_claude(claude_cli_path);
     let pi_info = detect_local_pi(pi_cli_path);
     let codex_info = detect_local_codex(codex_cli_path)?;
-    let install_grok = local_has_grok(grok_cli_path);
+    let grok_info = detect_local_grok(grok_cli_path)?;
 
     let mode = BuildxMode::from_host(docker_host, docker_socket);
 
@@ -684,7 +716,7 @@ pub fn build_prepared_image(
         claude_info.as_ref(),
         pi_info.as_ref(),
         codex_info.as_ref(),
-        install_grok,
+        grok_info.as_ref(),
         host_remotes,
         mount_targets,
         inject_system_prompt,
@@ -728,7 +760,7 @@ pub fn build_prepared_image(
         claude_info.as_ref(),
         pi_info.as_ref(),
         codex_info.as_ref(),
-        install_grok,
+        grok_info.as_ref(),
         host_remotes,
         mount_targets,
         inject_system_prompt,
@@ -850,8 +882,8 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         install_codex_cli(version)?;
     }
 
-    if cmd.install_grok {
-        install_grok_cli()?;
+    if let Some(ref version) = cmd.grok_version {
+        install_grok_cli(version)?;
     }
 
     if cmd.inject_system_prompt {
@@ -1520,22 +1552,21 @@ fn install_node_standalone() -> Result<PathBuf> {
     Ok(bin_dir)
 }
 
-/// Pinned Grok Build version.  xAI serves a per-(version, platform) static
-/// binary, so pinning keeps prepared images reproducible instead of
-/// tracking whatever `stable` points at on a given day.
-const GROK_VERSION: &str = "0.2.111";
-
-/// Download and install the pinned Grok Build binary matching the host
-/// architecture.
+/// Download and install the specified Grok CLI release for this architecture.
 ///
-/// Skips if a `grok` binary is already present.  xAI publishes a single
-/// statically-linked binary per platform (no archive), so the download
-/// is written straight to the target path.
-fn install_grok_cli() -> Result<()> {
-    if container_has_grok() {
+/// Skips only when the requested version is already present. A different Grok
+/// supplied by the base image must not change the prepared pod's version.
+/// xAI publishes a single statically-linked binary per platform (no archive),
+/// so the download is written straight to the target path.
+fn install_grok_cli(version: &str) -> Result<()> {
+    let bin_path = Path::new(crate::daemon::GROK_CONTAINER_BIN);
+    if bin_path.exists() {
+        if grok_version_at(bin_path).as_deref() == Some(version) {
+            return Ok(());
+        }
+    } else if grok_version_at(Path::new("grok")).as_deref() == Some(version) {
         return Ok(());
     }
-    let bin_path = Path::new(crate::daemon::GROK_CONTAINER_BIN);
 
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x86_64",
@@ -1543,7 +1574,7 @@ fn install_grok_cli() -> Result<()> {
         other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
     };
 
-    let url = format!("https://x.ai/cli/grok-{GROK_VERSION}-linux-{arch}");
+    let url = format!("https://x.ai/cli/grok-{version}-linux-{arch}");
     let data = download_cli_asset(&url, "Grok CLI binary")?;
 
     if let Some(parent) = bin_path.parent() {
@@ -1554,6 +1585,20 @@ fn install_grok_cli() -> Result<()> {
         .context("making grok binary executable")?;
 
     Ok(())
+}
+
+fn grok_version_at(bin: &Path) -> Option<String> {
+    let output = Command::new(bin)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Some(parse_grok_version(&raw)?.to_string())
 }
 
 /// Strip host-side hook lines that were baked into the image (e.g. via
@@ -1627,7 +1672,7 @@ mod tests {
                 None,
                 None,
                 Some(codex_info),
-                false,
+                None,
                 &[],
                 &[],
                 false,
@@ -1638,6 +1683,100 @@ mod tests {
         };
 
         assert_ne!(tag(&first), tag(&second));
+    }
+
+    #[test]
+    fn grok_version_changes_prepared_image_tag() {
+        let first = LocalGrokInfo {
+            version: "0.2.111".to_string(),
+        };
+        let second = LocalGrokInfo {
+            version: "0.2.112".to_string(),
+        };
+        let tag = |grok_info| {
+            compute_prepared_tag(
+                "example:latest",
+                Path::new("/workspace"),
+                "root",
+                None,
+                None,
+                None,
+                Some(grok_info),
+                &[],
+                &[],
+                false,
+                None,
+                "{}",
+                &[],
+            )
+        };
+
+        assert_ne!(tag(&first), tag(&second));
+    }
+
+    #[test]
+    fn grok_version_parser_accepts_release_versions() {
+        assert_eq!(
+            parse_grok_version("grok 0.2.111 (94172f2aa4) [stable]\n"),
+            Some("0.2.111")
+        );
+        assert_eq!(parse_grok_version("grok 0.2.111\n"), Some("0.2.111"));
+        assert_eq!(
+            parse_grok_version("grok 0.3.0-rc.1 extra\n"),
+            Some("0.3.0-rc.1")
+        );
+        assert_eq!(parse_grok_version("0.2.111\n"), None);
+        assert_eq!(parse_grok_version("grok ../../latest\n"), None);
+        assert_eq!(parse_grok_version("grok\n"), None);
+    }
+
+    #[test]
+    fn grok_detection_rejects_unrecognized_version_output() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin = dir.path().join("grok");
+        fs::write(&bin, "#!/bin/sh\necho 'unexpected output'\n").expect("write fake grok");
+        let mut permissions = fs::metadata(&bin).expect("stat fake grok").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bin, permissions).expect("chmod fake grok");
+
+        let result = detect_local_grok(Some(&bin));
+        let Err(error) = result else {
+            panic!("unrecognized Grok version output should fail detection");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Grok version output"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn grok_version_is_passed_to_prepare_image() {
+        let info = LocalGrokInfo {
+            version: "9.9.9".to_string(),
+        };
+        let dockerfile = generate_dockerfile(
+            "example:latest",
+            Path::new("/workspace"),
+            "root",
+            None,
+            None,
+            None,
+            Some(&info),
+            &[],
+            &[],
+            false,
+            None,
+        );
+        assert!(
+            dockerfile.contains("--grok-version '9.9.9'"),
+            "dockerfile should pin the detected grok version: {dockerfile}"
+        );
+        assert!(
+            !dockerfile.contains("--install-grok"),
+            "dockerfile should not use the unversioned grok flag: {dockerfile}"
+        );
     }
 
     #[test]
