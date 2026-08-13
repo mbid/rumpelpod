@@ -174,27 +174,6 @@ pub enum Command {
     #[command(verbatim_doc_comment)]
     Prune(PruneCommand),
 
-    /// Review changes in a pod using git difftool.
-    ///
-    /// Shows the diff between the pod's primary branch and the merge
-    /// base with its upstream branch. This effectively shows all
-    /// changes made in the pod since it diverged from the
-    /// corresponding branch on your local machine.
-    ///
-    /// The pod must have been created while your local repository was
-    /// on a branch (not in detached HEAD state) for the upstream to be
-    /// set.
-    ///
-    /// Use -- <path>... to restrict the review to specific paths, like
-    /// git difftool.
-    ///
-    /// Examples:
-    ///   rumpel review dev               # Review all changes in 'dev' pod
-    ///   rumpel review dev -- src/       # Review only changes under src/
-    ///   rumpel review dev -- foo bar    # Review only foo and bar
-    #[command(verbatim_doc_comment)]
-    Review(ReviewCommand),
-
     /// Merge a pod's branch into the current branch and stop the pod.
     #[command(verbatim_doc_comment, trailing_var_arg = true)]
     Merge(MergeCommand),
@@ -614,21 +593,6 @@ pub struct ForwardPortCommand {
     /// free port near the container port (same as `forwardPorts`).
     #[arg(value_name = "LOCAL_PORT", value_parser = parse_local_port)]
     pub local_port: Option<u16>,
-}
-
-#[derive(Args)]
-pub struct ReviewCommand {
-    /// Name of the pod to review
-    #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
-    pub name: String,
-
-    /// Skip prompting before opening each file
-    #[arg(short = 'y', long = "yes")]
-    pub yes: bool,
-
-    /// Restrict review to specific paths (like git difftool -- <path>...)
-    #[arg(last = true, value_name = "PATH")]
-    pub paths: Vec<String>,
 }
 
 #[derive(Args)]

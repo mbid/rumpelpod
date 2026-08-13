@@ -522,7 +522,8 @@ pub trait Daemon: Send + Sync + 'static {
     fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>>;
 
     // POST /review
-    // Computes immutable revisions and changed paths for reviewing a pod.
+    // Temporary: the unpublished VS Code extension still POSTs here.
+    // Remove once that client diffs `rumpelpod/<pod>` itself.
     fn review_plan(
         &self,
         repo_path: PathBuf,
