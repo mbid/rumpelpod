@@ -132,7 +132,7 @@ pub type HostConnectionEventRx = mpsc::UnboundedReceiver<HostConnectionEvent>;
 
 /// Daemon-wide registry of host connections, deduplicating live
 /// connections by `HostKey`.  The registry holds strong references so
-/// a host with pods stays up without those pods pointing at it.
+/// a host stays up for the daemon lifetime once used.
 /// All connections share a single mpsc sender so `Connections` can
 /// match host events to per-pod state.
 pub struct HostConnectionRegistry {

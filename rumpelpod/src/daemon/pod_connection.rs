@@ -221,6 +221,7 @@ impl PodConnection {
         key: PodConnectionKey,
         host: Host,
         token: String,
+        status: PodConnectionStatus,
     ) -> Self {
         let host_key = HostKey::from_host(&host);
         let (tx, _) = broadcast::channel(64);
@@ -229,8 +230,7 @@ impl PodConnection {
             host: Mutex::new(host),
             host_key: Mutex::new(host_key),
             token: Mutex::new(token),
-            // Connections sets this from the live host after insert.
-            status: Arc::new(Mutex::new(PodConnectionStatus::HostDisconnected)),
+            status: Arc::new(Mutex::new(status)),
             tx,
             claude_state: Arc::new(Mutex::new(None)),
             codex_state: Arc::new(Mutex::new(None)),
@@ -341,8 +341,8 @@ impl PodConnection {
         })
     }
 
-    /// Reserve the event-loop slot so `Connections` can spawn the
-    /// thread without a host pointer living on this object.
+    /// Reserve the event-loop slot. Returns the stop flag for the
+    /// thread `Connections` will spawn.
     pub(super) fn begin_event_loop(&self) -> Option<Arc<AtomicBool>> {
         let mut event_loop = self.event_loop.lock().unwrap();
         if event_loop.is_some() {
@@ -752,6 +752,7 @@ impl PodConnectionRegistry {
         pod_name: &str,
         host: Host,
         token: String,
+        initial_status: PodConnectionStatus,
     ) -> Result<(Arc<PodConnection>, bool)> {
         let key = PodConnectionKey::new(repo_path.to_path_buf(), pod_name.to_string());
         let mut pods = self.pods.lock().unwrap();
@@ -764,6 +765,7 @@ impl PodConnectionRegistry {
             key.clone(),
             host,
             token,
+            initial_status,
         ));
         pods.insert(key, connection.clone());
         Ok((connection, true))
@@ -978,13 +980,25 @@ mod tests {
         };
 
         let (old, _) = registry
-            .get_or_create(repo_path, "test", host.clone(), "old-token".to_string())
+            .get_or_create(
+                repo_path,
+                "test",
+                host.clone(),
+                "old-token".to_string(),
+                PodConnectionStatus::HostDisconnected,
+            )
             .unwrap();
         *old.codex_state.lock().unwrap() = Some(CodexState::Idle);
 
         registry.remove(repo_path, "test").unwrap();
         let (replacement, _) = registry
-            .get_or_create(repo_path, "test", host, "new-token".to_string())
+            .get_or_create(
+                repo_path,
+                "test",
+                host,
+                "new-token".to_string(),
+                PodConnectionStatus::HostDisconnected,
+            )
             .unwrap();
 
         assert!(!Arc::ptr_eq(&old, &replacement));

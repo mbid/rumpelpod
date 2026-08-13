@@ -118,21 +118,16 @@ impl Connections {
         host: Host,
         token: String,
     ) -> Result<Arc<PodConnection>> {
-        // Keep a live host object for this pod so the monitor stays up
-        // without the pod holding a HostConnection pointer.
         let host_conn = self.inner.hosts.get_or_create(&host)?;
-        let (pod, created) = self
-            .inner
-            .pods
-            .get_or_create(repo_path, pod_name, host, token)?;
-        if created {
-            let status = if host_conn.is_connected() {
-                PodConnectionStatus::PodDisconnected
-            } else {
-                PodConnectionStatus::HostDisconnected
-            };
-            pod.set_status(status);
-        }
+        let initial_status = if host_conn.is_connected() {
+            PodConnectionStatus::PodDisconnected
+        } else {
+            PodConnectionStatus::HostDisconnected
+        };
+        let (pod, _) =
+            self.inner
+                .pods
+                .get_or_create(repo_path, pod_name, host, token, initial_status)?;
         Ok(pod)
     }
 
@@ -464,24 +459,37 @@ mod tests {
 
     #[test]
     fn prepare_pod_server_repair_uses_host_liveness() {
-        let (events_tx, mut events_rx) = broadcast::channel(2);
+        let (events_tx, _events_rx) = broadcast::channel(8);
         let connections = Connections::new(events_tx);
-        let host = Host::Localhost {
+        let local_host = Host::Localhost {
             engine: ContainerEngine::Docker,
         };
-        let pod = connections
-            .get_or_create_pod(Path::new("/repo"), "test", host, "token".into())
-            .expect("create pod connection");
-        pod.set_status(PodConnectionStatus::Connected);
-        while events_rx.try_recv().is_ok() {}
+        let missing_host = Host::Ssh {
+            ssh_destination: "nobody@127.0.0.1".into(),
+            engine: ContainerEngine::Docker,
+        };
 
-        connections.prepare_pod_server_repair(&pod);
-        assert_eq!(
-            events_rx.try_recv(),
-            Ok(DaemonEvent::PodStatusChanged {
-                repository: "/repo".to_string(),
-                pod: "test".to_string(),
-            })
-        );
+        let local = connections
+            .get_or_create_pod(Path::new("/repo"), "local", local_host, "token".into())
+            .expect("create local pod");
+        local.set_status(PodConnectionStatus::Connected);
+        connections.prepare_pod_server_repair(&local);
+        assert_eq!(local.status(), PodConnectionStatus::PodDisconnected);
+
+        // No HostConnection for this host, so repair must not treat the pod
+        // as reachable.
+        let (orphan, _) = connections
+            .inner
+            .pods
+            .get_or_create(
+                Path::new("/repo"),
+                "orphan",
+                missing_host,
+                "token".into(),
+                PodConnectionStatus::Connected,
+            )
+            .expect("create orphan pod");
+        connections.prepare_pod_server_repair(&orphan);
+        assert_eq!(orphan.status(), PodConnectionStatus::HostDisconnected);
     }
 }
