@@ -1,0 +1,7 @@
+Inject the rumpelpod system prompt for grok
+
+Grok was the only installed agent that did not receive the
+DESCRIPTION and remotes instructions, so it would not follow
+the same pod-branch conventions as Claude, Codex, and pi.
+Write them to ~/.grok/rules/rumpelpod.md, which grok loads
+as global project instructions.

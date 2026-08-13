@@ -166,6 +166,21 @@ fn container_has_pi() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Whether a Grok CLI is already available inside the build container.
+fn container_has_grok() -> bool {
+    let bin_path = Path::new(crate::daemon::GROK_CONTAINER_BIN);
+    if bin_path.exists() {
+        return true;
+    }
+
+    Command::new("grok")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Try to detect the Grok CLI on the local machine and return its version.
 ///
 /// Uses the client-provided path so the daemon does not depend on its
@@ -911,6 +926,9 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
         if container_has_pi() {
             write_pi_system_prompt(&cmd.user, cmd.description_file.as_deref())?;
         }
+        if container_has_grok() {
+            write_grok_system_prompt(&cmd.user, cmd.description_file.as_deref())?;
+        }
     }
 
     if let Some(ref description_file) = cmd.description_file {
@@ -1095,6 +1113,42 @@ fn write_pi_system_prompt(user: &str, description_file: Option<&str>) -> Result<
         .context("setting ~/.pi ownership")?;
     if !status.success() {
         return Err(anyhow::anyhow!("chown ~/.pi failed"));
+    }
+    Ok(())
+}
+
+/// Write the rumpelpod system prompt to ~/.grok/rules/rumpelpod.md so
+/// grok understands the container layout and git remote conventions.
+///
+/// grok loads every `*.md` file in `$GROK_HOME/rules/` (default
+/// `~/.grok/rules/`) as global instructions, independent of cwd. A
+/// repo-tree AGENTS.md would be committed with the agent's work, so
+/// the prompt lives in the home rules dir instead. Written as a
+/// dedicated file so a base image's existing rules are preserved.
+/// The whole ~/.grok subtree is chowned to the container user so the
+/// runtime credential copy (which runs as that user) can write
+/// auth/settings alongside it.
+fn write_grok_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
+    let pw = nix::unistd::User::from_name(user)
+        .with_context(|| format!("looking up user '{user}'"))?
+        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let rules_dir = pw.dir.join(".grok/rules");
+    let rules_dir_display = rules_dir.display();
+    fs::create_dir_all(&rules_dir).with_context(|| format!("creating {rules_dir_display}"))?;
+    let path = rules_dir.join("rumpelpod.md");
+    let path_display = path.display();
+    fs::write(&path, system_prompt(description_file))
+        .with_context(|| format!("writing rumpelpod prompt to {path_display}"))?;
+
+    let grok_root = pw.dir.join(".grok");
+    let user_colon = format!("{user}:");
+    let status = Command::new("chown")
+        .args(["-R", &user_colon])
+        .arg(&grok_root)
+        .status()
+        .context("setting ~/.grok ownership")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!("chown ~/.grok failed"));
     }
     Ok(())
 }
