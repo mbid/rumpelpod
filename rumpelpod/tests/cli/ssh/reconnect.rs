@@ -13,6 +13,10 @@
 //! ControlMaster / ServerAlive settings follow a typical laptop SSH
 //! config; sshd `MaxSessions` is raised in the fixture image because
 //! one mux master carries every pod route.
+//!
+//! Each case waits for `ssh -O check` to report a live mux after setup
+//! and a dead mux after the fault, so recovery cannot hide behind a
+//! ControlMaster that never went away.
 
 use std::path::Path;
 use std::process::Command;
@@ -115,12 +119,14 @@ fn start_mux_harness(pod_names: &[&str]) -> MuxHarness {
             .unwrap_or_else(|e| panic!("creating pod {name} failed: {e:#}"));
     }
 
-    MuxHarness {
+    let harness = MuxHarness {
         home,
         remote,
         daemon,
         repo,
-    }
+    };
+    wait_for_mux(&harness, true, Duration::from_secs(15), "mux after setup");
+    harness
 }
 
 fn remote_docker(remote: &SshRemoteHost, args: &[&str]) -> Result<Vec<u8>> {
@@ -233,6 +239,57 @@ fn kill_control_masters(home: &TestHome) {
     let _ = Command::new("pkill").args(["-9", "-f", &pattern]).output();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MuxState {
+    Running(u32),
+    Dead,
+}
+
+fn parse_mux_pid(text: &str) -> Option<u32> {
+    let (_, rest) = text.split_once("pid=")?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn mux_state(home: &TestHome, remote: &SshRemoteHost) -> MuxState {
+    let config = home.path().join(".ssh/config");
+    let output = Command::new("ssh")
+        .args([
+            "-F",
+            &config.to_string_lossy(),
+            "-O",
+            "check",
+            &remote.ssh_spec(),
+        ])
+        .output()
+        .expect("ssh -O check");
+    if !output.status.success() {
+        return MuxState::Dead;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match parse_mux_pid(&stderr).or_else(|| parse_mux_pid(&stdout)) {
+        Some(pid) => MuxState::Running(pid),
+        None => MuxState::Running(0),
+    }
+}
+
+fn wait_for_mux(harness: &MuxHarness, want_alive: bool, timeout: Duration, what: &str) -> MuxState {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let state = mux_state(&harness.home, &harness.remote);
+        let alive = matches!(state, MuxState::Running(_));
+        if alive == want_alive {
+            return state;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}: mux still {state:?} after {timeout:?}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 struct ClientBlackhole {
     dest: String,
     port: u16,
@@ -296,6 +353,12 @@ fn mux_git_syncs_after_sshd_sessions_killed() {
 
     let harness = start_mux_harness(&["alpha", "beta"]);
     kill_sshd_sessions(&harness.remote);
+    wait_for_mux(
+        &harness,
+        false,
+        Duration::from_secs(10),
+        "mux after sshd kill",
+    );
     let oid = commit_in_pod(&harness.remote, "alpha", "after-session-kill");
     wait_for_ref(harness.repo.path(), &pod_ref("alpha"), &oid);
 }
@@ -315,9 +378,13 @@ fn mux_git_syncs_after_client_blackhole() {
         println!("xtest:skip");
         return;
     };
+    wait_for_mux(
+        &harness,
+        false,
+        Duration::from_secs(10),
+        "mux after client blackhole",
+    );
     let oid = commit_in_pod(&harness.remote, "alpha", "after-blackhole");
-    // ServerAliveInterval 1 * CountMax 2, plus a probe attempt.
-    std::thread::sleep(Duration::from_secs(4));
     drop(hole);
     wait_for_ref(harness.repo.path(), &pod_ref("alpha"), &oid);
 }
@@ -336,9 +403,14 @@ fn mux_both_pods_sync_after_client_blackhole() {
         println!("xtest:skip");
         return;
     };
+    wait_for_mux(
+        &harness,
+        false,
+        Duration::from_secs(10),
+        "mux after client blackhole",
+    );
     let oid_a = commit_in_pod(&harness.remote, "alpha", "alpha-pending");
     let oid_b = commit_in_pod(&harness.remote, "beta", "beta-pending");
-    std::thread::sleep(Duration::from_secs(4));
     drop(hole);
     wait_for_ref(harness.repo.path(), &pod_ref("alpha"), &oid_a);
     wait_for_ref(harness.repo.path(), &pod_ref("beta"), &oid_b);
@@ -353,7 +425,18 @@ fn mux_git_syncs_after_control_master_killed() {
     }
 
     let harness = start_mux_harness(&["alpha", "beta"]);
+    let before = mux_state(&harness.home, &harness.remote);
     kill_control_masters(&harness.home);
+    let after = wait_for_mux(
+        &harness,
+        false,
+        Duration::from_secs(5),
+        "mux after control master kill",
+    );
+    assert_ne!(
+        before, after,
+        "control master should not still be {before:?}"
+    );
     let oid = commit_in_pod(&harness.remote, "alpha", "after-mux-kill");
     wait_for_ref(harness.repo.path(), &pod_ref("alpha"), &oid);
 }
@@ -369,6 +452,12 @@ fn mux_all_pods_enter_after_sshd_sessions_killed() {
     let pods = ["one", "two", "three"];
     let harness = start_mux_harness(&pods);
     kill_sshd_sessions(&harness.remote);
+    wait_for_mux(
+        &harness,
+        false,
+        Duration::from_secs(10),
+        "mux after sshd kill",
+    );
     let ssh_config = harness.home.path().join(".ssh/config");
     harness.remote.wait_for_ssh_connectivity(&ssh_config);
 
@@ -398,6 +487,7 @@ fn mux_git_syncs_after_remote_pause() {
     // ServerAlive 1s * 2 plus one short probe. The nested engine is
     // frozen too, so the pending commit happens after unpause.
     std::thread::sleep(Duration::from_secs(6));
+    wait_for_mux(&harness, false, Duration::from_secs(10), "mux while paused");
     Command::new("docker")
         .args(["unpause", &harness.remote.container_id])
         .success()
@@ -424,6 +514,12 @@ fn mux_ten_pods_reconnect_after_disconnect() {
     if hole.is_none() {
         kill_sshd_sessions(&harness.remote);
     }
+    wait_for_mux(
+        &harness,
+        false,
+        Duration::from_secs(10),
+        "mux after load disconnect",
+    );
 
     let mut commits = Vec::new();
     for name in &pods {
