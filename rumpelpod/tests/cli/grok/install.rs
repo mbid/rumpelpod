@@ -21,9 +21,6 @@ use rumpelpod::CommandExt;
 /// drift from the host CLI the user is already running.
 #[test]
 fn image_includes_grok_from_client_path() {
-    // On a cold cache the prepared image build downloads the ~142 MiB
-    // grok binary; give it headroom over the default 120s timeout.
-    println!("xtest:timeout=180");
     let host_output = Command::new("grok")
         .arg("--version")
         .output()

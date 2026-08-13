@@ -342,7 +342,6 @@ fn run_iptables(args: &[&str]) -> bool {
 /// Server-side session death: sshd children are gone, listener stays.
 #[test]
 fn mux_git_syncs_after_sshd_sessions_killed() {
-    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -364,7 +363,6 @@ fn mux_git_syncs_after_sshd_sessions_killed() {
 /// master; after the route returns the daemon should recover alone.
 #[test]
 fn mux_git_syncs_after_client_blackhole() {
-    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -389,7 +387,6 @@ fn mux_git_syncs_after_client_blackhole() {
 /// SSH. Both refs should land after the blackhole is lifted.
 #[test]
 fn mux_both_pods_sync_after_client_blackhole() {
-    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -415,7 +412,6 @@ fn mux_both_pods_sync_after_client_blackhole() {
 /// The mux master process is killed and its socket is left behind.
 #[test]
 fn mux_git_syncs_after_control_master_killed() {
-    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -440,7 +436,6 @@ fn mux_git_syncs_after_control_master_killed() {
 /// Every pod on the muxed host should be enterable after sshd sessions die.
 #[test]
 fn mux_all_pods_enter_after_sshd_sessions_killed() {
-    println!("xtest:timeout=240");
     if !suite_enabled() {
         return;
     }
@@ -470,7 +465,6 @@ fn mux_all_pods_enter_after_sshd_sessions_killed() {
 /// to give up, then resumed. Same shape as a laptop sleep.
 #[test]
 fn mux_git_syncs_after_remote_pause() {
-    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -501,7 +495,6 @@ fn mux_git_syncs_after_remote_pause() {
 /// without an explicit `rumpel connect`.
 #[test]
 fn mux_ten_pods_reconnect_after_disconnect() {
-    println!("xtest:timeout=600");
     if !suite_enabled() {
         return;
     }

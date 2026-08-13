@@ -179,7 +179,6 @@ fn compose_service_container(project: &str, service: &str) -> String {
 
 #[test]
 fn compose_build_cache_reuses_images_and_tracks_context_content() {
-    println!("xtest:timeout=300");
     if !require_local_compose() {
         return;
     }
@@ -274,7 +273,6 @@ fn compose_build_cache_reuses_images_and_tracks_context_content() {
 
 #[test]
 fn compose_environment_secret_uses_client_command_environment() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }
@@ -337,7 +335,6 @@ fn compose_environment_secret_uses_client_command_environment() {
 
 #[test]
 fn compose_no_cache_builds_every_project() {
-    println!("xtest:timeout=300");
     if !require_local_compose() {
         return;
     }
@@ -388,7 +385,6 @@ fn compose_no_cache_builds_every_project() {
 
 #[test]
 fn compose_sidecar_forward_survives_project_restart() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }
@@ -475,7 +471,6 @@ fn compose_sidecar_forward_survives_project_restart() {
 
 #[test]
 fn compose_reenter_recreates_project_after_agent_removal() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }
@@ -531,7 +526,6 @@ fn compose_reenter_recreates_project_after_agent_removal() {
 
 #[test]
 fn compose_runtime_sidecar_forward_persists() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }
@@ -596,7 +590,6 @@ fn compose_runtime_sidecar_forward_persists() {
 
 #[test]
 fn compose_remote_docker_launches_sidecars_and_rejects_bind_mounts() {
-    println!("xtest:timeout=300");
     if !matches!(crate::executor::executor_mode(), ExecutorMode::Docker) {
         crate::executor::skip_test();
         return;
@@ -688,7 +681,6 @@ secrets:
 
 #[test]
 fn compose_build_forwards_client_ssh_agent() {
-    println!("xtest:timeout=300");
     if !require_local_compose() {
         return;
     }
@@ -772,7 +764,6 @@ fn compose_build_forwards_client_ssh_agent() {
 
 #[test]
 fn compose_override_command_and_run_services_are_applied() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }
@@ -839,7 +830,6 @@ fn compose_override_command_and_run_services_are_applied() {
 
 #[test]
 fn compose_default_command_exit_has_actionable_error() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }
@@ -868,7 +858,6 @@ fn compose_default_command_exit_has_actionable_error() {
 
 #[test]
 fn compose_service_user_is_used_when_devcontainer_has_no_user() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }
@@ -910,7 +899,6 @@ fn compose_service_user_is_used_when_devcontainer_has_no_user() {
 
 #[test]
 fn compose_fork_gets_independent_project_resources() {
-    println!("xtest:timeout=240");
     if !require_local_compose() {
         return;
     }

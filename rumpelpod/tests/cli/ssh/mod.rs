@@ -831,7 +831,6 @@ fn ssh_smoke_test() {
 
 #[test]
 fn ssh_uses_user_config_for_omitted_port() {
-    println!("xtest:timeout=185");
     if !matches!(
         crate::executor::executor_mode(),
         crate::executor::ExecutorMode::Docker | crate::executor::ExecutorMode::Ssh
@@ -869,7 +868,6 @@ fn ssh_uses_user_config_for_omitted_port() {
 /// through Colima's VM networking layer.
 #[test]
 fn ssh_reconnect_test() {
-    println!("xtest:timeout=300");
     if cfg!(target_os = "macos") {
         crate::executor::skip_test();
         return;
@@ -1041,7 +1039,6 @@ fn ssh_reconnect_test() {
 /// A single pod does not reproduce the stalled route seen after laptop resume.
 #[test]
 fn multiple_pods_reconnect_after_ssh_transport_stall() {
-    println!("xtest:timeout=180");
     if cfg!(target_os = "macos") {
         crate::executor::skip_test();
         return;
@@ -1118,7 +1115,6 @@ fn multiple_pods_reconnect_after_ssh_transport_stall() {
 
 #[test]
 fn ssh_unavailable_reentry_preserves_pod_record() {
-    println!("xtest:timeout=215");
     if !matches!(
         crate::executor::executor_mode(),
         crate::executor::ExecutorMode::Docker

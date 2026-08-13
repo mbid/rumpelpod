@@ -22,6 +22,8 @@ pub mod command_ext;
 
 pub use command_ext::CommandExt;
 
+pub mod xtest_timeouts;
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
