@@ -745,7 +745,6 @@ impl PodConnectionRegistry {
         }
     }
 
-    /// Returns the connection and whether it was newly created.
     pub fn get_or_create(
         &self,
         repo_path: &Path,
@@ -753,12 +752,12 @@ impl PodConnectionRegistry {
         host: Host,
         token: String,
         initial_status: PodConnectionStatus,
-    ) -> Result<(Arc<PodConnection>, bool)> {
+    ) -> Arc<PodConnection> {
         let key = PodConnectionKey::new(repo_path.to_path_buf(), pod_name.to_string());
         let mut pods = self.pods.lock().unwrap();
         if let Some(connection) = pods.get(&key) {
             connection.update_host_and_token(host, token);
-            return Ok((connection.clone(), false));
+            return connection.clone();
         }
         let connection = Arc::new(PodConnection::new(
             self.events_tx.clone(),
@@ -768,7 +767,7 @@ impl PodConnectionRegistry {
             initial_status,
         ));
         pods.insert(key, connection.clone());
-        Ok((connection, true))
+        connection
     }
 
     pub fn all(&self) -> Vec<Arc<PodConnection>> {
@@ -979,27 +978,23 @@ mod tests {
             engine: ContainerEngine::Docker,
         };
 
-        let (old, _) = registry
-            .get_or_create(
-                repo_path,
-                "test",
-                host.clone(),
-                "old-token".to_string(),
-                PodConnectionStatus::HostDisconnected,
-            )
-            .unwrap();
+        let old = registry.get_or_create(
+            repo_path,
+            "test",
+            host.clone(),
+            "old-token".to_string(),
+            PodConnectionStatus::HostDisconnected,
+        );
         *old.codex_state.lock().unwrap() = Some(CodexState::Idle);
 
         registry.remove(repo_path, "test").unwrap();
-        let (replacement, _) = registry
-            .get_or_create(
-                repo_path,
-                "test",
-                host,
-                "new-token".to_string(),
-                PodConnectionStatus::HostDisconnected,
-            )
-            .unwrap();
+        let replacement = registry.get_or_create(
+            repo_path,
+            "test",
+            host,
+            "new-token".to_string(),
+            PodConnectionStatus::HostDisconnected,
+        );
 
         assert!(!Arc::ptr_eq(&old, &replacement));
         assert_eq!(replacement.codex_state(), None);

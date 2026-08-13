@@ -124,11 +124,10 @@ impl Connections {
         } else {
             PodConnectionStatus::HostDisconnected
         };
-        let (pod, _) =
-            self.inner
-                .pods
-                .get_or_create(repo_path, pod_name, host, token, initial_status)?;
-        Ok(pod)
+        Ok(self
+            .inner
+            .pods
+            .get_or_create(repo_path, pod_name, host, token, initial_status))
     }
 
     pub fn pod(&self, repo_path: &Path, pod_name: &str) -> Option<Arc<PodConnection>> {
@@ -478,17 +477,13 @@ mod tests {
 
         // No HostConnection for this host, so repair must not treat the pod
         // as reachable.
-        let (orphan, _) = connections
-            .inner
-            .pods
-            .get_or_create(
-                Path::new("/repo"),
-                "orphan",
-                missing_host,
-                "token".into(),
-                PodConnectionStatus::Connected,
-            )
-            .expect("create orphan pod");
+        let orphan = connections.inner.pods.get_or_create(
+            Path::new("/repo"),
+            "orphan",
+            missing_host,
+            "token".into(),
+            PodConnectionStatus::Connected,
+        );
         connections.prepare_pod_server_repair(&orphan);
         assert_eq!(orphan.status(), PodConnectionStatus::HostDisconnected);
     }

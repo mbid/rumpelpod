@@ -20,7 +20,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use indoc::formatdoc;
@@ -262,17 +262,25 @@ fn mux_state(home: &TestHome, remote: &SshRemoteHost) -> MuxState {
 }
 
 /// Poll until `ssh -O check` reports `want`. The xtest timeout is the
-/// only deadline; this does not send traffic to the remote.
+/// only deadline; this does not send traffic to the remote. `what` is
+/// logged while waiting so a hang names the wait that never finished.
 pub(super) fn wait_for_mux(
     home: &TestHome,
     remote: &SshRemoteHost,
     want: MuxState,
-    _what: &str,
+    what: &str,
 ) -> MuxState {
+    let started = Instant::now();
+    let mut last_log = started;
     loop {
         let state = mux_state(home, remote);
         if state == want {
             return state;
+        }
+        if last_log.elapsed() >= Duration::from_secs(5) {
+            let waited = started.elapsed().as_secs();
+            eprintln!("waiting for {what}: want {want:?}, still {state:?} after {waited}s");
+            last_log = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(100));
     }
