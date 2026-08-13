@@ -23,7 +23,7 @@
 //!
 //! Connections know nothing about pods or executors.  They publish
 //! liveness on a per-connection `watch` channel and also emit
-//! `HostConnectionEvent`s on a daemon-wide mpsc channel; the daemon
+//! `HostConnectionEvent`s on a daemon-wide mpsc channel; `Connections`
 //! is the single reader and decides what to do per pod on
 //! `Connected`/`Disconnected` transitions.
 
@@ -131,13 +131,13 @@ pub type HostConnectionEventTx = mpsc::UnboundedSender<HostConnectionEvent>;
 pub type HostConnectionEventRx = mpsc::UnboundedReceiver<HostConnectionEvent>;
 
 /// Daemon-wide registry of host connections, deduplicating live
-/// connections by `HostKey`.  The registry caches weak references so
-/// an idle host does not keep a background monitor alive forever.
-/// All connections share a single mpsc sender so the daemon's central
-/// reader can match host events to per-pod state.
+/// connections by `HostKey`.  The registry holds strong references so
+/// a host with pods stays up without those pods pointing at it.
+/// All connections share a single mpsc sender so `Connections` can
+/// match host events to per-pod state.
 pub struct HostConnectionRegistry {
     events_tx: HostConnectionEventTx,
-    conns: Mutex<HashMap<HostKey, Weak<HostConnection>>>,
+    conns: Mutex<HashMap<HostKey, Arc<HostConnection>>>,
 }
 
 impl HostConnectionRegistry {
@@ -161,26 +161,11 @@ impl HostConnectionRegistry {
         let host = &host;
         let key = HostKey::from_host(host);
         let mut conns = self.conns.lock().unwrap();
-        if let Some(conn) = conns.get(&key).and_then(Weak::upgrade) {
-            return Ok(conn);
+        if let Some(conn) = conns.get(&key) {
+            return Ok(conn.clone());
         }
         let conn = Arc::new(HostConnection::new(host, self.events_tx.clone())?);
-        conns.insert(key, Arc::downgrade(&conn));
-        Ok(conn)
-    }
-
-    /// Build a fresh connection even when the registry already has one.
-    ///
-    /// This is reserved for explicit recovery: ordinary callers must share
-    /// the cached connection so each host has only one monitor and proxy.
-    pub fn replace(&self, host: &Host) -> Result<Arc<HostConnection>> {
-        let host = host.clone().resolve_docker_engine()?;
-        let key = HostKey::from_host(&host);
-        let conn = Arc::new(HostConnection::new(&host, self.events_tx.clone())?);
-        self.conns
-            .lock()
-            .unwrap()
-            .insert(key, Arc::downgrade(&conn));
+        conns.insert(key, conn.clone());
         Ok(conn)
     }
 
@@ -190,24 +175,13 @@ impl HostConnectionRegistry {
     pub fn get(&self, host: &Host) -> Option<Arc<HostConnection>> {
         let host = host.clone().resolve_docker_engine().ok()?;
         let key = HostKey::from_host(&host);
-        let mut conns = self.conns.lock().unwrap();
-        let conn = conns.get(&key).and_then(Weak::upgrade);
-        if conn.is_none() {
-            conns.remove(&key);
-        }
-        conn
+        self.conns.lock().unwrap().get(&key).cloned()
     }
 
-    /// Remove the connection for `host` from the registry.  The
-    /// underlying `Arc<HostConnection>` may live on if other Arcs
-    /// are held; drop happens when the last reference goes away.
-    /// Used by the central reader on `GaveUp` events.
+    /// Remove the connection for `host` from the registry.  Used by
+    /// the central reader on `GaveUp` events.
     pub fn remove(&self, key: &HostKey) -> Option<Arc<HostConnection>> {
-        self.conns
-            .lock()
-            .unwrap()
-            .remove(key)
-            .and_then(|c| c.upgrade())
+        self.conns.lock().unwrap().remove(key)
     }
 }
 
@@ -1007,7 +981,7 @@ mod registry_tests {
     }
 
     #[test]
-    fn registry_does_not_keep_idle_connection_alive() {
+    fn registry_reuses_the_same_connection() {
         let (events_tx, _events_rx) = mpsc::unbounded_channel();
         let registry = HostConnectionRegistry::new(events_tx);
 
@@ -1015,9 +989,7 @@ mod registry_tests {
         let same = registry.get_or_create(&localhost()).unwrap();
         assert!(Arc::ptr_eq(&conn, &same));
         drop(same);
-
-        assert!(registry.get(&localhost()).is_some());
         drop(conn);
-        assert!(registry.get(&localhost()).is_none());
+        assert!(registry.get(&localhost()).is_some());
     }
 }
