@@ -564,6 +564,13 @@ struct SingleTestResult {
     duration: Duration,
 }
 
+enum ChildFinish {
+    Exited(std::process::ExitStatus),
+    Interrupted,
+    TimedOut,
+    WaitFailed,
+}
+
 /// Run a single test with a timeout.
 ///
 /// Tests can skip themselves by printing `xtest:skip` before doing
@@ -674,39 +681,39 @@ fn run_single_test(
         })
     };
 
-    let outcome = loop {
+    let finish = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                break if status.success() {
-                    if skip_directive.load(Relaxed) {
-                        Outcome::Skipped
-                    } else {
-                        Outcome::Passed
-                    }
-                } else {
-                    Outcome::Failed
-                };
-            }
+            Ok(Some(status)) => break ChildFinish::Exited(status),
             Ok(None) => {
                 if interrupted.load(Relaxed) {
                     let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                     let _ = child.wait();
-                    break Outcome::Failed;
+                    break ChildFinish::Interrupted;
                 }
                 if start.elapsed() >= case.timeout {
                     let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                     let _ = child.wait();
-                    break Outcome::TimedOut;
+                    break ChildFinish::TimedOut;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Err(_) => {
-                break Outcome::Failed;
-            }
+            Err(_) => break ChildFinish::WaitFailed,
         }
     };
 
+    // xtest:skip is just a stdout line. An instant skip can exit before
+    // this thread has read that line; classify only after EOF.
     let _ = reader_handle.join();
+
+    let outcome = match finish {
+        ChildFinish::Exited(status) if status.success() && skip_directive.load(Relaxed) => {
+            Outcome::Skipped
+        }
+        ChildFinish::Exited(status) if status.success() => Outcome::Passed,
+        ChildFinish::Exited(_) => Outcome::Failed,
+        ChildFinish::Interrupted | ChildFinish::WaitFailed => Outcome::Failed,
+        ChildFinish::TimedOut => Outcome::TimedOut,
+    };
     SingleTestResult {
         outcome,
         duration: start.elapsed(),

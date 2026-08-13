@@ -144,6 +144,11 @@ fn xtest_timeouts_file_is_the_only_non_default_timeout_source() {
     }
 }
 
+#[test]
+fn xtest_reports_an_immediate_skip() {
+    println!("xtest:skip");
+}
+
 fn rust_files_under(dir: PathBuf) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut stack = vec![dir];
