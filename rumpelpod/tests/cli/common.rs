@@ -258,7 +258,12 @@ pub struct TestDaemon {
 
 impl TestDaemon {
     pub fn start(home: &TestHome) -> Self {
-        Self::start_inner(home)
+        Self::start_inner(home, &[])
+    }
+
+    /// Start a daemon with extra environment variables.
+    pub fn start_with_env(home: &TestHome, extra_env: &[(&str, &str)]) -> Self {
+        Self::start_inner(home, extra_env)
     }
 
     /// Start a daemon whose `$PATH` additionally includes the host
@@ -270,7 +275,7 @@ impl TestDaemon {
     /// this helper instead.
     pub fn start_with_local_llm_clis(home: &TestHome) -> Self {
         home.link_local_bins(&["claude", "codex"]);
-        Self::start_inner(home)
+        Self::start_inner(home, &[])
     }
 
     /// Start a daemon whose `$PATH` additionally includes the host
@@ -278,10 +283,10 @@ impl TestDaemon {
     /// the Grok CLI into the pod image.  See `start_with_local_llm_clis`.
     pub fn start_with_local_grok(home: &TestHome) -> Self {
         home.link_local_bins(&["grok"]);
-        Self::start_inner(home)
+        Self::start_inner(home, &[])
     }
 
-    fn start_inner(home: &TestHome) -> Self {
+    fn start_inner(home: &TestHome, extra_env: &[(&str, &str)]) -> Self {
         let home_path = home.path();
         let socket_path = home_path.join("rumpelpod.sock");
         let state_dir = home_path.join("state");
@@ -371,6 +376,9 @@ impl TestDaemon {
         // containers can route API requests through the tunnel.
         if std::env::var("RUMPELPOD_TEST_LLM_OFFLINE").is_err() {
             cmd.env("RUMPELPOD_TEST_LLM_OFFLINE", "1");
+        }
+        for (key, value) in extra_env {
+            cmd.env(key, value);
         }
 
         let process = cmd

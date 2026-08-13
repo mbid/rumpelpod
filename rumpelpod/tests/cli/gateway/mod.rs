@@ -3526,7 +3526,6 @@ fn pods_see_each_others_branches() {
 
 #[test]
 fn gateway_tunnel_recovers_without_reenter() {
-    println!("xtest:timeout=240");
     if !matches!(executor::executor_mode(), executor::ExecutorMode::Docker) {
         executor::skip_test();
         return;
