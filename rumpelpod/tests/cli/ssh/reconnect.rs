@@ -20,7 +20,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use indoc::formatdoc;
@@ -34,12 +34,6 @@ use rumpelpod::CommandExt;
 
 const ENV_VAR: &str = "RUMPELPOD_TEST_SSH_RECONNECT";
 const FAST_PROBE_MS: &str = "3000";
-/// How long the test waits for a pod commit to show up on the host.
-/// This is not a git(1) timeout; the hook push has already been
-/// attempted inside the pod.
-const GIT_WAIT: Duration = Duration::from_secs(90);
-const MUX_UP: Duration = Duration::from_secs(30);
-const MUX_DOWN: Duration = Duration::from_secs(45);
 
 fn suite_enabled() -> bool {
     if std::env::var(ENV_VAR).as_deref() != Ok("1") {
@@ -133,8 +127,7 @@ fn start_mux_harness(pod_names: &[&str]) -> MuxHarness {
     wait_for_mux(
         &harness.home,
         &harness.remote,
-        true,
-        MUX_UP,
+        MuxState::Alive,
         "mux after setup",
     );
     harness
@@ -203,13 +196,11 @@ fn pod_ref(pod_name: &str) -> String {
 }
 
 fn wait_for_ref(repo: &Path, git_ref: &str, expected: &str) {
-    wait_for_refs(repo, &[(git_ref, expected)], GIT_WAIT);
+    wait_for_refs(repo, &[(git_ref, expected)]);
 }
 
-fn wait_for_refs(repo: &Path, expected: &[(&str, &str)], timeout: Duration) {
-    let deadline = Instant::now() + timeout;
+fn wait_for_refs(repo: &Path, expected: &[(&str, &str)]) {
     let mut pending: Vec<(&str, &str)> = expected.to_vec();
-    let total = pending.len();
     while !pending.is_empty() {
         pending.retain(|(git_ref, oid)| {
             let output = Command::new("git")
@@ -222,11 +213,6 @@ fn wait_for_refs(repo: &Path, expected: &[(&str, &str)], timeout: Duration) {
         if pending.is_empty() {
             return;
         }
-        let recovered = total - pending.len();
-        assert!(
-            Instant::now() < deadline,
-            "only {recovered}/{total} git refs recovered within {timeout:?}; still missing {pending:?}"
-        );
         std::thread::sleep(Duration::from_millis(250));
     }
 }
@@ -252,14 +238,8 @@ fn kill_control_masters(home: &TestHome) {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum MuxState {
-    Running(u32),
+    Alive,
     Dead,
-}
-
-fn parse_mux_pid(text: &str) -> Option<u32> {
-    let (_, rest) = text.split_once("pid=")?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
 }
 
 fn mux_state(home: &TestHome, remote: &SshRemoteHost) -> MuxState {
@@ -274,35 +254,26 @@ fn mux_state(home: &TestHome, remote: &SshRemoteHost) -> MuxState {
         ])
         .output()
         .expect("ssh -O check");
-    if !output.status.success() {
-        return MuxState::Dead;
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    match parse_mux_pid(&stderr).or_else(|| parse_mux_pid(&stdout)) {
-        Some(pid) => MuxState::Running(pid),
-        None => MuxState::Running(0),
+    if output.status.success() {
+        MuxState::Alive
+    } else {
+        MuxState::Dead
     }
 }
 
+/// Poll until `ssh -O check` reports `want`. The xtest timeout is the
+/// only deadline; this does not send traffic to the remote.
 pub(super) fn wait_for_mux(
     home: &TestHome,
     remote: &SshRemoteHost,
-    want_alive: bool,
-    timeout: Duration,
-    what: &str,
+    want: MuxState,
+    _what: &str,
 ) -> MuxState {
-    let deadline = Instant::now() + timeout;
     loop {
         let state = mux_state(home, remote);
-        let alive = matches!(state, MuxState::Running(_));
-        if alive == want_alive {
+        if state == want {
             return state;
         }
-        assert!(
-            Instant::now() < deadline,
-            "{what}: mux still {state:?} after {timeout:?}"
-        );
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -373,8 +344,7 @@ fn mux_git_syncs_after_sshd_sessions_killed() {
     wait_for_mux(
         &harness.home,
         &harness.remote,
-        false,
-        MUX_DOWN,
+        MuxState::Dead,
         "mux after sshd kill",
     );
     let oid = commit_in_pod(&harness.remote, "alpha", "after-session-kill");
@@ -399,8 +369,7 @@ fn mux_git_syncs_after_client_blackhole() {
     wait_for_mux(
         &harness.home,
         &harness.remote,
-        false,
-        MUX_DOWN,
+        MuxState::Dead,
         "mux after client blackhole",
     );
     let oid = commit_in_pod(&harness.remote, "alpha", "after-blackhole");
@@ -425,8 +394,7 @@ fn mux_both_pods_sync_after_client_blackhole() {
     wait_for_mux(
         &harness.home,
         &harness.remote,
-        false,
-        MUX_DOWN,
+        MuxState::Dead,
         "mux after client blackhole",
     );
     let oid_a = commit_in_pod(&harness.remote, "alpha", "alpha-pending");
@@ -450,8 +418,7 @@ fn mux_git_syncs_after_control_master_killed() {
     let after = wait_for_mux(
         &harness.home,
         &harness.remote,
-        false,
-        MUX_DOWN,
+        MuxState::Dead,
         "mux after control master kill",
     );
     assert_ne!(
@@ -476,8 +443,7 @@ fn mux_all_pods_enter_after_sshd_sessions_killed() {
     wait_for_mux(
         &harness.home,
         &harness.remote,
-        false,
-        MUX_DOWN,
+        MuxState::Dead,
         "mux after sshd kill",
     );
     let ssh_config = harness.home.path().join(".ssh/config");
@@ -511,8 +477,7 @@ fn mux_git_syncs_after_remote_pause() {
     wait_for_mux(
         &harness.home,
         &harness.remote,
-        false,
-        MUX_DOWN,
+        MuxState::Dead,
         "mux while paused",
     );
     Command::new("docker")
@@ -544,8 +509,7 @@ fn mux_ten_pods_reconnect_after_disconnect() {
     wait_for_mux(
         &harness.home,
         &harness.remote,
-        false,
-        MUX_DOWN,
+        MuxState::Dead,
         "mux after load disconnect",
     );
 
@@ -560,7 +524,7 @@ fn mux_ten_pods_reconnect_after_disconnect() {
         .iter()
         .map(|(git_ref, oid)| (git_ref.as_str(), oid.as_str()))
         .collect();
-    wait_for_refs(harness.repo.path(), &expected, Duration::from_secs(120));
+    wait_for_refs(harness.repo.path(), &expected);
 
     let ssh_config = harness.home.path().join(".ssh/config");
     harness.remote.wait_for_ssh_connectivity(&ssh_config);

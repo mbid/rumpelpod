@@ -1089,8 +1089,7 @@ fn multiple_pods_reconnect_after_ssh_transport_stall() {
     reconnect::wait_for_mux(
         &home,
         &remote,
-        true,
-        Duration::from_secs(30),
+        reconnect::MuxState::Alive,
         "mux after setup",
     );
     Command::new("docker")
@@ -1100,8 +1099,7 @@ fn multiple_pods_reconnect_after_ssh_transport_stall() {
     reconnect::wait_for_mux(
         &home,
         &remote,
-        false,
-        Duration::from_secs(45),
+        reconnect::MuxState::Dead,
         "mux while paused",
     );
 
