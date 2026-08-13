@@ -186,19 +186,29 @@ fn pod_ref(pod_name: &str) -> String {
 }
 
 fn wait_for_ref(repo: &Path, git_ref: &str, expected: &str) {
-    let deadline = Instant::now() + GIT_WAIT;
-    loop {
-        let output = Command::new("git")
-            .args(["rev-parse", git_ref])
-            .current_dir(repo)
-            .output()
-            .expect("git rev-parse failed");
-        if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected {
+    wait_for_refs(repo, &[(git_ref, expected)], GIT_WAIT);
+}
+
+fn wait_for_refs(repo: &Path, expected: &[(&str, &str)], timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut pending: Vec<(&str, &str)> = expected.to_vec();
+    let total = pending.len();
+    while !pending.is_empty() {
+        pending.retain(|(git_ref, oid)| {
+            let output = Command::new("git")
+                .args(["rev-parse", git_ref])
+                .current_dir(repo)
+                .output()
+                .expect("git rev-parse failed");
+            !(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == *oid)
+        });
+        if pending.is_empty() {
             return;
         }
+        let recovered = total - pending.len();
         assert!(
             Instant::now() < deadline,
-            "git ref {git_ref} did not become {expected} within {GIT_WAIT:?}"
+            "only {recovered}/{total} git refs recovered within {timeout:?}; still missing {pending:?}"
         );
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -394,4 +404,47 @@ fn mux_git_syncs_after_remote_pause() {
         .expect("unpausing ssh host");
     let oid = commit_in_pod(&harness.remote, "alpha", "after-pause");
     wait_for_ref(harness.repo.path(), &pod_ref("alpha"), &oid);
+}
+
+/// Ten pods on one muxed host, then a client-side disconnect. Every
+/// pending commit should land and every pod should be enterable
+/// without an explicit `rumpel connect`.
+#[test]
+fn mux_ten_pods_reconnect_after_disconnect() {
+    println!("xtest:timeout=480");
+    if !suite_enabled() {
+        return;
+    }
+
+    let pods: Vec<String> = (0..10).map(|i| format!("load-{i:02}")).collect();
+    let names: Vec<&str> = pods.iter().map(String::as_str).collect();
+    let harness = start_mux_harness(&names);
+
+    let hole = ClientBlackhole::install(&harness.remote);
+    if hole.is_none() {
+        kill_sshd_sessions(&harness.remote);
+    }
+
+    let mut commits = Vec::new();
+    for name in &pods {
+        let oid = commit_in_pod(&harness.remote, name, "load-pending");
+        commits.push((pod_ref(name), oid));
+    }
+    drop(hole);
+
+    let expected: Vec<(&str, &str)> = commits
+        .iter()
+        .map(|(git_ref, oid)| (git_ref.as_str(), oid.as_str()))
+        .collect();
+    wait_for_refs(harness.repo.path(), &expected, Duration::from_secs(90));
+
+    let ssh_config = harness.home.path().join(".ssh/config");
+    harness.remote.wait_for_ssh_connectivity(&ssh_config);
+    for name in &pods {
+        let stdout = pod_command(&harness.repo, &harness.daemon)
+            .args(["enter", name, "--", "echo", "reconnected"])
+            .success()
+            .unwrap_or_else(|e| panic!("entering {name} after load reconnect failed: {e:#}"));
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "reconnected");
+    }
 }
