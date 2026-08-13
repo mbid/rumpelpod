@@ -251,10 +251,14 @@ fn small_blob_ids(repo_path: &Path, object_ids: &[String]) -> Result<Vec<String>
         return Ok(Vec::new());
     }
 
+    // cat-file --batch-check interpolates %(atom) only. Unlike
+    // for-each-ref, it copies pretty-format hex escapes such as %09
+    // through as literal text, so a tab-separated format never
+    // actually contains tabs. Object name/type/size are space-safe.
     let mut child = Command::new("git")
         .args([
             "cat-file",
-            "--batch-check=%(objectname)%09%(objecttype)%09%(objectsize)",
+            "--batch-check=%(objectname) %(objecttype) %(objectsize)",
         ])
         .current_dir(repo_path)
         .stdin(Stdio::piped())
@@ -286,7 +290,7 @@ fn small_blob_ids(repo_path: &Path, object_ids: &[String]) -> Result<Vec<String>
     let listing = String::from_utf8(output.stdout).context("cat-file output was not UTF-8")?;
     let mut blob_ids = Vec::new();
     for line in listing.lines() {
-        let mut parts = line.split('\t');
+        let mut parts = line.split(' ');
         let Some(object_id) = parts.next() else {
             return Err(anyhow::anyhow!(
                 "git cat-file returned malformed line: {line}"
@@ -519,6 +523,81 @@ fn rev_parse_optional(repo_path: &Path, refname: &str) -> Result<Option<String>>
         Some(_) | None => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             Err(anyhow::anyhow!("git rev-parse {refname} failed: {stderr}"))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::process::Command;
+
+    use super::*;
+
+    fn git_in(repo: &Path, args: &[&str]) -> std::process::Output {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            panic!("git {args:?} failed: {stderr}");
+        }
+        output
+    }
+
+    fn init_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("create temp repo");
+        git_in(dir.path(), &["-c", "init.defaultBranch=main", "init"]);
+        git_in(dir.path(), &["config", "user.email", "test@example.com"]);
+        git_in(dir.path(), &["config", "user.name", "Test User"]);
+        dir
+    }
+
+    fn rev_parse(repo: &Path, rev: &str) -> String {
+        let output = git_in(repo, &["rev-parse", rev]);
+        String::from_utf8(output.stdout)
+            .expect("rev-parse was not UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn small_blob_ids_parses_cat_file_batch_check() {
+        let dir = init_repo();
+        let repo = dir.path();
+        fs::write(repo.join("file.txt"), "hello\n").expect("write file.txt");
+        git_in(repo, &["add", "file.txt"]);
+        git_in(repo, &["commit", "-m", "add file"]);
+
+        let head = rev_parse(repo, "HEAD");
+        let object_ids = object_ids_in_ref_update(repo, &[], &head).expect("list objects");
+        let blob_ids = small_blob_ids(repo, &object_ids).expect("classify objects");
+
+        let expected_blob = rev_parse(repo, "HEAD:file.txt");
+        assert_eq!(blob_ids, vec![expected_blob]);
+    }
+
+    #[test]
+    fn prepare_lfs_for_rumpelpod_push_with_strict_ancestor_remote() {
+        let dir = init_repo();
+        let repo = dir.path();
+        git_in(repo, &["commit", "--allow-empty", "-m", "base"]);
+        let base = rev_parse(repo, "HEAD");
+        git_in(repo, &["commit", "--allow-empty", "-m", "ahead"]);
+        git_in(repo, &["update-ref", "refs/remotes/origin/main", &base]);
+        git_in(repo, &["config", "rumpelpod.pod-name", "main"]);
+
+        let prepared = prepare_lfs_for_rumpelpod_push(repo, "testpod")
+            .expect("prepare LFS for leftover branch ahead of remotes");
+        if git_lfs_available(repo).expect("check git-lfs") {
+            assert!(
+                prepared,
+                "strict ancestor remotes should trigger the new-ref LFS scan"
+            );
+        } else {
+            assert!(!prepared, "without git-lfs the new-ref LFS scan is skipped");
         }
     }
 }

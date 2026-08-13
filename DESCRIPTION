@@ -1,0 +1,10 @@
+Fix first-enter push when git-lfs is installed
+
+git cat-file --batch-check interpolates %(atom) only. Unlike
+for-each-ref, it copies pretty-format hex escapes such as %09
+through as literal text. The LFS object scan treated that format
+as tab-separated, so first-enter recover_push panicked with
+"malformed line: <oid>%09commit%09<size>" whenever a leftover
+image branch was a strict descendant of the fetched remotes.
+
+Use the default space-separated batch-check format instead.
