@@ -1,18 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Opt-in SSH reconnect cases that are closer to a laptop losing WiFi
-//! than the default suite.
+//! SSH reconnect cases that are closer to a laptop losing WiFi than
+//! a clean `docker kill`.
 //!
 //! These start a nested SSH Docker host, several pods, and then kill
 //! the transport in different ways. Recovery is asserted by a commit
 //! made through `docker exec` (not SSH) showing up in the host repo
 //! without `rumpel connect`.
 //!
-//! They are skipped unless `RUMPELPOD_TEST_SSH_RECONNECT=1`. The
-//! ControlMaster / ServerAlive settings follow a typical laptop SSH
-//! config; sshd `MaxSessions` is raised in the fixture image because
-//! one mux master carries every pod route.
+//! The ControlMaster / ServerAlive settings follow a typical laptop
+//! SSH config; sshd `MaxSessions` is raised in the fixture image
+//! because one mux master carries every pod route.
 //!
 //! Each case waits for `ssh -O check` to report a live mux after setup
 //! and a dead mux after the fault, so recovery cannot hide behind a
@@ -32,26 +31,21 @@ use crate::common::{
 use crate::executor;
 use rumpelpod::CommandExt;
 
-const ENV_VAR: &str = "RUMPELPOD_TEST_SSH_RECONNECT";
 const FAST_PROBE_MS: &str = "3000";
 
-fn suite_enabled() -> bool {
-    if std::env::var(ENV_VAR).as_deref() != Ok("1") {
-        println!("xtest:skip");
-        return false;
-    }
+fn skip_if_unsupported() -> bool {
     if cfg!(target_os = "macos") {
-        println!("xtest:skip");
-        return false;
+        executor::skip_test();
+        return true;
     }
     if !matches!(
         executor::executor_mode(),
         executor::ExecutorMode::Docker | executor::ExecutorMode::Ssh
     ) {
-        println!("xtest:skip");
-        return false;
+        executor::skip_test();
+        return true;
     }
-    true
+    false
 }
 
 struct MuxHarness {
@@ -342,7 +336,7 @@ fn run_iptables(args: &[&str]) -> bool {
 /// Server-side session death: sshd children are gone, listener stays.
 #[test]
 fn mux_git_syncs_after_sshd_sessions_killed() {
-    if !suite_enabled() {
+    if skip_if_unsupported() {
         return;
     }
 
@@ -363,7 +357,7 @@ fn mux_git_syncs_after_sshd_sessions_killed() {
 /// master; after the route returns the daemon should recover alone.
 #[test]
 fn mux_git_syncs_after_client_blackhole() {
-    if !suite_enabled() {
+    if skip_if_unsupported() {
         return;
     }
 
@@ -387,7 +381,7 @@ fn mux_git_syncs_after_client_blackhole() {
 /// SSH. Both refs should land after the blackhole is lifted.
 #[test]
 fn mux_both_pods_sync_after_client_blackhole() {
-    if !suite_enabled() {
+    if skip_if_unsupported() {
         return;
     }
 
@@ -412,7 +406,7 @@ fn mux_both_pods_sync_after_client_blackhole() {
 /// The mux master process is killed and its socket is left behind.
 #[test]
 fn mux_git_syncs_after_control_master_killed() {
-    if !suite_enabled() {
+    if skip_if_unsupported() {
         return;
     }
 
@@ -436,7 +430,7 @@ fn mux_git_syncs_after_control_master_killed() {
 /// Every pod on the muxed host should be enterable after sshd sessions die.
 #[test]
 fn mux_all_pods_enter_after_sshd_sessions_killed() {
-    if !suite_enabled() {
+    if skip_if_unsupported() {
         return;
     }
 
@@ -465,7 +459,7 @@ fn mux_all_pods_enter_after_sshd_sessions_killed() {
 /// to give up, then resumed. Same shape as a laptop sleep.
 #[test]
 fn mux_git_syncs_after_remote_pause() {
-    if !suite_enabled() {
+    if skip_if_unsupported() {
         return;
     }
 
@@ -495,7 +489,7 @@ fn mux_git_syncs_after_remote_pause() {
 /// without an explicit `rumpel connect`.
 #[test]
 fn mux_ten_pods_reconnect_after_disconnect() {
-    if !suite_enabled() {
+    if skip_if_unsupported() {
         return;
     }
 
