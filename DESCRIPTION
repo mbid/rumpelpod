@@ -1,0 +1,5 @@
+Drop the rumpel review subcommand
+
+Pod changes already land as rumpelpod/<pod> refs, so git diff and
+git difftool with the three-dot form are enough. Keep POST /review
+temporarily because the unpublished VS Code extension still uses it.

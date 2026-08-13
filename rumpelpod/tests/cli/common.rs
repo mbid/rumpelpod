@@ -39,7 +39,7 @@ const XDG_STATE_HOME_ENV: &str = "XDG_STATE_HOME";
 ///
 /// Split into two groups so the intent is legible:
 /// - **rumpelpod core**: what rumpel itself and its tests drive
-///   directly (`rumpel`, `git`, the shells, review's mock difftool).
+///   directly (`rumpel`, `git`, the shells).
 /// - **shell plumbing**: utilities that POSIX shell scripts (notably
 ///   `git submodule` and friends) invoke internally.  They are not
 ///   the subject of any test, but the test daemon and `pod_command`

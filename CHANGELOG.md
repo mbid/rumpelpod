@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- `rumpel review`. Use `git diff ...rumpelpod/<pod>` or
+  `git difftool ...rumpelpod/<pod>` instead.
+
 ## [0.1.0] - TBD
 
 ### Added
