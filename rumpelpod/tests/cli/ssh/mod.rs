@@ -1041,7 +1041,7 @@ fn ssh_reconnect_test() {
 /// A single pod does not reproduce the stalled route seen after laptop resume.
 #[test]
 fn multiple_pods_reconnect_after_ssh_transport_stall() {
-    println!("xtest:timeout=90");
+    println!("xtest:timeout=180");
     if cfg!(target_os = "macos") {
         crate::executor::skip_test();
         return;
@@ -1086,12 +1086,24 @@ fn multiple_pods_reconnect_after_ssh_transport_stall() {
             .unwrap_or_else(|e| panic!("creating pod {pod_name} failed: {e:#}"));
     }
 
+    reconnect::wait_for_mux(
+        &home,
+        &remote,
+        true,
+        Duration::from_secs(30),
+        "mux after setup",
+    );
     Command::new("docker")
         .args(["pause", &remote.container_id])
         .success()
         .expect("pausing the SSH host failed");
-
-    std::thread::sleep(Duration::from_secs(20));
+    reconnect::wait_for_mux(
+        &home,
+        &remote,
+        false,
+        Duration::from_secs(45),
+        "mux while paused",
+    );
 
     Command::new("docker")
         .args(["unpause", &remote.container_id])

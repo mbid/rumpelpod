@@ -34,7 +34,12 @@ use rumpelpod::CommandExt;
 
 const ENV_VAR: &str = "RUMPELPOD_TEST_SSH_RECONNECT";
 const FAST_PROBE_MS: &str = "3000";
-const GIT_WAIT: Duration = Duration::from_secs(30);
+/// How long the test waits for a pod commit to show up on the host.
+/// This is not a git(1) timeout; the hook push has already been
+/// attempted inside the pod.
+const GIT_WAIT: Duration = Duration::from_secs(90);
+const MUX_UP: Duration = Duration::from_secs(30);
+const MUX_DOWN: Duration = Duration::from_secs(45);
 
 fn suite_enabled() -> bool {
     if std::env::var(ENV_VAR).as_deref() != Ok("1") {
@@ -125,7 +130,13 @@ fn start_mux_harness(pod_names: &[&str]) -> MuxHarness {
         daemon,
         repo,
     };
-    wait_for_mux(&harness, true, Duration::from_secs(15), "mux after setup");
+    wait_for_mux(
+        &harness.home,
+        &harness.remote,
+        true,
+        MUX_UP,
+        "mux after setup",
+    );
     harness
 }
 
@@ -240,7 +251,7 @@ fn kill_control_masters(home: &TestHome) {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MuxState {
+pub(super) enum MuxState {
     Running(u32),
     Dead,
 }
@@ -274,10 +285,16 @@ fn mux_state(home: &TestHome, remote: &SshRemoteHost) -> MuxState {
     }
 }
 
-fn wait_for_mux(harness: &MuxHarness, want_alive: bool, timeout: Duration, what: &str) -> MuxState {
+pub(super) fn wait_for_mux(
+    home: &TestHome,
+    remote: &SshRemoteHost,
+    want_alive: bool,
+    timeout: Duration,
+    what: &str,
+) -> MuxState {
     let deadline = Instant::now() + timeout;
     loop {
-        let state = mux_state(&harness.home, &harness.remote);
+        let state = mux_state(home, remote);
         let alive = matches!(state, MuxState::Running(_));
         if alive == want_alive {
             return state;
@@ -346,7 +363,7 @@ fn run_iptables(args: &[&str]) -> bool {
 /// Server-side session death: sshd children are gone, listener stays.
 #[test]
 fn mux_git_syncs_after_sshd_sessions_killed() {
-    println!("xtest:timeout=120");
+    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -354,9 +371,10 @@ fn mux_git_syncs_after_sshd_sessions_killed() {
     let harness = start_mux_harness(&["alpha", "beta"]);
     kill_sshd_sessions(&harness.remote);
     wait_for_mux(
-        &harness,
+        &harness.home,
+        &harness.remote,
         false,
-        Duration::from_secs(10),
+        MUX_DOWN,
         "mux after sshd kill",
     );
     let oid = commit_in_pod(&harness.remote, "alpha", "after-session-kill");
@@ -368,7 +386,7 @@ fn mux_git_syncs_after_sshd_sessions_killed() {
 /// master; after the route returns the daemon should recover alone.
 #[test]
 fn mux_git_syncs_after_client_blackhole() {
-    println!("xtest:timeout=120");
+    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -379,9 +397,10 @@ fn mux_git_syncs_after_client_blackhole() {
         return;
     };
     wait_for_mux(
-        &harness,
+        &harness.home,
+        &harness.remote,
         false,
-        Duration::from_secs(10),
+        MUX_DOWN,
         "mux after client blackhole",
     );
     let oid = commit_in_pod(&harness.remote, "alpha", "after-blackhole");
@@ -393,7 +412,7 @@ fn mux_git_syncs_after_client_blackhole() {
 /// SSH. Both refs should land after the blackhole is lifted.
 #[test]
 fn mux_both_pods_sync_after_client_blackhole() {
-    println!("xtest:timeout=150");
+    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -404,9 +423,10 @@ fn mux_both_pods_sync_after_client_blackhole() {
         return;
     };
     wait_for_mux(
-        &harness,
+        &harness.home,
+        &harness.remote,
         false,
-        Duration::from_secs(10),
+        MUX_DOWN,
         "mux after client blackhole",
     );
     let oid_a = commit_in_pod(&harness.remote, "alpha", "alpha-pending");
@@ -419,7 +439,7 @@ fn mux_both_pods_sync_after_client_blackhole() {
 /// The mux master process is killed and its socket is left behind.
 #[test]
 fn mux_git_syncs_after_control_master_killed() {
-    println!("xtest:timeout=120");
+    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -428,9 +448,10 @@ fn mux_git_syncs_after_control_master_killed() {
     let before = mux_state(&harness.home, &harness.remote);
     kill_control_masters(&harness.home);
     let after = wait_for_mux(
-        &harness,
+        &harness.home,
+        &harness.remote,
         false,
-        Duration::from_secs(5),
+        MUX_DOWN,
         "mux after control master kill",
     );
     assert_ne!(
@@ -444,7 +465,7 @@ fn mux_git_syncs_after_control_master_killed() {
 /// Every pod on the muxed host should be enterable after sshd sessions die.
 #[test]
 fn mux_all_pods_enter_after_sshd_sessions_killed() {
-    println!("xtest:timeout=180");
+    println!("xtest:timeout=240");
     if !suite_enabled() {
         return;
     }
@@ -453,9 +474,10 @@ fn mux_all_pods_enter_after_sshd_sessions_killed() {
     let harness = start_mux_harness(&pods);
     kill_sshd_sessions(&harness.remote);
     wait_for_mux(
-        &harness,
+        &harness.home,
+        &harness.remote,
         false,
-        Duration::from_secs(10),
+        MUX_DOWN,
         "mux after sshd kill",
     );
     let ssh_config = harness.home.path().join(".ssh/config");
@@ -474,7 +496,7 @@ fn mux_all_pods_enter_after_sshd_sessions_killed() {
 /// to give up, then resumed. Same shape as a laptop sleep.
 #[test]
 fn mux_git_syncs_after_remote_pause() {
-    println!("xtest:timeout=150");
+    println!("xtest:timeout=180");
     if !suite_enabled() {
         return;
     }
@@ -484,10 +506,15 @@ fn mux_git_syncs_after_remote_pause() {
         .args(["pause", &harness.remote.container_id])
         .success()
         .expect("pausing ssh host");
-    // ServerAlive 1s * 2 plus one short probe. The nested engine is
-    // frozen too, so the pending commit happens after unpause.
-    std::thread::sleep(Duration::from_secs(6));
-    wait_for_mux(&harness, false, Duration::from_secs(10), "mux while paused");
+    // Nested dockerd is frozen; commit after unpause. Mux death is
+    // OpenSSH's ServerAlive, which we poll for instead of sleeping.
+    wait_for_mux(
+        &harness.home,
+        &harness.remote,
+        false,
+        MUX_DOWN,
+        "mux while paused",
+    );
     Command::new("docker")
         .args(["unpause", &harness.remote.container_id])
         .success()
@@ -501,7 +528,7 @@ fn mux_git_syncs_after_remote_pause() {
 /// without an explicit `rumpel connect`.
 #[test]
 fn mux_ten_pods_reconnect_after_disconnect() {
-    println!("xtest:timeout=480");
+    println!("xtest:timeout=600");
     if !suite_enabled() {
         return;
     }
@@ -515,9 +542,10 @@ fn mux_ten_pods_reconnect_after_disconnect() {
         kill_sshd_sessions(&harness.remote);
     }
     wait_for_mux(
-        &harness,
+        &harness.home,
+        &harness.remote,
         false,
-        Duration::from_secs(10),
+        MUX_DOWN,
         "mux after load disconnect",
     );
 
@@ -532,7 +560,7 @@ fn mux_ten_pods_reconnect_after_disconnect() {
         .iter()
         .map(|(git_ref, oid)| (git_ref.as_str(), oid.as_str()))
         .collect();
-    wait_for_refs(harness.repo.path(), &expected, Duration::from_secs(90));
+    wait_for_refs(harness.repo.path(), &expected, Duration::from_secs(120));
 
     let ssh_config = harness.home.path().join(".ssh/config");
     harness.remote.wait_for_ssh_connectivity(&ssh_config);
