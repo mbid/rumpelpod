@@ -468,12 +468,16 @@ fn build_remote_docker_image() -> Result<String> {
         # "administratively prohibited".  AllowTcpForwarding stays at
         # its default (yes) because devcontainer `forwardPorts` uses
         # `direct-tcpip`, which Teleport also allows.
+        # MaxSessions is raised because one ControlMaster carries every
+        # pod route (dial-stdio, git tunnel, exec proxy).
         RUN mkdir -p /run/sshd \
             && ssh-keygen -A \
             && sed -i 's/#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config \
             && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
             && sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
-            && echo 'AllowStreamLocalForwarding no' >> /etc/ssh/sshd_config
+            && echo 'AllowStreamLocalForwarding no' >> /etc/ssh/sshd_config \
+            && echo 'MaxSessions 50' >> /etc/ssh/sshd_config \
+            && echo 'MaxStartups 50:30:100' >> /etc/ssh/sshd_config
 
         # Startup script that runs both SSH and Docker.
         # After a container restart, stale PID and socket files from the previous
@@ -574,6 +578,8 @@ fn build_remote_podman_image() -> Result<String> {
             && sed -i 's/#PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config \
             && sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
             && echo 'AllowStreamLocalForwarding no' >> /etc/ssh/sshd_config \
+            && echo 'MaxSessions 50' >> /etc/ssh/sshd_config \
+            && echo 'MaxStartups 50:30:100' >> /etc/ssh/sshd_config \
             && echo 'SetEnv CONTAINER_HOST=unix:///run/podman/podman.sock' >> /etc/ssh/sshd_config
 
         # Startup script that runs both the Podman API service and SSH.
@@ -737,6 +743,8 @@ fn install_ssh_config_wrapper(home: &TestHome, config_path: &Path) {
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
+
+mod reconnect;
 
 // Tests
 // Note: These tests require privileged Docker containers, which may not be

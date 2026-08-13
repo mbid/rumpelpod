@@ -382,7 +382,8 @@ impl LocalhostConnection {
         self.set_status(HostStatus::Disconnected);
         let engine = self.engine.binary_name();
         Err(anyhow::anyhow!(
-            "local {engine} engine failed to answer within {PING_TIMEOUT:?}"
+            "local {engine} engine failed to answer within {:?}",
+            ping_timeout()
         ))
     }
 }
@@ -431,7 +432,7 @@ fn ping_local_engine(engine: ContainerEngine) -> bool {
         }
     }
     match RUNTIME.block_on(async {
-        timeout(PING_TIMEOUT, async {
+        timeout(ping_timeout(), async {
             TokioCommand::new(engine.binary_name())
                 .arg("info")
                 .stdin(Stdio::null())
@@ -449,7 +450,7 @@ fn ping_local_engine(engine: ContainerEngine) -> bool {
             false
         }
         Err(_) => {
-            debug!("local engine probe timed out after {PING_TIMEOUT:?}");
+            debug!("local engine probe timed out after {:?}", ping_timeout());
             false
         }
     }
@@ -597,7 +598,7 @@ impl SshConnection {
             "SSH {engine} transport to {} failed to answer /_ping within {:?}. \
              Check SSH configuration, remote {engine}, and API socket permissions.",
             self.key(),
-            PING_TIMEOUT
+            ping_timeout()
         ))
     }
 }
@@ -656,10 +657,24 @@ fn ssh_dial_stdio_args(destination: &str, engine: ContainerEngine) -> Vec<OsStri
 /// Hard ceiling on the engine `/_ping` round-trip over SSH.
 const PING_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Tests can set `RUMPELPOD_HOST_PROBE_TIMEOUT_MS` so a dead SSH
+/// transport fails in a few seconds instead of waiting out a laptop-
+/// scale 30s hang.
+fn ping_timeout() -> Duration {
+    match std::env::var("RUMPELPOD_HOST_PROBE_TIMEOUT_MS") {
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(ms) if ms > 0 => Duration::from_millis(ms),
+            Ok(_) | Err(_) => PING_TIMEOUT,
+        },
+        Err(_) => PING_TIMEOUT,
+    }
+}
+
 fn ping_ssh_engine(destination: &str, engine: ContainerEngine) -> bool {
     let destination = destination.to_string();
+    let timeout_for = ping_timeout();
     match RUNTIME
-        .block_on(async { timeout(PING_TIMEOUT, ping_ssh_engine_inner(destination, engine)).await })
+        .block_on(async { timeout(timeout_for, ping_ssh_engine_inner(destination, engine)).await })
     {
         Ok(Ok(())) => true,
         Ok(Err(e)) => {
@@ -667,7 +682,7 @@ fn ping_ssh_engine(destination: &str, engine: ContainerEngine) -> bool {
             false
         }
         Err(_) => {
-            debug!("ssh engine ping timed out after {PING_TIMEOUT:?}");
+            debug!("ssh engine ping timed out after {timeout_for:?}");
             false
         }
     }
