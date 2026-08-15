@@ -1119,15 +1119,6 @@ fn write_pi_system_prompt(user: &str, description_file: Option<&str>) -> Result<
 
 /// Write the rumpelpod system prompt to ~/.grok/rules/rumpelpod.md so
 /// grok understands the container layout and git remote conventions.
-///
-/// grok loads every `*.md` file in `$GROK_HOME/rules/` (default
-/// `~/.grok/rules/`) as global instructions, independent of cwd. A
-/// repo-tree AGENTS.md would be committed with the agent's work, so
-/// the prompt lives in the home rules dir instead. Written as a
-/// dedicated file so a base image's existing rules are preserved.
-/// The whole ~/.grok subtree is chowned to the container user so the
-/// runtime credential copy (which runs as that user) can write
-/// auth/settings alongside it.
 fn write_grok_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
     let pw = nix::unistd::User::from_name(user)
         .with_context(|| format!("looking up user '{user}'"))?
