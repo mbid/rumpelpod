@@ -260,7 +260,7 @@ RUN ARCH=$(uname -m) && \
         x86_64) CODEX_ARCH="x86_64-unknown-linux-musl" ;; \
         aarch64) CODEX_ARCH="aarch64-unknown-linux-musl" ;; \
     esac && \
-    curl -fsSL "https://github.com/openai/codex/releases/download/rust-v0.145.0/codex-$CODEX_ARCH.tar.gz" \
+    curl -fsSL "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-$CODEX_ARCH.tar.gz" \
     | tar xz -C /tmp && \
     mv "/tmp/codex-$CODEX_ARCH" /usr/local/bin/codex && \
     chmod +x /usr/local/bin/codex
