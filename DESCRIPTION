@@ -3,5 +3,6 @@ Restore Codex 0.147 standalone package support
 Install the complete pinned Codex release for tests while keeping it
 separate from the developer's Codex, and use the official standalone
 installer inside prepared pods so required companion binaries remain
-available. Normalize generated Codex message IDs so the updated smoke
-fixtures continue to replay offline.
+available, including for a numeric container UID.
+Normalize generated Codex message IDs so the updated smoke fixtures
+continue to replay offline.

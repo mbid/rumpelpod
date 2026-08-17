@@ -140,9 +140,7 @@ fn parse_codex_version(raw: &str) -> Option<&str> {
 
 /// Whether a Codex CLI is already available to the configured container user.
 fn container_has_codex(user: &str) -> Result<bool> {
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     if pw.dir.join(".local/bin/codex").exists() {
         return Ok(true);
     }
@@ -973,9 +971,7 @@ fn create_mount_targets(targets: &[String], user: &str) -> Result<()> {
         return Ok(());
     }
 
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
 
     for target in targets {
         fs::create_dir_all(target)
@@ -1032,9 +1028,7 @@ fn write_system_prompt(description_file: Option<&str>) -> Result<()> {
 /// above the project root and never read.  Appends rather than
 /// overwrites so a base image's existing file is preserved.
 fn write_codex_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     let codex_dir = pw.dir.join(".codex");
     fs::create_dir_all(&codex_dir).with_context(|| {
         let d = codex_dir.display();
@@ -1084,9 +1078,7 @@ fn write_codex_system_prompt(user: &str, description_file: Option<&str>) -> Resu
 /// chowned to the container user so the runtime config copy (which
 /// runs as that user) can write auth/settings alongside it.
 fn write_pi_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     let agent_dir = pw.dir.join(".pi/agent");
     let agent_dir_display = agent_dir.display();
     fs::create_dir_all(&agent_dir).with_context(|| format!("creating {agent_dir_display}"))?;
@@ -1124,9 +1116,7 @@ fn write_pi_system_prompt(user: &str, description_file: Option<&str>) -> Result<
 /// Write the rumpelpod system prompt to ~/.grok/rules/rumpelpod.md so
 /// grok understands the container layout and git remote conventions.
 fn write_grok_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     let rules_dir = pw.dir.join(".grok/rules");
     let rules_dir_display = rules_dir.display();
     fs::create_dir_all(&rules_dir).with_context(|| format!("creating {rules_dir_display}"))?;
@@ -1347,9 +1337,7 @@ fn install_claude_cli(version: &str) -> Result<()> {
 fn install_codex_cli(version: &str, user: &str) -> Result<()> {
     ensure_codex_download_tool()?;
 
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     let bin_dir = pw.dir.join(".local/bin");
     let bin_path = bin_dir.join("codex");
     let codex_home = pw.dir.join(".codex");

@@ -13,9 +13,9 @@
 //! switching logic is gated to Linux.  On macOS the binary runs on the
 //! host only; `switch_user` is unreachable but must compile.
 
-#[cfg(not(target_os = "macos"))]
 use anyhow::Context;
 use anyhow::Result;
+use nix::unistd::User;
 
 /// Path where `prepare-image` stores the resolved container user name.
 pub const USER_FILE: &str = "/opt/rumpelpod/user";
@@ -112,10 +112,7 @@ fn verify_groups(cname: &std::ffi::CString, primary_gid: nix::unistd::Gid) -> Re
 }
 
 /// Resolve a user by name, falling back to UID lookup for numeric strings.
-#[cfg(not(target_os = "macos"))]
-fn resolve_user(name: &str) -> Result<nix::unistd::User> {
-    use nix::unistd::User;
-
+pub(crate) fn resolve_user(name: &str) -> Result<nix::unistd::User> {
     if let Some(user) =
         User::from_name(name).with_context(|| format!("looking up user '{name}'"))?
     {
