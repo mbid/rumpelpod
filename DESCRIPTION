@@ -1,9 +1,8 @@
-Restore Codex 0.147 standalone package support
+Restore Codex 0.147 code mode support
 
-Install the complete pinned Codex release for tests while keeping it
-separate from the developer's Codex, and use the official standalone
-installer inside prepared pods so required companion binaries remain
-available, including for a numeric container UID.
-Resolve the runtime binary from the recorded container user before PATH.
+Keep the pinned test release separate from the developer's Codex, and
+install the CLI plus its required code-mode host directly from GitHub
+release archives without adding download tools to prepared images.
 Normalize generated Codex message IDs so the updated smoke fixtures
-continue to replay offline.
+continue to replay offline, and exercise a real shell tool call so a
+missing code-mode host fails behaviorally.

@@ -52,12 +52,11 @@ fn image_includes_codex_from_client_path() {
             "--create",
             "codex-install-test",
             "--",
-            "sh",
-            "-c",
-            r#"test -w "$HOME/.codex/packages/standalone/current" && test -x "$HOME/.codex/packages/standalone/current/bin/codex-code-mode-host" && "$HOME/.local/bin/codex" --version"#,
+            "/opt/rumpelpod/bin/codex",
+            "--version",
         ])
         .success()
-        .expect("standalone Codex package should run in the container");
+        .expect("codex binary should run in the container");
     let pod_version = String::from_utf8(stdout)
         .expect("pod codex version should be UTF-8")
         .trim()

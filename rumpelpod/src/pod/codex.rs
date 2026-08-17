@@ -547,18 +547,17 @@ fn tungstenite_to_axum(msg: tungstenite::Message) -> Message {
 
 /// Return the path to the codex binary inside the container.
 fn find_codex_cli() -> Result<PathBuf> {
-    let user = crate::switch_user::container_user()?;
-    let bin_path = user.dir.join(".local/bin/codex");
+    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
     if bin_path.exists() {
-        return Ok(bin_path);
+        return Ok(bin_path.to_path_buf());
     }
 
     if let Some(found) = crate::which("codex") {
         return Ok(found);
     }
 
-    let bin_path = bin_path.display();
     Err(anyhow::anyhow!(
-        "Codex CLI not found at {bin_path} or in PATH"
+        "Codex CLI not found at {} or in PATH",
+        crate::daemon::CODEX_CONTAINER_BIN
     ))
 }

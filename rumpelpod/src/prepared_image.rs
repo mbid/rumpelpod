@@ -6,17 +6,16 @@
 //! resolved devcontainer image. This avoids repeating expensive setup steps
 //! every time a container is created.
 
-use std::ffi::CString;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::CommandExt as UnixCommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use indoc::{formatdoc, indoc};
+use semver::Version;
 use sha2::{Digest, Sha256};
 
 use crate::cli::PrepareImageCommand;
@@ -138,19 +137,19 @@ fn parse_codex_version(raw: &str) -> Option<&str> {
     Some(version)
 }
 
-/// Whether a Codex CLI is already available to the configured container user.
-fn container_has_codex(user: &str) -> Result<bool> {
-    let pw = crate::switch_user::resolve_user(user)?;
-    if pw.dir.join(".local/bin/codex").exists() {
-        return Ok(true);
+/// Whether a Codex CLI is already available inside the build container.
+fn container_has_codex() -> bool {
+    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
+    if bin_path.exists() {
+        return true;
     }
 
-    Ok(Command::new("codex")
+    Command::new("codex")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success()))
+        .is_ok_and(|s| s.success())
 }
 
 /// Whether a pi CLI is already available inside the build container.
@@ -913,7 +912,7 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
     }
 
     if let Some(ref version) = cmd.codex_version {
-        install_codex_cli(version, &cmd.user)?;
+        install_codex_cli(version)?;
     }
 
     if let Some(ref version) = cmd.grok_version {
@@ -922,7 +921,7 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
 
     if cmd.inject_system_prompt {
         write_system_prompt(cmd.description_file.as_deref())?;
-        if container_has_codex(&cmd.user)? {
+        if container_has_codex() {
             write_codex_system_prompt(&cmd.user, cmd.description_file.as_deref())?;
         }
         if container_has_pi() {
@@ -1329,121 +1328,96 @@ fn install_claude_cli(version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Install the specified Codex release with its standalone package metadata.
-///
-/// Codex resolves companion executables relative to the installed package, so
-/// copying only the release binary is not sufficient. Running the supported
-/// installer as the container user also keeps its state in that user's home.
-fn install_codex_cli(version: &str, user: &str) -> Result<()> {
-    ensure_codex_download_tool()?;
-
-    let pw = crate::switch_user::resolve_user(user)?;
-    let bin_dir = pw.dir.join(".local/bin");
-    let bin_path = bin_dir.join("codex");
-    let codex_home = pw.dir.join(".codex");
-
-    let mut path_entries = vec![bin_dir.clone()];
-    if let Some(path) = std::env::var_os("PATH") {
-        path_entries.extend(std::env::split_paths(&path));
-    }
-    let path = std::env::join_paths(path_entries).context("constructing Codex installer PATH")?;
-
-    let name = CString::new(pw.name.clone()).context("container user name contains NUL")?;
-    let install = indoc! {r#"
-        if command -v curl >/dev/null 2>&1; then
-            curl -fsSL https://chatgpt.com/codex/install.sh
-        elif command -v wget >/dev/null 2>&1; then
-            wget -qO- https://chatgpt.com/codex/install.sh
-        else
-            echo "curl or wget is required to install Codex" >&2
-            exit 1
-        fi | sh -s -- --release "$1"
-    "#};
-    let mut command = Command::new("sh");
-    command
-        .args(["-c", install, "rumpelpod-codex-installer", version])
-        .env("HOME", &pw.dir)
-        .env("USER", &pw.name)
-        .env("LOGNAME", &pw.name)
-        .env("SHELL", &pw.shell)
-        .env("PATH", path)
-        .env("CODEX_HOME", &codex_home)
-        .env("CODEX_INSTALL_DIR", &bin_dir)
-        .env("CODEX_NON_INTERACTIVE", "1");
-    let uid = pw.uid;
-    let gid = pw.gid;
-    // The installer must not leave files owned by root, including companion
-    // package state that Codex updates later. Group initialization has to run
-    // before the child drops its uid and loses that privilege.
-    unsafe {
-        command.pre_exec(move || {
-            nix::unistd::initgroups(&name, gid).map_err(std::io::Error::from)?;
-            nix::unistd::setgid(gid).map_err(std::io::Error::from)?;
-            nix::unistd::setuid(uid).map_err(std::io::Error::from)?;
-            Ok(())
-        });
-    }
-    let status = command
-        .status()
-        .context("running the Codex standalone installer")?;
-    if !status.success() {
-        return Err(anyhow::anyhow!(
-            "Codex standalone installer for version {version} failed with {status}"
-        ));
-    }
-
-    let installed_version = codex_version_at(&bin_path);
-    if installed_version.as_deref() != Some(version) {
-        let bin_path = bin_path.display();
-        return Err(anyhow::anyhow!(
-            "Codex installer did not install version {version} at {bin_path}; found {installed_version:?}"
-        ));
-    }
-    Ok(())
-}
-
-/// Ensure the supported installer can fetch its release package in minimal
-/// devcontainer images, which often include neither downloader by default.
-fn ensure_codex_download_tool() -> Result<()> {
-    if crate::which("curl").is_some() || crate::which("wget").is_some() {
+fn install_codex_cli(version: &str) -> Result<()> {
+    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
+    let host_path = Path::new(crate::daemon::CODEX_CODE_MODE_HOST_CONTAINER_BIN);
+    let needs_host = codex_needs_code_mode_host(version)?;
+    if codex_version_at(bin_path).as_deref() == Some(version)
+        && (!needs_host
+            || host_path.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            }))
+    {
         return Ok(());
     }
 
-    let status = if crate::which("apt-get").is_some() {
-        let update = Command::new("apt-get")
-            .arg("update")
-            .status()
-            .context("updating apt metadata for the Codex installer")?;
-        if !update.success() {
+    // The musl releases run independently of the devcontainer's libc.
+    let target = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-unknown-linux-musl",
+        "aarch64" => "aarch64-unknown-linux-musl",
+        other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
+    };
+
+    install_codex_release_binary(version, target, "codex", bin_path)?;
+    if needs_host {
+        install_codex_release_binary(version, target, "codex-code-mode-host", host_path)?;
+    }
+
+    Ok(())
+}
+
+/// Keep releases below rumpelpod's tested sidecar transition installable
+/// without assuming that their release has the companion asset.
+fn codex_needs_code_mode_host(version: &str) -> Result<bool> {
+    let version = Version::parse(version)
+        .with_context(|| format!("parsing Codex release version '{version}'"))?;
+    Ok(version >= Version::new(0, 147, 0))
+}
+
+fn install_codex_release_binary(
+    version: &str,
+    target: &str,
+    binary: &str,
+    destination: &Path,
+) -> Result<()> {
+    let asset = format!("{binary}-{target}");
+    let url =
+        format!("https://github.com/openai/codex/releases/download/rust-v{version}/{asset}.tar.gz");
+    let label = format!("Codex {binary} tarball");
+    let data = download_cli_asset(&url, &label)?;
+
+    let decoder = flate2::read::GzDecoder::new(&data[..]);
+    let mut archive = tar::Archive::new(decoder);
+    let mut entries = archive.entries().context("reading Codex tar entries")?;
+    {
+        let mut entry = entries
+            .next()
+            .with_context(|| format!("empty Codex release asset {asset}.tar.gz"))?
+            .with_context(|| format!("reading {asset} tar entry"))?;
+        let entry_path = entry
+            .path()
+            .with_context(|| format!("reading path from {asset} tar entry"))?;
+        if entry_path != Path::new(&asset) || !entry.header().entry_type().is_file() {
             return Err(anyhow::anyhow!(
-                "apt-get update for the Codex installer failed with {update}"
+                "Codex release asset {asset}.tar.gz contained unexpected entry {entry_path:?}"
             ));
         }
-        Command::new("apt-get")
-            .args(["install", "-y", "curl", "ca-certificates"])
-            .status()
-            .context("installing curl for the Codex installer")?
-    } else if crate::which("apk").is_some() {
-        Command::new("apk")
-            .args(["add", "--no-cache", "curl"])
-            .status()
-            .context("installing curl for the Codex installer")?
-    } else {
-        return Err(anyhow::anyhow!(
-            "Codex installation requires curl or wget; add one to the devcontainer image"
-        ));
-    };
-    if !status.success() {
-        return Err(anyhow::anyhow!(
-            "installing a Codex download tool failed with {status}"
-        ));
+
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
+        }
+        let destination_display = destination.display();
+        let mut output = fs::File::create(destination)
+            .with_context(|| format!("creating {destination_display}"))?;
+        std::io::copy(&mut entry, &mut output)
+            .with_context(|| format!("extracting {asset} to {destination_display}"))?;
     }
-    if crate::which("curl").is_none() && crate::which("wget").is_none() {
-        return Err(anyhow::anyhow!(
-            "package installation completed without providing curl or wget"
-        ));
+    match entries.next() {
+        None => {}
+        Some(Ok(_)) => {
+            return Err(anyhow::anyhow!(
+                "Codex release asset {asset}.tar.gz contained multiple entries"
+            ));
+        }
+        Some(Err(error)) => {
+            return Err(error).with_context(|| format!("reading {asset} tar entries"));
+        }
     }
-    Ok(())
+
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o755)).with_context(|| {
+        let destination = destination.display();
+        format!("making {destination} executable")
+    })
 }
 
 fn codex_version_at(bin: &Path) -> Option<String> {

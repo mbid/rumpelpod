@@ -33,7 +33,9 @@ pub const USER_FILE: &str = "/opt/rumpelpod/user";
 /// supplementary groups are set correctly.
 #[cfg(not(target_os = "macos"))]
 pub fn switch_user() -> Result<()> {
-    let user = container_user()?;
+    let name = std::fs::read_to_string(USER_FILE)
+        .with_context(|| format!("reading container user from {USER_FILE}"))?;
+    let user = resolve_user(name.trim())?;
     let name = &user.name;
 
     let cname = CString::new(name.as_str()).context("user name contains NUL")?;
@@ -55,14 +57,6 @@ pub fn switch_user() -> Result<()> {
     set_user_env(&user);
 
     Ok(())
-}
-
-/// Use the identity recorded during image preparation so callers do not infer
-/// the configured user from ambient process credentials.
-pub(crate) fn container_user() -> Result<User> {
-    let name = std::fs::read_to_string(USER_FILE)
-        .with_context(|| format!("reading container user from {USER_FILE}"))?;
-    resolve_user(name.trim())
 }
 
 /// container-exec and container-serve only run inside Linux containers.

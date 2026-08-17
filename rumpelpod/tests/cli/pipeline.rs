@@ -120,7 +120,6 @@ fn devcontainer_keeps_pinned_codex_out_of_the_interactive_path() {
         fs::read_to_string(root.join(".devcontainer/Dockerfile")).expect("read Dockerfile");
     assert!(
         dockerfile.contains("ARG CODEX_VERSION=0.147.0")
-            && dockerfile.contains("https://chatgpt.com/codex/install.sh")
             && dockerfile
                 .contains("ENV RUMPELPOD_TEST_CODEX_BIN_DIR=/opt/rumpelpod-test-codex/bin")
             && !dockerfile.contains("/usr/local/bin/codex"),

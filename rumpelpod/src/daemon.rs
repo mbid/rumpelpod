@@ -2022,6 +2022,9 @@ fn strip_claude_json(data: &[u8], repo_path: &Path, container_repo_path: &Path) 
 
 pub(crate) const RUMPEL_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/rumpel";
 pub(crate) const CLAUDE_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/claude";
+pub(crate) const CODEX_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/codex";
+pub(crate) const CODEX_CODE_MODE_HOST_CONTAINER_BIN: &str =
+    "/opt/rumpelpod/bin/codex-code-mode-host";
 pub(crate) const PI_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/pi";
 pub(crate) const PI_CONFIG_COPIED_SENTINEL: &str = ".pi/agent/.rumpelpod-config-copied";
 pub(crate) const GROK_CONTAINER_BIN: &str = "/opt/rumpelpod/bin/grok";
