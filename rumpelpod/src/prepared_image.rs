@@ -6,9 +6,11 @@
 //! resolved devcontainer image. This avoids repeating expensive setup steps
 //! every time a container is created.
 
+use std::ffi::CString;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt as UnixCommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -29,7 +31,7 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 
 /// Bump this when the Dockerfile template changes in a way that
 /// invalidates previously built prepared images.
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 
 /// File baked into the prepared image listing the container env var
 /// names the daemon resolved from `containerEnv` and `--env-file` at
@@ -136,19 +138,21 @@ fn parse_codex_version(raw: &str) -> Option<&str> {
     Some(version)
 }
 
-/// Whether a Codex CLI is already available inside the build container.
-fn container_has_codex() -> bool {
-    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
-    if bin_path.exists() {
-        return true;
+/// Whether a Codex CLI is already available to the configured container user.
+fn container_has_codex(user: &str) -> Result<bool> {
+    let pw = nix::unistd::User::from_name(user)
+        .with_context(|| format!("looking up user '{user}'"))?
+        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    if pw.dir.join(".local/bin/codex").exists() {
+        return Ok(true);
     }
 
-    Command::new("codex")
+    Ok(Command::new("codex")
         .arg("--version")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok_and(|s| s.success()))
 }
 
 /// Whether a pi CLI is already available inside the build container.
@@ -911,7 +915,7 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
     }
 
     if let Some(ref version) = cmd.codex_version {
-        install_codex_cli(version)?;
+        install_codex_cli(version, &cmd.user)?;
     }
 
     if let Some(ref version) = cmd.grok_version {
@@ -920,7 +924,7 @@ pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
 
     if cmd.inject_system_prompt {
         write_system_prompt(cmd.description_file.as_deref())?;
-        if container_has_codex() {
+        if container_has_codex(&cmd.user)? {
             write_codex_system_prompt(&cmd.user, cmd.description_file.as_deref())?;
         }
         if container_has_pi() {
@@ -1335,53 +1339,122 @@ fn install_claude_cli(version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Download and install the specified Codex CLI release for this architecture.
+/// Install the specified Codex release with its standalone package metadata.
 ///
-/// Skips only when the requested version is already present. A different Codex
-/// supplied by the base image must not change the prepared pod's version.
-fn install_codex_cli(version: &str) -> Result<()> {
-    let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
-    if bin_path.exists() {
-        if codex_version_at(bin_path).as_deref() == Some(version) {
-            return Ok(());
-        }
-    } else if codex_version_at(Path::new("codex")).as_deref() == Some(version) {
+/// Codex resolves companion executables relative to the installed package, so
+/// copying only the release binary is not sufficient. Running the supported
+/// installer as the container user also keeps its state in that user's home.
+fn install_codex_cli(version: &str, user: &str) -> Result<()> {
+    ensure_codex_download_tool()?;
+
+    let pw = nix::unistd::User::from_name(user)
+        .with_context(|| format!("looking up user '{user}'"))?
+        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let bin_dir = pw.dir.join(".local/bin");
+    let bin_path = bin_dir.join("codex");
+    let codex_home = pw.dir.join(".codex");
+
+    let mut path_entries = vec![bin_dir.clone()];
+    if let Some(path) = std::env::var_os("PATH") {
+        path_entries.extend(std::env::split_paths(&path));
+    }
+    let path = std::env::join_paths(path_entries).context("constructing Codex installer PATH")?;
+
+    let name = CString::new(pw.name.clone()).context("container user name contains NUL")?;
+    let install = indoc! {r#"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL https://chatgpt.com/codex/install.sh
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO- https://chatgpt.com/codex/install.sh
+        else
+            echo "curl or wget is required to install Codex" >&2
+            exit 1
+        fi | sh -s -- --release "$1"
+    "#};
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", install, "rumpelpod-codex-installer", version])
+        .env("HOME", &pw.dir)
+        .env("USER", &pw.name)
+        .env("LOGNAME", &pw.name)
+        .env("SHELL", &pw.shell)
+        .env("PATH", path)
+        .env("CODEX_HOME", &codex_home)
+        .env("CODEX_INSTALL_DIR", &bin_dir)
+        .env("CODEX_NON_INTERACTIVE", "1");
+    let uid = pw.uid;
+    let gid = pw.gid;
+    // The installer must not leave files owned by root, including companion
+    // package state that Codex updates later. Group initialization has to run
+    // before the child drops its uid and loses that privilege.
+    unsafe {
+        command.pre_exec(move || {
+            nix::unistd::initgroups(&name, gid).map_err(std::io::Error::from)?;
+            nix::unistd::setgid(gid).map_err(std::io::Error::from)?;
+            nix::unistd::setuid(uid).map_err(std::io::Error::from)?;
+            Ok(())
+        });
+    }
+    let status = command
+        .status()
+        .context("running the Codex standalone installer")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "Codex standalone installer for version {version} failed with {status}"
+        ));
+    }
+
+    let installed_version = codex_version_at(&bin_path);
+    if installed_version.as_deref() != Some(version) {
+        let bin_path = bin_path.display();
+        return Err(anyhow::anyhow!(
+            "Codex installer did not install version {version} at {bin_path}; found {installed_version:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Ensure the supported installer can fetch its release package in minimal
+/// devcontainer images, which often include neither downloader by default.
+fn ensure_codex_download_tool() -> Result<()> {
+    if crate::which("curl").is_some() || crate::which("wget").is_some() {
         return Ok(());
     }
 
-    // musl build is static, so it runs on any base image.
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x86_64-unknown-linux-musl",
-        "aarch64" => "aarch64-unknown-linux-musl",
-        other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
+    let status = if crate::which("apt-get").is_some() {
+        let update = Command::new("apt-get")
+            .arg("update")
+            .status()
+            .context("updating apt metadata for the Codex installer")?;
+        if !update.success() {
+            return Err(anyhow::anyhow!(
+                "apt-get update for the Codex installer failed with {update}"
+            ));
+        }
+        Command::new("apt-get")
+            .args(["install", "-y", "curl", "ca-certificates"])
+            .status()
+            .context("installing curl for the Codex installer")?
+    } else if crate::which("apk").is_some() {
+        Command::new("apk")
+            .args(["add", "--no-cache", "curl"])
+            .status()
+            .context("installing curl for the Codex installer")?
+    } else {
+        return Err(anyhow::anyhow!(
+            "Codex installation requires curl or wget; add one to the devcontainer image"
+        ));
     };
-
-    let url = format!(
-        "https://github.com/openai/codex/releases/download/rust-v{version}/codex-{arch}.tar.gz"
-    );
-    let data = download_cli_asset(&url, "Codex CLI tarball")?;
-
-    // The tarball contains a single file named codex-<arch>.
-    let decoder = flate2::read::GzDecoder::new(&data[..]);
-    let mut archive = tar::Archive::new(decoder);
-    let mut entry = archive
-        .entries()
-        .context("reading tar entries")?
-        .next()
-        .context("empty tarball")?
-        .context("reading tar entry")?;
-
-    if let Some(parent) = bin_path.parent() {
-        fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "installing a Codex download tool failed with {status}"
+        ));
     }
-    std::io::copy(
-        &mut entry,
-        &mut fs::File::create(bin_path).context("creating codex binary")?,
-    )
-    .context("extracting codex binary")?;
-    fs::set_permissions(bin_path, fs::Permissions::from_mode(0o755))
-        .context("making codex binary executable")?;
-
+    if crate::which("curl").is_none() && crate::which("wget").is_none() {
+        return Err(anyhow::anyhow!(
+            "package installation completed without providing curl or wget"
+        ));
+    }
     Ok(())
 }
 

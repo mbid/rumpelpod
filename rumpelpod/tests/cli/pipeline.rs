@@ -114,6 +114,29 @@ fn devcontainer_installs_the_built_daemon_from_pipeline() {
 }
 
 #[test]
+fn devcontainer_keeps_pinned_codex_out_of_the_interactive_path() {
+    let root = workspace_root();
+    let dockerfile =
+        fs::read_to_string(root.join(".devcontainer/Dockerfile")).expect("read Dockerfile");
+    assert!(
+        dockerfile.contains("ARG CODEX_VERSION=0.147.0")
+            && dockerfile.contains("https://chatgpt.com/codex/install.sh")
+            && dockerfile
+                .contains("ENV RUMPELPOD_TEST_CODEX_BIN_DIR=/opt/rumpelpod-test-codex/bin")
+            && !dockerfile.contains("/usr/local/bin/codex"),
+        "the development image did not isolate its pinned Codex test package"
+    );
+
+    let pipeline =
+        fs::read_to_string(root.join("tools/src/bin/pipeline.rs")).expect("read Cargo pipeline");
+    assert!(
+        pipeline.contains("const TEST_CODEX_BIN_DIR_ENV: &str = \"RUMPELPOD_TEST_CODEX_BIN_DIR\"")
+            && pipeline.contains("use_pinned_test_codex(&mut xtest_cmd)?"),
+        "the test pipeline did not select the isolated Codex package"
+    );
+}
+
+#[test]
 fn xtest_timeouts_file_is_the_only_non_default_timeout_source() {
     let root = workspace_root();
     let path = root.join("tools/xtest-timeouts.json5");

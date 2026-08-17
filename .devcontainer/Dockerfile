@@ -253,17 +253,27 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s 2.1.219
 
 USER root
 
-# Install Codex CLI from GitHub releases.
-# musl build is static, so it runs on any base image.
-RUN ARCH=$(uname -m) && \
-    case "$ARCH" in \
-        x86_64) CODEX_ARCH="x86_64-unknown-linux-musl" ;; \
-        aarch64) CODEX_ARCH="aarch64-unknown-linux-musl" ;; \
-    esac && \
-    curl -fsSL "https://github.com/openai/codex/releases/download/rust-v0.147.0/codex-$CODEX_ARCH.tar.gz" \
-    | tar xz -C /tmp && \
-    mv "/tmp/codex-$CODEX_ARCH" /usr/local/bin/codex && \
-    chmod +x /usr/local/bin/codex
+# Keep the Codex used by CI outside the interactive PATH so developers can use
+# a different release without changing the test baseline. The standalone
+# installer supplies companion executables that are absent from the old
+# single-binary release archive.
+ARG CODEX_VERSION=0.147.0
+ENV RUMPELPOD_TEST_CODEX_BIN_DIR=/opt/rumpelpod-test-codex/bin
+RUN mkdir -p /opt/rumpelpod-test-codex && \
+    chown ${USER}:${USER} /opt/rumpelpod-test-codex
+USER ${USER}
+RUN mkdir -p \
+        /opt/rumpelpod-test-codex/bin \
+        /opt/rumpelpod-test-codex/home && \
+    curl -fsSL https://chatgpt.com/codex/install.sh \
+    | CODEX_HOME=/opt/rumpelpod-test-codex/home \
+      CODEX_INSTALL_DIR=${RUMPELPOD_TEST_CODEX_BIN_DIR} \
+      CODEX_NON_INTERACTIVE=1 \
+      PATH="${RUMPELPOD_TEST_CODEX_BIN_DIR}:${PATH}" \
+      sh -s -- --release "${CODEX_VERSION}" && \
+    "${RUMPELPOD_TEST_CODEX_BIN_DIR}/codex" --version
+
+USER root
 
 # Install the xAI Grok Build coding agent: a single statically-linked binary served
 # per (version, platform), pinned for reproducibility.
