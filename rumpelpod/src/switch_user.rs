@@ -13,8 +13,10 @@
 //! switching logic is gated to Linux.  On macOS the binary runs on the
 //! host only; `switch_user` is unreachable but must compile.
 
-use anyhow::Context;
-use anyhow::Result;
+#[cfg(not(target_os = "macos"))]
+use std::ffi::CString;
+
+use anyhow::{Context, Result};
 use nix::unistd::User;
 
 /// Path where `prepare-image` stores the resolved container user name.
@@ -31,19 +33,12 @@ pub const USER_FILE: &str = "/opt/rumpelpod/user";
 /// supplementary groups are set correctly.
 #[cfg(not(target_os = "macos"))]
 pub fn switch_user() -> Result<()> {
-    use std::ffi::CString;
+    let user = container_user()?;
+    let name = &user.name;
 
-    use nix::unistd;
+    let cname = CString::new(name.as_str()).context("user name contains NUL")?;
 
-    let name = std::fs::read_to_string(USER_FILE)
-        .with_context(|| format!("reading container user from {USER_FILE}"))?;
-    let name = name.trim();
-
-    let user = resolve_user(name)?;
-
-    let cname = CString::new(name).context("user name contains NUL")?;
-
-    if unistd::getuid() == user.uid {
+    if nix::unistd::getuid() == user.uid {
         // Already the target user.  The container runtime should
         // have set supplementary groups; verify they are correct.
         verify_groups(&cname, user.gid)?;
@@ -53,13 +48,21 @@ pub fn switch_user() -> Result<()> {
         // setuid before setgid would lose the privilege for setgid.
         nix::unistd::initgroups(&cname, user.gid)
             .with_context(|| format!("initgroups for '{name}' (gid {})", user.gid))?;
-        unistd::setgid(user.gid).with_context(|| format!("setgid to {}", user.gid))?;
-        unistd::setuid(user.uid).with_context(|| format!("setuid to {}", user.uid))?;
+        nix::unistd::setgid(user.gid).with_context(|| format!("setgid to {}", user.gid))?;
+        nix::unistd::setuid(user.uid).with_context(|| format!("setuid to {}", user.uid))?;
     }
 
     set_user_env(&user);
 
     Ok(())
+}
+
+/// Use the identity recorded during image preparation so callers do not infer
+/// the configured user from ambient process credentials.
+pub(crate) fn container_user() -> Result<User> {
+    let name = std::fs::read_to_string(USER_FILE)
+        .with_context(|| format!("reading container user from {USER_FILE}"))?;
+    resolve_user(name.trim())
 }
 
 /// container-exec and container-serve only run inside Linux containers.
