@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use indoc::{formatdoc, indoc};
+use semver::Version;
 use sha2::{Digest, Sha256};
 
 use crate::cli::PrepareImageCommand;
@@ -29,7 +30,7 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 
 /// Bump this when the Dockerfile template changes in a way that
 /// invalidates previously built prepared images.
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 
 /// File baked into the prepared image listing the container env var
 /// names the daemon resolved from `containerEnv` and `--env-file` at
@@ -969,9 +970,7 @@ fn create_mount_targets(targets: &[String], user: &str) -> Result<()> {
         return Ok(());
     }
 
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
 
     for target in targets {
         fs::create_dir_all(target)
@@ -1028,9 +1027,7 @@ fn write_system_prompt(description_file: Option<&str>) -> Result<()> {
 /// above the project root and never read.  Appends rather than
 /// overwrites so a base image's existing file is preserved.
 fn write_codex_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     let codex_dir = pw.dir.join(".codex");
     fs::create_dir_all(&codex_dir).with_context(|| {
         let d = codex_dir.display();
@@ -1080,9 +1077,7 @@ fn write_codex_system_prompt(user: &str, description_file: Option<&str>) -> Resu
 /// chowned to the container user so the runtime config copy (which
 /// runs as that user) can write auth/settings alongside it.
 fn write_pi_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     let agent_dir = pw.dir.join(".pi/agent");
     let agent_dir_display = agent_dir.display();
     fs::create_dir_all(&agent_dir).with_context(|| format!("creating {agent_dir_display}"))?;
@@ -1120,9 +1115,7 @@ fn write_pi_system_prompt(user: &str, description_file: Option<&str>) -> Result<
 /// Write the rumpelpod system prompt to ~/.grok/rules/rumpelpod.md so
 /// grok understands the container layout and git remote conventions.
 fn write_grok_system_prompt(user: &str, description_file: Option<&str>) -> Result<()> {
-    let pw = nix::unistd::User::from_name(user)
-        .with_context(|| format!("looking up user '{user}'"))?
-        .with_context(|| format!("user '{user}' not found in /etc/passwd"))?;
+    let pw = crate::switch_user::resolve_user(user)?;
     let rules_dir = pw.dir.join(".grok/rules");
     let rules_dir_display = rules_dir.display();
     fs::create_dir_all(&rules_dir).with_context(|| format!("creating {rules_dir_display}"))?;
@@ -1335,54 +1328,96 @@ fn install_claude_cli(version: &str) -> Result<()> {
     Ok(())
 }
 
-/// Download and install the specified Codex CLI release for this architecture.
-///
-/// Skips only when the requested version is already present. A different Codex
-/// supplied by the base image must not change the prepared pod's version.
 fn install_codex_cli(version: &str) -> Result<()> {
     let bin_path = Path::new(crate::daemon::CODEX_CONTAINER_BIN);
-    if bin_path.exists() {
-        if codex_version_at(bin_path).as_deref() == Some(version) {
-            return Ok(());
-        }
-    } else if codex_version_at(Path::new("codex")).as_deref() == Some(version) {
+    let host_path = Path::new(crate::daemon::CODEX_CODE_MODE_HOST_CONTAINER_BIN);
+    let needs_host = codex_needs_code_mode_host(version)?;
+    if codex_version_at(bin_path).as_deref() == Some(version)
+        && (!needs_host
+            || host_path.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            }))
+    {
         return Ok(());
     }
 
-    // musl build is static, so it runs on any base image.
-    let arch = match std::env::consts::ARCH {
+    // The musl releases run independently of the devcontainer's libc.
+    let target = match std::env::consts::ARCH {
         "x86_64" => "x86_64-unknown-linux-musl",
         "aarch64" => "aarch64-unknown-linux-musl",
         other => return Err(anyhow::anyhow!("unsupported architecture '{other}'")),
     };
 
-    let url = format!(
-        "https://github.com/openai/codex/releases/download/rust-v{version}/codex-{arch}.tar.gz"
-    );
-    let data = download_cli_asset(&url, "Codex CLI tarball")?;
-
-    // The tarball contains a single file named codex-<arch>.
-    let decoder = flate2::read::GzDecoder::new(&data[..]);
-    let mut archive = tar::Archive::new(decoder);
-    let mut entry = archive
-        .entries()
-        .context("reading tar entries")?
-        .next()
-        .context("empty tarball")?
-        .context("reading tar entry")?;
-
-    if let Some(parent) = bin_path.parent() {
-        fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
+    install_codex_release_binary(version, target, "codex", bin_path)?;
+    if needs_host {
+        install_codex_release_binary(version, target, "codex-code-mode-host", host_path)?;
     }
-    std::io::copy(
-        &mut entry,
-        &mut fs::File::create(bin_path).context("creating codex binary")?,
-    )
-    .context("extracting codex binary")?;
-    fs::set_permissions(bin_path, fs::Permissions::from_mode(0o755))
-        .context("making codex binary executable")?;
 
     Ok(())
+}
+
+/// Keep releases below rumpelpod's tested sidecar transition installable
+/// without assuming that their release has the companion asset.
+fn codex_needs_code_mode_host(version: &str) -> Result<bool> {
+    let version = Version::parse(version)
+        .with_context(|| format!("parsing Codex release version '{version}'"))?;
+    Ok(version >= Version::new(0, 147, 0))
+}
+
+fn install_codex_release_binary(
+    version: &str,
+    target: &str,
+    binary: &str,
+    destination: &Path,
+) -> Result<()> {
+    let asset = format!("{binary}-{target}");
+    let url =
+        format!("https://github.com/openai/codex/releases/download/rust-v{version}/{asset}.tar.gz");
+    let label = format!("Codex {binary} tarball");
+    let data = download_cli_asset(&url, &label)?;
+
+    let decoder = flate2::read::GzDecoder::new(&data[..]);
+    let mut archive = tar::Archive::new(decoder);
+    let mut entries = archive.entries().context("reading Codex tar entries")?;
+    {
+        let mut entry = entries
+            .next()
+            .with_context(|| format!("empty Codex release asset {asset}.tar.gz"))?
+            .with_context(|| format!("reading {asset} tar entry"))?;
+        let entry_path = entry
+            .path()
+            .with_context(|| format!("reading path from {asset} tar entry"))?;
+        if entry_path != Path::new(&asset) || !entry.header().entry_type().is_file() {
+            return Err(anyhow::anyhow!(
+                "Codex release asset {asset}.tar.gz contained unexpected entry {entry_path:?}"
+            ));
+        }
+
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).context("creating /opt/rumpelpod/bin")?;
+        }
+        let destination_display = destination.display();
+        let mut output = fs::File::create(destination)
+            .with_context(|| format!("creating {destination_display}"))?;
+        std::io::copy(&mut entry, &mut output)
+            .with_context(|| format!("extracting {asset} to {destination_display}"))?;
+    }
+    match entries.next() {
+        None => {}
+        Some(Ok(_)) => {
+            return Err(anyhow::anyhow!(
+                "Codex release asset {asset}.tar.gz contained multiple entries"
+            ));
+        }
+        Some(Err(error)) => {
+            return Err(error).with_context(|| format!("reading {asset} tar entries"));
+        }
+    }
+
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o755)).with_context(|| {
+        let destination = destination.display();
+        format!("making {destination} executable")
+    })
 }
 
 fn codex_version_at(bin: &Path) -> Option<String> {
