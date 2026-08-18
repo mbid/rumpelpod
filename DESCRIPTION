@@ -1,0 +1,6 @@
+Raise safe default test parallelism
+
+Give nested Docker a larger pool of smaller bridge subnets so parallel
+test fixtures cannot exhaust its allocator. Raise xtest's automatic
+worker cap from 16 to 32, reducing suite time without the contention
+seen at higher worker counts.

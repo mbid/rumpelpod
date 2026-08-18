@@ -52,7 +52,7 @@
 //! cargo xtest [flags] [filter] [-- [test-binary-flags]]
 //!
 //! Flags:
-//!   --test-threads N   parallel tests (env: XTEST_JOBS, default: min(ncpus, 16))
+//!   --test-threads N   parallel tests (env: XTEST_JOBS, default: min(ncpus, 32))
 //!   --timeout SECS     default per-test kill deadline  (env: XTEST_TIMEOUT, default: 120)
 //!   --retries N        retry count on failure  (env: XTEST_RETRIES, default: 1)
 //!   --executor NAME    run against podman or a k8s cluster (podman|eks|hetzner|k3d)
@@ -110,7 +110,7 @@ struct Cli {
     #[arg(long)]
     runtime: Option<String>,
 
-    /// Maximum parallel tests (default: min(ncpus, 16), env: XTEST_JOBS).
+    /// Maximum parallel tests (default: min(ncpus, 32), env: XTEST_JOBS).
     #[arg(long = "test-threads")]
     jobs: Option<usize>,
 

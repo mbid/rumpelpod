@@ -92,6 +92,9 @@ RUN printf 'd /run/podman 0755 root root -\n' \
 # - insecure-registries: the k3d built-in registry speaks HTTP. The
 #   .localhost suffix resolves to ::1 (IPv6), which falls outside
 #   Docker's default insecure range (127.0.0.0/8).
+# - default-address-pools: parallel tests create many short-lived bridge
+#   networks. /24 allocations leave ample room for each fixture while
+#   preventing the daemon's subnet allocator from becoming the bottleneck.
 # No "dns" override: k3d nodes inherit the pod's resolver from
 # /etc/resolv.conf, which already forwards to the real host upstreams.
 # The collision that used to break this (the nested k3s service CIDR
@@ -100,7 +103,10 @@ RUN printf 'd /run/podman 0755 root root -\n' \
 # provision-k3d.sh.
 RUN mkdir -p /etc/docker && printf '%s\n' \
     '{' \
-    '  "insecure-registries": ["rumpelpod-registry.localhost:5000"]' \
+    '  "insecure-registries": ["rumpelpod-registry.localhost:5000"],' \
+    '  "default-address-pools": [' \
+    '    {"base": "172.16.0.0/12", "size": 24}' \
+    '  ]' \
     '}' > /etc/docker/daemon.json
 
 RUN dpkg_arch=$(dpkg --print-architecture) && \
