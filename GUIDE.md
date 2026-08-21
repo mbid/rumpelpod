@@ -19,7 +19,6 @@ Yolo install (see [Installation](#installation) for details):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nvidia/rumpelpod/main/install.sh | sh
-rumpel system-install
 ```
 
 From inside one of your repositories, run:
@@ -387,7 +386,6 @@ The latter is useful when [baked build caches](#warm-build-caches) have gone sta
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nvidia/rumpelpod/master/install.sh | sh
-rumpel system-install
 ```
 
 The install script fetches the latest release tarball from [GitHub Releases](https://github.com/nvidia/rumpelpod/releases) and extracts it into `~/.local/bin/`, symlinking `rumpel` to the binary for your local machine's platform.

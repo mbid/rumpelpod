@@ -7,7 +7,6 @@ Designed for running LLM coding agents.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nvidia/rumpelpod/main/install.sh | sh
-rumpel system-install
 ```
 
 Requirements: git, Docker or Podman, optionally ssh and kubectl.
