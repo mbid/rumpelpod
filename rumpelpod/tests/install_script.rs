@@ -215,8 +215,9 @@ fn install_script_adds_install_dir_to_new_shell_path() {
     assert!(result.success, "install script failed:\n{}", result.output);
     assert!(
         result.output.contains(&format!(
-            "Add {} to PATH in {}/.bashrc? [y/N]",
+            "Add {} to PATH in {}/.profile and {}/.bashrc? [y/N]",
             install_dir.display(),
+            fixture.home.display(),
             fixture.home.display()
         )),
         "install script did not offer PATH setup:\n{}",
@@ -234,35 +235,69 @@ fn install_script_adds_install_dir_to_new_shell_path() {
         "system-install ran after the prompt was declined"
     );
 
-    let profile = fs::read_to_string(fixture.home.join(".bashrc"))
-        .expect("read shell configuration written by installer");
-    assert!(
-        profile.contains(&format!(
-            "export PATH='{}':\"$PATH\"",
-            install_dir.display()
-        )),
-        "shell configuration did not contain the install directory:\n{profile}"
-    );
+    for config_name in [".profile", ".bashrc"] {
+        let config = fs::read_to_string(fixture.home.join(config_name))
+            .unwrap_or_else(|error| panic!("read {config_name} written by installer: {error}"));
+        assert!(
+            config.contains(&format!(
+                "export PATH='{}':\"$PATH\"",
+                install_dir.display()
+            )),
+            "{config_name} did not contain the install directory:\n{config}"
+        );
+    }
 
-    let fresh_shell = Command::new("bash")
-        .args(["--noprofile", "-ic", "rumpel --version"])
-        .env_clear()
-        .env("HOME", &fixture.home)
-        .env("SHELL", "/bin/bash")
-        .env("PATH", &fixture.path)
-        .env("RUMPELPOD_TEST_COMMAND_LOG", &fixture.command_log)
-        .env("RUMPELPOD_TEST_REAL_RUMPEL", env!("CARGO_BIN_EXE_rumpel"))
-        .output()
-        .expect("start a fresh shell");
-    assert!(
-        fresh_shell.status.success(),
-        "rumpel was not usable in a fresh shell:\n{}",
-        String::from_utf8_lossy(&fresh_shell.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&fresh_shell.stdout).contains("rumpelpod"),
-        "fresh shell did not run the installed rumpel binary"
-    );
+    for (shell_kind, args) in [
+        (
+            "interactive non-login",
+            [
+                "--noprofile",
+                "-ic",
+                "printf 'PATH=%s\\n' \"$PATH\"; rumpel --version",
+            ],
+        ),
+        (
+            "login",
+            [
+                "--norc",
+                "-lic",
+                "printf 'PATH=%s\\n' \"$PATH\"; rumpel --version",
+            ],
+        ),
+    ] {
+        let fresh_shell = Command::new("bash")
+            .args(args)
+            .env_clear()
+            .env("HOME", &fixture.home)
+            .env("SHELL", "/bin/bash")
+            .env("PATH", &fixture.path)
+            .env("RUMPELPOD_TEST_COMMAND_LOG", &fixture.command_log)
+            .env("RUMPELPOD_TEST_REAL_RUMPEL", env!("CARGO_BIN_EXE_rumpel"))
+            .output()
+            .unwrap_or_else(|error| panic!("start a fresh {shell_kind} shell: {error}"));
+        assert!(
+            fresh_shell.status.success(),
+            "rumpel was not usable in a fresh {shell_kind} shell:\n{}",
+            String::from_utf8_lossy(&fresh_shell.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&fresh_shell.stdout);
+        assert!(
+            stdout.contains("rumpelpod"),
+            "fresh {shell_kind} shell did not run the installed rumpel binary"
+        );
+        let configured_path = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("PATH="))
+            .unwrap_or_else(|| panic!("fresh {shell_kind} shell did not print PATH:\n{stdout}"));
+        assert_eq!(
+            configured_path
+                .split(':')
+                .filter(|entry| *entry == install_dir_str)
+                .count(),
+            1,
+            "fresh {shell_kind} shell added the install directory more than once: {configured_path}"
+        );
+    }
 }
 
 #[test]
@@ -273,6 +308,10 @@ fn install_script_runs_system_install_only_after_confirmation() {
     assert!(
         !fixture.home.join(".bashrc").exists(),
         "installer changed shell configuration after the prompt was declined"
+    );
+    assert!(
+        !fixture.home.join(".profile").exists(),
+        "installer changed login configuration after the prompt was declined"
     );
     assert_eq!(
         fs::read_to_string(&fixture.command_log).expect("read system-install invocation log"),
@@ -287,14 +326,86 @@ fn install_script_persists_an_absolute_install_dir() {
     assert!(result.success, "install script failed:\n{}", result.output);
 
     let absolute_install_dir = fixture.temp.path().join("relative-bin");
-    let profile = fs::read_to_string(fixture.home.join(".bashrc"))
-        .expect("read shell configuration written by installer");
+    for config_name in [".profile", ".bashrc"] {
+        let config = fs::read_to_string(fixture.home.join(config_name))
+            .unwrap_or_else(|error| panic!("read {config_name} written by installer: {error}"));
+        assert!(
+            config.contains(&format!(
+                "export PATH='{}':\"$PATH\"",
+                absolute_install_dir.display()
+            )),
+            "relative install directory was persisted without normalization in {config_name}:\n{config}"
+        );
+    }
+}
+
+#[test]
+fn install_script_updates_the_selected_bash_login_profile() {
+    let fixture = InstallerFixture::new();
+    let install_dir = fixture.home.join(".local/bin");
+    let install_dir_display = install_dir.display();
+    let expected = format!(
+        "case \":$PATH:\" in *':{install_dir_display}:'*) ;; *) export PATH='{install_dir_display}':\"$PATH\" ;; esac"
+    );
+    fs::write(
+        fixture.home.join(".bash_profile"),
+        format!("# {expected}\n[ ! -f \"$HOME/.bashrc\" ] || . \"$HOME/.bashrc\"\n"),
+    )
+    .expect("write existing .bash_profile");
+    fs::write(
+        fixture.home.join(".profile"),
+        "# shadowed by .bash_profile\n",
+    )
+    .expect("write shadowed .profile");
+
+    let result = fixture.run("y\nn\n");
+    assert!(result.success, "install script failed:\n{}", result.output);
+    let bash_profile =
+        fs::read_to_string(fixture.home.join(".bash_profile")).expect("read updated .bash_profile");
+    assert_eq!(
+        bash_profile
+            .lines()
+            .filter(|line| *line == expected)
+            .count(),
+        1,
+        "installer treated commented configuration as active:\n{bash_profile}"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.home.join(".profile")).expect("read shadowed .profile"),
+        "# shadowed by .bash_profile\n",
+        "installer updated a login profile Bash would not read"
+    );
+    let bashrc = fs::read_to_string(fixture.home.join(".bashrc")).expect("read updated .bashrc");
     assert!(
-        profile.contains(&format!(
-            "export PATH='{}':\"$PATH\"",
-            absolute_install_dir.display()
-        )),
-        "relative install directory was persisted without normalization:\n{profile}"
+        bashrc.contains(&expected),
+        "installer did not update interactive Bash configuration:\n{bashrc}"
+    );
+
+    let login_shell = Command::new("bash")
+        .args(["--norc", "-lic", "printf '%s\\n' \"$PATH\""])
+        .env_clear()
+        .env("HOME", &fixture.home)
+        .env("SHELL", "/bin/bash")
+        .env("PATH", &fixture.path)
+        .output()
+        .expect("start login shell whose profile sources .bashrc");
+    assert!(
+        login_shell.status.success(),
+        "login shell failed:\n{}",
+        String::from_utf8_lossy(&login_shell.stderr)
+    );
+    let login_path = String::from_utf8(login_shell.stdout)
+        .expect("login shell PATH is UTF-8")
+        .trim()
+        .to_string();
+    let install_dir = install_dir.to_str().expect("install directory is UTF-8");
+    assert_eq!(
+        login_path
+            .split(':')
+            .filter(|entry| *entry == install_dir)
+            .count(),
+        1,
+        "login profile and .bashrc added the install directory more than once: {login_path}"
     );
 }
 

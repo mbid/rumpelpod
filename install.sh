@@ -38,6 +38,78 @@ shell_quote() {
     printf "'%s'" "$escaped"
 }
 
+path_export_command() {
+    quoted_path="$(shell_quote "$INSTALL_DIR")"
+    quoted_path_entry="$(shell_quote ":$INSTALL_DIR:")"
+    printf '%s' "case \":\$PATH:\" in *${quoted_path_entry}*) ;; *) export PATH=${quoted_path}:\"\$PATH\" ;; esac"
+}
+
+path_is_configured() {
+    [ -f "$1" ] && grep -Fqx "$2" "$1" >/dev/null 2>&1
+}
+
+write_path_config() {
+    target_config="$1"
+    target_command="$2"
+    target_dir="${target_config%/*}"
+    mkdir -p "$target_dir"
+    {
+        printf '\n%s\n' '# Added by the rumpelpod installer.'
+        printf '%s\n' "$target_command"
+    } >> "$target_config"
+}
+
+configure_bash_path() {
+    bash_path_command="$1"
+
+    # Bash separates login and non-login startup, so one file cannot cover both.
+    if [ -f "$HOME/.bash_profile" ]; then
+        bash_login_config="$HOME/.bash_profile"
+    elif [ -f "$HOME/.bash_login" ]; then
+        bash_login_config="$HOME/.bash_login"
+    else
+        bash_login_config="$HOME/.profile"
+    fi
+    bash_interactive_config="$HOME/.bashrc"
+
+    if path_is_configured "$bash_login_config" "$bash_path_command"; then
+        bash_login_update=0
+    else
+        bash_login_update=1
+    fi
+    if path_is_configured "$bash_interactive_config" "$bash_path_command"; then
+        bash_interactive_update=0
+    else
+        bash_interactive_update=1
+    fi
+
+    case "$bash_login_update:$bash_interactive_update" in
+        0:0)
+            echo "$INSTALL_DIR is already configured in $bash_login_config and $bash_interactive_config."
+            return
+            ;;
+        0:1) bash_config_summary="$bash_interactive_config" ;;
+        1:0) bash_config_summary="$bash_login_config" ;;
+        1:1) bash_config_summary="$bash_login_config and $bash_interactive_config" ;;
+        *)
+            echo "Unexpected Bash configuration state" >&2
+            exit 1
+            ;;
+    esac
+
+    if confirm "Add $INSTALL_DIR to PATH in $bash_config_summary?"; then
+        if [ "$bash_login_update" -eq 1 ]; then
+            write_path_config "$bash_login_config" "$bash_path_command"
+        fi
+        if [ "$bash_interactive_update" -eq 1 ]; then
+            write_path_config "$bash_interactive_config" "$bash_path_command"
+        fi
+        echo "Updated $bash_config_summary. Log in again or start a new shell to use rumpel."
+    else
+        echo "Add $INSTALL_DIR to PATH before running rumpel."
+    fi
+}
+
 configure_path() {
     case ":${PATH:-}:" in
         *":$INSTALL_DIR:"*) return ;;
@@ -47,12 +119,13 @@ configure_path() {
     shell_name="${shell_name##*/}"
     case "$shell_name" in
         bash)
-            shell_config="$HOME/.bashrc"
-            path_command="export PATH=$(shell_quote "$INSTALL_DIR"):\"\$PATH\""
+            path_command="$(path_export_command)"
+            configure_bash_path "$path_command"
+            return
             ;;
         zsh)
             shell_config="${ZDOTDIR:-$HOME}/.zshrc"
-            path_command="export PATH=$(shell_quote "$INSTALL_DIR"):\"\$PATH\""
+            path_command="$(path_export_command)"
             ;;
         fish)
             shell_config="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
@@ -60,7 +133,7 @@ configure_path() {
             ;;
         sh | dash | ksh | mksh)
             shell_config="$HOME/.profile"
-            path_command="export PATH=$(shell_quote "$INSTALL_DIR"):\"\$PATH\""
+            path_command="$(path_export_command)"
             ;;
         '')
             echo "Could not determine your shell. Add $INSTALL_DIR to PATH manually."
@@ -73,18 +146,13 @@ configure_path() {
             ;;
     esac
 
-    if [ -f "$shell_config" ] && grep -F "$path_command" "$shell_config" >/dev/null 2>&1; then
+    if path_is_configured "$shell_config" "$path_command"; then
         echo "$INSTALL_DIR is already configured in $shell_config."
         return
     fi
 
     if confirm "Add $INSTALL_DIR to PATH in $shell_config?"; then
-        config_dir="${shell_config%/*}"
-        mkdir -p "$config_dir"
-        {
-            printf '\n%s\n' '# Added by the rumpelpod installer.'
-            printf '%s\n' "$path_command"
-        } >> "$shell_config"
+        write_path_config "$shell_config" "$path_command"
         echo "Updated $shell_config. Log in again or source that file to use rumpel."
     else
         echo "Add $INSTALL_DIR to PATH before running rumpel."
