@@ -1,0 +1,6 @@
+Make installer configuration opt-in
+
+Offer to persist the rumpel install directory in the user's shell
+configuration when it is not already on PATH. Prompt separately before
+installing the background service, and remove the redundant manual setup
+command from the installation documentation.

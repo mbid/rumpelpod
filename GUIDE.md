@@ -15,11 +15,10 @@ Pods can run on the local Docker or Podman engine, on a remote Docker machine ov
 
 ## Quick start
 
-Yolo install (see [Installation](#installation) for details):
+Install (see [Installation](#installation) for details):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nvidia/rumpelpod/main/install.sh | sh
-rumpel system-install
 ```
 
 From inside one of your repositories, run:
@@ -387,11 +386,12 @@ The latter is useful when [baked build caches](#warm-build-caches) have gone sta
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nvidia/rumpelpod/master/install.sh | sh
-rumpel system-install
 ```
 
 The install script fetches the latest release tarball from [GitHub Releases](https://github.com/nvidia/rumpelpod/releases) and extracts it into `~/.local/bin/`, symlinking `rumpel` to the binary for your local machine's platform.
 The tarball ships binaries for all supported architectures; they all must live in the same directory, because rumpelpod copies a matching Linux binary into every pod container regardless of your local machine's platform.
+If `~/.local/bin/` is not already on `PATH`, the script offers to add it to the configuration for your current shell.
+It also asks before installing and starting the background service.
 
 `rumpel system-install` installs a user-level background daemon that handles pod lifecycle, git synchronization, and related plumbing.
 It runs as a systemd user service on Linux and a launchd user agent on macOS.
