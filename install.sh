@@ -59,6 +59,11 @@ write_path_config() {
     } >> "$target_config"
 }
 
+print_path_reload_hint() {
+    echo "To use rumpel, open a new terminal or run:"
+    echo '  exec "$SHELL" -l'
+}
+
 configure_bash_path() {
     bash_path_command="$1"
 
@@ -86,6 +91,7 @@ configure_bash_path() {
     case "$bash_login_update:$bash_interactive_update" in
         0:0)
             echo "$INSTALL_DIR is already configured in $bash_login_config and $bash_interactive_config."
+            print_path_reload_hint
             return
             ;;
         0:1) bash_config_summary="$bash_interactive_config" ;;
@@ -104,7 +110,8 @@ configure_bash_path() {
         if [ "$bash_interactive_update" -eq 1 ]; then
             write_path_config "$bash_interactive_config" "$bash_path_command"
         fi
-        echo "Updated $bash_config_summary. Log in again or start a new shell to use rumpel."
+        echo "Updated $bash_config_summary."
+        print_path_reload_hint
     else
         echo "Add $INSTALL_DIR to PATH before running rumpel."
     fi
@@ -148,12 +155,14 @@ configure_path() {
 
     if path_is_configured "$shell_config" "$path_command"; then
         echo "$INSTALL_DIR is already configured in $shell_config."
+        print_path_reload_hint
         return
     fi
 
     if confirm "Add $INSTALL_DIR to PATH in $shell_config?"; then
         write_path_config "$shell_config" "$path_command"
-        echo "Updated $shell_config. Log in again or source that file to use rumpel."
+        echo "Updated $shell_config."
+        print_path_reload_hint
     else
         echo "Add $INSTALL_DIR to PATH before running rumpel."
     fi

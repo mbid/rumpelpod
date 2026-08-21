@@ -231,6 +231,13 @@ fn install_script_adds_install_dir_to_new_shell_path() {
         result.output
     );
     assert!(
+        result
+            .output
+            .contains("To use rumpel, open a new terminal or run:\n  exec \"$SHELL\" -l"),
+        "install script did not explain how to reload PATH:\n{}",
+        result.output
+    );
+    assert!(
         !fixture.command_log.exists(),
         "system-install ran after the prompt was declined"
     );
@@ -316,6 +323,25 @@ fn install_script_defaults_to_running_system_install() {
     assert_eq!(
         fs::read_to_string(&fixture.command_log).expect("read system-install invocation log"),
         "system-install\n"
+    );
+}
+
+#[test]
+fn install_script_skips_path_setup_when_install_dir_is_on_path() {
+    let mut fixture = InstallerFixture::new();
+    let install_dir = fixture.home.join(".local/bin");
+    fixture.path = format!("{}:{}", install_dir.display(), fixture.path);
+
+    let result = fixture.run("n\n");
+    assert!(result.success, "install script failed:\n{}", result.output);
+    assert!(
+        !result.output.contains("to PATH in") && !result.output.contains("exec \"$SHELL\" -l"),
+        "installer offered PATH setup even though the install directory was already present:\n{}",
+        result.output
+    );
+    assert!(
+        !fixture.home.join(".profile").exists() && !fixture.home.join(".bashrc").exists(),
+        "installer wrote shell configuration even though PATH was already configured"
     );
 }
 
