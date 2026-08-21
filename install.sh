@@ -20,14 +20,14 @@ confirm() {
     fi
 
     while true; do
-        printf '%s [y/N] ' "$prompt" >/dev/tty
+        printf '%s [Y/n] ' "$prompt" >/dev/tty
         if ! IFS= read -r answer </dev/tty; then
             echo "Could not read a response; answering no to: $prompt" >&2
             return 1
         fi
         case "$answer" in
-            y | Y | yes | YES | Yes) return 0 ;;
-            n | N | no | NO | No | '') return 1 ;;
+            y | Y | yes | YES | Yes | '') return 0 ;;
+            n | N | no | NO | No) return 1 ;;
             *) echo "Please answer yes or no." >/dev/tty ;;
         esac
     done

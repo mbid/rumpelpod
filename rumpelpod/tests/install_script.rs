@@ -211,11 +211,11 @@ fn install_script_adds_install_dir_to_new_shell_path() {
         "test PATH unexpectedly contains the install directory"
     );
 
-    let result = fixture.run("y\nn\n");
+    let result = fixture.run("\nn\n");
     assert!(result.success, "install script failed:\n{}", result.output);
     assert!(
         result.output.contains(&format!(
-            "Add {} to PATH in {}/.profile and {}/.bashrc? [y/N]",
+            "Add {} to PATH in {}/.profile and {}/.bashrc? [Y/n]",
             install_dir.display(),
             fixture.home.display(),
             fixture.home.display()
@@ -226,7 +226,7 @@ fn install_script_adds_install_dir_to_new_shell_path() {
     assert!(
         result
             .output
-            .contains("Install and start the rumpelpod background service? [y/N]"),
+            .contains("Install and start the rumpelpod background service? [Y/n]"),
         "install script did not ask before service setup:\n{}",
         result.output
     );
@@ -301,9 +301,9 @@ fn install_script_adds_install_dir_to_new_shell_path() {
 }
 
 #[test]
-fn install_script_runs_system_install_only_after_confirmation() {
+fn install_script_defaults_to_running_system_install() {
     let fixture = InstallerFixture::new();
-    let result = fixture.run("n\ny\n");
+    let result = fixture.run("n\n\n");
     assert!(result.success, "install script failed:\n{}", result.output);
     assert!(
         !fixture.home.join(".bashrc").exists(),
