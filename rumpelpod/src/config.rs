@@ -535,6 +535,10 @@ pub struct JsonConfig {
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     pub host: Option<String>,
 
+    /// devcontainer.json file or directory containing one. Relative paths
+    /// start at the repository root.
+    pub devcontainer: Option<PathBuf>,
+
     /// Container engine preference for local execution and image builds.
     #[serde(default)]
     pub container_engine: Option<ContainerEngine>,
@@ -977,6 +981,20 @@ mod tests {
         "#})
         .unwrap();
         assert_eq!(config.container_engine, Some(ContainerEngine::Podman));
+    }
+
+    #[test]
+    fn parse_devcontainer_default() {
+        let config: JsonConfig = json5::from_str(indoc::indoc! {r#"
+            {
+              "devcontainer": "configs/rust/devcontainer.json"
+            }
+        "#})
+        .unwrap();
+        assert_eq!(
+            config.devcontainer,
+            Some(PathBuf::from("configs/rust/devcontainer.json"))
+        );
     }
 
     #[test]

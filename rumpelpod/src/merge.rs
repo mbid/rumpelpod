@@ -15,8 +15,13 @@ use crate::git::get_repo_root;
 
 /// Check for uncommitted changes inside the pod container.
 /// Prints a warning to stderr if the working tree is dirty.
-fn check_dirty_checkout(pod_name: &str) -> Result<()> {
-    let result = enter::launch_pod(pod_name, None)?;
+fn check_dirty_checkout(cmd: &MergeCommand) -> Result<()> {
+    let pod_name = &cmd.name;
+    let result = enter::launch_pod(
+        pod_name,
+        cmd.container_config.resolve_host()?,
+        cmd.container_config.devcontainer.clone(),
+    )?;
     let container_repo_path = result.container_repo_path.clone();
 
     let pod = crate::pod::PodClient::connect(&result.container_url, &result.container_token)?;
@@ -223,7 +228,7 @@ pub fn merge(cmd: &MergeCommand) -> Result<()> {
     }
 
     // 3. Warn about uncommitted changes in the pod
-    check_dirty_checkout(&cmd.name)?;
+    check_dirty_checkout(cmd)?;
 
     // 4. Check if there is nothing to merge (pod ref is ancestor of HEAD)
     let ancestor_check = Command::new("git")

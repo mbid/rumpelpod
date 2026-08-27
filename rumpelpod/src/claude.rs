@@ -29,7 +29,7 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     let elapsed = t.elapsed();
     trace!("get_repo_root: {elapsed:?}");
 
-    let host_override = cmd.host_args.resolve()?;
+    let host_override = cmd.container_config.resolve_host()?;
 
     let json_config = load_json_config(&repo_root)?;
 
@@ -46,7 +46,11 @@ pub fn claude(cmd: &ClaudeCommand) -> Result<()> {
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
 
     let t = Instant::now();
-    let result = launch_pod(&cmd.name, host_override)?;
+    let result = launch_pod(
+        &cmd.name,
+        host_override,
+        cmd.container_config.devcontainer.clone(),
+    )?;
     let elapsed = t.elapsed();
     trace!("launch_pod: {elapsed:?}");
     let workdir = result.container_repo_path.clone();
@@ -189,9 +193,13 @@ fn read_keychain_credentials() -> Option<Vec<u8>> {
 /// (e.g. token expiry) without needing to recreate the pod.
 pub fn reauth(cmd: &ClaudeCommand) -> Result<()> {
     let repo_root = get_repo_root()?;
-    let host_override = cmd.host_args.resolve()?;
+    let host_override = cmd.container_config.resolve_host()?;
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
-    let result = launch_pod(&cmd.name, host_override)?;
+    let result = launch_pod(
+        &cmd.name,
+        host_override,
+        cmd.container_config.devcontainer.clone(),
+    )?;
     let pod = PodClient::connect(&result.container_url, &result.container_token)?;
 
     let local_home = dirs::home_dir().context("could not determine home directory")?;

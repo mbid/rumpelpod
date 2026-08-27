@@ -10,8 +10,8 @@ use crate::config::load_json_config;
 use crate::daemon;
 use crate::daemon::protocol::{Daemon, DaemonClient, LaunchProgress, PodLaunchParams, PodName};
 use crate::enter::{
-    collect_client_env, collect_local_env, determine_host, find_local_claude_cli,
-    find_local_codex_cli, find_local_grok_cli, find_local_pi_cli,
+    collect_client_env, collect_local_env, determine_devcontainer, determine_host,
+    find_local_claude_cli, find_local_codex_cli, find_local_grok_cli, find_local_pi_cli,
 };
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
@@ -27,8 +27,10 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         return Err(anyhow::anyhow!("pod '{name}' does not exist"));
     }
 
-    let docker_host = determine_host(&repo_root, cmd.host_args.resolve()?)?;
-    let local_env_vars = collect_local_env(&repo_root)?;
+    let docker_host = determine_host(&repo_root, cmd.container_config.resolve_host()?)?;
+    let devcontainer_path =
+        determine_devcontainer(&repo_root, cmd.container_config.devcontainer.clone())?;
+    let local_env_vars = collect_local_env(&repo_root, devcontainer_path.as_deref())?;
     let client_env = collect_client_env()?;
 
     let host_branch = get_current_branch(&repo_root);
@@ -48,6 +50,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     let mut progress = client.recreate_pod(PodLaunchParams {
         pod_name,
         repo_path: repo_root,
+        devcontainer_path,
         host_branch,
         host: docker_host,
         git_identity: Some(git_identity),

@@ -296,6 +296,7 @@ fn daemon_serializes_concurrent_initialize_commands() {
             let mut progress = client.launch_pod(PodLaunchParams {
                 pod_name: PodName::new("init-concurrent").expect("valid pod name"),
                 repo_path,
+                devcontainer_path: None,
                 host_branch: None,
                 host: Host::Localhost {
                     engine: ContainerEngine::Auto,

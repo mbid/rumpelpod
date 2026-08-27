@@ -557,6 +557,7 @@ pub fn launch_pod_via_daemon(repo: &TestRepo, daemon: &TestDaemon, pod_name: &st
         .launch_pod(PodLaunchParams {
             pod_name,
             repo_path: repo.path().to_path_buf(),
+            devcontainer_path: None,
             host_branch: current_branch(repo.path()),
             host: resolve_test_host(repo.path()),
             git_identity: None,

@@ -87,9 +87,13 @@ pub fn codex(cmd: &CodexCommand) -> Result<()> {
         ));
     }
 
-    let host_override = cmd.host_args.resolve()?;
+    let host_override = cmd.container_config.resolve_host()?;
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
-    launch_pod(&cmd.name, host_override)?;
+    launch_pod(
+        &cmd.name,
+        host_override,
+        cmd.container_config.devcontainer.clone(),
+    )?;
 
     let outcome = attach_codex(&socket_path, &path, cmd.args.clone()).map_err(|error| {
         if error

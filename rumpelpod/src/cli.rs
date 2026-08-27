@@ -27,9 +27,14 @@ pub(crate) fn validate_pod_name(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-/// Shared flags for selecting the target host (Docker or Kubernetes).
+/// Shared flags for selecting the container configuration and target host.
 #[derive(Args, Clone, Debug)]
-pub struct HostArgs {
+pub struct ContainerConfigArgs {
+    /// devcontainer.json file or directory containing one.
+    /// Overrides the .rumpelpod.json setting and standard locations.
+    #[arg(long, value_name = "PATH", value_hint = ValueHint::AnyPath)]
+    pub devcontainer: Option<PathBuf>,
+
     /// Docker host: "localhost" or "ssh://user@host".
     /// Overrides .rumpelpod.json setting.
     #[arg(long, conflicts_with_all = ["kubernetes_context", "kubernetes_namespace"])]
@@ -57,9 +62,9 @@ pub struct HostArgs {
     pub container_engine: Option<ContainerEngine>,
 }
 
-impl HostArgs {
+impl ContainerConfigArgs {
     /// Build a Host from the CLI flags, if any were given.
-    pub fn resolve(&self) -> Result<Option<Host>> {
+    pub fn resolve_host(&self) -> Result<Option<Host>> {
         if let Some(ref ctx) = self.kubernetes_context {
             let namespace = self
                 .kubernetes_namespace
@@ -451,7 +456,7 @@ pub struct EnterCommand {
     pub name: String,
 
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 
     /// Create the pod if it doesn't exist
     #[arg(long)]
@@ -502,7 +507,7 @@ pub struct RecreateCommand {
     pub name: String,
 
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 }
 
 #[derive(Args)]
@@ -602,6 +607,9 @@ pub struct MergeCommand {
     #[arg(value_parser = validate_pod_name, add = PodNameCompleter::candidates())]
     pub name: String,
 
+    #[command(flatten)]
+    pub container_config: ContainerConfigArgs,
+
     /// Use this file from the pod branch as the merge commit message
     #[arg(long, value_name = "PATH", conflicts_with = "no_description_file")]
     pub description_file: Option<String>,
@@ -631,7 +639,7 @@ pub struct ClaudeCommand {
     pub action: Option<ClaudeAction>,
 
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 
     /// Create the pod without prompting if it doesn't exist
     #[arg(long)]
@@ -657,7 +665,7 @@ pub struct CodexCommand {
     pub name: String,
 
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 
     /// Create the pod without prompting if it doesn't exist
     #[arg(long)]
@@ -679,7 +687,7 @@ pub struct PiCommand {
     pub name: String,
 
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 
     /// Create the pod without prompting if it doesn't exist
     #[arg(long)]
@@ -697,7 +705,7 @@ pub struct GrokCommand {
     pub name: String,
 
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 
     /// Create the pod without prompting if it doesn't exist
     #[arg(long)]
@@ -715,7 +723,7 @@ pub struct GrokCommand {
 #[derive(Args)]
 pub struct CpCommand {
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 
     /// Archive mode (preserve uid/gid)
     #[arg(short = 'a', long = "archive")]
@@ -814,7 +822,7 @@ pub enum ImageSubcommand {
 #[derive(Args)]
 pub struct ImageBuildCommand {
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 
     /// Disable Docker layer cache (--no-cache)
     #[arg(long)]
@@ -828,7 +836,7 @@ pub struct ImageBuildCommand {
 #[derive(Args)]
 pub struct ImageFetchCommand {
     #[command(flatten)]
-    pub host_args: HostArgs,
+    pub container_config: ContainerConfigArgs,
 }
 
 #[derive(Subcommand)]

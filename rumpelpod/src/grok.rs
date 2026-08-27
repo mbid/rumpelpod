@@ -35,7 +35,7 @@ pub fn grok(cmd: &GrokCommand) -> Result<()> {
     let t_total = Instant::now();
 
     let repo_root = get_repo_root()?;
-    let host_override = cmd.host_args.resolve()?;
+    let host_override = cmd.container_config.resolve_host()?;
     let json_config = load_json_config(&repo_root)?;
 
     // CLI --no-always-approve wins over the config setting.
@@ -44,7 +44,11 @@ pub fn grok(cmd: &GrokCommand) -> Result<()> {
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
 
     let t = Instant::now();
-    let result = launch_pod(&cmd.name, host_override)?;
+    let result = launch_pod(
+        &cmd.name,
+        host_override,
+        cmd.container_config.devcontainer.clone(),
+    )?;
     trace!("launch_pod: {:?}", t.elapsed());
     let workdir = result.container_repo_path.clone();
 

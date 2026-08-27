@@ -1,0 +1,6 @@
+Allow selecting devcontainer configurations
+
+Add a --devcontainer flag to container-related commands and add a
+devcontainer default in .rumpelpod.json. Resolve directory and JSON-file
+selections through the client and daemon while keeping build and Compose
+paths relative to the selected configuration.

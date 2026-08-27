@@ -24,8 +24,10 @@ use crate::image::OutputLine;
 /// devcontainer configuration. Backend overrides are added to that same map
 /// before variable substitution so `${localEnv:DOCKER_HOST}` matches the
 /// child process and the configuration applied afterward.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     repo_path: &Path,
+    devcontainer_path: Option<&Path>,
     pod_name: &str,
     host: &Host,
     docker_socket: Option<&Path>,
@@ -34,7 +36,7 @@ pub(crate) fn run(
     progress: &std::sync::mpsc::Sender<OutputLine>,
 ) -> Result<()> {
     let raw_devcontainer_json =
-        DevContainer::find_raw(repo_path)?.unwrap_or_else(|| "{}".to_string());
+        DevContainer::find_raw(repo_path, devcontainer_path)?.unwrap_or_else(|| "{}".to_string());
     let mut remove_env: HashSet<String> = collect_local_env_var_names(&raw_devcontainer_json)
         .into_iter()
         .filter(|name| !local_env.contains_key(name))
@@ -62,7 +64,7 @@ pub(crate) fn run(
         local_env.insert(name, value);
     }
 
-    let devcontainer = DevContainer::find_and_load(repo_path)?
+    let devcontainer = DevContainer::find_and_load(repo_path, devcontainer_path)?
         .map(|(devcontainer, _)| devcontainer)
         .unwrap_or_default();
     let Some(command) = devcontainer.initialize_command.as_ref() else {

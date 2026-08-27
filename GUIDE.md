@@ -70,6 +70,15 @@ Rumpelpod consumes `devcontainer.json` following the [Dev Container spec][spec].
 Several of the fields the spec defines overlap with features already available in a Dockerfile, in which case the Dockerfile is usually the more natural place to set them.
 The sections below cover the fields that remain useful regardless, followed by rumpelpod's deviations from the spec.
 
+By default, rumpelpod searches `.devcontainer/devcontainer.json` and then `.devcontainer.json` at the repository root.
+Use `--devcontainer PATH` on commands such as `rumpel enter`, `rumpel claude`, `rumpel recreate`, and `rumpel image build` to select another configuration.
+`PATH` may be a directory containing `devcontainer.json` or a file whose name ends in `.json`.
+Relative command-line paths start at the current directory.
+To choose a project-wide default instead, set [`devcontainer`](#devcontainer) in `.rumpelpod.json`.
+
+Dockerfile paths, Docker Compose file paths, and explicit or implicit build contexts remain relative to the directory containing the selected `devcontainer.json`.
+For example, selecting `containers/rust/devcontainer.json` with a build that omits `context` uses `containers/rust` as its build context.
+
 [spec]: https://containers.dev/implementors/json_reference/
 
 The first decision is which container image to use.
@@ -401,6 +410,16 @@ Local state is tracked in a SQLite database under `~/.local/state/rumpelpod/` (o
 `.rumpelpod.json` lives at the repository root.
 It is optional and holds pod-specific settings that have no devcontainer equivalent.
 Like `devcontainer.json`, the file is parsed as [JSON5](https://json5.org/), so comments and trailing commas are allowed.
+
+### `devcontainer`
+
+```json
+{ "devcontainer": "containers/rust" }
+```
+
+Selects the default devcontainer configuration used when creating or recreating pods and by devcontainer image commands.
+The path may name either a directory containing `devcontainer.json` or a `.json` file; relative paths start at the repository root.
+The `--devcontainer` command-line flag overrides this setting.
 
 ### `host`
 

@@ -28,13 +28,17 @@ pub fn pi(cmd: &PiCommand) -> Result<()> {
     let t_total = Instant::now();
 
     let repo_root = get_repo_root()?;
-    let host_override = cmd.host_args.resolve()?;
+    let host_override = cmd.container_config.resolve_host()?;
     let json_config = load_json_config(&repo_root)?;
 
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
 
     let t = Instant::now();
-    let result = launch_pod(&cmd.name, host_override)?;
+    let result = launch_pod(
+        &cmd.name,
+        host_override,
+        cmd.container_config.devcontainer.clone(),
+    )?;
     let elapsed = t.elapsed();
     trace!("launch_pod: {elapsed:?}");
     let workdir = result.container_repo_path.clone();
