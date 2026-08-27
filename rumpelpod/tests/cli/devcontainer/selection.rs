@@ -4,6 +4,7 @@
 //! Integration tests for selecting non-standard devcontainer.json files.
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use indoc::formatdoc;
@@ -15,9 +16,8 @@ use crate::common::{
 };
 use crate::executor::ExecutorResources;
 
-fn write_selected_devcontainer(repo: &TestRepo, directory: &str, marker: &str) {
-    let config_dir = repo.path().join(directory);
-    fs::create_dir_all(&config_dir).expect("create selected config directory");
+fn write_selected_devcontainer(config_dir: &Path, marker: &str) {
+    fs::create_dir_all(config_dir).expect("create selected config directory");
     fs::write(config_dir.join("context-marker"), marker).expect("write context marker");
     fs::write(
         config_dir.join("Dockerfile"),
@@ -65,7 +65,7 @@ fn write_executor_config(
 #[test]
 fn devcontainer_select_cli_overrides_default_and_preserves_implicit_build_context() {
     let repo = TestRepo::new();
-    write_selected_devcontainer(&repo, "configs/cli", "selected by CLI\n");
+    write_selected_devcontainer(&repo.path().join("configs/cli"), "selected by CLI\n");
 
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
@@ -92,7 +92,7 @@ fn devcontainer_select_cli_overrides_default_and_preserves_implicit_build_contex
 #[test]
 fn devcontainer_select_rumpelpod_config_accepts_json_file() {
     let repo = TestRepo::new();
-    write_selected_devcontainer(&repo, "configs/default", "selected by config\n");
+    write_selected_devcontainer(&repo.path().join("configs/default"), "selected by config\n");
 
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
@@ -112,6 +112,37 @@ fn devcontainer_select_rumpelpod_config_accepts_json_file() {
         .expect("enter with .rumpelpod.json devcontainer failed");
 
     assert_eq!(String::from_utf8_lossy(&stdout), "selected by config\n");
+}
+
+#[test]
+fn devcontainer_select_accepts_external_implicit_build_context() {
+    let repo = TestRepo::new();
+    let external = tempfile::tempdir().expect("create external config directory");
+    write_selected_devcontainer(external.path(), "selected outside repository\n");
+
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    write_executor_config(&repo, &executor, None);
+
+    let stdout = pod_command(&repo, &daemon)
+        .arg("enter")
+        .arg("--devcontainer")
+        .arg(external.path())
+        .args([
+            "--create",
+            "selected-external",
+            "--",
+            "cat",
+            "/tmp/selected-devcontainer",
+        ])
+        .success()
+        .expect("enter with external devcontainer directory failed");
+
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        "selected outside repository\n"
+    );
 }
 
 #[test]

@@ -74,6 +74,7 @@ By default, rumpelpod searches `.devcontainer/devcontainer.json` and then `.devc
 Use `--devcontainer PATH` on commands such as `rumpel enter`, `rumpel claude`, `rumpel recreate`, and `rumpel image build` to select another configuration.
 `PATH` may be a directory containing `devcontainer.json` or a file whose name ends in `.json`.
 Relative command-line paths start at the current directory.
+Absolute paths may select configurations and build contexts outside the repository.
 To choose a project-wide default instead, set [`devcontainer`](#devcontainer) in `.rumpelpod.json`.
 
 Dockerfile paths, Docker Compose file paths, and explicit or implicit build contexts remain relative to the directory containing the selected `devcontainer.json`.

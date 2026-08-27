@@ -921,12 +921,11 @@ impl DevContainer {
     }
 
     /// Normalize build paths: merge legacy `dockerfile`/`context` into the
-    /// `build` struct and make all paths relative to `repo_root`.
-    ///
-    /// Must be called on the client side before sending to the daemon, since
-    /// the daemon doesn't know the devcontainer.json directory.
+    /// `build` struct and anchor paths at the devcontainer.json directory.
+    /// Absolute paths preserve the selected configuration's context even when
+    /// that configuration lives outside the repository.
     /// No-op if no build is configured (image-based container).
-    pub fn resolve_build_paths(&mut self, devcontainer_dir: &Path, repo_root: &Path) -> Result<()> {
+    pub fn resolve_build_paths(&mut self, devcontainer_dir: &Path) {
         // Merge legacy top-level dockerfile into build.dockerfile
         let dockerfile = self
             .dockerfile
@@ -935,7 +934,7 @@ impl DevContainer {
 
         let dockerfile = match dockerfile {
             Some(d) => d,
-            None => return Ok(()), // No build configured
+            None => return, // No build configured
         };
 
         let context = self
@@ -947,31 +946,16 @@ impl DevContainer {
 
         let resolved_dockerfile = devcontainer_dir
             .join(&dockerfile)
-            .strip_prefix(repo_root)
-            .map_err(|_| {
-                anyhow!(
-                    "devcontainer dockerfile path must stay under the repo root: {}",
-                    devcontainer_dir.join(&dockerfile).display()
-                )
-            })?
             .to_string_lossy()
             .to_string();
         let resolved_context = devcontainer_dir
             .join(&context)
-            .strip_prefix(repo_root)
-            .map_err(|_| {
-                anyhow!(
-                    "devcontainer build context path must stay under the repo root: {}",
-                    devcontainer_dir.join(&context).display()
-                )
-            })?
             .to_string_lossy()
             .to_string();
 
         let build = self.build.get_or_insert_with(BuildOptions::default);
         build.dockerfile = Some(resolved_dockerfile);
         build.context = Some(resolved_context);
-        Ok(())
     }
 
     /// Whether this devcontainer uses a Dockerfile build (vs a pre-built image).
