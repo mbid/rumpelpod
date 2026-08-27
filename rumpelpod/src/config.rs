@@ -984,20 +984,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_devcontainer_default() {
-        let config: JsonConfig = json5::from_str(indoc::indoc! {r#"
-            {
-              "devcontainer": "configs/rust/devcontainer.json"
-            }
-        "#})
-        .unwrap();
-        assert_eq!(
-            config.devcontainer,
-            Some(PathBuf::from("configs/rust/devcontainer.json"))
-        );
-    }
-
-    #[test]
     fn parse_unknown_container_engine_rejected() {
         let err = json5::from_str::<JsonConfig>(indoc::indoc! {r#"
             {

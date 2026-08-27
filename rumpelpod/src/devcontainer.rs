@@ -1345,52 +1345,7 @@ pub fn resolve_container_env_in_process(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::path::Path;
-
-    #[test]
-    fn resolve_config_path_accepts_json_file_and_containing_directory() {
-        let temp = tempfile::tempdir().expect("create temp directory");
-        let config_path = temp.path().join("devcontainer.json");
-        fs::write(&config_path, "{}").expect("write devcontainer config");
-
-        assert_eq!(
-            DevContainer::resolve_config_path(temp.path()).expect("resolve directory"),
-            config_path
-        );
-        assert_eq!(
-            DevContainer::resolve_config_path(&config_path).expect("resolve file"),
-            config_path
-        );
-    }
-
-    #[test]
-    fn resolve_config_path_rejects_non_json_file() {
-        let temp = tempfile::tempdir().expect("create temp directory");
-        let config_path = temp.path().join("devcontainer.json5");
-        fs::write(&config_path, "{}").expect("write devcontainer config");
-
-        let error = DevContainer::resolve_config_path(&config_path)
-            .expect_err("non-JSON config path should fail");
-        assert!(
-            error.to_string().contains("must be a JSON file"),
-            "unexpected error: {error:#}"
-        );
-    }
-
-    #[test]
-    fn standard_config_path_rejects_a_directory() {
-        let temp = tempfile::tempdir().expect("create temp directory");
-        fs::create_dir_all(temp.path().join(".devcontainer/devcontainer.json"))
-            .expect("create invalid config directory");
-
-        let error = DevContainer::find_raw(temp.path(), None)
-            .expect_err("config directory should not be ignored");
-        assert!(
-            error.to_string().contains("config is not a file"),
-            "unexpected error: {error:#}"
-        );
-    }
 
     fn full_ctx() -> SubstitutionContext {
         SubstitutionContext {

@@ -4,6 +4,7 @@
 //! Integration tests for selecting non-standard devcontainer.json files.
 
 use std::fs;
+use std::process::Command;
 
 use indoc::formatdoc;
 use rumpelpod::CommandExt;
@@ -111,4 +112,53 @@ fn devcontainer_select_rumpelpod_config_accepts_json_file() {
         .expect("enter with .rumpelpod.json devcontainer failed");
 
     assert_eq!(String::from_utf8_lossy(&stdout), "selected by config\n");
+}
+
+#[test]
+fn devcontainer_select_rejects_non_json_file() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.path().join("configs")).expect("create configs directory");
+    fs::write(repo.path().join("configs/devcontainer.json5"), "{}")
+        .expect("write non-JSON config path");
+
+    let output = Command::new("rumpel")
+        .args([
+            "image",
+            "build",
+            "--devcontainer",
+            "configs/devcontainer.json5",
+        ])
+        .current_dir(repo.path())
+        .output()
+        .expect("run rumpel image build");
+
+    assert!(!output.status.success(), "non-JSON config path should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("devcontainer config must be a JSON file"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn devcontainer_select_rejects_standard_config_directory() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.path().join(".devcontainer/devcontainer.json"))
+        .expect("create invalid config directory");
+
+    let output = Command::new("rumpel")
+        .args(["image", "build"])
+        .current_dir(repo.path())
+        .output()
+        .expect("run rumpel image build");
+
+    assert!(
+        !output.status.success(),
+        "config directory should not be ignored"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("devcontainer config is not a file"),
+        "unexpected stderr: {stderr}"
+    );
 }
