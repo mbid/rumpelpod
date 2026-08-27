@@ -928,39 +928,32 @@ fn parse_account_id(value: &str, path: &str, line: usize, field: &str) -> Result
         .with_context(|| format!("{path} has invalid {field} '{}' at line {line}", value))
 }
 
-fn translate_home_ownership(
-    home: &Path,
+fn translate_root_filesystem_ownership(
     old_uid: u32,
     old_gid: u32,
     new_uid: u32,
     new_gid: u32,
 ) -> Result<()> {
-    let home = fs::canonicalize(home).with_context(|| {
-        let home = home.display();
-        format!("resolving container user home '{home}'")
-    })?;
-    if home == Path::new("/") {
-        return Err(anyhow::anyhow!(
-            "refusing to translate container user home ownership for '/'"
-        ));
-    }
-    if !home.is_dir() {
-        let home = home.display();
-        return Err(anyhow::anyhow!(
-            "container user home '{home}' is not a directory"
-        ));
-    }
+    let root = Path::new("/");
+    let root_device = fs::symlink_metadata(root)
+        .context("reading container root filesystem metadata")?
+        .dev();
 
-    for entry in WalkDir::new(&home).follow_links(false) {
-        let entry = entry.with_context(|| {
-            let home = home.display();
-            format!("walking container user home '{home}'")
-        })?;
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .same_file_system(true)
+    {
+        let entry = entry.context("walking container root filesystem")?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(path).with_context(|| {
             let path = path.display();
             format!("reading ownership for '{path}'")
         })?;
+        // same_file_system prevents descent, while this check also leaves
+        // the mounted directory entry itself unchanged.
+        if metadata.dev() != root_device {
+            continue;
+        }
         let owner =
             (old_uid != new_uid && metadata.uid() == old_uid).then_some(Uid::from_raw(new_uid));
         let group =
@@ -1012,7 +1005,6 @@ fn update_remote_user_ids(user: &str, requested: RemoteUserIdUpdate) -> Result<(
 
     let old_uid = parse_account_id(&passwd[user_index][2], PASSWD_PATH, user_index + 1, "UID")?;
     let old_gid = parse_account_id(&passwd[user_index][3], PASSWD_PATH, user_index + 1, "GID")?;
-    let home = PathBuf::from(&passwd[user_index][5]);
     if old_uid == 0 {
         return Ok(());
     }
@@ -1065,7 +1057,7 @@ fn update_remote_user_ids(user: &str, requested: RemoteUserIdUpdate) -> Result<(
     passwd[user_index][3] = new_gid.to_string();
     fs::write(PASSWD_PATH, serialize_account_file(&passwd)).context("updating /etc/passwd")?;
 
-    translate_home_ownership(&home, old_uid, old_gid, requested.uid, new_gid)?;
+    translate_root_filesystem_ownership(old_uid, old_gid, requested.uid, new_gid)?;
 
     let resolved = crate::switch_user::resolve_user(user)?;
     if resolved.uid.as_raw() != requested.uid || resolved.gid.as_raw() != new_gid {

@@ -81,7 +81,10 @@ fn write_user_id_devcontainer(
             RUN groupadd -g {image_gid} {TEST_USER} \
                 && useradd -m -u {image_uid} -g {image_gid} {TEST_USER} \
                 && echo image-owned > /home/{TEST_USER}/image-owned \
-                && chown {image_uid}:{image_gid} /home/{TEST_USER}/image-owned
+                && chown {image_uid}:{image_gid} /home/{TEST_USER}/image-owned \
+                && mkdir -p /workspaces/reference-project \
+                && echo image-owned > /workspaces/reference-project/image-owned \
+                && chown -R {image_uid}:{image_gid} /workspaces/reference-project
             USER {TEST_USER}
         "#},
     )
@@ -183,11 +186,11 @@ fn remote_user_uid_defaults_on_for_local_bind_mount() {
             "--",
             "sh",
             "-c",
-            r#"stat -c '%u:%g' "$HOME" "$HOME/image-owned" && touch "$HOME/runtime-owned""#,
+            r#"stat -c '%u:%g' "$HOME" "$HOME/image-owned" /workspaces/reference-project /workspaces/reference-project/image-owned && touch "$HOME/runtime-owned" /workspaces/reference-project/runtime-owned"#,
         ])
         .success()
-        .expect("verify translated home ownership");
-    let expected = format!("{0}:{1}\n{0}:{1}\n", ids.0, ids.1);
+        .expect("verify translated image ownership");
+    let expected = format!("{0}:{1}\n{0}:{1}\n{0}:{1}\n{0}:{1}\n", ids.0, ids.1);
     assert_eq!(String::from_utf8_lossy(&ownership), expected);
 
     let contents = pod_command(&repo, &daemon)
@@ -340,6 +343,7 @@ fn remote_user_uid_keeps_image_gid_when_host_gid_is_taken() {
     let host_gid = nix::unistd::getgid().as_raw();
     let image_uid = alternate_id(host_uid);
     let image_gid = alternate_id(host_gid);
+    let cache_nonce = repo_id(&repo);
     let devcontainer_dir = repo.path().join(".devcontainer");
     fs::create_dir_all(&devcontainer_dir).expect("create devcontainer directory");
     fs::write(
@@ -359,6 +363,7 @@ fn remote_user_uid_keeps_image_gid_when_host_gid_is_taken() {
         devcontainer_dir.join("devcontainer.json"),
         formatdoc! {r#"
             {{
+                "name": "gid-collision-{cache_nonce}",
                 "build": {{
                     "dockerfile": "Dockerfile",
                     "context": ".."
