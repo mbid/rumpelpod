@@ -8,20 +8,23 @@
 
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use indoc::{formatdoc, indoc};
+use nix::fcntl::{AtFlags, AT_FDCWD};
+use nix::unistd::{Gid, Uid};
 use semver::Version;
 use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 
 use crate::cli::PrepareImageCommand;
 use crate::config::{ContainerEngine, Host};
 use crate::git::GitRemote;
-use crate::image::{BuildOutputFn, BuildResult, BuildxMode, Image};
+use crate::image::{BuildOutputFn, BuildResult, BuildxMode, Image, OutputLine};
 use crate::CommandExt;
 
 /// GCS bucket hosting Claude Code releases (mirrors pod/pty.rs).
@@ -30,7 +33,7 @@ const CLAUDE_CODE_DIST_BUCKET: &str =
 
 /// Bump this when the Dockerfile template changes in a way that
 /// invalidates previously built prepared images.
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 
 /// File baked into the prepared image listing the container env var
 /// names the daemon resolved from `containerEnv` and `--env-file` at
@@ -74,6 +77,13 @@ struct LocalPiInfo {
 /// exact version inside the prepared image.
 struct LocalGrokInfo {
     version: String,
+}
+
+/// Local account IDs to assign to the effective container user.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteUserIdUpdate {
+    pub uid: u32,
+    pub gid: u32,
 }
 
 /// npm package implementing the pi coding agent CLI.
@@ -364,6 +374,7 @@ fn compute_prepared_tag(
     base_image: &str,
     container_repo_path: &Path,
     container_user: &str,
+    user_id_update: Option<RemoteUserIdUpdate>,
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
     codex_info: Option<&LocalCodexInfo>,
@@ -380,6 +391,14 @@ fn compute_prepared_tag(
     hasher.update(RUMPEL_VERSION_INFO.as_bytes());
     hasher.update(container_repo_path.as_os_str().as_encoded_bytes());
     hasher.update(container_user.as_bytes());
+    match user_id_update {
+        Some(update) => {
+            hasher.update([1]);
+            hasher.update(update.uid.to_le_bytes());
+            hasher.update(update.gid.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
     if let Some(info) = claude_info {
         hasher.update(info.version.as_bytes());
     }
@@ -445,6 +464,7 @@ fn generate_dockerfile(
     base_image: &str,
     container_repo_path: &Path,
     container_user: &str,
+    user_id_update: Option<RemoteUserIdUpdate>,
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
     codex_info: Option<&LocalCodexInfo>,
@@ -499,12 +519,20 @@ fn generate_dockerfile(
         None => String::new(),
     };
 
+    let user_id_flags = match user_id_update {
+        Some(update) => format!(
+            " \\\n      --user-uid '{}' \\\n      --user-gid '{}'",
+            update.uid, update.gid
+        ),
+        None => String::new(),
+    };
+
     // Each flag above already carries its own ` \<newline>` prefix, so
     // concatenating them keeps the generated RUN line one-flag-per-line.
     // Assembling them here keeps the template below readable.
     let prepare_image_flags = format!(
         "{claude_flag}{pi_flag}{codex_flag}{grok_flag}{remote_flags}\
-         {mount_target_flags}{system_prompt_flag}{description_flag}"
+         {mount_target_flags}{system_prompt_flag}{description_flag}{user_id_flags}"
     );
 
     // The image must end with the base image's original USER so that
@@ -545,6 +573,7 @@ fn assemble_build_context(
     base_image: &str,
     container_repo_path: &Path,
     container_user: &str,
+    user_id_update: Option<RemoteUserIdUpdate>,
     claude_info: Option<&LocalClaudeInfo>,
     pi_info: Option<&LocalPiInfo>,
     codex_info: Option<&LocalCodexInfo>,
@@ -560,6 +589,7 @@ fn assemble_build_context(
         base_image,
         container_repo_path,
         container_user,
+        user_id_update,
         claude_info,
         pi_info,
         codex_info,
@@ -689,6 +719,7 @@ pub fn build_prepared_image(
     git_dir: &Path,
     container_repo_path: &Path,
     container_user: Option<&str>,
+    requested_user_id_update: Option<RemoteUserIdUpdate>,
     host_remotes: &[GitRemote],
     mount_targets: &[String],
     claude_cli_path: Option<&Path>,
@@ -702,7 +733,7 @@ pub fn build_prepared_image(
     container_env_keys: &[String],
     build_options: &[String],
     ssh_auth_sock: Option<&Path>,
-    on_output: Option<BuildOutputFn>,
+    mut on_output: Option<BuildOutputFn>,
 ) -> Result<BuildResult> {
     let claude_info = detect_local_claude(claude_cli_path);
     let pi_info = detect_local_pi(pi_cli_path);
@@ -726,6 +757,26 @@ pub fn build_prepared_image(
     // or fall back to the image's own USER.
     let container_user = container_user.unwrap_or(&image_user);
 
+    // A numeric user reference would stop resolving after its UID changed.
+    // Root already owns bind-mounted paths whenever elevated access is
+    // permitted, so neither case benefits from rewriting the account files.
+    let user_id_update = if container_user == "root"
+        || container_user.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        if requested_user_id_update.is_some() && container_user != "root" {
+            let warning = format!(
+                "warning: updateRemoteUserUID cannot update numeric container user '{container_user}'"
+            );
+            match on_output.as_mut() {
+                Some(output) => output(OutputLine::Stderr(warning)),
+                None => eprintln!("{warning}"),
+            }
+        }
+        None
+    } else {
+        requested_user_id_update
+    };
+
     // On k8s, kubectl exec has no --user flag, so we enter the
     // container as the image's USER.  switch_user() can only drop
     // privileges (root -> non-root) or no-op (already the right
@@ -746,6 +797,7 @@ pub fn build_prepared_image(
         &base_image.0,
         container_repo_path,
         container_user,
+        user_id_update,
         claude_info.as_ref(),
         pi_info.as_ref(),
         codex_info.as_ref(),
@@ -790,6 +842,7 @@ pub fn build_prepared_image(
         &buildable_base,
         container_repo_path,
         container_user,
+        user_id_update,
         claude_info.as_ref(),
         pi_info.as_ref(),
         codex_info.as_ref(),
@@ -828,6 +881,209 @@ pub fn build_prepared_image(
 // `rumpel prepare-image` subcommand -- runs inside the container at build time
 // ---------------------------------------------------------------------------
 
+const PASSWD_PATH: &str = "/etc/passwd";
+const GROUP_PATH: &str = "/etc/group";
+
+fn parse_account_file(
+    contents: &str,
+    path: &str,
+    expected_fields: usize,
+) -> Result<Vec<Vec<String>>> {
+    let mut records = Vec::new();
+    for (index, line) in contents.lines().enumerate() {
+        if line.is_empty() {
+            return Err(anyhow::anyhow!(
+                "{path} contains an empty record at line {}",
+                index + 1
+            ));
+        }
+        let fields: Vec<String> = line.split(':').map(str::to_string).collect();
+        if fields.len() != expected_fields {
+            return Err(anyhow::anyhow!(
+                "{path} has {} fields at line {}, expected {expected_fields}",
+                fields.len(),
+                index + 1
+            ));
+        }
+        records.push(fields);
+    }
+    if records.is_empty() {
+        return Err(anyhow::anyhow!("{path} is empty"));
+    }
+    Ok(records)
+}
+
+fn serialize_account_file(records: &[Vec<String>]) -> String {
+    let mut contents = String::new();
+    for record in records {
+        contents.push_str(&record.join(":"));
+        contents.push('\n');
+    }
+    contents
+}
+
+fn parse_account_id(value: &str, path: &str, line: usize, field: &str) -> Result<u32> {
+    value
+        .parse::<u32>()
+        .with_context(|| format!("{path} has invalid {field} '{}' at line {line}", value))
+}
+
+fn translate_home_ownership(
+    home: &Path,
+    old_uid: u32,
+    old_gid: u32,
+    new_uid: u32,
+    new_gid: u32,
+) -> Result<()> {
+    let home = fs::canonicalize(home).with_context(|| {
+        let home = home.display();
+        format!("resolving container user home '{home}'")
+    })?;
+    if home == Path::new("/") {
+        return Err(anyhow::anyhow!(
+            "refusing to translate container user home ownership for '/'"
+        ));
+    }
+    if !home.is_dir() {
+        let home = home.display();
+        return Err(anyhow::anyhow!(
+            "container user home '{home}' is not a directory"
+        ));
+    }
+
+    for entry in WalkDir::new(&home).follow_links(false) {
+        let entry = entry.with_context(|| {
+            let home = home.display();
+            format!("walking container user home '{home}'")
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(path).with_context(|| {
+            let path = path.display();
+            format!("reading ownership for '{path}'")
+        })?;
+        let owner =
+            (old_uid != new_uid && metadata.uid() == old_uid).then_some(Uid::from_raw(new_uid));
+        let group =
+            (old_gid != new_gid && metadata.gid() == old_gid).then_some(Gid::from_raw(new_gid));
+        if owner.is_none() && group.is_none() {
+            continue;
+        }
+        nix::unistd::fchownat(AT_FDCWD, path, owner, group, AtFlags::AT_SYMLINK_NOFOLLOW)
+            .with_context(|| {
+                let path = path.display();
+                format!("translating ownership for '{path}'")
+            })?;
+    }
+    Ok(())
+}
+
+fn update_remote_user_ids(user: &str, requested: RemoteUserIdUpdate) -> Result<()> {
+    if user == "root" {
+        return Ok(());
+    }
+    if user.bytes().all(|byte| byte.is_ascii_digit()) {
+        eprintln!("warning: updateRemoteUserUID cannot update numeric container user '{user}'");
+        return Ok(());
+    }
+
+    let passwd_contents = fs::read_to_string(PASSWD_PATH).context("reading /etc/passwd")?;
+    let group_contents = fs::read_to_string(GROUP_PATH).context("reading /etc/group")?;
+    let mut passwd = parse_account_file(&passwd_contents, PASSWD_PATH, 7)?;
+    let mut group = parse_account_file(&group_contents, GROUP_PATH, 4)?;
+
+    let matching_users: Vec<usize> = passwd
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| (record[0] == user).then_some(index))
+        .collect();
+    let user_index = match matching_users.as_slice() {
+        [index] => *index,
+        [] => {
+            return Err(anyhow::anyhow!(
+                "container user '{user}' was not found in /etc/passwd"
+            ));
+        }
+        _ => {
+            return Err(anyhow::anyhow!(
+                "container user '{user}' has duplicate records in /etc/passwd"
+            ));
+        }
+    };
+
+    let old_uid = parse_account_id(&passwd[user_index][2], PASSWD_PATH, user_index + 1, "UID")?;
+    let old_gid = parse_account_id(&passwd[user_index][3], PASSWD_PATH, user_index + 1, "GID")?;
+    let home = PathBuf::from(&passwd[user_index][5]);
+    if old_uid == 0 {
+        return Ok(());
+    }
+
+    for (index, record) in passwd.iter().enumerate() {
+        let uid = parse_account_id(&record[2], PASSWD_PATH, index + 1, "UID")?;
+        if index != user_index && uid == requested.uid {
+            let existing_user = &record[0];
+            return Err(anyhow::anyhow!(
+                "cannot update container user '{user}' to UID {} because it belongs to user '{existing_user}'; set updateRemoteUserUID to false to keep the image IDs",
+                requested.uid
+            ));
+        }
+    }
+
+    let mut conflicting_group = None;
+    for (index, record) in group.iter().enumerate() {
+        let gid = parse_account_id(&record[2], GROUP_PATH, index + 1, "GID")?;
+        if old_gid != requested.gid && gid == requested.gid {
+            conflicting_group = Some(record[0].clone());
+            break;
+        }
+    }
+    let new_gid = match conflicting_group {
+        Some(existing_group) => {
+            eprintln!(
+                "warning: keeping container user '{user}' at GID {old_gid} because requested GID {} belongs to group '{existing_group}'",
+                requested.gid
+            );
+            old_gid
+        }
+        None => requested.gid,
+    };
+
+    if old_uid == requested.uid && old_gid == new_gid {
+        return Ok(());
+    }
+
+    if old_gid != new_gid {
+        for (index, record) in group.iter_mut().enumerate() {
+            let gid = parse_account_id(&record[2], GROUP_PATH, index + 1, "GID")?;
+            if gid == old_gid {
+                record[2] = new_gid.to_string();
+            }
+        }
+        fs::write(GROUP_PATH, serialize_account_file(&group)).context("updating /etc/group")?;
+    }
+
+    passwd[user_index][2] = requested.uid.to_string();
+    passwd[user_index][3] = new_gid.to_string();
+    fs::write(PASSWD_PATH, serialize_account_file(&passwd)).context("updating /etc/passwd")?;
+
+    translate_home_ownership(&home, old_uid, old_gid, requested.uid, new_gid)?;
+
+    let resolved = crate::switch_user::resolve_user(user)?;
+    if resolved.uid.as_raw() != requested.uid || resolved.gid.as_raw() != new_gid {
+        return Err(anyhow::anyhow!(
+            "container user '{user}' resolved to {}:{}, expected {}:{new_gid} after updating account files",
+            resolved.uid,
+            resolved.gid,
+            requested.uid
+        ));
+    }
+
+    eprintln!(
+        "updated container user '{user}' from {old_uid}:{old_gid} to {}:{new_gid}",
+        requested.uid
+    );
+    Ok(())
+}
+
 /// Clone the repo and optionally install the Claude CLI.
 ///
 /// Invoked as a Dockerfile RUN step after the rumpel binary itself has
@@ -840,6 +1096,18 @@ pub fn build_prepared_image(
 /// who runs the entrypoint.  The two coincide when devcontainer.json
 /// does not set remoteUser/containerUser.
 pub fn run_prepare_image(cmd: &PrepareImageCommand) -> Result<()> {
+    match (cmd.user_uid, cmd.user_gid) {
+        (Some(uid), Some(gid)) => {
+            update_remote_user_ids(&cmd.user, RemoteUserIdUpdate { uid, gid })?;
+        }
+        (None, None) => {}
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(anyhow::anyhow!(
+                "--user-uid and --user-gid must be provided together"
+            ));
+        }
+    }
+
     if crate::which("git").is_none() {
         return Err(anyhow::anyhow!(
             "the devcontainer image does not have git installed, \
@@ -1768,6 +2036,7 @@ mod tests {
                 "root",
                 None,
                 None,
+                None,
                 Some(codex_info),
                 None,
                 &[],
@@ -1795,6 +2064,7 @@ mod tests {
                 "example:latest",
                 Path::new("/workspace"),
                 "root",
+                None,
                 None,
                 None,
                 None,
@@ -1857,6 +2127,7 @@ mod tests {
             "example:latest",
             Path::new("/workspace"),
             "root",
+            None,
             None,
             None,
             None,

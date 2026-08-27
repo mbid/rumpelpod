@@ -744,6 +744,14 @@ pub struct PrepareImageCommand {
     #[arg(long)]
     pub user: String,
 
+    /// UID to assign to the container user
+    #[arg(long, requires = "user_gid")]
+    pub user_uid: Option<u32>,
+
+    /// GID to assign to the container user
+    #[arg(long, requires = "user_uid")]
+    pub user_gid: Option<u32>,
+
     /// Claude CLI version to install (skip if not provided)
     #[arg(long)]
     pub claude_version: Option<String>,

@@ -77,6 +77,78 @@ fn write_compose_devcontainer(
     .expect("write compose devcontainer.json");
 }
 
+fn write_compose_user_id_devcontainer(
+    repo: &TestRepo,
+    agent_config: &str,
+    extra_services: &str,
+) -> (u32, u32) {
+    let host_uid = nix::unistd::getuid().as_raw();
+    let host_gid = nix::unistd::getgid().as_raw();
+    let image_uid = if host_uid == 20_001 { 20_002 } else { 20_001 };
+    let image_gid = if host_gid == 20_001 { 20_002 } else { 20_001 };
+    let devcontainer_dir = repo.path().join(".devcontainer");
+    fs::create_dir_all(&devcontainer_dir).expect("create .devcontainer");
+    fs::write(
+        devcontainer_dir.join("Dockerfile"),
+        formatdoc! {r#"
+            FROM cgr.dev/chainguard/wolfi-base
+            RUN apk add --no-cache git shadow
+            RUN groupadd -g {image_gid} {TEST_USER} \
+                && useradd -m -u {image_uid} -g {image_gid} {TEST_USER}
+            USER {TEST_USER}
+        "#},
+    )
+    .expect("write compose Dockerfile");
+    fs::write(
+        devcontainer_dir.join("compose.yaml"),
+        format!(
+            "services:\n  agent:\n    build:\n      context: ..\n      dockerfile: .devcontainer/Dockerfile\n    command: [\"sleep\", \"infinity\"]\n{agent_config}\n{extra_services}\n"
+        ),
+    )
+    .expect("write compose file");
+    fs::write(
+        devcontainer_dir.join("devcontainer.json"),
+        formatdoc! {r#"
+            {{
+                "dockerComposeFile": "compose.yaml",
+                "service": "agent",
+                "workspaceFolder": "{TEST_REPO_PATH}",
+                "containerUser": "{TEST_USER}"
+            }}
+        "#},
+    )
+    .expect("write compose devcontainer.json");
+    (image_uid, image_gid)
+}
+
+fn enter_compose_user_ids(repo: &TestRepo, daemon: &TestDaemon, pod_name: &str) -> (u32, u32) {
+    let output = pod_command(repo, daemon)
+        .args([
+            "enter",
+            "--create",
+            pod_name,
+            "--",
+            "sh",
+            "-c",
+            "id -u; id -g",
+        ])
+        .success()
+        .expect("enter compose pod and read user IDs");
+    let output = String::from_utf8(output).expect("id output is UTF-8");
+    let mut lines = output.lines().rev();
+    let gid = lines
+        .next()
+        .expect("id output has GID")
+        .parse()
+        .expect("GID is numeric");
+    let uid = lines
+        .next()
+        .expect("id output has UID")
+        .parse()
+        .expect("UID is numeric");
+    (uid, gid)
+}
+
 fn try_echo(port: u16, message: &str) -> Option<String> {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
@@ -175,6 +247,63 @@ fn compose_service_container(project: &str, service: &str) -> String {
         panic!("expected one container for compose service '{service}', got {containers:?}");
     };
     (*container).to_string()
+}
+
+#[test]
+fn remote_user_uid_defaults_on_for_compose_agent_bind_mount() {
+    if !cfg!(target_os = "linux") || !require_local_compose() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let bind_source = repo.path().join("compose-uid-bind");
+    fs::create_dir(&bind_source).expect("create bind source");
+    let bind_source = bind_source.display();
+    write_compose_user_id_devcontainer(
+        &repo,
+        &format!(
+            "    volumes:\n      - type: bind\n        source: \"{bind_source}\"\n        target: /mnt/uid-bind"
+        ),
+        "",
+    );
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    assert_eq!(
+        enter_compose_user_ids(&repo, &daemon, "compose-uid-bind"),
+        (
+            nix::unistd::getuid().as_raw(),
+            nix::unistd::getgid().as_raw()
+        )
+    );
+}
+
+#[test]
+fn remote_user_uid_ignores_compose_sidecar_bind_mount() {
+    if !cfg!(target_os = "linux") || !require_local_compose() {
+        return;
+    }
+    let repo = TestRepo::new();
+    let bind_source = repo.path().join("compose-sidecar-uid-bind");
+    fs::create_dir(&bind_source).expect("create bind source");
+    let bind_source = bind_source.display();
+    let image_ids = write_compose_user_id_devcontainer(
+        &repo,
+        "",
+        &format!(
+            "  sidecar:\n    image: cgr.dev/chainguard/wolfi-base\n    command: [\"sleep\", \"infinity\"]\n    volumes:\n      - type: bind\n        source: \"{bind_source}\"\n        target: /mnt/uid-bind"
+        ),
+    );
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
+
+    assert_eq!(
+        enter_compose_user_ids(&repo, &daemon, "compose-sidecar-uid-bind"),
+        image_ids
+    );
 }
 
 #[test]

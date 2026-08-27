@@ -1,0 +1,14 @@
+Align local devcontainer user IDs
+
+Honor updateRemoteUserUID as a tri-state setting. On Linux localhost
+engines, default to aligning the effective container user when the agent
+service has a bind mount, allow true to force alignment, and allow false
+to disable it. Warn and leave image IDs unchanged on unsupported hosts.
+
+Perform account and home ownership migration in the prepared-image layer
+without requiring user-management tools from the base image. Detect UID
+collisions, preserve the image GID when the requested GID is occupied,
+and include the selected IDs in prepared-image cache keys.
+
+Cover the policy, Compose mounts, ownership migration, collisions, and
+unsupported hosts with integration tests.

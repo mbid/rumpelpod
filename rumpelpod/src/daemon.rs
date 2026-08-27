@@ -750,6 +750,34 @@ struct DockerRunArgs {
     init: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteUserIdUpdateDecision {
+    Disabled,
+    Enabled,
+    Unsupported,
+}
+
+fn remote_user_id_update_decision(
+    setting: Option<bool>,
+    host: &Host,
+    has_bind_mount: bool,
+) -> RemoteUserIdUpdateDecision {
+    let supported = cfg!(target_os = "linux") && matches!(host, Host::Localhost { .. });
+    if !supported {
+        return match setting {
+            Some(true) => RemoteUserIdUpdateDecision::Unsupported,
+            Some(false) | None => RemoteUserIdUpdateDecision::Disabled,
+        };
+    }
+
+    match setting {
+        Some(true) => RemoteUserIdUpdateDecision::Enabled,
+        Some(false) => RemoteUserIdUpdateDecision::Disabled,
+        None if has_bind_mount => RemoteUserIdUpdateDecision::Enabled,
+        None => RemoteUserIdUpdateDecision::Disabled,
+    }
+}
+
 /// Map devcontainer.json `runArgs` strings to docker create fields.
 ///
 /// Handles `--key=value` and `--key value` forms for all recognised flags.
@@ -3600,6 +3628,9 @@ impl DaemonServer {
 
         let all_mounts = devcontainer.resolved_mounts()?;
         check_no_unresolved_mount_vars(&all_mounts)?;
+        let devcontainer_has_bind_mount = all_mounts
+            .iter()
+            .any(|mount| mount.mount_type == MountType::Bind);
         let mount_targets: Vec<String> = all_mounts.iter().map(|m| m.target.clone()).collect();
         let (mounts, bind_sources) = split_bind_mounts(all_mounts, &docker_host, &pod_name.0);
 
@@ -3784,6 +3815,37 @@ impl DaemonServer {
         };
         let host_remotes = crate::git::get_remotes(&repo_path).unwrap_or_default();
         let build_options = devcontainer.build_options();
+        let compose_agent_has_bind_mount = match (&compose_model, &agent_service) {
+            (Some(model), Some(service)) => model.service_has_bind_mount(service)?,
+            (None, None) => false,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "compose bind detection is missing its agent service or rendered model"
+                ));
+            }
+        };
+        let has_bind_mount = devcontainer_has_bind_mount || compose_agent_has_bind_mount;
+        let user_id_update = match remote_user_id_update_decision(
+            devcontainer.update_remote_user_uid,
+            &docker_host,
+            has_bind_mount,
+        ) {
+            RemoteUserIdUpdateDecision::Disabled => None,
+            RemoteUserIdUpdateDecision::Enabled => {
+                Some(crate::prepared_image::RemoteUserIdUpdate {
+                    uid: nix::unistd::getuid().as_raw(),
+                    gid: nix::unistd::getgid().as_raw(),
+                })
+            }
+            RemoteUserIdUpdateDecision::Unsupported => {
+                build_tx
+                    .send(OutputLine::Stderr(
+                        "warning: updateRemoteUserUID has no effect unless rumpelpod uses a localhost container engine on Linux".into(),
+                    ))
+                    .ok();
+                None
+            }
+        };
         let compose_service_user = match (&compose_model, &agent_service) {
             (Some(model), Some(service)) => model.service_user_optional(service)?,
             (None, None) => None,
@@ -3807,6 +3869,7 @@ impl DaemonServer {
             &git_dir,
             &container_repo_path,
             prepared_user,
+            user_id_update,
             &host_remotes,
             &mount_targets,
             claude_cli_path.as_deref(),

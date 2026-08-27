@@ -55,7 +55,10 @@ pub struct DevContainer {
     pub container_user: Option<String>,
 
     /// Whether to update the container user's UID/GID to match the local user.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "updateRemoteUserUID",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub update_remote_user_uid: Option<bool>,
 
     /// Shell type for probing user environment variables.
