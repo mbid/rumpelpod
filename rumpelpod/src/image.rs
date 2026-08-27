@@ -189,8 +189,8 @@ impl<'a> BuildxMode<'a> {
 
 /// Resolve a Docker image, building from devcontainer.json 'build' if necessary.
 ///
-/// The DevContainer's build paths must already be resolved to repo-root-relative
-/// paths (via `resolve_build_paths`) before calling this.
+/// The DevContainer's build paths must already be anchored at the directory
+/// containing devcontainer.json (via `resolve_build_paths`) before calling this.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_image(
     devcontainer: &DevContainer,

@@ -202,7 +202,11 @@ pub fn cp(cmd: &CpCommand) -> Result<()> {
         return Err(anyhow::anyhow!("pod '{pod_name}' does not exist"));
     }
 
-    let result = enter::launch_pod(pod_name, cmd.host_args.resolve()?)?;
+    let result = enter::launch_pod(
+        pod_name,
+        cmd.container_config.resolve_host()?,
+        cmd.container_config.devcontainer.clone(),
+    )?;
     let repo_path = result.container_repo_path.clone();
     let client = PodClient::connect(&result.container_url, &result.container_token)?;
 

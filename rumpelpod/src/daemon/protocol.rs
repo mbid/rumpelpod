@@ -221,6 +221,9 @@ pub struct PodLaunchParams {
     /// this verbatim as the key for DB lookups and canonicalizes a
     /// local copy only where bind-mount paths need it (macOS symlinks).
     pub repo_path: PathBuf,
+    /// Explicit devcontainer.json selected by the client, or `None` to search
+    /// the standard locations under `repo_path`.
+    pub devcontainer_path: Option<PathBuf>,
     /// The branch currently checked out on the host, if any.
     /// Used to set the upstream of the primary branch in the pod.
     pub host_branch: Option<String>,

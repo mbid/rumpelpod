@@ -518,6 +518,75 @@ pub struct LifecycleConfig {
 }
 
 impl DevContainer {
+    /// Resolve an explicit devcontainer selection to a JSON file.
+    ///
+    /// Directories select their `devcontainer.json`; file selections must use
+    /// the `.json` extension so a misspelled directory does not silently become
+    /// a file path.
+    pub fn resolve_config_path(path: &Path) -> Result<PathBuf> {
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                let path = path.display();
+                return Err(error).with_context(|| format!("checking devcontainer path {path}"));
+            }
+        };
+
+        let config_path = match metadata {
+            Some(metadata) if metadata.is_dir() => path.join("devcontainer.json"),
+            Some(metadata) if metadata.is_file() => path.to_path_buf(),
+            Some(_) => {
+                let path = path.display();
+                return Err(anyhow!(
+                    "devcontainer path is not a file or directory: {path}"
+                ));
+            }
+            None => path.to_path_buf(),
+        };
+
+        if config_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("json")
+        {
+            let path = config_path.display();
+            return Err(anyhow!("devcontainer config must be a JSON file: {path}"));
+        }
+        if !config_path.is_file() {
+            let path = config_path.display();
+            return Err(anyhow!("devcontainer config does not exist: {path}"));
+        }
+        Ok(config_path)
+    }
+
+    fn config_path(repo_root: &Path, selected: Option<&Path>) -> Result<Option<PathBuf>> {
+        if let Some(path) = selected {
+            return Self::resolve_config_path(path).map(Some);
+        }
+
+        let candidates = [
+            repo_root.join(".devcontainer/devcontainer.json"),
+            repo_root.join(".devcontainer.json"),
+        ];
+        for candidate in candidates {
+            match std::fs::metadata(&candidate) {
+                Ok(metadata) if metadata.is_file() => return Ok(Some(candidate)),
+                Ok(_) => {
+                    let path = candidate.display();
+                    return Err(anyhow!("devcontainer config is not a file: {path}"));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let path = candidate.display();
+                    return Err(error)
+                        .with_context(|| format!("checking devcontainer config {path}"));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Load a devcontainer.json from the given path using json5 (supports comments).
     pub fn load(path: &Path) -> Result<Self> {
         let contents = std::fs::read_to_string(path).with_context(|| {
@@ -531,51 +600,42 @@ impl DevContainer {
         })
     }
 
-    /// Read the raw devcontainer.json content from standard locations.
+    /// Read the raw devcontainer.json content from an explicit selection or
+    /// the standard locations.
     /// Returns the raw text (before any parsing or resolution) or None
     /// if no devcontainer.json exists.
-    pub fn find_raw(repo_root: &Path) -> Result<Option<String>> {
-        let candidates = [
-            repo_root.join(".devcontainer/devcontainer.json"),
-            repo_root.join(".devcontainer.json"),
-        ];
-        for candidate in &candidates {
-            if candidate.exists() {
-                let content = std::fs::read_to_string(candidate).with_context(|| {
-                    let path = candidate.display();
-                    format!("reading {path}")
-                })?;
-                return Ok(Some(content));
-            }
-        }
-        Ok(None)
+    pub fn find_raw(repo_root: &Path, selected: Option<&Path>) -> Result<Option<String>> {
+        let Some(config_path) = Self::config_path(repo_root, selected)? else {
+            return Ok(None);
+        };
+        let content = std::fs::read_to_string(&config_path).with_context(|| {
+            let path = config_path.display();
+            format!("reading {path}")
+        })?;
+        Ok(Some(content))
     }
 
-    /// Find and load a devcontainer.json from standard locations in the repo.
+    /// Find and load a devcontainer.json from an explicit selection or the
+    /// standard locations in the repo.
     ///
-    /// Searches for:
+    /// Without an explicit selection, searches for:
     /// 1. `.devcontainer/devcontainer.json`
     /// 2. `.devcontainer.json`
     ///
     /// Returns the DevContainer and the directory containing the devcontainer.json file.
-    pub fn find_and_load(repo_root: &Path) -> Result<Option<(Self, PathBuf)>> {
-        let candidates = [
-            repo_root.join(".devcontainer/devcontainer.json"),
-            repo_root.join(".devcontainer.json"),
-        ];
-
-        for candidate in &candidates {
-            if candidate.exists() {
-                let dc = Self::load(candidate)?;
-                let dc_dir = candidate
-                    .parent()
-                    .expect("devcontainer.json must have a parent directory")
-                    .to_path_buf();
-                return Ok(Some((dc, dc_dir)));
-            }
-        }
-
-        Ok(None)
+    pub fn find_and_load(
+        repo_root: &Path,
+        selected: Option<&Path>,
+    ) -> Result<Option<(Self, PathBuf)>> {
+        let Some(config_path) = Self::config_path(repo_root, selected)? else {
+            return Ok(None);
+        };
+        let dc = Self::load(&config_path)?;
+        let dc_dir = config_path
+            .parent()
+            .expect("devcontainer.json must have a parent directory")
+            .to_path_buf();
+        Ok(Some((dc, dc_dir)))
     }
 
     /// Check for unsupported fields and emit warnings to stderr.
@@ -864,12 +924,11 @@ impl DevContainer {
     }
 
     /// Normalize build paths: merge legacy `dockerfile`/`context` into the
-    /// `build` struct and make all paths relative to `repo_root`.
-    ///
-    /// Must be called on the client side before sending to the daemon, since
-    /// the daemon doesn't know the devcontainer.json directory.
+    /// `build` struct and anchor paths at the devcontainer.json directory.
+    /// Absolute paths preserve the selected configuration's context even when
+    /// that configuration lives outside the repository.
     /// No-op if no build is configured (image-based container).
-    pub fn resolve_build_paths(&mut self, devcontainer_dir: &Path, repo_root: &Path) -> Result<()> {
+    pub fn resolve_build_paths(&mut self, devcontainer_dir: &Path) {
         // Merge legacy top-level dockerfile into build.dockerfile
         let dockerfile = self
             .dockerfile
@@ -878,7 +937,7 @@ impl DevContainer {
 
         let dockerfile = match dockerfile {
             Some(d) => d,
-            None => return Ok(()), // No build configured
+            None => return, // No build configured
         };
 
         let context = self
@@ -890,31 +949,16 @@ impl DevContainer {
 
         let resolved_dockerfile = devcontainer_dir
             .join(&dockerfile)
-            .strip_prefix(repo_root)
-            .map_err(|_| {
-                anyhow!(
-                    "devcontainer dockerfile path must stay under the repo root: {}",
-                    devcontainer_dir.join(&dockerfile).display()
-                )
-            })?
             .to_string_lossy()
             .to_string();
         let resolved_context = devcontainer_dir
             .join(&context)
-            .strip_prefix(repo_root)
-            .map_err(|_| {
-                anyhow!(
-                    "devcontainer build context path must stay under the repo root: {}",
-                    devcontainer_dir.join(&context).display()
-                )
-            })?
             .to_string_lossy()
             .to_string();
 
         let build = self.build.get_or_insert_with(BuildOptions::default);
         build.dockerfile = Some(resolved_dockerfile);
         build.context = Some(resolved_context);
-        Ok(())
     }
 
     /// Whether this devcontainer uses a Dockerfile build (vs a pre-built image).

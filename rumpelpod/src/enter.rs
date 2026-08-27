@@ -142,14 +142,53 @@ pub fn determine_host(repo_root: &Path, host_override: Option<Host>) -> Result<H
     })
 }
 
+/// Determine the devcontainer config from the CLI override or .rumpelpod.json.
+///
+/// CLI paths follow normal command-line behavior and are relative to the
+/// invoking directory. Config-file paths are relative to the repository root.
+pub fn determine_devcontainer(
+    repo_root: &Path,
+    devcontainer_override: Option<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    if let Some(path) = devcontainer_override {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .context("failed to get current directory")?
+                .join(path)
+        };
+        return DevContainer::resolve_config_path(&path)
+            .map(Some)
+            .context("invalid --devcontainer");
+    }
+
+    let json_config = load_json_config(repo_root)?;
+    let Some(path) = json_config.devcontainer else {
+        return Ok(None);
+    };
+    let path = if path.is_absolute() {
+        path
+    } else {
+        repo_root.join(path)
+    };
+    DevContainer::resolve_config_path(&path)
+        .map(Some)
+        .context("invalid devcontainer in .rumpelpod.json")
+}
+
 /// Collect `${localEnv:VAR}` / `${env:VAR}` values from the local environment
 /// so the daemon can substitute them when it loads devcontainer.json.
 ///
 /// The daemon cannot do this itself because it does not have access to
 /// the user's shell environment.  This is the only reason the client
 /// opens devcontainer.json at all.
-pub fn collect_local_env(repo_root: &Path) -> Result<HashMap<String, String>> {
-    let raw = DevContainer::find_raw(repo_root)?.unwrap_or_else(|| "{}".to_string());
+pub fn collect_local_env(
+    repo_root: &Path,
+    devcontainer_path: Option<&Path>,
+) -> Result<HashMap<String, String>> {
+    let raw =
+        DevContainer::find_raw(repo_root, devcontainer_path)?.unwrap_or_else(|| "{}".to_string());
     Ok(crate::devcontainer::collect_local_env_vars(&raw))
 }
 
@@ -181,15 +220,18 @@ pub fn collect_client_env() -> Result<HashMap<String, String>> {
 pub fn load_for_image_cmd(
     repo_root: &Path,
     host_override: Option<Host>,
+    devcontainer_override: Option<PathBuf>,
 ) -> Result<(DevContainer, Host)> {
     let docker_host = determine_host(repo_root, host_override)?;
+    let devcontainer_path = determine_devcontainer(repo_root, devcontainer_override)?;
 
-    let (mut devcontainer, devcontainer_dir) = DevContainer::find_and_load(repo_root)?
-        .unwrap_or_else(|| (DevContainer::default(), repo_root.to_path_buf()));
+    let (mut devcontainer, devcontainer_dir) =
+        DevContainer::find_and_load(repo_root, devcontainer_path.as_deref())?
+            .unwrap_or_else(|| (DevContainer::default(), repo_root.to_path_buf()));
 
-    devcontainer.resolve_build_paths(&devcontainer_dir, repo_root)?;
+    devcontainer.resolve_build_paths(&devcontainer_dir);
 
-    let local_env_vars = collect_local_env(repo_root)?;
+    let local_env_vars = collect_local_env(repo_root, devcontainer_path.as_deref())?;
 
     let local_ws = repo_root
         .to_string_lossy()
@@ -289,11 +331,16 @@ pub fn confirm_pod_creation(pod_name: &str, repo_root: &Path, create: bool) -> R
 }
 
 /// Launch a pod and return the container ID and user.
-pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchResult> {
+pub fn launch_pod(
+    pod_name: &str,
+    host_override: Option<Host>,
+    devcontainer_override: Option<PathBuf>,
+) -> Result<LaunchResult> {
     let t = Instant::now();
     let repo_root = get_repo_root()?;
     let docker_host = determine_host(&repo_root, host_override)?;
-    let local_env_vars = collect_local_env(&repo_root)?;
+    let devcontainer_path = determine_devcontainer(&repo_root, devcontainer_override)?;
+    let local_env_vars = collect_local_env(&repo_root, devcontainer_path.as_deref())?;
     let client_env = collect_client_env()?;
     let elapsed = t.elapsed();
     trace!("launch_pod config: {elapsed:?}");
@@ -319,6 +366,7 @@ pub fn launch_pod(pod_name: &str, host_override: Option<Host>) -> Result<LaunchR
     let mut progress = client.launch_pod(PodLaunchParams {
         pod_name,
         repo_path: repo_root,
+        devcontainer_path,
         host_branch,
         host: docker_host,
         git_identity: Some(git_identity),
@@ -353,12 +401,16 @@ pub fn enter(cmd: &EnterCommand) -> Result<()> {
     let elapsed = t.elapsed();
     trace!("get_repo_root: {elapsed:?}");
 
-    let host_override = cmd.host_args.resolve()?;
+    let host_override = cmd.container_config.resolve_host()?;
 
     confirm_pod_creation(&cmd.name, &repo_root, cmd.create)?;
 
     let t = Instant::now();
-    let result = launch_pod(&cmd.name, host_override)?;
+    let result = launch_pod(
+        &cmd.name,
+        host_override,
+        cmd.container_config.devcontainer.clone(),
+    )?;
     let elapsed = t.elapsed();
     trace!("launch_pod: {elapsed:?}");
 

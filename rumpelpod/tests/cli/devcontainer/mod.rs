@@ -12,6 +12,7 @@ mod mounts;
 mod ports;
 mod remote_env;
 mod runtime_options;
+mod selection;
 mod unsupported;
 mod variables;
 mod workspace;

@@ -574,11 +574,13 @@ fn stage_default_image(devcontainer: &mut DevContainer) -> Result<tempfile::Temp
 /// warning via the progress channel.
 fn load_and_resolve_devcontainer(
     repo_path: &Path,
+    devcontainer_path: Option<&Path>,
     pod_name: &str,
     local_env: &HashMap<String, String>,
 ) -> Result<(DevContainer, PathBuf, bool)> {
-    let (mut devcontainer, devcontainer_dir) = DevContainer::find_and_load(repo_path)?
-        .unwrap_or_else(|| (DevContainer::default(), repo_path.to_path_buf()));
+    let (mut devcontainer, devcontainer_dir) =
+        DevContainer::find_and_load(repo_path, devcontainer_path)?
+            .unwrap_or_else(|| (DevContainer::default(), repo_path.to_path_buf()));
 
     let used_default_image = devcontainer.docker_compose_file.is_none()
         && devcontainer.image.is_none()
@@ -587,7 +589,7 @@ fn load_and_resolve_devcontainer(
     // `launch_pod_impl`, past the reentry check: a reconnect does
     // not need the embedded Dockerfile staged at all.
     if !used_default_image {
-        devcontainer.resolve_build_paths(&devcontainer_dir, repo_path)?;
+        devcontainer.resolve_build_paths(&devcontainer_dir);
     }
 
     devcontainer
@@ -3454,6 +3456,7 @@ impl DaemonServer {
         let PodLaunchParams {
             pod_name,
             repo_path,
+            devcontainer_path,
             host_branch,
             host: docker_host,
             git_identity,
@@ -3534,6 +3537,7 @@ impl DaemonServer {
                     } else {
                         load_and_resolve_devcontainer(
                             &repo_path,
+                            devcontainer_path.as_deref(),
                             &pod_name.0,
                             &reconnect_local_env,
                         )?
@@ -3582,6 +3586,7 @@ impl DaemonServer {
                 let docker_socket = initialize_docker_socket(&docker_host);
                 crate::initialize::run(
                     &repo_path,
+                    devcontainer_path.as_deref(),
                     &pod_name.0,
                     &docker_host,
                     docker_socket.as_deref(),
@@ -3593,9 +3598,15 @@ impl DaemonServer {
             InitializeMode::AlreadyRun => {}
         }
         let (mut devcontainer, devcontainer_dir, used_default_image) =
-            load_and_resolve_devcontainer(&repo_path, &pod_name.0, &local_env_vars)?;
+            load_and_resolve_devcontainer(
+                &repo_path,
+                devcontainer_path.as_deref(),
+                &pod_name.0,
+                &local_env_vars,
+            )?;
         let raw_devcontainer_json =
-            DevContainer::find_raw(&repo_path)?.unwrap_or_else(|| "{}".to_string());
+            DevContainer::find_raw(&repo_path, devcontainer_path.as_deref())?
+                .unwrap_or_else(|| "{}".to_string());
 
         if docker_host.is_remote() {
             validate_bind_mount_ownership(&devcontainer)?;
@@ -4645,6 +4656,7 @@ impl DaemonServer {
         let ssh_auth_sock = params.ssh_auth_sock.clone();
         crate::initialize::run(
             &repo_path,
+            params.devcontainer_path.as_deref(),
             &pod_name.0,
             &docker_host,
             docker_socket.as_deref(),

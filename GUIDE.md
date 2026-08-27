@@ -402,6 +402,16 @@ Local state is tracked in a SQLite database under `~/.local/state/rumpelpod/` (o
 It is optional and holds pod-specific settings that have no devcontainer equivalent.
 Like `devcontainer.json`, the file is parsed as [JSON5](https://json5.org/), so comments and trailing commas are allowed.
 
+### `devcontainer`
+
+```json
+{ "devcontainer": "containers/rust" }
+```
+
+Selects a `.json` file or directory containing `devcontainer.json`.
+Relative paths start at the repository root; `--devcontainer` overrides this value.
+Paths inside the selected configuration remain relative to its directory.
+
 ### `host`
 
 ```json

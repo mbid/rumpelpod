@@ -535,6 +535,10 @@ pub struct JsonConfig {
     /// Docker host: "localhost" for local or "ssh://user@host" for remote.
     pub host: Option<String>,
 
+    /// devcontainer.json file or directory containing one. Relative paths
+    /// start at the repository root.
+    pub devcontainer: Option<PathBuf>,
+
     /// Container engine preference for local execution and image builds.
     #[serde(default)]
     pub container_engine: Option<ContainerEngine>,
