@@ -401,6 +401,26 @@ impl Model {
         Ok(self.service(service)?.get("user").and_then(Value::as_str))
     }
 
+    /// Whether the rendered service mounts a host path directly.
+    pub fn service_has_bind_mount(&self, service: &str) -> Result<bool> {
+        let service = self.service(service)?;
+        let Some(volumes) = service.get("volumes") else {
+            return Ok(false);
+        };
+        let volumes = volumes
+            .as_array()
+            .context("rendered compose service has invalid volumes")?;
+        for volume in volumes {
+            let volume = volume
+                .as_object()
+                .context("rendered compose service has an invalid volume entry")?;
+            if volume.get("type").and_then(Value::as_str) == Some("bind") {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn published_port_services(&self) -> Vec<String> {
         self.value
             .get("services")
