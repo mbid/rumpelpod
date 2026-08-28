@@ -310,7 +310,7 @@ fn daemon_serializes_concurrent_initialize_commands() {
                 description_file: None,
                 local_env_vars: HashMap::new(),
                 client_env: HashMap::new(),
-                ssh_auth_sock: None,
+                client_context: rumpelpod::daemon::protocol::ClientContext::default(),
             })?;
             for _line in &mut progress {}
             progress.finish()

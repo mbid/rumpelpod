@@ -26,7 +26,10 @@ use crate::config::Host;
 use crate::daemon::host_connection::HostKey;
 use crate::daemon::protocol::DaemonEvent;
 use crate::daemon::reconnect::ReconnectEvent;
-use crate::daemon::{ssh_agent_dir, CodexProxyEndpoint, CodexProxyHandle, SshAgentHandle};
+use crate::daemon::{
+    ssh_agent_dir, CodexProxyEndpoint, CodexProxyHandle, SshAgentHandle,
+    SSH_AGENT_CONFIGURED_KEYS_MARKER,
+};
 use crate::pod::client::PodClient;
 use crate::pod::types::{ClaudeState, CodexState};
 
@@ -574,6 +577,15 @@ impl PodConnection {
         };
 
         if need_start {
+            let marker_path = agent_dir.join(SSH_AGENT_CONFIGURED_KEYS_MARKER);
+            match std::fs::remove_file(&marker_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let marker_path = marker_path.display();
+                    return Err(error).with_context(|| format!("removing stale {marker_path}"));
+                }
+            }
             if sock_path.exists() {
                 if let Err(e) = std::fs::remove_file(&sock_path) {
                     let path = sock_path.display();

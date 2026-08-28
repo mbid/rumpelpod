@@ -34,6 +34,7 @@ use url::Url;
 
 use crate::cli::CodexCommand;
 use crate::config::load_json_config;
+use crate::daemon::protocol::ClientContext;
 use crate::daemon::{self, DaemonServer};
 use crate::enter::{confirm_pod_creation, find_local_codex_cli, launch_pod};
 use crate::git::get_repo_root;
@@ -120,7 +121,10 @@ fn attach_codex(
         path,
         // Daemon's Unix socket does not validate Authorization.
         "",
-        pty_attach::WireParams::Attach { extra_args },
+        pty_attach::WireParams::Attach {
+            extra_args,
+            client_context: ClientContext::current(),
+        },
         None,
     )
 }
@@ -168,18 +172,25 @@ async fn codex_ws_handler(
     ws.on_upgrade(move |socket| async move {
         let session_name = codex_session_name(&q.repo_path, &name);
         let sessions = daemon.pty_sessions();
-        serve_ws_session_with_params(socket, sessions, session_name, move |extra_args| {
-            tokio::task::block_in_place(|| {
-                build_codex_spec(
-                    &daemon,
-                    &q.repo_path,
-                    &name,
-                    q.codex_cli_path.as_deref(),
-                    q.no_dangerously_bypass_approvals_and_sandbox,
-                    extra_args,
-                )
-            })
-        })
+        let context_daemon = daemon.clone();
+        serve_ws_session_with_params(
+            socket,
+            sessions,
+            session_name,
+            move |client_context| context_daemon.remember_client_context(client_context),
+            move |extra_args| {
+                tokio::task::block_in_place(|| {
+                    build_codex_spec(
+                        &daemon,
+                        &q.repo_path,
+                        &name,
+                        q.codex_cli_path.as_deref(),
+                        q.no_dangerously_bypass_approvals_and_sandbox,
+                        extra_args,
+                    )
+                })
+            },
+        )
         .await
     })
 }

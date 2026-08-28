@@ -69,6 +69,28 @@ pub struct LaunchResult {
     /// the devcontainer.json it loads itself and returns it so the client
     /// can derive the exec `--workdir` without having to parse the config.
     pub container_repo_path: PathBuf,
+    /// A managed agent that may need the configured keys loaded. The client
+    /// tracks the loaded key set beside the socket and runs `ssh-add` locally
+    /// so passphrase prompts use its terminal.
+    pub ssh_agent_to_initialize: Option<PathBuf>,
+}
+
+/// Environment belonging to the host-side client that initiated an operation.
+///
+/// The daemon must not use its service environment for session-specific values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientContext {
+    pub ssh_auth_sock: Option<PathBuf>,
+}
+
+impl ClientContext {
+    pub fn current() -> Self {
+        Self {
+            ssh_auth_sock: std::env::var_os("SSH_AUTH_SOCK")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+        }
+    }
 }
 
 /// Human-readable pod name to distinguish multiple pods for the same repo.
@@ -259,12 +281,9 @@ pub struct PodLaunchParams {
     /// interpolation and environment-backed secrets in the client context.
     /// These values are not passed into the pod or persisted in its database row.
     pub client_env: HashMap<String, String>,
-    /// `SSH_AUTH_SOCK` from the client's environment, if set.  The daemon
-    /// forwards it verbatim as `SSH_AUTH_SOCK` on every `docker buildx
-    /// build` it spawns; buildx itself decides whether to use it (e.g.
-    /// when the Dockerfile or `build.options` asks for `--ssh=default`).
-    /// `None` leaves the daemon's own `SSH_AUTH_SOCK` in place unchanged.
-    pub ssh_auth_sock: Option<PathBuf>,
+    /// Session-specific values captured by the invoking client. The ambient
+    /// agent is also forwarded to builds that request BuildKit SSH access.
+    pub client_context: ClientContext,
 }
 
 /// Request body for `rumpel fork`.
@@ -298,6 +317,7 @@ pub struct PodLaunchResponse {
     /// Container-side workspace path computed by the daemon from the
     /// fully-resolved devcontainer.json.
     pub container_repo_path: PathBuf,
+    pub ssh_agent_to_initialize: Option<PathBuf>,
 }
 
 /// Request body for stop_pod endpoint.
@@ -439,6 +459,7 @@ pub struct EnsurePiConfigRequest {
 pub struct PodReconnectRequest {
     pub repo_path: PathBuf,
     pub pod_name: String,
+    pub client_context: ClientContext,
 }
 
 /// Request body used by the host post-receive hook after a pod ref update.
@@ -453,6 +474,7 @@ struct PodReviewChangedRequest {
 pub struct ConnectPodRequest {
     pub pod_name: String,
     pub repo_path: PathBuf,
+    pub client_context: ClientContext,
 }
 
 /// Error response body.
@@ -577,6 +599,7 @@ pub trait Daemon: Send + Sync + 'static {
         &self,
         _repo_path: &Path,
         _pod_name: &str,
+        _client_context: &ClientContext,
     ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
         None
     }
@@ -716,6 +739,7 @@ impl Iterator for ClientLaunchProgress {
                                 container_url: body.container_url,
                                 container_token: body.container_token,
                                 container_repo_path: body.container_repo_path,
+                                ssh_agent_to_initialize: body.ssh_agent_to_initialize,
                             }));
                         }
                         Err(e) => {
@@ -1080,6 +1104,7 @@ impl DaemonClient {
         let request = PodReconnectRequest {
             repo_path: repo_path.to_path_buf(),
             pod_name: pod_name.to_string(),
+            client_context: ClientContext::current(),
         };
 
         let response = self
@@ -1518,6 +1543,7 @@ fn streaming_launch_response<D: Daemon, P: Send + 'static>(
                     container_url: r.container_url,
                     container_token: r.container_token,
                     container_repo_path: r.container_repo_path,
+                    ssh_agent_to_initialize: r.ssh_agent_to_initialize,
                 })
                 .expect("PodLaunchResponse is always serializable"),
             ),
@@ -1849,7 +1875,11 @@ async fn pod_reconnect_events_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<PodReconnectRequest>,
 ) -> Response {
-    match daemon.subscribe_pod_reconnect(&request.repo_path, &request.pod_name) {
+    match daemon.subscribe_pod_reconnect(
+        &request.repo_path,
+        &request.pod_name,
+        &request.client_context,
+    ) {
         Some(rx) => reconnect_sse_response(rx),
         None => {
             let (tx, rx) = tokio::sync::broadcast::channel(1);

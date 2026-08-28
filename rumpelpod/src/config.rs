@@ -523,6 +523,10 @@ pub struct JsonConfig {
     #[serde(default)]
     pub merge: MergeConfig,
 
+    /// SSH identities exposed through the socket relayed into pods.
+    #[serde(default)]
+    pub ssh_agent: SshAgentConfig,
+
     /// Inject a system prompt describing the rumpelpod environment
     /// (devcontainer layout, git remotes, push/fetch behavior) into
     /// each installed agent's system-prompt location (CLAUDE.md,
@@ -545,6 +549,47 @@ pub struct JsonConfig {
 
     /// Kubernetes target. Mutually exclusive with `host`.
     pub kubernetes: Option<KubernetesConfig>,
+}
+
+/// SSH agent behavior configured in `.rumpelpod.json`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SshAgentConfig {
+    /// Private key files loaded into rumpelpod's isolated per-pod agent.
+    pub keys: Vec<PathBuf>,
+    /// Forward the invoking user's agent instead of using the per-pod agent.
+    pub forward: Option<SshAgentForward>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshAgentForward {
+    Ambient,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SshAgentConfigFields {
+    #[serde(default)]
+    keys: Vec<PathBuf>,
+    forward: Option<SshAgentForward>,
+}
+
+impl<'de> Deserialize<'de> for SshAgentConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = SshAgentConfigFields::deserialize(deserializer)?;
+        if fields.forward == Some(SshAgentForward::Ambient) && !fields.keys.is_empty() {
+            return Err(serde::de::Error::custom(
+                "sshAgent.keys and sshAgent.forward are mutually exclusive",
+            ));
+        }
+        Ok(Self {
+            keys: fields.keys,
+            forward: fields.forward,
+        })
+    }
 }
 
 /// Load `.rumpelpod.json` from the given repo root, if present.

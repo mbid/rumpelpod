@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use crate::cli::ConnectCommand;
 use crate::daemon;
-use crate::daemon::protocol::{ConnectPodRequest, Daemon, DaemonClient};
+use crate::daemon::protocol::{ClientContext, ConnectPodRequest, Daemon, DaemonClient};
 use crate::git::get_repo_root;
 
 pub fn connect(cmd: &ConnectCommand) -> Result<()> {
@@ -16,5 +16,6 @@ pub fn connect(cmd: &ConnectCommand) -> Result<()> {
     client.connect_pod(ConnectPodRequest {
         pod_name: cmd.name.clone(),
         repo_path,
+        client_context: ClientContext::current(),
     })
 }

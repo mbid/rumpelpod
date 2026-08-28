@@ -571,7 +571,7 @@ pub fn launch_pod_via_daemon(repo: &TestRepo, daemon: &TestDaemon, pod_name: &st
             description_file: None,
             local_env_vars: HashMap::new(),
             client_env: HashMap::new(),
-            ssh_auth_sock: None,
+            client_context: rumpelpod::daemon::protocol::ClientContext::default(),
         })
         .expect("launch pod request failed");
     for _line in &mut progress {}

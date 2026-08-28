@@ -4,16 +4,18 @@
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use log::{info, trace};
+use sha2::{Digest, Sha256};
 
 use crate::cli::EnterCommand;
 use crate::config::{load_json_config, ContainerEngine, Host};
 use crate::daemon;
 use crate::daemon::protocol::{
-    Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
+    ClientContext, Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
 };
 use crate::devcontainer::{DevContainer, GpuRequirement, HostRequirements, SubstitutionContext};
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
@@ -352,6 +354,7 @@ pub fn launch_pod(
     let pi_cli_path = find_local_pi_cli();
     let grok_cli_path = find_local_grok_cli();
     let json_config = load_json_config(&repo_root)?;
+    let ssh_key_paths = resolve_ssh_key_paths(&repo_root, &json_config.ssh_agent.keys)?;
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
@@ -361,7 +364,6 @@ pub fn launch_pod(
         .merge
         .description_file_path()
         .map(str::to_string);
-    let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
     let pod_name = PodName::new(pod_name.to_string()).map_err(|e| anyhow::anyhow!(e))?;
     let mut progress = client.launch_pod(PodLaunchParams {
         pod_name,
@@ -378,7 +380,7 @@ pub fn launch_pod(
         description_file,
         local_env_vars,
         client_env,
-        ssh_auth_sock,
+        client_context: ClientContext::current(),
     })?;
     for line in &mut progress {
         match line {
@@ -387,10 +389,81 @@ pub fn launch_pod(
         }
     }
     let result = progress.finish()?;
+    initialize_managed_ssh_agent(&result, &ssh_key_paths)?;
     let elapsed = t.elapsed();
     trace!("launch_pod daemon RPC: {elapsed:?}");
 
     Ok(result)
+}
+
+pub(crate) fn resolve_ssh_key_paths(repo_root: &Path, keys: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::with_capacity(keys.len());
+    for key in keys {
+        let path = match key.to_str() {
+            Some("~") => dirs::home_dir().context("could not determine home directory")?,
+            Some(value) if value.starts_with("~/") => dirs::home_dir()
+                .context("could not determine home directory")?
+                .join(&value[2..]),
+            Some(value) if value.starts_with('~') => {
+                return Err(anyhow::anyhow!(
+                    "SSH key path '{value}' uses unsupported user-home expansion"
+                ));
+            }
+            Some(_) | None if key.is_absolute() => key.clone(),
+            Some(_) | None => repo_root.join(key),
+        };
+        let metadata = std::fs::metadata(&path).with_context(|| {
+            let path = path.display();
+            format!("reading configured SSH key {path}")
+        })?;
+        if !metadata.is_file() {
+            let path = path.display();
+            return Err(anyhow::anyhow!("configured SSH key {path} is not a file"));
+        }
+        resolved.push(path);
+    }
+    Ok(resolved)
+}
+
+pub(crate) fn initialize_managed_ssh_agent(result: &LaunchResult, keys: &[PathBuf]) -> Result<()> {
+    let Some(socket_path) = result.ssh_agent_to_initialize.as_ref() else {
+        return Ok(());
+    };
+    let mut hasher = Sha256::new();
+    for key in keys {
+        hasher.update(key.as_os_str().as_encoded_bytes());
+        hasher.update([0]);
+        hasher.update(std::fs::read(key).with_context(|| {
+            let key = key.display();
+            format!("reading configured SSH key {key}")
+        })?);
+    }
+    let key_set = hex::encode(hasher.finalize());
+    let marker_path = socket_path.with_file_name(daemon::SSH_AGENT_CONFIGURED_KEYS_MARKER);
+    match std::fs::read_to_string(&marker_path) {
+        Ok(existing) if existing == key_set => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            let marker_path = marker_path.display();
+            return Err(error).with_context(|| format!("reading {marker_path}"));
+        }
+    }
+    let status = Command::new("ssh-add")
+        .args(keys)
+        .env("SSH_AUTH_SOCK", socket_path)
+        .status()
+        .context("running ssh-add for configured SSH keys")?;
+    if !status.success() {
+        return Err(anyhow::anyhow!(
+            "ssh-add failed while loading configured SSH keys with status {status}"
+        ));
+    }
+    std::fs::write(&marker_path, key_set).with_context(|| {
+        let marker_path = marker_path.display();
+        format!("writing {marker_path}")
+    })?;
+    Ok(())
 }
 
 pub fn enter(cmd: &EnterCommand) -> Result<()> {
