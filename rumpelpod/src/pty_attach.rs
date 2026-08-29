@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use url::Url;
 
-use crate::daemon::protocol::DaemonClient;
+use crate::daemon::protocol::{ClientContext, DaemonClient};
 use crate::daemon::reconnect::ReconnectEvent;
 use crate::pty_session::PtyControl;
 
@@ -181,7 +181,10 @@ pub enum WireParams {
     /// Send `PtyControl::Attach` with only dimensions and any user
     /// extra args -- codex-style.  The daemon's handler already knows
     /// the binary path and proxy URL.
-    Attach { extra_args: Vec<String> },
+    Attach {
+        extra_args: Vec<String>,
+        client_context: ClientContext,
+    },
 }
 
 /// How to coordinate reconnection with the daemon.
@@ -394,11 +397,15 @@ async fn connect_ws(
             rows,
             create,
         },
-        WireParams::Attach { extra_args } => PtyControl::Attach {
+        WireParams::Attach {
+            extra_args,
+            client_context,
+        } => PtyControl::Attach {
             cols,
             rows,
             create,
             extra_args: extra_args.clone(),
+            client_context: client_context.clone(),
         },
     };
     let json = serde_json::to_string(&first_msg).context("serializing session params")?;

@@ -25,11 +25,13 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
 use anyhow::{Context, Result};
 use axum::body::Body;
+use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{header, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -40,10 +42,13 @@ use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, Socket, Type};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tower_service::Service;
 
 use crate::async_runtime::RUNTIME;
+use crate::config::load_json_config;
 
 /// Locate git-http-backend by querying `git --exec-path`.
 fn git_http_backend_path() -> &'static str {
@@ -72,52 +77,158 @@ pub const POD_NAME_ENV: &str = "POD_NAME";
 /// Information about a registered pod.
 #[derive(Clone)]
 struct PodInfo {
+    /// Repository root used for configuration that applies to the pod.
+    repo_path: PathBuf,
     /// Path to the host repository's `.git` directory.
     git_dir: PathBuf,
     /// Resolved git directories for submodules, keyed by displaypath.
     submodule_git_dirs: Vec<(String, PathBuf)>,
     /// Name of the pod (used for access control in hooks).
     pod_name: String,
-    /// Path to the host-side ssh-agent Unix socket for this pod.
-    /// May not exist yet if no keys have been added.
-    agent_sock: Option<PathBuf>,
+}
+
+enum SshAgentBackend {
+    Managed(PathBuf),
+    Ambient,
+}
+
+const MAX_AMBIENT_SSH_AGENTS: usize = 32;
+const SSH_AGENT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_SSH_AGENT_MESSAGE_SIZE: usize = 256 * 1024;
+
+#[derive(Clone)]
+struct AmbientSshAgentCandidate {
+    generation: u64,
+    socket_path: PathBuf,
+}
+
+#[derive(Default)]
+struct AmbientSshAgentState {
+    next_generation: u64,
+    candidates: Vec<AmbientSshAgentCandidate>,
+}
+
+/// Daemon-lifetime, per-user candidates supplied by clients.
+///
+/// Registration does not touch the socket. The first agent request from a pod
+/// probes candidates from newest to oldest and discards ones that no longer
+/// answer the SSH agent protocol.
+#[derive(Clone, Default)]
+pub struct AmbientSshAgents {
+    state: Arc<Mutex<AmbientSshAgentState>>,
+}
+
+impl AmbientSshAgents {
+    pub fn remember(&self, socket_path: PathBuf) {
+        let mut state = self.state.lock().unwrap();
+        state
+            .candidates
+            .retain(|candidate| candidate.socket_path != socket_path);
+        state.next_generation = state
+            .next_generation
+            .checked_add(1)
+            .expect("ambient SSH agent generation overflowed");
+        let generation = state.next_generation;
+        state.candidates.push(AmbientSshAgentCandidate {
+            generation,
+            socket_path,
+        });
+        if state.candidates.len() > MAX_AMBIENT_SSH_AGENTS {
+            let excess = state.candidates.len() - MAX_AMBIENT_SSH_AGENTS;
+            state.candidates.drain(..excess);
+        }
+    }
+
+    async fn connect_latest_live(&self) -> Option<tokio::net::UnixStream> {
+        loop {
+            let candidate = self.state.lock().unwrap().candidates.last().cloned()?;
+            match connect_and_probe_ssh_agent(&candidate.socket_path).await {
+                Ok(agent) => return Some(agent),
+                Err(error) => {
+                    let path = candidate.socket_path.display();
+                    debug!("ambient ssh-agent candidate {path} is unavailable: {error:#}");
+                    let mut state = self.state.lock().unwrap();
+                    if state
+                        .candidates
+                        .last()
+                        .is_some_and(|latest| latest.generation == candidate.generation)
+                    {
+                        state.candidates.pop();
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn connect_and_probe_ssh_agent(socket_path: &Path) -> Result<tokio::net::UnixStream> {
+    timeout(SSH_AGENT_PROBE_TIMEOUT, async {
+        let mut agent = tokio::net::UnixStream::connect(socket_path).await?;
+        agent.write_all(&[0, 0, 0, 1, 11]).await?;
+
+        let mut length = [0u8; 4];
+        agent.read_exact(&mut length).await?;
+        let length = u32::from_be_bytes(length) as usize;
+        if length == 0 || length > MAX_SSH_AGENT_MESSAGE_SIZE {
+            return Err(anyhow::anyhow!(
+                "invalid SSH agent response length {length}"
+            ));
+        }
+        let mut response = vec![0u8; length];
+        agent.read_exact(&mut response).await?;
+        match response[0] {
+            5 | 12 => Ok(agent),
+            message_type => Err(anyhow::anyhow!(
+                "unexpected SSH agent response type {message_type}"
+            )),
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("SSH agent probe timed out"))?
 }
 
 /// Shared state for the git HTTP server.
 ///
 /// Validates bearer tokens by querying the SQLite database on each
-/// request.  Pod metadata (git directory, submodules, agent socket)
+/// request. Pod metadata (repository and submodule directories)
 /// is derived from the database record rather than cached in memory,
 /// so no registration/unregistration is needed.
 #[derive(Clone)]
 pub struct SharedGitServerState {
     db: Arc<Mutex<Connection>>,
+    ambient_ssh_agents: AmbientSshAgents,
 }
 
 impl SharedGitServerState {
-    pub fn new(db: Arc<Mutex<Connection>>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Mutex<Connection>>, ambient_ssh_agents: AmbientSshAgents) -> Self {
+        Self {
+            db,
+            ambient_ssh_agents,
+        }
     }
 
     /// Look up pod info by token.  Queries the database and derives
-    /// the git directory, submodule paths, and agent socket from the
-    /// stored repo_path and pod_name.
-    fn get_pod_info(&self, token: &str) -> Option<PodInfo> {
+    /// the repository and submodule paths from the stored record.
+    fn get_pod_info(&self, token: &str) -> Result<Option<PodInfo>> {
         let conn = self.db.lock().unwrap();
-        let record = crate::daemon::db::get_pod_by_token(&conn, token).ok()??;
+        let Some(record) = crate::daemon::db::get_pod_by_token(&conn, token)? else {
+            return Ok(None);
+        };
+        drop(conn);
 
         let repo_path = PathBuf::from(&record.repo_path);
-        let git_dir = std::fs::canonicalize(repo_path.join(".git")).ok()?;
+        let git_dir = std::fs::canonicalize(repo_path.join(".git")).with_context(|| {
+            let repo_path = repo_path.display();
+            format!("resolving Git directory for {repo_path}")
+        })?;
         let submodule_git_dirs = crate::gateway::resolve_submodule_git_dirs(&repo_path);
-        let pod_name = crate::daemon::protocol::PodName(record.name.clone());
-        let agent_sock = crate::daemon::ssh_agent_dir(&repo_path, &pod_name).join("agent.sock");
 
-        Some(PodInfo {
+        Ok(Some(PodInfo {
+            repo_path,
             git_dir,
             submodule_git_dirs,
             pod_name: record.name,
-            agent_sock: Some(agent_sock),
-        })
+        }))
     }
 
     /// Generate a new random token for a pod.
@@ -318,8 +429,12 @@ fn authenticate(
     };
 
     match state.get_pod_info(token) {
-        Some(info) => Ok((info, token.to_string())),
-        None => Err(Box::new(StatusCode::UNAUTHORIZED.into_response())),
+        Ok(Some(info)) => Ok((info, token.to_string())),
+        Ok(None) => Err(Box::new(StatusCode::UNAUTHORIZED.into_response())),
+        Err(error) => {
+            warn!("Failed to load pod information: {error:#}");
+            Err(Box::new(StatusCode::INTERNAL_SERVER_ERROR.into_response()))
+        }
     }
 }
 
@@ -585,8 +700,12 @@ async fn handle_request(State(state): State<SharedGitServerState>, req: Request<
 
     // Look up pod info
     let info = match state.get_pod_info(token) {
-        Some(info) => info,
-        None => return StatusCode::UNAUTHORIZED.into_response(),
+        Ok(Some(info)) => info,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(error) => {
+            warn!("Failed to load pod information: {error:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     };
     let daemon_socket = match crate::daemon::socket_path() {
         Ok(path) => path,
@@ -746,39 +865,54 @@ async fn ssh_agent_handler(
         _ => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let info = match state.get_pod_info(token) {
-        Some(i) => i,
-        None => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    let agent_sock = match info.agent_sock {
-        Some(p) => p,
-        None => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                "no ssh-agent configured for this pod",
-            )
-                .into_response()
+        Ok(Some(info)) => info,
+        Ok(None) => return StatusCode::UNAUTHORIZED.into_response(),
+        Err(error) => {
+            warn!("Failed to load pod information: {error:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
 
-    ws.on_upgrade(move |socket| ssh_agent_bridge(socket, agent_sock))
+    let ssh_agent = match load_json_config(&info.repo_path) {
+        Ok(config) => match config.ssh_agent.ambient {
+            true => SshAgentBackend::Ambient,
+            false => {
+                let pod_name = crate::daemon::protocol::PodName(info.pod_name);
+                let agent_sock =
+                    crate::daemon::ssh_agent_dir(&info.repo_path, &pod_name).join("agent.sock");
+                SshAgentBackend::Managed(agent_sock)
+            }
+        },
+        Err(error) => {
+            warn!("Failed to load SSH agent configuration: {error:#}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let ambient_ssh_agents = state.ambient_ssh_agents;
+    ws.on_upgrade(move |socket| async move {
+        match ssh_agent {
+            SshAgentBackend::Managed(agent_sock) => {
+                match tokio::net::UnixStream::connect(&agent_sock).await {
+                    Ok(agent) => ssh_agent_bridge(socket, agent).await,
+                    Err(error) => {
+                        let path = agent_sock.display();
+                        warn!("ssh-agent relay: cannot connect to {path}: {error}");
+                        close_ssh_agent_websocket(socket).await;
+                    }
+                }
+            }
+            SshAgentBackend::Ambient => {
+                if let Some(agent) = ambient_ssh_agents.connect_latest_live().await {
+                    ssh_agent_bridge(socket, agent).await;
+                } else {
+                    close_ssh_agent_websocket(socket).await;
+                }
+            }
+        }
+    })
 }
 
-async fn ssh_agent_bridge(mut ws: axum::extract::ws::WebSocket, agent_sock: PathBuf) {
-    use axum::extract::ws::Message;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let agent = match tokio::net::UnixStream::connect(&agent_sock).await {
-        Ok(s) => s,
-        Err(e) => {
-            let path = agent_sock.display();
-            warn!("ssh-agent relay: cannot connect to {path}: {e}");
-            if let Err(e) = ws.send(Message::Close(None)).await {
-                warn!("ssh-agent relay: failed to send close frame: {e}");
-            }
-            return;
-        }
-    };
+async fn ssh_agent_bridge(mut ws: WebSocket, agent: tokio::net::UnixStream) {
     let (mut agent_read, mut agent_write) = tokio::io::split(agent);
 
     // Read from the agent socket in a background task and feed a channel,
@@ -828,5 +962,11 @@ async fn ssh_agent_bridge(mut ws: axum::extract::ws::WebSocket, agent_sock: Path
     agent_reader.abort();
     if let Err(e) = ws.send(Message::Close(None)).await {
         warn!("ssh-agent relay: failed to send close frame: {e}");
+    }
+}
+
+async fn close_ssh_agent_websocket(mut ws: WebSocket) {
+    if let Err(error) = ws.send(Message::Close(None)).await {
+        warn!("ssh-agent relay: failed to send close frame: {error}");
     }
 }

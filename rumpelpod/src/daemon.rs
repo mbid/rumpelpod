@@ -27,18 +27,18 @@ use tokio::net::UnixListener;
 use sha2::{Digest, Sha256};
 
 use crate::async_runtime::block_on;
-use crate::config::{ContainerEngine, Host};
+use crate::config::{load_json_config, ContainerEngine, Host};
 use crate::devcontainer::{
     self, check_no_unresolved_mount_vars, resolve_devcontainer_vars, BuildOptions, DevContainer,
     GpuRequirement, HostRequirements, MountType, Port, PortAttributes,
 };
 use crate::executor::PodBackendInfo;
 use crate::gateway;
-use crate::git_http_server::{GitHttpServer, SharedGitServerState};
+use crate::git_http_server::{AmbientSshAgents, GitHttpServer, SharedGitServerState};
 use connections::Connections;
 use pod_connection::{PodConnection, PodConnectionStatus, PodEndpoint, PodRepairBackoff};
 use protocol::{
-    AddForwardedPortRequest, ConnectPodRequest, ContainerId, Daemon, DaemonEvent,
+    AddForwardedPortRequest, ClientContext, ConnectPodRequest, ContainerId, Daemon, DaemonEvent,
     EnsureClaudeConfigRequest, EnsurePiConfigRequest, ForkPodRequest, Image, LaunchResult, PodInfo,
     PodLaunchParams, PodName, PodStatus, PortInfo,
 };
@@ -365,20 +365,33 @@ pub fn ssh_agent_dir(repo_path: &Path, pod_name: &PodName) -> PathBuf {
     runtime_dir.join("rumpelpod/agents").join(hash_prefix)
 }
 
-/// Handle to a running ssh-agent process managed by the daemon.
-struct SshAgentHandle {
-    child: std::process::Child,
-}
-
-impl Drop for SshAgentHandle {
-    fn drop(&mut self) {
-        if let Err(e) = self.child.kill() {
-            eprintln!("warning: failed to kill ssh-agent: {e}");
+fn resolve_ssh_key_paths(repo_root: &Path, keys: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::with_capacity(keys.len());
+    for key in keys {
+        let path = match key.to_str() {
+            Some("~") => dirs::home_dir().context("could not determine home directory")?,
+            Some(value) if value.starts_with("~/") => dirs::home_dir()
+                .context("could not determine home directory")?
+                .join(&value[2..]),
+            Some(value) if value.starts_with('~') => {
+                return Err(anyhow::anyhow!(
+                    "SSH key path '{value}' uses unsupported user-home expansion"
+                ));
+            }
+            Some(_) | None if key.is_absolute() => key.clone(),
+            Some(_) | None => repo_root.join(key),
+        };
+        let metadata = std::fs::metadata(&path).with_context(|| {
+            let path = path.display();
+            format!("reading configured SSH key {path}")
+        })?;
+        if !metadata.is_file() {
+            let path = path.display();
+            return Err(anyhow::anyhow!("configured SSH key {path} is not a file"));
         }
-        if let Err(e) = self.child.wait() {
-            eprintln!("warning: failed to wait on ssh-agent: {e}");
-        }
+        resolved.push(path);
     }
+    Ok(resolved)
 }
 
 pub struct DaemonServer {
@@ -402,6 +415,8 @@ pub struct DaemonServer {
     events_tx: tokio::sync::broadcast::Sender<DaemonEvent>,
     /// Serializes lifecycle decisions for each logical pod.
     lifecycle_locks: PodLifecycleLocks,
+    /// Client-forwarded agents are per-user and can serve any ambient-enabled pod.
+    ambient_ssh_agents: AmbientSshAgents,
 }
 
 impl DaemonServer {
@@ -409,6 +424,12 @@ impl DaemonServer {
         self.this
             .upgrade()
             .expect("DaemonServer is always stored in an Arc")
+    }
+
+    pub(crate) fn remember_client_context(&self, client_context: &ClientContext) {
+        if let Some(socket_path) = client_context.ssh_auth_sock.as_ref() {
+            self.ambient_ssh_agents.remember(socket_path.clone());
+        }
     }
 }
 
@@ -487,6 +508,12 @@ impl PodLifecycleLocks {
 enum InitializeMode {
     IfCreating,
     AlreadyRun,
+}
+
+#[derive(Clone, Copy)]
+enum PodConnectionDisposition {
+    Remove,
+    Preserve,
 }
 
 #[derive(Clone, Copy)]
@@ -2546,6 +2573,12 @@ impl DaemonServer {
         record: &db::PodRecord,
         options: ReconnectOptions,
     ) -> ReconnectPodResult {
+        if let Err(error) =
+            self.configure_pod_connection_ssh_agent(pod_name, repo_path, docker_host, &record.token)
+        {
+            return ReconnectPodResult::Unavailable(error.context("configuring SSH agent"));
+        }
+
         if let Err(e) = gateway::install_host_hooks(repo_path) {
             return ReconnectPodResult::Unavailable(e);
         }
@@ -2730,6 +2763,7 @@ impl DaemonServer {
         let ConnectPodRequest {
             pod_name,
             repo_path,
+            client_context: _,
         } = request;
         let pod_name = PodName::new(pod_name).map_err(anyhow::Error::msg)?;
         let record = {
@@ -2743,6 +2777,9 @@ impl DaemonServer {
         let host = host
             .resolve_docker_engine()
             .context("resolving container engine for pod")?;
+        self.configure_pod_connection_ssh_agent(&pod_name, &repo_path, &host, &record.token)
+            .context("configuring SSH agent")?;
+
         let local_env_vars = deserialize_local_env(&record.local_env)?;
         let devcontainer = parse_stored_devcontainer(
             &record.devcontainer_json,
@@ -2854,12 +2891,8 @@ impl DaemonServer {
         repair_pod_server: bool,
     ) -> Result<LaunchResult> {
         let token = record.token.clone();
-        let pod_connection = self.connections.get_or_create_pod(
-            repo_path,
-            &pod_name.0,
-            docker_host.clone(),
-            token.clone(),
-        )?;
+        let pod_connection =
+            self.configure_pod_connection_ssh_agent(pod_name, repo_path, docker_host, &token)?;
 
         self.ensure_git_tunnel(&pod_connection, executor, pod_id.as_str())
             .context("starting tunnel to existing k8s pod")?;
@@ -3112,12 +3145,8 @@ impl DaemonServer {
         }
 
         let token = record.token.clone();
-        let pod_connection = self.connections.get_or_create_pod(
-            repo_path,
-            &pod_name.0,
-            docker_host.clone(),
-            token.clone(),
-        )?;
+        let pod_connection =
+            self.configure_pod_connection_ssh_agent(pod_name, repo_path, docker_host, &token)?;
 
         if was_stopped {
             pod_connection.remove_pod_server();
@@ -3305,8 +3334,7 @@ impl DaemonServer {
             e
         };
         let pod_connection = self
-            .connections
-            .get_or_create_pod(repo_path, &pod_name.0, docker_host.clone(), token.clone())
+            .configure_pod_connection_ssh_agent(pod_name, repo_path, docker_host, &token)
             .map_err(&mark_error)?;
 
         let mut bind_sources = Vec::new();
@@ -3468,8 +3496,9 @@ impl DaemonServer {
             description_file,
             mut local_env_vars,
             client_env,
-            ssh_auth_sock,
+            client_context,
         } = params;
+        let ssh_auth_sock = client_context.ssh_auth_sock;
         let requested_host = docker_host;
 
         // When re-entering an existing pod, use the host it was created on
@@ -3564,6 +3593,7 @@ impl DaemonServer {
                                     repo_path.clone(),
                                     true,
                                     None,
+                                    PodConnectionDisposition::Remove,
                                 )?;
                             } else {
                                 self.forget_gone_pod(&repo_path, &pod_name.0)?;
@@ -3581,6 +3611,9 @@ impl DaemonServer {
         }
 
         let docker_host = requested_host.resolve_container_tools()?;
+        self.configure_pod_connection_ssh_agent(&pod_name, &repo_path, &docker_host, "")
+            .context("configuring SSH agent before pod creation")?;
+
         match initialize_mode {
             InitializeMode::IfCreating => {
                 let docker_socket = initialize_docker_socket(&docker_host);
@@ -4201,8 +4234,7 @@ impl DaemonServer {
             e
         };
         let pod_connection = self
-            .connections
-            .get_or_create_pod(&repo_path, &pod_name.0, docker_host.clone(), token.clone())
+            .configure_pod_connection_ssh_agent(&pod_name, &repo_path, &docker_host, &token)
             .map_err(&mark_error)?;
 
         // forwardPorts are served via exec-proxy after the container
@@ -4417,6 +4449,7 @@ impl DaemonServer {
             repo_path,
             allow_processing,
             client_env,
+            client_context: _,
         } = request;
 
         crate::cli::validate_pod_name(&new_name)
@@ -4588,8 +4621,11 @@ impl DaemonServer {
             git_identity: Some(git_identity),
         };
 
-        let result = self.launch_pod_from_source(
-            PodName(new_name.clone()),
+        let new_pod_name = PodName(new_name.clone());
+        self.configure_pod_connection_ssh_agent(&new_pod_name, &repo_path, &docker_host, "")
+            .context("configuring SSH agent before pod creation")?;
+        let result = match self.launch_pod_from_source(
+            new_pod_name,
             repo_path.clone(),
             docker_host,
             local_env_vars,
@@ -4601,7 +4637,13 @@ impl DaemonServer {
             source_env,
             git_setup,
             build_tx,
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                self.connections.remove_pod(&repo_path, &new_name);
+                return Err(error);
+            }
+        };
 
         // New pod is up -- restore agent state and dirty patch.
         let new_pod = PodClient::new(
@@ -4652,8 +4694,24 @@ impl DaemonServer {
         let pod_name = params.pod_name.clone();
         let repo_path = params.repo_path.clone();
         let docker_host = params.host.clone();
+        let (existing_host, existing_token) = {
+            let conn = self.db.lock().unwrap();
+            let record = db::get_pod(&conn, &repo_path, &pod_name.0)?
+                .with_context(|| format!("pod '{}' not found", pod_name.0))?;
+            let host: Host =
+                serde_json::from_str(&record.host).context("parsing stored host for pod")?;
+            (host.resolve_docker_engine()?, record.token)
+        };
+        self.configure_pod_connection_ssh_agent(
+            &pod_name,
+            &repo_path,
+            &existing_host,
+            &existing_token,
+        )
+        .context("configuring SSH agent before pod recreation")?;
+
         let docker_socket = initialize_docker_socket(&docker_host);
-        let ssh_auth_sock = params.ssh_auth_sock.clone();
+        let ssh_auth_sock = params.client_context.ssh_auth_sock.clone();
         crate::initialize::run(
             &repo_path,
             params.devcontainer_path.as_deref(),
@@ -4722,7 +4780,13 @@ impl DaemonServer {
             }
 
             // 2. Delete the pod
-            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true, None)?;
+            self.delete_pod_impl(
+                pod_name.clone(),
+                repo_path.clone(),
+                true,
+                None,
+                PodConnectionDisposition::Preserve,
+            )?;
 
             // 3. Create new pod (call impl directly to avoid nested thread)
             let launch_result =
@@ -4851,7 +4915,13 @@ impl DaemonServer {
         if old_record.is_some() {
             // A Compose project can retain sidecars after its agent disappears,
             // so its stored project must always be torn down before relaunch.
-            self.delete_pod_impl(pod_name.clone(), repo_path.clone(), true, None)?;
+            self.delete_pod_impl(
+                pod_name.clone(),
+                repo_path.clone(),
+                true,
+                None,
+                PodConnectionDisposition::Preserve,
+            )?;
         } else {
             match status {
                 PodStatus::Gone => {}
@@ -4933,16 +5003,15 @@ impl DaemonServer {
                 }
             };
 
-            let pod_connection = match self.connections.get_or_create_pod(
-                Path::new(&pod.repo_path),
-                &pod.name,
-                host.clone(),
-                pod.token.clone(),
-            ) {
+            let repo_path = Path::new(&pod.repo_path);
+            let pod_name = PodName(pod.name.clone());
+            let pod_connection = match self
+                .configure_pod_connection_ssh_agent(&pod_name, repo_path, &host, &pod.token)
+            {
                 Ok(connection) => connection,
                 Err(e) => {
                     eprintln!(
-                        "restore_running_pods: failed to create connection for {}: {e:#}",
+                        "restore_running_pods: failed to configure connection for {}: {e:#}",
                         pod.name
                     );
                     continue;
@@ -4986,12 +5055,8 @@ impl DaemonServer {
         let serve_port = read_container_server_port(&executor, &agent_container)
             .context("reading server-port file while restoring running pod")?;
 
-        let pod_connection = self.connections.get_or_create_pod(
-            &repo_path,
-            &pod_name.0,
-            host.clone(),
-            pod.token.clone(),
-        )?;
+        let pod_connection =
+            self.configure_pod_connection_ssh_agent(&pod_name, &repo_path, host, &pod.token)?;
         self.ensure_git_tunnel(&pod_connection, &executor, &agent_container)
             .context("starting docker tunnel")?;
 
@@ -5095,6 +5160,7 @@ impl DaemonServer {
         repo_path: PathBuf,
         wait: bool,
         lifecycle_guard: Option<PodLifecycleGuard>,
+        connection_disposition: PodConnectionDisposition,
     ) -> Result<()> {
         let pod_record = {
             let conn = self.db.lock().unwrap();
@@ -5123,22 +5189,22 @@ impl DaemonServer {
         }
 
         self.emit_status_changed(&repo_path, &pod_name.0);
-        self.connections.remove_pod(&repo_path, &pod_name.0);
+        match connection_disposition {
+            PodConnectionDisposition::Remove => {
+                self.connections.remove_pod(&repo_path, &pod_name.0);
+            }
+            PodConnectionDisposition::Preserve => {
+                if let Some(connection) = self.connections.pod(&repo_path, &pod_name.0) {
+                    connection.reset_for_recreate();
+                }
+            }
+        }
         self.cleanup_codex_runtime(&repo_path, &pod_name.0);
 
         // Drop the backend-specific handles up-front so any exec
         // sessions inside the container are cleaned up before we try
         // to remove it.  The docker overlay unmount only finishes
         // once exec sessions have gone away.
-        if !is_k8s {
-            let agent_dir = ssh_agent_dir(&repo_path, &pod_name);
-            if agent_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
-                    let dir = agent_dir.display();
-                    error!("failed to remove ssh-agent directory {dir}: {e}");
-                }
-            }
-        }
         // K8s delete is a quick API call, so wait inline.  Docker
         // overlay unmounts are sometimes slow and unreliable, so the
         // non-wait path runs deletion in a background thread with
@@ -5261,6 +5327,27 @@ impl DaemonServer {
 
         Ok(())
     }
+
+    fn configure_pod_connection_ssh_agent(
+        &self,
+        pod_name: &PodName,
+        repo_path: &Path,
+        host: &Host,
+        token: &str,
+    ) -> Result<Arc<PodConnection>> {
+        let config = load_json_config(repo_path)?;
+        let keys = match config.ssh_agent.ambient {
+            true => None,
+            false => Some(resolve_ssh_key_paths(repo_path, &config.ssh_agent.keys)?),
+        };
+        self.connections.get_or_create_pod(
+            repo_path,
+            &pod_name.0,
+            host.clone(),
+            token.to_string(),
+            keys.as_deref(),
+        )
+    }
 }
 
 pub(crate) fn generate_codex_proxy_token() -> String {
@@ -5272,6 +5359,7 @@ impl Daemon for DaemonServer {
     type Progress = ServerLaunchProgress;
 
     fn launch_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        self.remember_client_context(&params.client_context);
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.handle();
         let handle = std::thread::spawn(move || {
@@ -5279,7 +5367,21 @@ impl Daemon for DaemonServer {
                 .lifecycle_locks
                 .for_pod(&params.repo_path, &params.pod_name.0);
             let _guard = lifecycle_lock.acquire();
-            this.launch_pod_impl(params, tx, InitializeMode::IfCreating)
+            let remove_connection_on_failure = this
+                .connections
+                .pod(&params.repo_path, &params.pod_name.0)
+                .is_none()
+                && {
+                    let conn = this.db.lock().unwrap();
+                    db::get_pod(&conn, &params.repo_path, &params.pod_name.0)?.is_none()
+                };
+            let repo_path = params.repo_path.clone();
+            let pod_name = params.pod_name.0.clone();
+            let result = this.launch_pod_impl(params, tx, InitializeMode::IfCreating);
+            if result.is_err() && remove_connection_on_failure {
+                this.connections.remove_pod(&repo_path, &pod_name);
+            }
+            result
         });
         Ok(ServerLaunchProgress {
             rx: Some(rx),
@@ -5288,6 +5390,7 @@ impl Daemon for DaemonServer {
     }
 
     fn recreate_pod(&self, params: PodLaunchParams) -> Result<ServerLaunchProgress> {
+        self.remember_client_context(&params.client_context);
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.handle();
         let handle = std::thread::spawn(move || {
@@ -5304,6 +5407,7 @@ impl Daemon for DaemonServer {
     }
 
     fn fork_pod(&self, request: ForkPodRequest) -> Result<ServerLaunchProgress> {
+        self.remember_client_context(&request.client_context);
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.handle();
         let handle = std::thread::spawn(move || this.fork_pod_impl(request, tx));
@@ -5400,7 +5504,13 @@ impl Daemon for DaemonServer {
     fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let lifecycle_lock = self.lifecycle_locks.for_pod(&repo_path, &pod_name.0);
         let lifecycle_guard = lifecycle_lock.acquire();
-        self.delete_pod_impl(pod_name, repo_path, wait, Some(lifecycle_guard))
+        self.delete_pod_impl(
+            pod_name,
+            repo_path,
+            wait,
+            Some(lifecycle_guard),
+            PodConnectionDisposition::Remove,
+        )
     }
 
     fn list_pods(&self, repo_path: PathBuf, sync: bool, sync_refs: bool) -> Result<Vec<PodInfo>> {
@@ -5718,11 +5828,11 @@ impl Daemon for DaemonServer {
             (pod_rec, host, service)
         };
         let db_pod_id = pod_record.id;
-        let pod_connection = self.connections.get_or_create_pod(
+        let pod_connection = self.configure_pod_connection_ssh_agent(
+            &pod_name,
             &repo_path,
-            &pod_name.0,
-            host.clone(),
-            pod_record.token.clone(),
+            &host,
+            &pod_record.token,
         )?;
 
         let executor = self.host_executor(&host)?;
@@ -5811,6 +5921,7 @@ impl Daemon for DaemonServer {
     }
 
     fn connect_pod(&self, request: ConnectPodRequest) -> Result<()> {
+        self.remember_client_context(&request.client_context);
         {
             let conn = self.db.lock().unwrap();
             if let Some(record) = db::get_pod(&conn, &request.repo_path, &request.pod_name)? {
@@ -5885,25 +5996,34 @@ impl Daemon for DaemonServer {
     }
 
     fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf> {
-        // Verify the pod exists.
-        let conn = self.db.lock().unwrap();
-        let pod_record = db::get_pod(&conn, &repo_path, &pod_name.0)?.context("pod not found")?;
+        let config = load_json_config(&repo_path)?;
+        if config.ssh_agent.ambient {
+            let pod_name = &pod_name.0;
+            return Err(anyhow::anyhow!(
+                "pod '{pod_name}' uses ambient SSH agent forwarding, which must be managed with ssh-add directly"
+            ));
+        }
+        let record = {
+            let conn = self.db.lock().unwrap();
+            db::get_pod(&conn, &repo_path, &pod_name.0)?.context("pod not found")?
+        };
         let host: Host =
-            serde_json::from_str(&pod_record.host).context("parsing stored host for pod")?;
-        let token = pod_record.token;
-        drop(conn);
-
-        let pod_connection =
-            self.connections
-                .get_or_create_pod(&repo_path, &pod_name.0, host, token)?;
-        pod_connection.ensure_ssh_agent()
+            serde_json::from_str(&record.host).context("parsing stored host for pod")?;
+        let host = host
+            .resolve_docker_engine()
+            .context("resolving container engine for pod")?;
+        let connection =
+            self.configure_pod_connection_ssh_agent(&pod_name, &repo_path, &host, &record.token)?;
+        connection.ensure_ssh_agent()
     }
 
     fn subscribe_pod_reconnect(
         &self,
         repo_path: &Path,
         pod_name: &str,
+        client_context: &ClientContext,
     ) -> Option<tokio::sync::broadcast::Receiver<reconnect::ReconnectEvent>> {
+        self.remember_client_context(client_context);
         self.connections.subscribe_pod(repo_path, pod_name)
     }
 
@@ -5936,7 +6056,8 @@ pub fn run_daemon() -> Result<()> {
 
     // Create shared state for the git HTTP server.  The server
     // validates tokens by querying the database directly.
-    let git_server_state = SharedGitServerState::new(db.clone());
+    let ambient_ssh_agents = AmbientSshAgents::default();
+    let git_server_state = SharedGitServerState::new(db.clone(), ambient_ssh_agents.clone());
 
     // When RUMPELPOD_TEST_LLM_OFFLINE is set (to any value), enable
     // the LLM cache proxy on the git HTTP server so containers can
@@ -6014,6 +6135,7 @@ pub fn run_daemon() -> Result<()> {
         container_ids: Mutex::new(ContainerIdCache::default()),
         events_tx,
         lifecycle_locks: PodLifecycleLocks::default(),
+        ambient_ssh_agents,
     });
 
     // Re-establish connections to pods that were running before we

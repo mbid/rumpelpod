@@ -5,34 +5,195 @@
 //!
 //! A `PodConnection` owns the host-side resources that make a running
 //! pod reachable from the daemon: the pod-server exec proxy, the git
-//! tunnel, user-facing forwarded ports, the optional ssh-agent, and
-//! the codex proxy.  It does not hold a `HostConnection`; loops that
-//! need both live on `Connections`.
+//! tunnel, user-facing forwarded ports, its managed ssh-agent, and the
+//! codex proxy. It does not hold a `HostConnection`; loops that need
+//! both live on `Connections`.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use log::info;
+use log::{error, info};
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 use crate::config::Host;
 use crate::daemon::host_connection::HostKey;
-use crate::daemon::protocol::DaemonEvent;
+use crate::daemon::protocol::{DaemonEvent, PodName};
 use crate::daemon::reconnect::ReconnectEvent;
-use crate::daemon::{ssh_agent_dir, CodexProxyEndpoint, CodexProxyHandle, SshAgentHandle};
+use crate::daemon::{CodexProxyEndpoint, CodexProxyHandle};
 use crate::pod::client::PodClient;
 use crate::pod::types::{ClaudeState, CodexState};
 
 const POD_REPAIR_INITIAL_DELAY: Duration = Duration::from_secs(1);
 const POD_REPAIR_MAX_DELAY: Duration = Duration::from_secs(30);
 const POD_REPAIR_FAILURE_LIMIT: usize = 10;
+
+const SSH_AGENT_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct ManagedSshAgent {
+    child: Child,
+    agent_dir: PathBuf,
+    socket_path: PathBuf,
+    configured_keys_hash: Option<String>,
+}
+
+impl ManagedSshAgent {
+    fn configured(key: &PodConnectionKey, keys: &[PathBuf]) -> Result<Self> {
+        let configured_keys_hash = Self::configured_keys_hash(keys)?;
+        let mut agent = Self::start(key)?;
+        agent.add_configured_keys(keys)?;
+        agent.configured_keys_hash = Some(configured_keys_hash);
+        Ok(agent)
+    }
+
+    fn configured_keys_hash(keys: &[PathBuf]) -> Result<String> {
+        let mut hasher = Sha256::new();
+        for key in keys {
+            hasher.update(key.as_os_str().as_encoded_bytes());
+            hasher.update([0]);
+            hasher.update(std::fs::read(key).with_context(|| {
+                let key = key.display();
+                format!("reading configured SSH key {key}")
+            })?);
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn start(key: &PodConnectionKey) -> Result<Self> {
+        let pod_name = PodName(key.pod_name.clone());
+        let agent_dir = crate::daemon::ssh_agent_dir(&key.repo_path, &pod_name);
+        match std::fs::remove_dir_all(&agent_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let agent_dir = agent_dir.display();
+                return Err(error)
+                    .with_context(|| format!("removing stale ssh-agent directory {agent_dir}"));
+            }
+        }
+        std::fs::create_dir_all(&agent_dir).with_context(|| {
+            let agent_dir = agent_dir.display();
+            format!("creating ssh-agent directory {agent_dir}")
+        })?;
+
+        let socket_path = agent_dir.join("agent.sock");
+        let child = match Command::new("ssh-agent")
+            .args(["-D", "-a"])
+            .arg(&socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                if let Err(cleanup_error) = std::fs::remove_dir_all(&agent_dir) {
+                    let agent_dir = agent_dir.display();
+                    error!(
+                        "failed to remove ssh-agent directory {agent_dir} after startup failure: {cleanup_error}"
+                    );
+                }
+                return Err(error).context("failed to start ssh-agent");
+            }
+        };
+        let mut agent = Self {
+            child,
+            agent_dir,
+            socket_path,
+            configured_keys_hash: None,
+        };
+        let deadline = Instant::now() + SSH_AGENT_START_TIMEOUT;
+        while !agent.socket_path.exists() {
+            match agent.child.try_wait() {
+                Ok(Some(status)) => {
+                    let stderr = agent
+                        .child
+                        .stderr
+                        .take()
+                        .and_then(|mut stderr| {
+                            let mut output = String::new();
+                            stderr.read_to_string(&mut output).ok()?;
+                            Some(output)
+                        })
+                        .unwrap_or_default();
+                    let stderr = stderr.trim();
+                    return Err(anyhow::anyhow!("ssh-agent exited with {status}: {stderr}"));
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error).context("checking ssh-agent startup"),
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "ssh-agent did not create its socket within {SSH_AGENT_START_TIMEOUT:?}"
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(agent)
+    }
+
+    fn is_alive(&mut self) -> Result<bool> {
+        match self.child.try_wait() {
+            Ok(Some(_)) => Ok(false),
+            Ok(None) => Ok(true),
+            Err(error) => Err(error).context("checking ssh-agent status"),
+        }
+    }
+
+    fn add_configured_keys(&mut self, keys: &[PathBuf]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let output = Command::new("ssh-add")
+            .args(keys)
+            .env("SSH_AUTH_SOCK", &self.socket_path)
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .stdin(Stdio::null())
+            .output()
+            .context("running ssh-add for configured SSH keys")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = stderr.trim();
+            return Err(anyhow::anyhow!(
+                "ssh-add failed while loading configured SSH keys with status {}: {stderr}",
+                output.status
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ManagedSshAgent {
+    fn drop(&mut self) {
+        match self.child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Err(error) = self.child.kill() {
+                    error!("failed to kill ssh-agent: {error}");
+                }
+                if let Err(error) = self.child.wait() {
+                    error!("failed to wait on ssh-agent: {error}");
+                }
+            }
+            Err(error) => error!("failed to check ssh-agent before cleanup: {error}"),
+        }
+        match std::fs::remove_dir_all(&self.agent_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let agent_dir = self.agent_dir.display();
+                error!("failed to remove ssh-agent directory {agent_dir}: {error}");
+            }
+        }
+    }
+}
 
 pub(super) struct PodRepairBackoff {
     pub(super) failures: usize,
@@ -175,7 +336,6 @@ struct PodConnectionResources {
     supervise_git_tunnel: bool,
     validate_pod_before_git_tunnel_repair: bool,
     forwarded_ports: Option<Vec<crate::exec_proxy::ExecProxyHandle>>,
-    ssh_agent: Option<SshAgentHandle>,
     codex_proxy: Option<CodexProxyHandle>,
 }
 
@@ -187,7 +347,6 @@ impl PodConnectionResources {
             supervise_git_tunnel: false,
             validate_pod_before_git_tunnel_repair: false,
             forwarded_ports: None,
-            ssh_agent: None,
             codex_proxy: None,
         }
     }
@@ -208,6 +367,8 @@ pub struct PodConnection {
     claude_state: Arc<Mutex<Option<ClaudeState>>>,
     codex_state: Arc<Mutex<Option<CodexState>>>,
     resources: Mutex<PodConnectionResources>,
+    /// Reconnect and recreation preserve the connection, so the agent stays here.
+    managed_ssh_agent: Mutex<Option<ManagedSshAgent>>,
     git_tunnel_setup: Mutex<()>,
     git_tunnel_repair_scheduled: AtomicBool,
     repair_state: Arc<PodRepairState>,
@@ -222,6 +383,7 @@ impl PodConnection {
         host: Host,
         token: String,
         status: PodConnectionStatus,
+        managed_ssh_agent: Option<ManagedSshAgent>,
     ) -> Self {
         let host_key = HostKey::from_host(&host);
         let (tx, _) = broadcast::channel(64);
@@ -235,6 +397,7 @@ impl PodConnection {
             claude_state: Arc::new(Mutex::new(None)),
             codex_state: Arc::new(Mutex::new(None)),
             resources: Mutex::new(PodConnectionResources::new()),
+            managed_ssh_agent: Mutex::new(managed_ssh_agent),
             git_tunnel_setup: Mutex::new(()),
             git_tunnel_repair_scheduled: AtomicBool::new(false),
             repair_state: Arc::new(PodRepairState::default()),
@@ -256,6 +419,45 @@ impl PodConnection {
             self.stop_event_loop();
         }
         *self.token.lock().unwrap() = token;
+    }
+
+    pub fn ensure_ssh_agent(&self) -> Result<PathBuf> {
+        let mut slot = self.managed_ssh_agent.lock().unwrap();
+        if let Some(agent) = slot.as_mut() {
+            if agent.is_alive()? {
+                return Ok(agent.socket_path.clone());
+            }
+        }
+        drop(slot.take());
+        let agent = ManagedSshAgent::start(&self.key)?;
+        let socket_path = agent.socket_path.clone();
+        *slot = Some(agent);
+        Ok(socket_path)
+    }
+
+    pub fn configure_ssh_agent(&self, keys: &[PathBuf]) -> Result<PathBuf> {
+        let configured_keys_hash = ManagedSshAgent::configured_keys_hash(keys)?;
+
+        let mut slot = self.managed_ssh_agent.lock().unwrap();
+        if let Some(agent) = slot.as_mut() {
+            if agent.configured_keys_hash.as_ref() == Some(&configured_keys_hash)
+                && agent.is_alive()?
+            {
+                return Ok(agent.socket_path.clone());
+            }
+        }
+        drop(slot.take());
+
+        let mut agent = ManagedSshAgent::start(&self.key)?;
+        agent.add_configured_keys(keys)?;
+        agent.configured_keys_hash = Some(configured_keys_hash);
+        let socket_path = agent.socket_path.clone();
+        *slot = Some(agent);
+        Ok(socket_path)
+    }
+
+    pub fn remove_ssh_agent(&self) {
+        self.managed_ssh_agent.lock().unwrap().take();
     }
 
     pub fn status(&self) -> PodConnectionStatus {
@@ -550,74 +752,6 @@ impl PodConnection {
             .push(handle);
     }
 
-    pub fn ensure_ssh_agent(&self) -> Result<PathBuf> {
-        let pod_name = crate::daemon::protocol::PodName(self.key.pod_name.clone());
-        let agent_dir = ssh_agent_dir(&self.key.repo_path, &pod_name);
-        let sock_path = agent_dir.join("agent.sock");
-
-        let mut resources = self.resources.lock().unwrap();
-        let need_start = if let Some(handle) = resources.ssh_agent.as_mut() {
-            match handle.child.try_wait() {
-                Ok(Some(_)) => {
-                    resources.ssh_agent = None;
-                    true
-                }
-                Ok(None) => false,
-                Err(e) => {
-                    eprintln!("warning: failed to check ssh-agent status: {e}");
-                    resources.ssh_agent = None;
-                    true
-                }
-            }
-        } else {
-            true
-        };
-
-        if need_start {
-            if sock_path.exists() {
-                if let Err(e) = std::fs::remove_file(&sock_path) {
-                    let path = sock_path.display();
-                    eprintln!("warning: failed to remove stale agent socket {path}: {e}");
-                }
-            }
-
-            std::fs::create_dir_all(&agent_dir).with_context(|| {
-                let dir = agent_dir.display();
-                format!("creating ssh-agent directory {dir}")
-            })?;
-
-            let mut child = Command::new("ssh-agent")
-                .args(["-D", "-a"])
-                .arg(&sock_path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .context("failed to start ssh-agent")?;
-
-            while !sock_path.exists() {
-                if let Ok(Some(status)) = child.try_wait() {
-                    let stderr = child
-                        .stderr
-                        .take()
-                        .and_then(|mut s| {
-                            let mut buf = String::new();
-                            s.read_to_string(&mut buf).ok()?;
-                            Some(buf)
-                        })
-                        .unwrap_or_default();
-                    let stderr = stderr.trim();
-                    return Err(anyhow::anyhow!("ssh-agent exited with {status}: {stderr}"));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-
-            resources.ssh_agent = Some(SshAgentHandle { child });
-        }
-
-        Ok(sock_path)
-    }
-
     pub fn remove_codex_proxy(&self) {
         self.resources.lock().unwrap().codex_proxy = None;
     }
@@ -712,16 +846,20 @@ impl PodConnection {
         self.emit_reconnect(ReconnectEvent::Stopped);
     }
 
-    pub fn drop_all(&self) {
+    pub fn reset_for_recreate(&self) {
         self.stop_events();
         let mut resources = self.resources.lock().unwrap();
         resources.pod_server = None;
         resources.git_tunnel = None;
         resources.forwarded_ports = None;
-        resources.ssh_agent = None;
         resources.codex_proxy = None;
         *self.claude_state.lock().unwrap() = None;
         *self.codex_state.lock().unwrap() = None;
+    }
+
+    pub fn drop_all(&self) {
+        self.reset_for_recreate();
+        self.remove_ssh_agent();
     }
 
     fn stop_event_loop(&self) {
@@ -752,22 +890,34 @@ impl PodConnectionRegistry {
         host: Host,
         token: String,
         initial_status: PodConnectionStatus,
-    ) -> Arc<PodConnection> {
+        configured_ssh_keys: Option<&[PathBuf]>,
+    ) -> Result<Arc<PodConnection>> {
         let key = PodConnectionKey::new(repo_path.to_path_buf(), pod_name.to_string());
         let mut pods = self.pods.lock().unwrap();
-        if let Some(connection) = pods.get(&key) {
+        if let Some(connection) = pods.get(&key).cloned() {
+            drop(pods);
             connection.update_host_and_token(host, token);
-            return connection.clone();
+            match configured_ssh_keys {
+                Some(keys) => {
+                    connection.configure_ssh_agent(keys)?;
+                }
+                None => connection.remove_ssh_agent(),
+            }
+            return Ok(connection);
         }
+        let managed_ssh_agent = configured_ssh_keys
+            .map(|keys| ManagedSshAgent::configured(&key, keys))
+            .transpose()?;
         let connection = Arc::new(PodConnection::new(
             self.events_tx.clone(),
             key.clone(),
             host,
             token,
             initial_status,
+            managed_ssh_agent,
         ));
         pods.insert(key, connection.clone());
-        connection
+        Ok(connection)
     }
 
     pub fn all(&self) -> Vec<Arc<PodConnection>> {
@@ -978,23 +1128,29 @@ mod tests {
             engine: ContainerEngine::Docker,
         };
 
-        let old = registry.get_or_create(
-            repo_path,
-            "test",
-            host.clone(),
-            "old-token".to_string(),
-            PodConnectionStatus::HostDisconnected,
-        );
+        let old = registry
+            .get_or_create(
+                repo_path,
+                "test",
+                host.clone(),
+                "old-token".to_string(),
+                PodConnectionStatus::HostDisconnected,
+                None,
+            )
+            .expect("create old pod connection");
         *old.codex_state.lock().unwrap() = Some(CodexState::Idle);
 
         registry.remove(repo_path, "test").unwrap();
-        let replacement = registry.get_or_create(
-            repo_path,
-            "test",
-            host,
-            "new-token".to_string(),
-            PodConnectionStatus::HostDisconnected,
-        );
+        let replacement = registry
+            .get_or_create(
+                repo_path,
+                "test",
+                host,
+                "new-token".to_string(),
+                PodConnectionStatus::HostDisconnected,
+                None,
+            )
+            .expect("create replacement pod connection");
 
         assert!(!Arc::ptr_eq(&old, &replacement));
         assert_eq!(replacement.codex_state(), None);

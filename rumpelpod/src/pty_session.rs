@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
 
+use crate::daemon::protocol::ClientContext;
+
 // ---------------------------------------------------------------------------
 // Session types
 // ---------------------------------------------------------------------------
@@ -480,6 +482,7 @@ pub enum PtyControl {
         rows: u16,
         create: bool,
         extra_args: Vec<String>,
+        client_context: ClientContext,
     },
     /// Terminal resize (client -> server).
     Resize { cols: u16, rows: u16 },
@@ -576,22 +579,25 @@ pub async fn serve_ws_session(
 /// Server-owned entry point: read `PtyControl::Attach` from the wire,
 /// then construct spawn parameters only if the requested session is absent.
 /// Used by the daemon's `/pod/codex/{name}` route.
-pub async fn serve_ws_session_with_params<F>(
+pub async fn serve_ws_session_with_params<F, C>(
     mut socket: WebSocket,
     sessions: PtySessions,
     session_name: String,
+    remember_client_context: C,
     build_spec: F,
 ) where
     F: FnOnce(Vec<String>) -> Result<Option<SessionSpec>> + Send,
+    C: FnOnce(&ClientContext) + Send,
 {
-    let (cols, rows, create, extra_args) = match socket.recv().await {
+    let (cols, rows, create, extra_args, client_context) = match socket.recv().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<PtyControl>(&text) {
             Ok(PtyControl::Attach {
                 cols,
                 rows,
                 create,
                 extra_args,
-            }) => (cols, rows, create, extra_args),
+                client_context,
+            }) => (cols, rows, create, extra_args, client_context),
             Ok(other) => {
                 eprintln!("pty: expected attach message, got {other:?}");
                 return;
@@ -611,6 +617,8 @@ pub async fn serve_ws_session_with_params<F>(
         }
         None => return,
     };
+
+    remember_client_context(&client_context);
 
     run_bridge(
         socket,

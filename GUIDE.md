@@ -357,7 +357,7 @@ The file path is also configurable.
 ### SSH key forwarding
 
 Rumpelpod runs a per-pod SSH agent on the local machine and relays connections into the container.
-Keys are added locally:
+Keys can be added explicitly:
 
 ```sh
 rumpel ssh-add my-pod ~/.ssh/id_ed25519
@@ -368,6 +368,14 @@ Arguments after the pod name are forwarded verbatim to `ssh-add`.
 
 Inside the container, `SSH_AUTH_SOCK` points to the relay socket.
 The private key material never enters the container.
+
+Keys can instead be loaded automatically:
+
+```json
+{ "sshAgent": { "keys": ["~/.ssh/id_ed25519"] } }
+```
+
+Set `sshAgent.ambient` to `true` instead to forward the invoking shell's agent. Manage that agent with `ssh-add` directly.
 
 ### Rebuilding the image
 
@@ -435,6 +443,22 @@ Allowed values are `"auto"` (default), `"docker"`, and `"podman"`.
 
 For Kubernetes, this controls the local build-and-push path when `kubernetes.builder` is not set.
 If `kubernetes.builder` is set, Docker buildx is required.
+
+### `sshAgent`
+
+```json
+{ "sshAgent": { "keys": ["~/.ssh/id_ed25519"] } }
+```
+
+Controls the SSH agent relayed into the pod.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `keys` | array of paths | `[]` | loads key files into the isolated per-pod agent through local `ssh-add`, with relative paths starting at the repository root and `~/` expanding to the user's home directory |
+| `ambient` | bool | `false` | forwards the invoking shell's agent |
+
+`keys` and `ambient` are mutually exclusive.
+With neither field configured, keys can still be managed with `rumpel ssh-add`. The command rejects ambient pods.
 
 ### `kubernetes`
 

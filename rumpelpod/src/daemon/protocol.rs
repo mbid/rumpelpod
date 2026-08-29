@@ -71,6 +71,24 @@ pub struct LaunchResult {
     pub container_repo_path: PathBuf,
 }
 
+/// Environment belonging to the host-side client that initiated an operation.
+///
+/// The daemon must not use its service environment for session-specific values.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientContext {
+    pub ssh_auth_sock: Option<PathBuf>,
+}
+
+impl ClientContext {
+    pub fn current() -> Self {
+        Self {
+            ssh_auth_sock: std::env::var_os("SSH_AUTH_SOCK")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+        }
+    }
+}
+
 /// Human-readable pod name to distinguish multiple pods for the same repo.
 ///
 /// Restricted to DNS-1123 labels so a single name works unchanged as
@@ -259,12 +277,9 @@ pub struct PodLaunchParams {
     /// interpolation and environment-backed secrets in the client context.
     /// These values are not passed into the pod or persisted in its database row.
     pub client_env: HashMap<String, String>,
-    /// `SSH_AUTH_SOCK` from the client's environment, if set.  The daemon
-    /// forwards it verbatim as `SSH_AUTH_SOCK` on every `docker buildx
-    /// build` it spawns; buildx itself decides whether to use it (e.g.
-    /// when the Dockerfile or `build.options` asks for `--ssh=default`).
-    /// `None` leaves the daemon's own `SSH_AUTH_SOCK` in place unchanged.
-    pub ssh_auth_sock: Option<PathBuf>,
+    /// Session-specific values captured by the invoking client. The ambient
+    /// agent is also forwarded to builds that request BuildKit SSH access.
+    pub client_context: ClientContext,
 }
 
 /// Request body for `rumpel fork`.
@@ -280,6 +295,8 @@ pub struct ForkPodRequest {
     /// Environment of the client command, used when creating a forked Compose
     /// project. These values are not passed into the pod or persisted.
     pub client_env: HashMap<String, String>,
+    /// Session-specific values captured by the invoking client.
+    pub client_context: ClientContext,
 }
 
 /// Response body for launch/recreate pod endpoints.
@@ -439,6 +456,7 @@ pub struct EnsurePiConfigRequest {
 pub struct PodReconnectRequest {
     pub repo_path: PathBuf,
     pub pod_name: String,
+    pub client_context: ClientContext,
 }
 
 /// Request body used by the host post-receive hook after a pod ref update.
@@ -453,6 +471,7 @@ struct PodReviewChangedRequest {
 pub struct ConnectPodRequest {
     pub pod_name: String,
     pub repo_path: PathBuf,
+    pub client_context: ClientContext,
 }
 
 /// Error response body.
@@ -565,9 +584,7 @@ pub trait Daemon: Send + Sync + 'static {
     fn ensure_pi_config(&self, request: EnsurePiConfigRequest) -> Result<()>;
 
     // POST /pod/ssh-agent
-    // Ensure the pod's host-side ssh-agent is running and return the
-    // path to its Unix socket.  The caller invokes `ssh-add` locally
-    // with `SSH_AUTH_SOCK` set to this path.
+    // Return the managed agent socket used by `rumpel ssh-add`.
     fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf>;
 
     // POST /pod/reconnect-events
@@ -577,6 +594,7 @@ pub trait Daemon: Send + Sync + 'static {
         &self,
         _repo_path: &Path,
         _pod_name: &str,
+        _client_context: &ClientContext,
     ) -> Option<tokio::sync::broadcast::Receiver<ReconnectEvent>> {
         None
     }
@@ -1080,6 +1098,7 @@ impl DaemonClient {
         let request = PodReconnectRequest {
             repo_path: repo_path.to_path_buf(),
             pod_name: pod_name.to_string(),
+            client_context: ClientContext::current(),
         };
 
         let response = self
@@ -1849,7 +1868,11 @@ async fn pod_reconnect_events_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<PodReconnectRequest>,
 ) -> Response {
-    match daemon.subscribe_pod_reconnect(&request.repo_path, &request.pod_name) {
+    match daemon.subscribe_pod_reconnect(
+        &request.repo_path,
+        &request.pod_name,
+        &request.client_context,
+    ) {
         Some(rx) => reconnect_sse_response(rx),
         None => {
             let (tx, rx) = tokio::sync::broadcast::channel(1);

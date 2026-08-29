@@ -9,7 +9,7 @@
 //! host-event / git-tunnel tasks.
 
 use std::io::BufRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -117,6 +117,7 @@ impl Connections {
         pod_name: &str,
         host: Host,
         token: String,
+        configured_ssh_keys: Option<&[PathBuf]>,
     ) -> Result<Arc<PodConnection>> {
         let host_conn = self.inner.hosts.get_or_create(&host)?;
         let initial_status = if host_conn.is_connected() {
@@ -124,10 +125,14 @@ impl Connections {
         } else {
             PodConnectionStatus::HostDisconnected
         };
-        Ok(self
-            .inner
-            .pods
-            .get_or_create(repo_path, pod_name, host, token, initial_status))
+        self.inner.pods.get_or_create(
+            repo_path,
+            pod_name,
+            host,
+            token,
+            initial_status,
+            configured_ssh_keys,
+        )
     }
 
     pub fn pod(&self, repo_path: &Path, pod_name: &str) -> Option<Arc<PodConnection>> {
@@ -400,13 +405,19 @@ mod tests {
             engine: ContainerEngine::Podman,
         };
         let docker_a = connections
-            .get_or_create_pod(Path::new("/repo-a"), "a", docker_host.clone(), "a".into())
+            .get_or_create_pod(
+                Path::new("/repo-a"),
+                "a",
+                docker_host.clone(),
+                "a".into(),
+                None,
+            )
             .unwrap();
         let docker_b = connections
-            .get_or_create_pod(Path::new("/repo-b"), "b", docker_host, "b".into())
+            .get_or_create_pod(Path::new("/repo-b"), "b", docker_host, "b".into(), None)
             .unwrap();
         let podman = connections
-            .get_or_create_pod(Path::new("/repo-c"), "c", podman_host, "c".into())
+            .get_or_create_pod(Path::new("/repo-c"), "c", podman_host, "c".into(), None)
             .unwrap();
 
         for connection in [&docker_a, &docker_b, &podman] {
@@ -469,7 +480,13 @@ mod tests {
         };
 
         let local = connections
-            .get_or_create_pod(Path::new("/repo"), "local", local_host, "token".into())
+            .get_or_create_pod(
+                Path::new("/repo"),
+                "local",
+                local_host,
+                "token".into(),
+                None,
+            )
             .expect("create local pod");
         local.set_status(PodConnectionStatus::Connected);
         connections.prepare_pod_server_repair(&local);
@@ -477,13 +494,18 @@ mod tests {
 
         // No HostConnection for this host, so repair must not treat the pod
         // as reachable.
-        let orphan = connections.inner.pods.get_or_create(
-            Path::new("/repo"),
-            "orphan",
-            missing_host,
-            "token".into(),
-            PodConnectionStatus::Connected,
-        );
+        let orphan = connections
+            .inner
+            .pods
+            .get_or_create(
+                Path::new("/repo"),
+                "orphan",
+                missing_host,
+                "token".into(),
+                PodConnectionStatus::Connected,
+                None,
+            )
+            .expect("create orphan pod");
         connections.prepare_pod_server_repair(&orphan);
         assert_eq!(orphan.status(), PodConnectionStatus::HostDisconnected);
     }

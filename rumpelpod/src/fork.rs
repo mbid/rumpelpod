@@ -14,7 +14,9 @@ use anyhow::{Context, Result};
 
 use crate::cli::ForkCommand;
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, ForkPodRequest, LaunchProgress};
+use crate::daemon::protocol::{
+    ClientContext, Daemon, DaemonClient, ForkPodRequest, LaunchProgress,
+};
 use crate::git::get_repo_root;
 use crate::image::OutputLine;
 
@@ -53,6 +55,7 @@ pub fn fork(cmd: &ForkCommand) -> Result<()> {
         repo_path: repo_root,
         allow_processing,
         client_env: crate::enter::collect_client_env()?,
+        client_context: ClientContext::current(),
     })?;
     for line in &mut progress {
         match line {

@@ -13,7 +13,7 @@ use crate::cli::EnterCommand;
 use crate::config::{load_json_config, ContainerEngine, Host};
 use crate::daemon;
 use crate::daemon::protocol::{
-    Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
+    ClientContext, Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
 };
 use crate::devcontainer::{DevContainer, GpuRequirement, HostRequirements, SubstitutionContext};
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
@@ -355,14 +355,13 @@ pub fn launch_pod(
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
+    let pod_name = PodName::new(pod_name.to_string()).map_err(|e| anyhow::anyhow!(e))?;
 
     let t = Instant::now();
     let description_file = json_config
         .merge
         .description_file_path()
         .map(str::to_string);
-    let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
-    let pod_name = PodName::new(pod_name.to_string()).map_err(|e| anyhow::anyhow!(e))?;
     let mut progress = client.launch_pod(PodLaunchParams {
         pod_name,
         repo_path: repo_root,
@@ -378,7 +377,7 @@ pub fn launch_pod(
         description_file,
         local_env_vars,
         client_env,
-        ssh_auth_sock,
+        client_context: ClientContext::current(),
     })?;
     for line in &mut progress {
         match line {

@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
-
 use anyhow::Result;
 
 use crate::cli::RecreateCommand;
 use crate::config::load_json_config;
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, LaunchProgress, PodLaunchParams, PodName};
+use crate::daemon::protocol::{
+    ClientContext, Daemon, DaemonClient, LaunchProgress, PodLaunchParams, PodName,
+};
 use crate::enter::{
     collect_client_env, collect_local_env, determine_devcontainer, determine_host,
     find_local_claude_cli, find_local_codex_cli, find_local_grok_cli, find_local_pi_cli,
@@ -45,7 +45,6 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         .merge
         .description_file_path()
         .map(str::to_string);
-    let ssh_auth_sock = std::env::var_os("SSH_AUTH_SOCK").map(PathBuf::from);
     let pod_name = PodName::new(cmd.name.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let mut progress = client.recreate_pod(PodLaunchParams {
         pod_name,
@@ -62,7 +61,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         description_file,
         local_env_vars,
         client_env,
-        ssh_auth_sock,
+        client_context: ClientContext::current(),
     })?;
     for line in &mut progress {
         match line {

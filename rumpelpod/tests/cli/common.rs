@@ -77,6 +77,8 @@ impl TestHome {
         let home = TestHome { dir };
         std::fs::create_dir_all(home.bin_dir()).expect("create .local/bin");
         home.link_local_bins(BASELINE_TOOLS);
+        // Every non-ambient PodConnection starts its agent before pod work.
+        home.link_local_bin("ssh-agent");
         home
     }
 
@@ -571,7 +573,7 @@ pub fn launch_pod_via_daemon(repo: &TestRepo, daemon: &TestDaemon, pod_name: &st
             description_file: None,
             local_env_vars: HashMap::new(),
             client_env: HashMap::new(),
-            ssh_auth_sock: None,
+            client_context: rumpelpod::daemon::protocol::ClientContext::default(),
         })
         .expect("launch pod request failed");
     for _line in &mut progress {}
