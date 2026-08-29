@@ -16,6 +16,7 @@ use crate::config::{load_json_config, ContainerEngine, Host};
 use crate::daemon;
 use crate::daemon::protocol::{
     ClientContext, Daemon, DaemonClient, LaunchProgress, LaunchResult, PodLaunchParams, PodName,
+    SshAgentPurpose,
 };
 use crate::devcontainer::{DevContainer, GpuRequirement, HostRequirements, SubstitutionContext};
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
@@ -358,13 +359,14 @@ pub fn launch_pod(
 
     let socket_path = daemon::socket_path()?;
     let client = DaemonClient::new_unix(&socket_path);
+    let pod_name = PodName::new(pod_name.to_string()).map_err(|e| anyhow::anyhow!(e))?;
+    prepare_configured_ssh_agent(&client, &pod_name, &repo_root, &ssh_key_paths)?;
 
     let t = Instant::now();
     let description_file = json_config
         .merge
         .description_file_path()
         .map(str::to_string);
-    let pod_name = PodName::new(pod_name.to_string()).map_err(|e| anyhow::anyhow!(e))?;
     let mut progress = client.launch_pod(PodLaunchParams {
         pod_name,
         repo_path: repo_root,
@@ -389,7 +391,6 @@ pub fn launch_pod(
         }
     }
     let result = progress.finish()?;
-    initialize_managed_ssh_agent(&result, &ssh_key_paths)?;
     let elapsed = t.elapsed();
     trace!("launch_pod daemon RPC: {elapsed:?}");
 
@@ -425,10 +426,21 @@ pub(crate) fn resolve_ssh_key_paths(repo_root: &Path, keys: &[PathBuf]) -> Resul
     Ok(resolved)
 }
 
-pub(crate) fn initialize_managed_ssh_agent(result: &LaunchResult, keys: &[PathBuf]) -> Result<()> {
-    let Some(socket_path) = result.ssh_agent_to_initialize.as_ref() else {
+pub(crate) fn prepare_configured_ssh_agent(
+    client: &DaemonClient,
+    pod_name: &PodName,
+    repo_root: &Path,
+    keys: &[PathBuf],
+) -> Result<()> {
+    if keys.is_empty() {
         return Ok(());
-    };
+    }
+    let socket_path = client.ensure_ssh_agent(
+        pod_name.clone(),
+        repo_root.to_path_buf(),
+        SshAgentPurpose::ConfiguredKeys,
+    )?;
+
     let mut hasher = Sha256::new();
     for key in keys {
         hasher.update(key.as_os_str().as_encoded_bytes());
@@ -451,7 +463,7 @@ pub(crate) fn initialize_managed_ssh_agent(result: &LaunchResult, keys: &[PathBu
     }
     let status = Command::new("ssh-add")
         .args(keys)
-        .env("SSH_AUTH_SOCK", socket_path)
+        .env("SSH_AUTH_SOCK", &socket_path)
         .status()
         .context("running ssh-add for configured SSH keys")?;
     if !status.success() {

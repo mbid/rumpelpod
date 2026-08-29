@@ -69,10 +69,6 @@ pub struct LaunchResult {
     /// the devcontainer.json it loads itself and returns it so the client
     /// can derive the exec `--workdir` without having to parse the config.
     pub container_repo_path: PathBuf,
-    /// A managed agent that may need the configured keys loaded. The client
-    /// tracks the loaded key set beside the socket and runs `ssh-add` locally
-    /// so passphrase prompts use its terminal.
-    pub ssh_agent_to_initialize: Option<PathBuf>,
 }
 
 /// Environment belonging to the host-side client that initiated an operation.
@@ -299,6 +295,8 @@ pub struct ForkPodRequest {
     /// Environment of the client command, used when creating a forked Compose
     /// project. These values are not passed into the pod or persisted.
     pub client_env: HashMap<String, String>,
+    /// Session-specific values captured by the invoking client.
+    pub client_context: ClientContext,
 }
 
 /// Response body for launch/recreate pod endpoints.
@@ -317,7 +315,6 @@ pub struct PodLaunchResponse {
     /// Container-side workspace path computed by the daemon from the
     /// fully-resolved devcontainer.json.
     pub container_repo_path: PathBuf,
-    pub ssh_agent_to_initialize: Option<PathBuf>,
 }
 
 /// Request body for stop_pod endpoint.
@@ -410,6 +407,16 @@ pub struct AddForwardedPortRequest {
 struct EnsureSshAgentRequest {
     pod_name: PodName,
     repo_path: PathBuf,
+    purpose: SshAgentPurpose,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SshAgentPurpose {
+    /// Prepare and validate configured keys before the pod exists.
+    ConfiguredKeys,
+    /// Manage an existing pod's isolated agent through `rumpel ssh-add`.
+    ManualCommand,
 }
 
 /// Response body for the ensure_ssh_agent endpoint.
@@ -587,10 +594,15 @@ pub trait Daemon: Send + Sync + 'static {
     fn ensure_pi_config(&self, request: EnsurePiConfigRequest) -> Result<()>;
 
     // POST /pod/ssh-agent
-    // Ensure the pod's host-side ssh-agent is running and return the
-    // path to its Unix socket.  The caller invokes `ssh-add` locally
-    // with `SSH_AUTH_SOCK` set to this path.
-    fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf>;
+    // Ensure a managed host-side ssh-agent is running and return its socket.
+    // Configured-key preparation may happen before the pod exists so the
+    // caller can run `ssh-add` before starting any pod work.
+    fn ensure_ssh_agent(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        purpose: SshAgentPurpose,
+    ) -> Result<PathBuf>;
 
     // POST /pod/reconnect-events
     // Subscribe to reconnection events for a pod.
@@ -739,7 +751,6 @@ impl Iterator for ClientLaunchProgress {
                                 container_url: body.container_url,
                                 container_token: body.container_token,
                                 container_repo_path: body.container_repo_path,
-                                ssh_agent_to_initialize: body.ssh_agent_to_initialize,
                             }));
                         }
                         Err(e) => {
@@ -1013,11 +1024,17 @@ impl Daemon for DaemonClient {
         Ok(())
     }
 
-    fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf> {
+    fn ensure_ssh_agent(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        purpose: SshAgentPurpose,
+    ) -> Result<PathBuf> {
         let url = self.url.join("/pod/ssh-agent")?;
         let request = EnsureSshAgentRequest {
             pod_name,
             repo_path,
+            purpose,
         };
 
         let response = self
@@ -1543,7 +1560,6 @@ fn streaming_launch_response<D: Daemon, P: Send + 'static>(
                     container_url: r.container_url,
                     container_token: r.container_token,
                     container_repo_path: r.container_repo_path,
-                    ssh_agent_to_initialize: r.ssh_agent_to_initialize,
                 })
                 .expect("PodLaunchResponse is always serializable"),
             ),
@@ -1721,7 +1737,9 @@ async fn ensure_ssh_agent_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<EnsureSshAgentRequest>,
 ) -> Result<Json<EnsureSshAgentResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| daemon.ensure_ssh_agent(request.pod_name, request.repo_path));
+    let result = block_in_place(|| {
+        daemon.ensure_ssh_agent(request.pod_name, request.repo_path, request.purpose)
+    });
 
     match result {
         Ok(socket_path) => Ok(Json(EnsureSshAgentResponse { socket_path })),

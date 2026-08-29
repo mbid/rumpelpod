@@ -12,7 +12,7 @@ use crate::daemon::protocol::{
 use crate::enter::{
     collect_client_env, collect_local_env, determine_devcontainer, determine_host,
     find_local_claude_cli, find_local_codex_cli, find_local_grok_cli, find_local_pi_cli,
-    initialize_managed_ssh_agent, resolve_ssh_key_paths,
+    prepare_configured_ssh_agent, resolve_ssh_key_paths,
 };
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
@@ -48,6 +48,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
         .description_file_path()
         .map(str::to_string);
     let pod_name = PodName::new(cmd.name.clone()).map_err(|e| anyhow::anyhow!(e))?;
+    prepare_configured_ssh_agent(&client, &pod_name, &repo_root, &ssh_key_paths)?;
     let mut progress = client.recreate_pod(PodLaunchParams {
         pod_name,
         repo_path: repo_root,
@@ -71,8 +72,7 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
             OutputLine::Stderr(s) => eprintln!("{s}"),
         }
     }
-    let result = progress.finish()?;
-    initialize_managed_ssh_agent(&result, &ssh_key_paths)?;
+    progress.finish()?;
 
     let name = &cmd.name;
     println!("recreated pod '{name}'");

@@ -5,14 +5,13 @@
 //!
 //! A `PodConnection` owns the host-side resources that make a running
 //! pod reachable from the daemon: the pod-server exec proxy, the git
-//! tunnel, user-facing forwarded ports, the optional ssh-agent, and
-//! the codex proxy.  It does not hold a `HostConnection`; loops that
+//! tunnel, user-facing forwarded ports, and the codex proxy. It does
+//! not hold a `HostConnection`; loops that
 //! need both live on `Connections`.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -26,10 +25,7 @@ use crate::config::Host;
 use crate::daemon::host_connection::HostKey;
 use crate::daemon::protocol::DaemonEvent;
 use crate::daemon::reconnect::ReconnectEvent;
-use crate::daemon::{
-    ssh_agent_dir, CodexProxyEndpoint, CodexProxyHandle, SshAgentHandle,
-    SSH_AGENT_CONFIGURED_KEYS_MARKER,
-};
+use crate::daemon::{CodexProxyEndpoint, CodexProxyHandle};
 use crate::pod::client::PodClient;
 use crate::pod::types::{ClaudeState, CodexState};
 
@@ -178,7 +174,6 @@ struct PodConnectionResources {
     supervise_git_tunnel: bool,
     validate_pod_before_git_tunnel_repair: bool,
     forwarded_ports: Option<Vec<crate::exec_proxy::ExecProxyHandle>>,
-    ssh_agent: Option<SshAgentHandle>,
     codex_proxy: Option<CodexProxyHandle>,
 }
 
@@ -190,7 +185,6 @@ impl PodConnectionResources {
             supervise_git_tunnel: false,
             validate_pod_before_git_tunnel_repair: false,
             forwarded_ports: None,
-            ssh_agent: None,
             codex_proxy: None,
         }
     }
@@ -553,83 +547,6 @@ impl PodConnection {
             .push(handle);
     }
 
-    pub fn ensure_ssh_agent(&self) -> Result<PathBuf> {
-        let pod_name = crate::daemon::protocol::PodName(self.key.pod_name.clone());
-        let agent_dir = ssh_agent_dir(&self.key.repo_path, &pod_name);
-        let sock_path = agent_dir.join("agent.sock");
-
-        let mut resources = self.resources.lock().unwrap();
-        let need_start = if let Some(handle) = resources.ssh_agent.as_mut() {
-            match handle.child.try_wait() {
-                Ok(Some(_)) => {
-                    resources.ssh_agent = None;
-                    true
-                }
-                Ok(None) => false,
-                Err(e) => {
-                    eprintln!("warning: failed to check ssh-agent status: {e}");
-                    resources.ssh_agent = None;
-                    true
-                }
-            }
-        } else {
-            true
-        };
-
-        if need_start {
-            let marker_path = agent_dir.join(SSH_AGENT_CONFIGURED_KEYS_MARKER);
-            match std::fs::remove_file(&marker_path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    let marker_path = marker_path.display();
-                    return Err(error).with_context(|| format!("removing stale {marker_path}"));
-                }
-            }
-            if sock_path.exists() {
-                if let Err(e) = std::fs::remove_file(&sock_path) {
-                    let path = sock_path.display();
-                    eprintln!("warning: failed to remove stale agent socket {path}: {e}");
-                }
-            }
-
-            std::fs::create_dir_all(&agent_dir).with_context(|| {
-                let dir = agent_dir.display();
-                format!("creating ssh-agent directory {dir}")
-            })?;
-
-            let mut child = Command::new("ssh-agent")
-                .args(["-D", "-a"])
-                .arg(&sock_path)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .context("failed to start ssh-agent")?;
-
-            while !sock_path.exists() {
-                if let Ok(Some(status)) = child.try_wait() {
-                    let stderr = child
-                        .stderr
-                        .take()
-                        .and_then(|mut s| {
-                            let mut buf = String::new();
-                            s.read_to_string(&mut buf).ok()?;
-                            Some(buf)
-                        })
-                        .unwrap_or_default();
-                    let stderr = stderr.trim();
-                    return Err(anyhow::anyhow!("ssh-agent exited with {status}: {stderr}"));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-
-            resources.ssh_agent = Some(SshAgentHandle { child });
-        }
-
-        Ok(sock_path)
-    }
-
     pub fn remove_codex_proxy(&self) {
         self.resources.lock().unwrap().codex_proxy = None;
     }
@@ -730,7 +647,6 @@ impl PodConnection {
         resources.pod_server = None;
         resources.git_tunnel = None;
         resources.forwarded_ports = None;
-        resources.ssh_agent = None;
         resources.codex_proxy = None;
         *self.claude_state.lock().unwrap() = None;
         *self.codex_state.lock().unwrap() = None;

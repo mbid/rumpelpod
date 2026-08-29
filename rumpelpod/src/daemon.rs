@@ -10,11 +10,12 @@ pub mod reconnect;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::image::OutputLine;
 use anyhow::{Context, Result};
@@ -40,7 +41,7 @@ use pod_connection::{PodConnection, PodConnectionStatus, PodEndpoint, PodRepairB
 use protocol::{
     AddForwardedPortRequest, ClientContext, ConnectPodRequest, ContainerId, Daemon, DaemonEvent,
     EnsureClaudeConfigRequest, EnsurePiConfigRequest, ForkPodRequest, Image, LaunchResult, PodInfo,
-    PodLaunchParams, PodName, PodStatus, PortInfo,
+    PodLaunchParams, PodName, PodStatus, PortInfo, SshAgentPurpose,
 };
 
 use crate::pod::types::{ClaudeState, CodexState, GitSetupParams};
@@ -374,11 +375,129 @@ struct SshAgentHandle {
 
 impl Drop for SshAgentHandle {
     fn drop(&mut self) {
+        match self.child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: failed to check ssh-agent before cleanup: {e}"),
+        }
         if let Err(e) = self.child.kill() {
             eprintln!("warning: failed to kill ssh-agent: {e}");
         }
         if let Err(e) = self.child.wait() {
             eprintln!("warning: failed to wait on ssh-agent: {e}");
+        }
+    }
+}
+
+const SSH_AGENT_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct ManagedSshAgents {
+    agents: Mutex<HashMap<(PathBuf, String), SshAgentHandle>>,
+}
+
+impl ManagedSshAgents {
+    fn ensure(&self, repo_path: &Path, pod_name: &PodName) -> Result<PathBuf> {
+        let agent_dir = ssh_agent_dir(repo_path, pod_name);
+        let sock_path = agent_dir.join("agent.sock");
+        let key = (repo_path.to_path_buf(), pod_name.0.clone());
+
+        let mut agents = self.agents.lock().unwrap();
+        let need_start = if let Some(handle) = agents.get_mut(&key) {
+            match handle.child.try_wait() {
+                Ok(Some(_)) => {
+                    agents.remove(&key);
+                    true
+                }
+                Ok(None) => false,
+                Err(e) => {
+                    eprintln!("warning: failed to check ssh-agent status: {e}");
+                    agents.remove(&key);
+                    true
+                }
+            }
+        } else {
+            true
+        };
+
+        if need_start {
+            let marker_path = agent_dir.join(SSH_AGENT_CONFIGURED_KEYS_MARKER);
+            match std::fs::remove_file(&marker_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    let marker_path = marker_path.display();
+                    return Err(error).with_context(|| format!("removing stale {marker_path}"));
+                }
+            }
+            if sock_path.exists() {
+                if let Err(e) = std::fs::remove_file(&sock_path) {
+                    let path = sock_path.display();
+                    eprintln!("warning: failed to remove stale agent socket {path}: {e}");
+                }
+            }
+
+            std::fs::create_dir_all(&agent_dir).with_context(|| {
+                let dir = agent_dir.display();
+                format!("creating ssh-agent directory {dir}")
+            })?;
+
+            let child = Command::new("ssh-agent")
+                .args(["-D", "-a"])
+                .arg(&sock_path)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .context("failed to start ssh-agent")?;
+            let mut handle = SshAgentHandle { child };
+            let deadline = Instant::now() + SSH_AGENT_START_TIMEOUT;
+
+            while !sock_path.exists() {
+                match handle.child.try_wait() {
+                    Ok(Some(status)) => {
+                        let stderr = handle
+                            .child
+                            .stderr
+                            .take()
+                            .and_then(|mut stderr| {
+                                let mut output = String::new();
+                                stderr.read_to_string(&mut output).ok()?;
+                                Some(output)
+                            })
+                            .unwrap_or_default();
+                        let stderr = stderr.trim();
+                        return Err(anyhow::anyhow!("ssh-agent exited with {status}: {stderr}"));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(error).context("checking ssh-agent startup");
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(anyhow::anyhow!(
+                        "ssh-agent did not create its socket within {SSH_AGENT_START_TIMEOUT:?}"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+
+            agents.insert(key, handle);
+        }
+
+        Ok(sock_path)
+    }
+
+    fn remove(&self, repo_path: &Path, pod_name: &PodName) {
+        let key = (repo_path.to_path_buf(), pod_name.0.clone());
+        self.agents.lock().unwrap().remove(&key);
+
+        let agent_dir = ssh_agent_dir(repo_path, pod_name);
+        if agent_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
+                let dir = agent_dir.display();
+                error!("failed to remove ssh-agent directory {dir}: {e}");
+            }
         }
     }
 }
@@ -406,6 +525,8 @@ pub struct DaemonServer {
     lifecycle_locks: PodLifecycleLocks,
     /// Client-forwarded agents are per-user and can serve any ambient-enabled pod.
     ambient_ssh_agents: AmbientSshAgents,
+    /// Managed agents exist before their pods so configured keys can be validated first.
+    managed_ssh_agents: ManagedSshAgents,
 }
 
 impl DaemonServer {
@@ -2933,7 +3054,6 @@ impl DaemonServer {
             container_url,
             container_token: token,
             container_repo_path: container_repo_path.to_path_buf(),
-            ssh_agent_to_initialize: None,
         })
     }
 
@@ -3246,7 +3366,6 @@ impl DaemonServer {
             container_url,
             container_token: token,
             container_repo_path: container_repo_path.to_path_buf(),
-            ssh_agent_to_initialize: None,
         })
     }
 
@@ -3437,7 +3556,6 @@ impl DaemonServer {
             container_url,
             container_token: token,
             container_repo_path: container_repo_path.to_path_buf(),
-            ssh_agent_to_initialize: None,
         })
     }
 
@@ -4404,7 +4522,6 @@ impl DaemonServer {
             container_url,
             container_token: token,
             container_repo_path,
-            ssh_agent_to_initialize: None,
         })
     }
 
@@ -4433,6 +4550,7 @@ impl DaemonServer {
             repo_path,
             allow_processing,
             client_env,
+            client_context: _,
         } = request;
 
         crate::cli::validate_pod_name(&new_name)
@@ -5146,15 +5264,6 @@ impl DaemonServer {
         // sessions inside the container are cleaned up before we try
         // to remove it.  The docker overlay unmount only finishes
         // once exec sessions have gone away.
-        if !is_k8s {
-            let agent_dir = ssh_agent_dir(&repo_path, &pod_name);
-            if agent_dir.exists() {
-                if let Err(e) = std::fs::remove_dir_all(&agent_dir) {
-                    let dir = agent_dir.display();
-                    error!("failed to remove ssh-agent directory {dir}: {e}");
-                }
-            }
-        }
         // K8s delete is a quick API call, so wait inline.  Docker
         // overlay unmounts are sometimes slow and unreliable, so the
         // non-wait path runs deletion in a background thread with
@@ -5279,31 +5388,7 @@ impl DaemonServer {
     }
 
     fn ensure_managed_ssh_agent(&self, pod_name: &PodName, repo_path: &Path) -> Result<PathBuf> {
-        let conn = self.db.lock().unwrap();
-        let pod_record = db::get_pod(&conn, repo_path, &pod_name.0)?.context("pod not found")?;
-        let host: Host =
-            serde_json::from_str(&pod_record.host).context("parsing stored host for pod")?;
-        let token = pod_record.token;
-        drop(conn);
-
-        let pod_connection =
-            self.connections
-                .get_or_create_pod(repo_path, &pod_name.0, host, token)?;
-        pod_connection.ensure_ssh_agent()
-    }
-
-    fn prepare_configured_ssh_agent(
-        &self,
-        result: &mut LaunchResult,
-        pod_name: &PodName,
-        repo_path: &Path,
-    ) -> Result<()> {
-        if load_json_config(repo_path)?.ssh_agent.keys.is_empty() {
-            return Ok(());
-        }
-        let agent = self.ensure_managed_ssh_agent(pod_name, repo_path)?;
-        result.ssh_agent_to_initialize = Some(agent);
-        Ok(())
+        self.managed_ssh_agents.ensure(repo_path, pod_name)
     }
 }
 
@@ -5320,15 +5405,11 @@ impl Daemon for DaemonServer {
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.handle();
         let handle = std::thread::spawn(move || {
-            let repo_path = params.repo_path.clone();
-            let pod_name = params.pod_name.clone();
             let lifecycle_lock = this
                 .lifecycle_locks
                 .for_pod(&params.repo_path, &params.pod_name.0);
             let _guard = lifecycle_lock.acquire();
-            let mut result = this.launch_pod_impl(params, tx, InitializeMode::IfCreating)?;
-            this.prepare_configured_ssh_agent(&mut result, &pod_name, &repo_path)?;
-            Ok(result)
+            this.launch_pod_impl(params, tx, InitializeMode::IfCreating)
         });
         Ok(ServerLaunchProgress {
             rx: Some(rx),
@@ -5341,15 +5422,11 @@ impl Daemon for DaemonServer {
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.handle();
         let handle = std::thread::spawn(move || {
-            let repo_path = params.repo_path.clone();
-            let pod_name = params.pod_name.clone();
             let lifecycle_lock = this
                 .lifecycle_locks
                 .for_pod(&params.repo_path, &params.pod_name.0);
             let _guard = lifecycle_lock.acquire();
-            let mut result = this.recreate_pod_impl(params, tx)?;
-            this.prepare_configured_ssh_agent(&mut result, &pod_name, &repo_path)?;
-            Ok(result)
+            this.recreate_pod_impl(params, tx)
         });
         Ok(ServerLaunchProgress {
             rx: Some(rx),
@@ -5358,6 +5435,7 @@ impl Daemon for DaemonServer {
     }
 
     fn fork_pod(&self, request: ForkPodRequest) -> Result<ServerLaunchProgress> {
+        self.remember_client_context(&request.client_context);
         let (tx, rx) = std::sync::mpsc::channel();
         let this = self.handle();
         let handle = std::thread::spawn(move || this.fork_pod_impl(request, tx));
@@ -5454,6 +5532,7 @@ impl Daemon for DaemonServer {
     fn delete_pod(&self, pod_name: PodName, repo_path: PathBuf, wait: bool) -> Result<()> {
         let lifecycle_lock = self.lifecycle_locks.for_pod(&repo_path, &pod_name.0);
         let lifecycle_guard = lifecycle_lock.acquire();
+        self.managed_ssh_agents.remove(&repo_path, &pod_name);
         self.delete_pod_impl(pod_name, repo_path, wait, Some(lifecycle_guard))
     }
 
@@ -5939,12 +6018,32 @@ impl Daemon for DaemonServer {
         Ok(())
     }
 
-    fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf> {
-        if load_json_config(&repo_path)?.ssh_agent.ambient {
-            let pod_name = &pod_name.0;
-            return Err(anyhow::anyhow!(
-                "pod '{pod_name}' uses ambient SSH agent forwarding, which must be managed with ssh-add directly"
-            ));
+    fn ensure_ssh_agent(
+        &self,
+        pod_name: PodName,
+        repo_path: PathBuf,
+        purpose: SshAgentPurpose,
+    ) -> Result<PathBuf> {
+        let config = load_json_config(&repo_path)?;
+        match purpose {
+            SshAgentPurpose::ConfiguredKeys => {
+                if config.ssh_agent.keys.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "configured SSH agent preparation requires at least one key"
+                    ));
+                }
+            }
+            SshAgentPurpose::ManualCommand => {
+                let conn = self.db.lock().unwrap();
+                db::get_pod(&conn, &repo_path, &pod_name.0)?.context("pod not found")?;
+                drop(conn);
+                if config.ssh_agent.ambient {
+                    let pod_name = &pod_name.0;
+                    return Err(anyhow::anyhow!(
+                        "pod '{pod_name}' uses ambient SSH agent forwarding, which must be managed with ssh-add directly"
+                    ));
+                }
+            }
         }
         self.ensure_managed_ssh_agent(&pod_name, &repo_path)
     }
@@ -6068,6 +6167,7 @@ pub fn run_daemon() -> Result<()> {
         events_tx,
         lifecycle_locks: PodLifecycleLocks::default(),
         ambient_ssh_agents,
+        managed_ssh_agents: ManagedSshAgents::default(),
     });
 
     // Re-establish connections to pods that were running before we

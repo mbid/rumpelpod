@@ -1,5 +1,7 @@
 Add automatic SSH agent configuration
 
 Allow pods to use configured key files or the caller's ambient SSH agent
-without adding daemon round trips. Keep ambient agent selection
-resilient across overlapping forwarded SSH sessions.
+while keeping ambient agent selection resilient across overlapping
+forwarded SSH sessions. Validate and load configured keys before pod
+creation, recreation, or forking so agent setup failures cannot leave
+partial pod state.

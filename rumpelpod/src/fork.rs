@@ -13,8 +13,12 @@ use std::io::{IsTerminal, Write};
 use anyhow::{Context, Result};
 
 use crate::cli::ForkCommand;
+use crate::config::load_json_config;
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, DaemonClient, ForkPodRequest, LaunchProgress};
+use crate::daemon::protocol::{
+    ClientContext, Daemon, DaemonClient, ForkPodRequest, LaunchProgress, PodName,
+};
+use crate::enter::{prepare_configured_ssh_agent, resolve_ssh_key_paths};
 use crate::git::get_repo_root;
 use crate::image::OutputLine;
 
@@ -47,12 +51,18 @@ pub fn fork(cmd: &ForkCommand) -> Result<()> {
         confirm_processing_if_needed(&pods, &cmd.source)?
     };
 
+    let config = load_json_config(&repo_root)?;
+    let keys = resolve_ssh_key_paths(&repo_root, &config.ssh_agent.keys)?;
+    let pod_name = PodName::new(cmd.new_name.clone()).map_err(anyhow::Error::msg)?;
+    prepare_configured_ssh_agent(&client, &pod_name, &repo_root, &keys)?;
+
     let mut progress = client.fork_pod(ForkPodRequest {
         source: cmd.source.clone(),
         new_name: cmd.new_name.clone(),
         repo_path: repo_root,
         allow_processing,
         client_env: crate::enter::collect_client_env()?,
+        client_context: ClientContext::current(),
     })?;
     for line in &mut progress {
         match line {

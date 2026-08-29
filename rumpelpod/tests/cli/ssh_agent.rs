@@ -323,10 +323,16 @@ fn ssh_agent_configured_key_is_added_automatically() {
 
     assert_agent_comment(&repo, &daemon, "configured", None, comment);
 
-    // Re-entering must not invoke ssh-add again, which would repeatedly prompt
-    // for encrypted keys. The already-loaded key remains usable without the
-    // host-side binary.
+    // Re-entering or recreating must not invoke ssh-add again, which would
+    // repeatedly prompt for encrypted keys. The already-loaded key remains
+    // usable without the host-side binary.
     fs::remove_file(daemon.bin_dir.join("ssh-add")).expect("remove host ssh-add binary");
+    assert_agent_comment(&repo, &daemon, "configured", None, comment);
+
+    pod_command(&repo, &daemon)
+        .args(["recreate", "configured"])
+        .success()
+        .expect("recreate pod with an already-prepared SSH agent");
     assert_agent_comment(&repo, &daemon, "configured", None, comment);
 }
 
@@ -364,6 +370,189 @@ fn ssh_agent_missing_configured_key_prevents_pod_creation() {
     assert!(
         !String::from_utf8_lossy(&stdout).contains("missing-key"),
         "rejected pod was persisted"
+    );
+}
+
+#[test]
+fn ssh_agent_malformed_configured_key_prevents_pod_creation() {
+    let home = TestHome::new();
+    home.link_local_bins(&["ssh-agent", "ssh-add"]);
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+    fs::write(home.path().join("malformed-key"), "not an SSH private key")
+        .expect("write malformed SSH key");
+    write_ssh_agent_config(
+        &repo,
+        &executor,
+        serde_json::json!({"keys": ["~/malformed-key"]}),
+    );
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "malformed-key", "--", "true"])
+        .output()
+        .expect("run rumpel enter with a malformed configured key");
+    assert!(
+        !output.status.success(),
+        "pod creation unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ssh-add failed while loading configured SSH keys"),
+        "unexpected error: {stderr}"
+    );
+
+    let stdout = pod_command(&repo, &daemon)
+        .arg("list")
+        .success()
+        .expect("list pods after rejected creation");
+    assert!(
+        !String::from_utf8_lossy(&stdout).contains("malformed-key"),
+        "rejected pod was persisted"
+    );
+}
+
+#[test]
+fn ssh_agent_malformed_configured_key_prevents_recreate() {
+    let home = TestHome::new();
+    home.link_local_bins(&["ssh-agent", "ssh-add"]);
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json)
+        .expect("write initial .rumpelpod.json");
+
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            "malformed-recreate",
+            "--",
+            "touch",
+            "/tmp/original-container",
+        ])
+        .success()
+        .expect("create pod before rejected recreate");
+
+    fs::write(
+        home.path().join("malformed-recreate-key"),
+        "not an SSH private key",
+    )
+    .expect("write malformed SSH key");
+    write_ssh_agent_config(
+        &repo,
+        &executor,
+        serde_json::json!({"keys": ["~/malformed-recreate-key"]}),
+    );
+    let output = pod_command(&repo, &daemon)
+        .args(["recreate", "malformed-recreate"])
+        .output()
+        .expect("run rumpel recreate with a malformed configured key");
+    assert!(
+        !output.status.success(),
+        "pod recreate unexpectedly succeeded"
+    );
+
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json)
+        .expect("restore .rumpelpod.json");
+    pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "malformed-recreate",
+            "--",
+            "test",
+            "-f",
+            "/tmp/original-container",
+        ])
+        .success()
+        .expect("rejected recreate replaced the original container");
+}
+
+#[test]
+fn ssh_agent_start_failure_prevents_pod_creation() {
+    let home = TestHome::new();
+    home.link_local_bins(&["ssh-agent", "ssh-add"]);
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+    generate_key(&home, "unstartable", "rumpelpod-unstartable");
+    write_ssh_agent_config(
+        &repo,
+        &executor,
+        serde_json::json!({"keys": ["~/unstartable_ed25519"]}),
+    );
+    fs::remove_file(daemon.bin_dir.join("ssh-agent")).expect("remove daemon ssh-agent binary");
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "unstartable", "--", "true"])
+        .output()
+        .expect("run rumpel enter without daemon ssh-agent");
+    assert!(
+        !output.status.success(),
+        "pod creation unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to start ssh-agent"),
+        "unexpected error: {stderr}"
+    );
+
+    let stdout = pod_command(&repo, &daemon)
+        .arg("list")
+        .success()
+        .expect("list pods after rejected creation");
+    assert!(
+        !String::from_utf8_lossy(&stdout).contains("unstartable"),
+        "rejected pod was persisted"
+    );
+}
+
+#[test]
+fn ssh_agent_malformed_configured_key_prevents_fork() {
+    let home = TestHome::new();
+    home.link_local_bins(&["ssh-agent", "ssh-add"]);
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+    fs::write(repo.path().join(".rumpelpod.json"), &executor.json)
+        .expect("write initial .rumpelpod.json");
+    pod_command(&repo, &daemon)
+        .args(["enter", "--create", "fork-source", "--", "true"])
+        .success()
+        .expect("create fork source");
+
+    fs::write(
+        home.path().join("malformed-fork-key"),
+        "not an SSH private key",
+    )
+    .expect("write malformed SSH key");
+    write_ssh_agent_config(
+        &repo,
+        &executor,
+        serde_json::json!({"keys": ["~/malformed-fork-key"]}),
+    );
+    let output = pod_command(&repo, &daemon)
+        .args(["fork", "fork-source", "fork-destination"])
+        .output()
+        .expect("run rumpel fork with a malformed configured key");
+    assert!(!output.status.success(), "pod fork unexpectedly succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ssh-add failed while loading configured SSH keys"),
+        "unexpected error: {stderr}"
+    );
+
+    let stdout = pod_command(&repo, &daemon)
+        .arg("list")
+        .success()
+        .expect("list pods after rejected fork");
+    assert!(
+        !String::from_utf8_lossy(&stdout).contains("fork-destination"),
+        "rejected fork was persisted"
     );
 }
 
