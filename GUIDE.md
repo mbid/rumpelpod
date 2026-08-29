@@ -375,7 +375,7 @@ Keys can instead be loaded automatically:
 { "sshAgent": { "keys": ["~/.ssh/id_ed25519"] } }
 ```
 
-Set `sshAgent.ambient` to `true` instead to forward the invoking shell's agent. The daemon uses the newest responsive agent it has received, falling back to earlier agents and then no identities.
+Set `sshAgent.ambient` to `true` instead to forward the invoking shell's agent. Manage that agent with `ssh-add` directly.
 
 ### Rebuilding the image
 
@@ -455,10 +455,10 @@ Controls the SSH agent relayed into the pod.
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `keys` | array of paths | `[]` | loads key files into the isolated per-pod agent through local `ssh-add`, with relative paths starting at the repository root and `~/` expanding to the user's home directory |
-| `ambient` | bool | `false` | forwards the invoking shell's agent through a daemon-wide newest-live selection |
+| `ambient` | bool | `false` | forwards the invoking shell's agent |
 
 `keys` and `ambient` are mutually exclusive.
-With neither field configured, keys can still be managed with `rumpel ssh-add`.
+With neither field configured, keys can still be managed with `rumpel ssh-add`. The command rejects ambient pods.
 
 ### `kubernetes`
 

@@ -5940,6 +5940,12 @@ impl Daemon for DaemonServer {
     }
 
     fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf> {
+        if load_json_config(&repo_path)?.ssh_agent.ambient {
+            let pod_name = &pod_name.0;
+            return Err(anyhow::anyhow!(
+                "pod '{pod_name}' uses ambient SSH agent forwarding, which must be managed with ssh-add directly"
+            ));
+        }
         self.ensure_managed_ssh_agent(&pod_name, &repo_path)
     }
 

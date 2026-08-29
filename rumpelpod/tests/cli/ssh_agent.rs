@@ -331,6 +331,43 @@ fn ssh_agent_configured_key_is_added_automatically() {
 }
 
 #[test]
+fn ssh_agent_missing_configured_key_prevents_pod_creation() {
+    let home = TestHome::new();
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+    write_ssh_agent_config(
+        &repo,
+        &executor,
+        serde_json::json!({"keys": ["missing-key"]}),
+    );
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", "--create", "missing-key", "--", "true"])
+        .output()
+        .expect("run rumpel enter with a missing configured key");
+    assert!(
+        !output.status.success(),
+        "pod creation unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reading configured SSH key") && stderr.contains("missing-key"),
+        "unexpected error: {stderr}"
+    );
+
+    let stdout = pod_command(&repo, &daemon)
+        .arg("list")
+        .success()
+        .expect("list pods after rejected creation");
+    assert!(
+        !String::from_utf8_lossy(&stdout).contains("missing-key"),
+        "rejected pod was persisted"
+    );
+}
+
+#[test]
 fn ssh_agent_ambient_uses_latest_live_socket() {
     let home = TestHome::new();
     home.link_local_bins(&["ssh-agent", "ssh-add"]);
@@ -360,6 +397,56 @@ fn ssh_agent_ambient_uses_latest_live_socket() {
 
     second.stop();
     assert_agent_comment(&repo, &daemon, "ambient", None, &first.comment);
+}
+
+#[test]
+fn ssh_add_rejects_ambient_pods() {
+    let home = TestHome::new();
+    home.link_local_bins(&["ssh-agent", "ssh-add"]);
+    let executor = ExecutorResources::setup(&home);
+    let daemon = TestDaemon::start(&home);
+    let repo = TestRepo::new();
+    write_test_devcontainer(&repo, "", "");
+    write_ssh_agent_config(&repo, &executor, serde_json::json!({"ambient": true}));
+
+    let agent = TestSshAgent::start(&home, "ambient-reject");
+    assert_agent_comment(
+        &repo,
+        &daemon,
+        "ambient-reject",
+        Some(&agent.socket_path),
+        &agent.comment,
+    );
+
+    let additional_comment = "rumpelpod-ambient-additional";
+    let additional_key = generate_key(&home, "ambient-additional", additional_comment);
+    let output = pod_command(&repo, &daemon)
+        .env("SSH_AUTH_SOCK", &agent.socket_path)
+        .args(["ssh-add", "ambient-reject"])
+        .arg(&additional_key)
+        .output()
+        .expect("run rumpel ssh-add for ambient pod");
+    assert!(
+        !output.status.success(),
+        "rumpel ssh-add unexpectedly succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("uses ambient SSH agent forwarding"),
+        "unexpected error: {stderr}"
+    );
+
+    let output = Command::new("ssh-add")
+        .arg("-l")
+        .env("SSH_AUTH_SOCK", &agent.socket_path)
+        .output()
+        .expect("list ambient agent keys");
+    assert!(output.status.success(), "failed to list ambient agent keys");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(additional_comment),
+        "rejected key was added to the ambient agent: {stdout}"
+    );
 }
 
 #[test]
