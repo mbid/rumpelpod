@@ -12,7 +12,6 @@ use crate::daemon::protocol::{
 use crate::enter::{
     collect_client_env, collect_local_env, determine_devcontainer, determine_host,
     find_local_claude_cli, find_local_codex_cli, find_local_grok_cli, find_local_pi_cli,
-    prepare_configured_ssh_agent, resolve_ssh_key_paths,
 };
 use crate::git::{get_current_branch, get_git_user_config, get_repo_root};
 use crate::image::OutputLine;
@@ -41,14 +40,12 @@ pub fn recreate(cmd: &RecreateCommand) -> Result<()> {
     let pi_cli_path = find_local_pi_cli();
     let grok_cli_path = find_local_grok_cli();
     let json_config = load_json_config(&repo_root)?;
-    let ssh_key_paths = resolve_ssh_key_paths(&repo_root, &json_config.ssh_agent.keys)?;
 
     let description_file = json_config
         .merge
         .description_file_path()
         .map(str::to_string);
     let pod_name = PodName::new(cmd.name.clone()).map_err(|e| anyhow::anyhow!(e))?;
-    prepare_configured_ssh_agent(&client, &pod_name, &repo_root, &ssh_key_paths)?;
     let mut progress = client.recreate_pod(PodLaunchParams {
         pod_name,
         repo_path: repo_root,

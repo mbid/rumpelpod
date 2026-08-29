@@ -1,8 +1,8 @@
 Add automatic SSH agent configuration
 
 Allow pods to use configured key files or the caller's ambient SSH agent
-while keeping ambient agent selection resilient across overlapping
-forwarded SSH sessions. Validate and load configured keys before pod
-creation, recreation, or forking so agent setup failures cannot leave
-partial pod state.
-Fail agent connections when no remembered ambient socket is live.
+while keeping ambient selection resilient across overlapping forwarded
+SSH sessions. Tie managed agent lifetime to PodConnection so stopped,
+reconnected, and recreated pods reuse it, while daemon restart restores
+configured agents. Fail lifecycle operations before pod creation when
+agent startup or key loading fails.

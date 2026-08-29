@@ -407,16 +407,6 @@ pub struct AddForwardedPortRequest {
 struct EnsureSshAgentRequest {
     pod_name: PodName,
     repo_path: PathBuf,
-    purpose: SshAgentPurpose,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SshAgentPurpose {
-    /// Prepare and validate configured keys before the pod exists.
-    ConfiguredKeys,
-    /// Manage an existing pod's isolated agent through `rumpel ssh-add`.
-    ManualCommand,
 }
 
 /// Response body for the ensure_ssh_agent endpoint.
@@ -594,15 +584,8 @@ pub trait Daemon: Send + Sync + 'static {
     fn ensure_pi_config(&self, request: EnsurePiConfigRequest) -> Result<()>;
 
     // POST /pod/ssh-agent
-    // Ensure a managed host-side ssh-agent is running and return its socket.
-    // Configured-key preparation may happen before the pod exists so the
-    // caller can run `ssh-add` before starting any pod work.
-    fn ensure_ssh_agent(
-        &self,
-        pod_name: PodName,
-        repo_path: PathBuf,
-        purpose: SshAgentPurpose,
-    ) -> Result<PathBuf>;
+    // Return the managed agent socket used by `rumpel ssh-add`.
+    fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf>;
 
     // POST /pod/reconnect-events
     // Subscribe to reconnection events for a pod.
@@ -1024,17 +1007,11 @@ impl Daemon for DaemonClient {
         Ok(())
     }
 
-    fn ensure_ssh_agent(
-        &self,
-        pod_name: PodName,
-        repo_path: PathBuf,
-        purpose: SshAgentPurpose,
-    ) -> Result<PathBuf> {
+    fn ensure_ssh_agent(&self, pod_name: PodName, repo_path: PathBuf) -> Result<PathBuf> {
         let url = self.url.join("/pod/ssh-agent")?;
         let request = EnsureSshAgentRequest {
             pod_name,
             repo_path,
-            purpose,
         };
 
         let response = self
@@ -1737,9 +1714,7 @@ async fn ensure_ssh_agent_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<EnsureSshAgentRequest>,
 ) -> Result<Json<EnsureSshAgentResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let result = block_in_place(|| {
-        daemon.ensure_ssh_agent(request.pod_name, request.repo_path, request.purpose)
-    });
+    let result = block_in_place(|| daemon.ensure_ssh_agent(request.pod_name, request.repo_path));
 
     match result {
         Ok(socket_path) => Ok(Json(EnsureSshAgentResponse { socket_path })),

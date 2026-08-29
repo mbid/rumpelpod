@@ -309,7 +309,7 @@ fn ssh_agent_configured_key_is_added_automatically() {
     let home = TestHome::new();
     home.link_local_bins(&["ssh-agent", "ssh-add"]);
     let executor = ExecutorResources::setup(&home);
-    let daemon = TestDaemon::start(&home);
+    let mut daemon = TestDaemon::start(&home);
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
 
@@ -323,16 +323,27 @@ fn ssh_agent_configured_key_is_added_automatically() {
 
     assert_agent_comment(&repo, &daemon, "configured", None, comment);
 
-    // Re-entering or recreating must not invoke ssh-add again, which would
-    // repeatedly prompt for encrypted keys. The already-loaded key remains
-    // usable without the host-side binary.
+    // Warm, stopped, and recreated connections retain the same configured
+    // agent rather than invoking ssh-add again.
     fs::remove_file(daemon.bin_dir.join("ssh-add")).expect("remove host ssh-add binary");
+    assert_agent_comment(&repo, &daemon, "configured", None, comment);
+
+    pod_command(&repo, &daemon)
+        .args(["stop", "--wait", "configured"])
+        .success()
+        .expect("stop pod with a configured SSH agent");
     assert_agent_comment(&repo, &daemon, "configured", None, comment);
 
     pod_command(&repo, &daemon)
         .args(["recreate", "configured"])
         .success()
         .expect("recreate pod with an already-prepared SSH agent");
+    assert_agent_comment(&repo, &daemon, "configured", None, comment);
+
+    home.link_local_bin("ssh-add");
+    daemon.kill();
+    drop(daemon);
+    let daemon = TestDaemon::start(&home);
     assert_agent_comment(&repo, &daemon, "configured", None, comment);
 }
 

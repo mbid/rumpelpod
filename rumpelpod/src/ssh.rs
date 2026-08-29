@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 
 use crate::cli::SshAddCommand;
 use crate::daemon;
-use crate::daemon::protocol::{Daemon, PodName, SshAgentPurpose};
+use crate::daemon::protocol::{Daemon, PodName};
 use crate::git::get_repo_root;
 
 pub fn ssh_add(cmd: &SshAddCommand) -> Result<()> {
@@ -26,8 +26,7 @@ pub fn ssh_add(cmd: &SshAddCommand) -> Result<()> {
     let client = daemon::protocol::DaemonClient::new_unix(&socket_path);
     let pod_name = PodName::new(cmd.name.clone()).map_err(|e| anyhow::anyhow!(e))?;
 
-    let agent_sock =
-        client.ensure_ssh_agent(pod_name, repo_root, SshAgentPurpose::ManualCommand)?;
+    let agent_sock = client.ensure_ssh_agent(pod_name, repo_root)?;
 
     // Use exec so ssh-add inherits the terminal directly (passphrase
     // prompts, signal handling) and its exit status becomes ours.
