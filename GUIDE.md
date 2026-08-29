@@ -385,7 +385,7 @@ Passphrase prompts come from the local `ssh-add` process and use the invoking te
 Alternatively, a pod can use the ambient agent from the shell that invokes rumpelpod:
 
 ```json
-{ "sshAgent": { "forward": "ambient" } }
+{ "sshAgent": { "ambient": true } }
 ```
 
 The client sends its current `SSH_AUTH_SOCK` to the daemon as part of operations that already contact it, including launch, enter, connect, reconnection, and Codex attachment.
@@ -396,7 +396,7 @@ If no supplied socket responds, the pod sees a working agent with no identities.
 
 The ambient socket list lasts only for the daemon process lifetime.
 After a daemon restart, the next client operation with `SSH_AUTH_SOCK` set repopulates it.
-`keys` and `forward` are mutually exclusive.
+`keys` and `ambient` are mutually exclusive.
 The explicit `rumpel ssh-add` command always addresses the isolated per-pod agent, even when ambient forwarding is configured; those managed identities are not exposed to the pod until ambient forwarding is disabled.
 
 ### Rebuilding the image
@@ -477,9 +477,9 @@ Controls the SSH agent relayed into the pod.
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `keys` | array of paths | `[]` | loads key files into the isolated per-pod agent through local `ssh-add`; relative paths start at the repository root and `~/` expands to the user's home directory |
-| `forward` | `"ambient"` | none | forwards the invoking shell's agent through a daemon-wide newest-live selection |
+| `ambient` | bool | `false` | forwards the invoking shell's agent through a daemon-wide newest-live selection |
 
-`keys` and `forward` are mutually exclusive.
+`keys` and `ambient` are mutually exclusive.
 With neither field configured, keys can still be managed with `rumpel ssh-add`.
 
 ### `kubernetes`

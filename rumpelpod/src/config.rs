@@ -557,13 +557,7 @@ pub struct SshAgentConfig {
     /// Private key files loaded into rumpelpod's isolated per-pod agent.
     pub keys: Vec<PathBuf>,
     /// Forward the invoking user's agent instead of using the per-pod agent.
-    pub forward: Option<SshAgentForward>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SshAgentForward {
-    Ambient,
+    pub ambient: bool,
 }
 
 #[derive(Deserialize)]
@@ -571,7 +565,8 @@ pub enum SshAgentForward {
 struct SshAgentConfigFields {
     #[serde(default)]
     keys: Vec<PathBuf>,
-    forward: Option<SshAgentForward>,
+    #[serde(default)]
+    ambient: bool,
 }
 
 impl<'de> Deserialize<'de> for SshAgentConfig {
@@ -580,14 +575,14 @@ impl<'de> Deserialize<'de> for SshAgentConfig {
         D: serde::Deserializer<'de>,
     {
         let fields = SshAgentConfigFields::deserialize(deserializer)?;
-        if fields.forward == Some(SshAgentForward::Ambient) && !fields.keys.is_empty() {
+        if fields.ambient && !fields.keys.is_empty() {
             return Err(serde::de::Error::custom(
-                "sshAgent.keys and sshAgent.forward are mutually exclusive",
+                "sshAgent.keys and sshAgent.ambient are mutually exclusive",
             ));
         }
         Ok(Self {
             keys: fields.keys,
-            forward: fields.forward,
+            ambient: fields.ambient,
         })
     }
 }

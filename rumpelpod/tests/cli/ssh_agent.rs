@@ -338,7 +338,7 @@ fn ssh_agent_ambient_uses_latest_live_socket() {
     let daemon = TestDaemon::start(&home);
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
-    write_ssh_agent_config(&repo, &executor, serde_json::json!({"forward": "ambient"}));
+    write_ssh_agent_config(&repo, &executor, serde_json::json!({"ambient": true}));
 
     let first = TestSshAgent::start(&home, "ambient-first");
     assert_agent_comment(
@@ -370,7 +370,7 @@ fn ssh_agent_reconnect_registers_ambient_socket_after_daemon_restart() {
     let mut daemon = TestDaemon::start(&home);
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
-    write_ssh_agent_config(&repo, &executor, serde_json::json!({"forward": "ambient"}));
+    write_ssh_agent_config(&repo, &executor, serde_json::json!({"ambient": true}));
 
     let agent = TestSshAgent::start(&home, "ambient-reconnect");
     assert_agent_comment(
@@ -397,7 +397,7 @@ fn ssh_agent_codex_attach_registers_ambient_socket_in_first_message() {
     let daemon = TestDaemon::start(&home);
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
-    write_ssh_agent_config(&repo, &executor, serde_json::json!({"forward": "ambient"}));
+    write_ssh_agent_config(&repo, &executor, serde_json::json!({"ambient": true}));
 
     let agent = TestSshAgent::start(&home, "ambient-codex");
     register_codex_attach_context(&daemon, &repo, &agent.socket_path);
@@ -412,7 +412,7 @@ fn ssh_agent_ambient_registration_waits_for_a_pod_agent_request() {
     let daemon = TestDaemon::start(&home);
     let repo = TestRepo::new();
     write_test_devcontainer(&repo, "", "");
-    write_ssh_agent_config(&repo, &executor, serde_json::json!({"forward": "ambient"}));
+    write_ssh_agent_config(&repo, &executor, serde_json::json!({"ambient": true}));
 
     let socket_path = home.path().join("unprobed-agent.sock");
     let listener = UnixListener::bind(&socket_path).expect("bind fake SSH agent socket");
@@ -466,7 +466,7 @@ fn ssh_agent_keys_and_ambient_are_rejected_together() {
     write_test_devcontainer(&repo, "", "");
     fs::write(
         repo.path().join(".rumpelpod.json"),
-        r#"{"sshAgent":{"keys":["key"],"forward":"ambient"}}"#,
+        r#"{"sshAgent":{"keys":["key"],"ambient":true}}"#,
     )
     .expect("write invalid .rumpelpod.json");
 
@@ -477,7 +477,7 @@ fn ssh_agent_keys_and_ambient_are_rejected_together() {
     assert!(!output.status.success(), "invalid SSH config succeeded");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("sshAgent.keys and sshAgent.forward are mutually exclusive"),
+        stderr.contains("sshAgent.keys and sshAgent.ambient are mutually exclusive"),
         "unexpected error: {stderr}"
     );
 }

@@ -48,7 +48,7 @@ use tokio::time::timeout;
 use tower_service::Service;
 
 use crate::async_runtime::RUNTIME;
-use crate::config::{load_json_config, SshAgentForward};
+use crate::config::load_json_config;
 
 /// Locate git-http-backend by querying `git --exec-path`.
 fn git_http_backend_path() -> &'static str {
@@ -874,9 +874,9 @@ async fn ssh_agent_handler(
     };
 
     let ssh_agent = match load_json_config(&info.repo_path) {
-        Ok(config) => match config.ssh_agent.forward {
-            Some(SshAgentForward::Ambient) => SshAgentBackend::Ambient,
-            None => {
+        Ok(config) => match config.ssh_agent.ambient {
+            true => SshAgentBackend::Ambient,
+            false => {
                 let pod_name = crate::daemon::protocol::PodName(info.pod_name);
                 let agent_sock =
                     crate::daemon::ssh_agent_dir(&info.repo_path, &pod_name).join("agent.sock");
