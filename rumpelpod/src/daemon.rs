@@ -5340,27 +5340,13 @@ impl DaemonServer {
             true => None,
             false => Some(resolve_ssh_key_paths(repo_path, &config.ssh_agent.keys)?),
         };
-        let connection_existed = self.connections.pod(repo_path, &pod_name.0).is_some();
-        let connection = self.connections.get_or_create_pod(
+        self.connections.get_or_create_pod(
             repo_path,
             &pod_name.0,
             host.clone(),
             token.to_string(),
-        )?;
-        let setup_result = match keys {
-            Some(keys) => connection.configure_ssh_agent(&keys).map(|_| ()),
-            None => {
-                connection.remove_ssh_agent();
-                Ok(())
-            }
-        };
-        if let Err(error) = setup_result {
-            if !connection_existed {
-                self.connections.remove_pod(repo_path, &pod_name.0);
-            }
-            return Err(error);
-        }
-        Ok(connection)
+            keys.as_deref(),
+        )
     }
 }
 

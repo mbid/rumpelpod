@@ -45,6 +45,27 @@ struct ManagedSshAgent {
 }
 
 impl ManagedSshAgent {
+    fn configured(key: &PodConnectionKey, keys: &[PathBuf]) -> Result<Self> {
+        let configured_keys_hash = Self::configured_keys_hash(keys)?;
+        let mut agent = Self::start(key)?;
+        agent.add_configured_keys(keys)?;
+        agent.configured_keys_hash = Some(configured_keys_hash);
+        Ok(agent)
+    }
+
+    fn configured_keys_hash(keys: &[PathBuf]) -> Result<String> {
+        let mut hasher = Sha256::new();
+        for key in keys {
+            hasher.update(key.as_os_str().as_encoded_bytes());
+            hasher.update([0]);
+            hasher.update(std::fs::read(key).with_context(|| {
+                let key = key.display();
+                format!("reading configured SSH key {key}")
+            })?);
+        }
+        Ok(hex::encode(hasher.finalize()))
+    }
+
     fn start(key: &PodConnectionKey) -> Result<Self> {
         let pod_name = PodName(key.pod_name.clone());
         let agent_dir = crate::daemon::ssh_agent_dir(&key.repo_path, &pod_name);
@@ -362,6 +383,7 @@ impl PodConnection {
         host: Host,
         token: String,
         status: PodConnectionStatus,
+        managed_ssh_agent: Option<ManagedSshAgent>,
     ) -> Self {
         let host_key = HostKey::from_host(&host);
         let (tx, _) = broadcast::channel(64);
@@ -375,7 +397,7 @@ impl PodConnection {
             claude_state: Arc::new(Mutex::new(None)),
             codex_state: Arc::new(Mutex::new(None)),
             resources: Mutex::new(PodConnectionResources::new()),
-            managed_ssh_agent: Mutex::new(None),
+            managed_ssh_agent: Mutex::new(managed_ssh_agent),
             git_tunnel_setup: Mutex::new(()),
             git_tunnel_repair_scheduled: AtomicBool::new(false),
             repair_state: Arc::new(PodRepairState::default()),
@@ -414,16 +436,7 @@ impl PodConnection {
     }
 
     pub fn configure_ssh_agent(&self, keys: &[PathBuf]) -> Result<PathBuf> {
-        let mut hasher = Sha256::new();
-        for key in keys {
-            hasher.update(key.as_os_str().as_encoded_bytes());
-            hasher.update([0]);
-            hasher.update(std::fs::read(key).with_context(|| {
-                let key = key.display();
-                format!("reading configured SSH key {key}")
-            })?);
-        }
-        let configured_keys_hash = hex::encode(hasher.finalize());
+        let configured_keys_hash = ManagedSshAgent::configured_keys_hash(keys)?;
 
         let mut slot = self.managed_ssh_agent.lock().unwrap();
         if let Some(agent) = slot.as_mut() {
@@ -877,22 +890,34 @@ impl PodConnectionRegistry {
         host: Host,
         token: String,
         initial_status: PodConnectionStatus,
-    ) -> Arc<PodConnection> {
+        configured_ssh_keys: Option<&[PathBuf]>,
+    ) -> Result<Arc<PodConnection>> {
         let key = PodConnectionKey::new(repo_path.to_path_buf(), pod_name.to_string());
         let mut pods = self.pods.lock().unwrap();
-        if let Some(connection) = pods.get(&key) {
+        if let Some(connection) = pods.get(&key).cloned() {
+            drop(pods);
             connection.update_host_and_token(host, token);
-            return connection.clone();
+            match configured_ssh_keys {
+                Some(keys) => {
+                    connection.configure_ssh_agent(keys)?;
+                }
+                None => connection.remove_ssh_agent(),
+            }
+            return Ok(connection);
         }
+        let managed_ssh_agent = configured_ssh_keys
+            .map(|keys| ManagedSshAgent::configured(&key, keys))
+            .transpose()?;
         let connection = Arc::new(PodConnection::new(
             self.events_tx.clone(),
             key.clone(),
             host,
             token,
             initial_status,
+            managed_ssh_agent,
         ));
         pods.insert(key, connection.clone());
-        connection
+        Ok(connection)
     }
 
     pub fn all(&self) -> Vec<Arc<PodConnection>> {
@@ -1103,23 +1128,29 @@ mod tests {
             engine: ContainerEngine::Docker,
         };
 
-        let old = registry.get_or_create(
-            repo_path,
-            "test",
-            host.clone(),
-            "old-token".to_string(),
-            PodConnectionStatus::HostDisconnected,
-        );
+        let old = registry
+            .get_or_create(
+                repo_path,
+                "test",
+                host.clone(),
+                "old-token".to_string(),
+                PodConnectionStatus::HostDisconnected,
+                None,
+            )
+            .expect("create old pod connection");
         *old.codex_state.lock().unwrap() = Some(CodexState::Idle);
 
         registry.remove(repo_path, "test").unwrap();
-        let replacement = registry.get_or_create(
-            repo_path,
-            "test",
-            host,
-            "new-token".to_string(),
-            PodConnectionStatus::HostDisconnected,
-        );
+        let replacement = registry
+            .get_or_create(
+                repo_path,
+                "test",
+                host,
+                "new-token".to_string(),
+                PodConnectionStatus::HostDisconnected,
+                None,
+            )
+            .expect("create replacement pod connection");
 
         assert!(!Arc::ptr_eq(&old, &replacement));
         assert_eq!(replacement.codex_state(), None);
