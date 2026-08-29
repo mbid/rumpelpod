@@ -369,35 +369,13 @@ Arguments after the pod name are forwarded verbatim to `ssh-add`.
 Inside the container, `SSH_AUTH_SOCK` points to the relay socket.
 The private key material never enters the container.
 
-To load the same keys automatically whenever the managed agent starts, configure them in `.rumpelpod.json`:
+Keys can instead be loaded automatically:
 
 ```json
-{
-  "sshAgent": {
-    "keys": ["~/.ssh/id_ed25519", "keys/work_id_ed25519"]
-  }
-}
+{ "sshAgent": { "keys": ["~/.ssh/id_ed25519"] } }
 ```
 
-Relative paths start at the repository root.
-Passphrase prompts come from the local `ssh-add` process and use the invoking terminal.
-
-Alternatively, a pod can use the ambient agent from the shell that invokes rumpelpod:
-
-```json
-{ "sshAgent": { "ambient": true } }
-```
-
-The client sends its current `SSH_AUTH_SOCK` to the daemon as part of operations that already contact it, including launch, enter, connect, reconnection, and Codex attachment.
-The daemon keeps recently supplied sockets for the current user.
-For each new agent connection from a pod, it uses the newest responsive socket and falls back to older sockets when a forwarded SSH login ends.
-Existing agent connections remain attached to the socket they selected.
-If no supplied socket responds, the pod sees a working agent with no identities.
-
-The ambient socket list lasts only for the daemon process lifetime.
-After a daemon restart, the next client operation with `SSH_AUTH_SOCK` set repopulates it.
-`keys` and `ambient` are mutually exclusive.
-The explicit `rumpel ssh-add` command always addresses the isolated per-pod agent, even when ambient forwarding is configured; those managed identities are not exposed to the pod until ambient forwarding is disabled.
+Set `sshAgent.ambient` to `true` instead to forward the invoking shell's agent. The daemon uses the newest responsive agent it has received, falling back to earlier agents and then no identities.
 
 ### Rebuilding the image
 
@@ -476,7 +454,7 @@ Controls the SSH agent relayed into the pod.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `keys` | array of paths | `[]` | loads key files into the isolated per-pod agent through local `ssh-add`; relative paths start at the repository root and `~/` expands to the user's home directory |
+| `keys` | array of paths | `[]` | loads key files into the isolated per-pod agent through local `ssh-add`, with relative paths starting at the repository root and `~/` expanding to the user's home directory |
 | `ambient` | bool | `false` | forwards the invoking shell's agent through a daemon-wide newest-live selection |
 
 `keys` and `ambient` are mutually exclusive.
