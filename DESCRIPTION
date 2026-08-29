@@ -1,0 +1,5 @@
+Bump version to 0.8.0
+
+Keep crate metadata, lockfile workspace entries, and generated
+notices aligned for the 0.8.0 release without refreshing third-party
+dependencies.
