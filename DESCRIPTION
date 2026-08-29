@@ -5,3 +5,4 @@ while keeping ambient agent selection resilient across overlapping
 forwarded SSH sessions. Validate and load configured keys before pod
 creation, recreation, or forking so agent setup failures cannot leave
 partial pod state.
+Fail agent connections when no remembered ambient socket is live.

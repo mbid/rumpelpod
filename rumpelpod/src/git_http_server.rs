@@ -905,7 +905,7 @@ async fn ssh_agent_handler(
                 if let Some(agent) = ambient_ssh_agents.connect_latest_live().await {
                     ssh_agent_bridge(socket, agent).await;
                 } else {
-                    empty_ssh_agent(socket).await;
+                    close_ssh_agent_websocket(socket).await;
                 }
             }
         }
@@ -968,48 +968,5 @@ async fn ssh_agent_bridge(mut ws: WebSocket, agent: tokio::net::UnixStream) {
 async fn close_ssh_agent_websocket(mut ws: WebSocket) {
     if let Err(error) = ws.send(Message::Close(None)).await {
         warn!("ssh-agent relay: failed to send close frame: {error}");
-    }
-}
-
-/// Keep SSH clients deterministic when no ambient agent is currently alive.
-/// Listing identities succeeds with an empty list; unsupported operations fail.
-async fn empty_ssh_agent(mut ws: WebSocket) {
-    let mut buffered = Vec::new();
-    while let Some(message) = ws.recv().await {
-        match message {
-            Ok(Message::Binary(data)) => {
-                buffered.extend_from_slice(&data);
-                loop {
-                    if buffered.len() < 4 {
-                        break;
-                    }
-                    let length = u32::from_be_bytes(buffered[..4].try_into().unwrap()) as usize;
-                    if length == 0 || length > MAX_SSH_AGENT_MESSAGE_SIZE {
-                        close_ssh_agent_websocket(ws).await;
-                        return;
-                    }
-                    if buffered.len() < 4 + length {
-                        break;
-                    }
-                    let message_type = buffered[4];
-                    buffered.drain(..4 + length);
-                    let response: &[u8] = if message_type == 11 {
-                        &[0, 0, 0, 5, 12, 0, 0, 0, 0]
-                    } else {
-                        &[0, 0, 0, 1, 5]
-                    };
-                    if let Err(error) = ws.send(Message::Binary(response.to_vec().into())).await {
-                        warn!("empty ssh-agent: failed to send response: {error}");
-                        return;
-                    }
-                }
-            }
-            Ok(Message::Close(_)) => return,
-            Ok(_) => {}
-            Err(error) => {
-                warn!("empty ssh-agent: WebSocket read failed: {error}");
-                return;
-            }
-        }
     }
 }

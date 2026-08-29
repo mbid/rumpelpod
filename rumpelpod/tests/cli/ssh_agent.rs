@@ -682,7 +682,7 @@ fn ssh_agent_codex_attach_registers_ambient_socket_in_first_message() {
 }
 
 #[test]
-fn ssh_agent_ambient_registration_waits_for_a_pod_agent_request() {
+fn ssh_agent_ambient_missing_socket_reports_broken_agent_without_eager_probe() {
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
     let daemon = TestDaemon::start(&home);
@@ -710,27 +710,23 @@ fn ssh_agent_ambient_registration_waits_for_a_pod_agent_request() {
     fs::remove_file(&socket_path).expect("remove fake SSH agent socket");
     let output = pod_command(&repo, &daemon)
         .env_remove("SSH_AUTH_SOCK")
-        .args([
-            "enter",
-            "--create",
-            "unprobed",
-            "--",
-            "sh",
-            "-c",
-            "ssh-add -l 2>&1; test $? -eq 1",
-        ])
+        .args(["enter", "--create", "unprobed", "--", "ssh-add", "-l"])
         .output()
-        .expect("query empty fallback agent");
+        .expect("query unavailable ambient agent");
     assert!(
-        output.status.success(),
-        "empty SSH agent query failed: stdout={}, stderr={}",
+        !output.status.success(),
+        "unavailable ambient agent unexpectedly worked: stdout={}, stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(
-        stdout.contains("no identities"),
-        "expected an empty live agent, got: {stdout}"
+        diagnostic.contains("communication with agent failed"),
+        "expected a broken agent error, got: {diagnostic}"
     );
 }
 

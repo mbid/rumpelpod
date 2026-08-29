@@ -37,7 +37,9 @@ use crate::executor::PodBackendInfo;
 use crate::gateway;
 use crate::git_http_server::{AmbientSshAgents, GitHttpServer, SharedGitServerState};
 use connections::Connections;
-use pod_connection::{PodConnection, PodConnectionStatus, PodEndpoint, PodRepairBackoff};
+use pod_connection::{
+    PodConnection, PodConnectionKey, PodConnectionStatus, PodEndpoint, PodRepairBackoff,
+};
 use protocol::{
     AddForwardedPortRequest, ClientContext, ConnectPodRequest, ContainerId, Daemon, DaemonEvent,
     EnsureClaudeConfigRequest, EnsurePiConfigRequest, ForkPodRequest, Image, LaunchResult, PodInfo,
@@ -393,14 +395,14 @@ const SSH_AGENT_START_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct ManagedSshAgents {
-    agents: Mutex<HashMap<(PathBuf, String), SshAgentHandle>>,
+    agents: Mutex<HashMap<PodConnectionKey, SshAgentHandle>>,
 }
 
 impl ManagedSshAgents {
     fn ensure(&self, repo_path: &Path, pod_name: &PodName) -> Result<PathBuf> {
         let agent_dir = ssh_agent_dir(repo_path, pod_name);
         let sock_path = agent_dir.join("agent.sock");
-        let key = (repo_path.to_path_buf(), pod_name.0.clone());
+        let key = PodConnectionKey::new(repo_path, &pod_name.0);
 
         let mut agents = self.agents.lock().unwrap();
         let need_start = if let Some(handle) = agents.get_mut(&key) {
@@ -489,7 +491,7 @@ impl ManagedSshAgents {
     }
 
     fn remove(&self, repo_path: &Path, pod_name: &PodName) {
-        let key = (repo_path.to_path_buf(), pod_name.0.clone());
+        let key = PodConnectionKey::new(repo_path, &pod_name.0);
         self.agents.lock().unwrap().remove(&key);
 
         let agent_dir = ssh_agent_dir(repo_path, pod_name);
