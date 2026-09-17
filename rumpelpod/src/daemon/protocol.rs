@@ -416,6 +416,14 @@ struct EnsureSshAgentResponse {
     socket_path: PathBuf,
 }
 
+/// A prepared Claude pod reached entirely through daemon-owned state.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ClaudeConnection {
+    pub container_url: String,
+    pub container_token: String,
+    pub container_repo_path: PathBuf,
+}
+
 /// Request body for ensure_claude_config endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnsureClaudeConfigRequest {
@@ -573,6 +581,10 @@ pub trait Daemon: Send + Sync + 'static {
     // POST /pod/connect
     // Probe the host and pod, restoring only failed or missing connections.
     fn connect_pod(&self, request: ConnectPodRequest) -> Result<()>;
+
+    // POST /pod/claude-connection
+    // Return a prepared connection without probing the pod or its backend.
+    fn claude_connection(&self, request: ConnectPodRequest) -> Result<Option<ClaudeConnection>>;
 
     // PUT /pod/claude-config
     // Ensure Claude Code config files are present in the container.
@@ -978,6 +990,17 @@ impl Daemon for DaemonClient {
 
         let _: serde_json::Value = read_sse_result(response, "connecting to pod")?;
         Ok(())
+    }
+
+    fn claude_connection(&self, request: ConnectPodRequest) -> Result<Option<ClaudeConnection>> {
+        let url = self.url.join("/pod/claude-connection")?;
+        let response = self.client.post(url).json(&request).send()?;
+        if response.status().is_success() {
+            Ok(response.json()?)
+        } else {
+            let error: ErrorResponse = response.json()?;
+            Err(anyhow::anyhow!("{}", error.error))
+        }
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
@@ -1688,6 +1711,21 @@ async fn connect_pod_handler<D: Daemon>(
     })
 }
 
+async fn claude_connection_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ConnectPodRequest>,
+) -> Result<Json<Option<ClaudeConnection>>, (StatusCode, Json<ErrorResponse>)> {
+    match block_in_place(|| daemon.claude_connection(request)) {
+        Ok(connection) => Ok(Json(connection)),
+        Err(error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{error:#}"),
+            }),
+        )),
+    }
+}
+
 /// Handler for PUT /pod/claude-config endpoint.
 async fn ensure_claude_config_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
@@ -1926,6 +1964,10 @@ where
             get(list_ports_handler::<D>).post(add_forwarded_port_handler::<D>),
         )
         .route("/pod/connect", post(connect_pod_handler::<D>))
+        .route(
+            "/pod/claude-connection",
+            post(claude_connection_handler::<D>),
+        )
         .route("/pod/claude-config", put(ensure_claude_config_handler::<D>))
         .route("/pod/pi-config", put(ensure_pi_config_handler::<D>))
         .route("/pod/ssh-agent", post(ensure_ssh_agent_handler::<D>))
