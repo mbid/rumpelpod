@@ -1,0 +1,10 @@
+Keep pod Git credentials scoped to the gateway
+
+Scope bearer headers to the repository URL shared by host and
+rumpelpod, including submodule clones and gateway refreshes. Remove
+stale scopes when tunnel addresses change and reject redirects to keep
+credentials at the intended endpoint. Avoid printing credential-
+bearing arguments when Git commands fail.
+
+Add regression coverage for credential isolation and gateway
+refreshes.
