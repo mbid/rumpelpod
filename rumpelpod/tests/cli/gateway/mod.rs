@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use indoc::{formatdoc, indoc};
+use indoc::formatdoc;
 use rumpelpod::CommandExt;
 use sha2::{Digest, Sha256};
 
@@ -163,75 +163,6 @@ fn gateway_http_remotes_configured_in_container() {
         "Container should have remote, got: {}",
         remotes
     );
-}
-
-#[test]
-fn gateway_credentials_are_scoped_to_host_remotes() {
-    let repo = TestRepo::new();
-    let home = TestHome::new();
-    let executor = ExecutorResources::setup(&home);
-    let daemon = TestDaemon::start(&home);
-    write_test_devcontainer(&repo, "RUN apk add --no-cache socat", "");
-    fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
-
-    // An unrelated HTTP remote must never receive the pod's bearer token,
-    // including on the first request before any authentication challenge.
-    let script = indoc! {r#"
-        set -eu
-        gateway=$(git remote get-url host)
-        header=$(git config --get-urlmatch http.extraHeader "$gateway")
-        case "$header" in
-            'Authorization: Bearer '*) ;;
-            *) echo 'missing gateway credential' >&2; exit 1 ;;
-        esac
-        for remote in host rumpelpod; do
-            url=$(git remote get-url "$remote")
-            test "$(git config --get-urlmatch http.extraHeader "$url")" = "$header"
-            git fetch "$remote"
-        done
-        test "$(git config --get-urlmatch http.extraHeader "$gateway/info/lfs")" = "$header"
-        test "$(git config --get-urlmatch http.followRedirects "$gateway")" = false
-        base=${gateway%/rumpelpod.git}
-        port=${base##*:}
-        for url in https://example.invalid/repo.git "${gateway}-other" \
-            "$base/other.git" "https://${gateway#http://}" "http://localhost:$port/rumpelpod.git"; do
-            if git config --get-urlmatch http.extraHeader "$url" >/dev/null; then
-                echo 'credential matches an unrelated URL' >&2
-                exit 1
-            fi
-        done
-
-        cat > /tmp/http-receiver <<'EOF'
-        #!/bin/sh
-        while IFS= read -r line; do
-            printf '%s\n' "$line" >> /tmp/http-requests
-            test "$line" != "$(printf '\r')" || break
-        done
-        printf 'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
-        EOF
-        chmod +x /tmp/http-receiver
-        socat TCP-LISTEN:32891,bind=127.0.0.1,reuseaddr,fork EXEC:/tmp/http-receiver &
-        receiver=$!
-        trap 'kill "$receiver"; wait "$receiver" || test "$?" -eq 143' EXIT
-        for attempt in $(seq 1 100); do
-            if git ls-remote http://127.0.0.1:32891/unrelated.git >/tmp/git-result 2>&1; then
-                echo 'expected the unrelated remote to return 404' >&2
-                exit 1
-            fi
-            test ! -s /tmp/http-requests || break
-            kill -0 "$receiver"
-            sleep 0.05
-        done
-        test -s /tmp/http-requests
-        if grep -qi '^Authorization:' /tmp/http-requests; then
-            echo 'Git leaked an Authorization header' >&2
-            exit 1
-        fi
-    "#};
-    pod_command(&repo, &daemon)
-        .args(["enter", "--create", "auth-scope", "--", "sh", "-c", script])
-        .success()
-        .expect("gateway credentials must only authenticate the gateway remotes");
 }
 
 #[test]
@@ -3088,7 +3019,7 @@ fn gateway_lfs_rejects_invalid_oid_paths() {
     let download_script = formatdoc! {r#"
         set -eu
         url=$(git config --get remote.host.url)
-        header=$(git config --get-urlmatch http.extraHeader "$url")
+        header=$(git config --get http.extraHeader)
         curl --path-as-is -sS -o /tmp/lfs-download-body -w '%{{http_code}}' \
             -H "$header" \
             "$url/lfs/objects/{encoded_secret_path}"
@@ -3120,7 +3051,7 @@ fn gateway_lfs_rejects_invalid_oid_paths() {
     let batch_script = formatdoc! {r#"
         set -eu
         url=$(git config --get remote.host.url)
-        header=$(git config --get-urlmatch http.extraHeader "$url")
+        header=$(git config --get http.extraHeader)
         curl -sS -o /tmp/lfs-batch-body -w '%{{http_code}}' \
             -H "$header" \
             -H 'Content-Type: application/vnd.git-lfs+json' \
@@ -3150,7 +3081,7 @@ fn gateway_lfs_rejects_invalid_oid_paths() {
     let upload_script = formatdoc! {r#"
         set -eu
         url=$(git config --get remote.host.url)
-        header=$(git config --get-urlmatch http.extraHeader "$url")
+        header=$(git config --get http.extraHeader)
         curl --path-as-is -sS -o /tmp/lfs-upload-body -w '%{{http_code}}' \
             -H "$header" \
             -X PUT \
@@ -4074,27 +4005,4 @@ fn gateway_push_after_daemon_restart_refreshes_changed_tunnel_port() {
         .args(["enter", "--create", pod_name, "--", "sh", "-c", push_script])
         .success()
         .expect("git push rumpelpod should work after daemon restart");
-
-    let check_old_url = indoc! {r#"
-        set -eu
-        if git config --get-urlmatch http.extraHeader "$1" >/dev/null; then
-            echo 'obsolete tunnel URL still has a credential' >&2
-            exit 1
-        fi
-        url=$(git remote get-url host)
-        test -n "$(git config --get-urlmatch http.extraHeader "$url")"
-    "#};
-    pod_command(&repo, &daemon)
-        .args([
-            "enter",
-            pod_name,
-            "--",
-            "sh",
-            "-c",
-            check_old_url,
-            "sh",
-            &old_url,
-        ])
-        .success()
-        .expect("gateway refresh must remove credentials for the old tunnel URL");
 }

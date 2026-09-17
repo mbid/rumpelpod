@@ -1,13 +1,10 @@
-Keep pod Git credentials scoped to the gateway
+Document pod Git credential security findings
 
-Scope bearer headers to the repository URL shared by host and
-rumpelpod, including submodule clones and gateway refreshes. Remove
-stale scopes when tunnel addresses change and reject redirects to keep
-credentials at the intended endpoint. Avoid printing credential-
-bearing arguments when Git commands fail, including when Git tracing
-is enabled.
+Record the unscoped HTTP bearer header and related error disclosure,
+shared token privileges, database permissions, and token lifetime
+concerns. Explain the SSH-agent relay transport and why its shared HTTP
+gateway authenticates requests even though both agent endpoints use
+Unix sockets.
 
-Preserve inherited Git configuration and support nested submodule
-paths containing equals signs. Add regression coverage for unrelated
-HTTP requests, nested repositories, error redaction, and stale
-credentials.
+Keep implementation and tests unchanged because this is a findings-only
+review.
