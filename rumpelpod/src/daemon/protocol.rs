@@ -424,7 +424,6 @@ pub struct ClaudeConnection {
     pub container_repo_path: PathBuf,
 }
 
-/// Prepared pod metadata for clients that also need native container exec.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PreparedPodConnection {
     pub container_id: ContainerId,
@@ -607,7 +606,6 @@ pub trait Daemon: Send + Sync + 'static {
     fn connect_pod(&self, request: ConnectPodRequest) -> Result<()>;
 
     // POST /pod/prepared-connection
-    // Return ready pod metadata without probing the pod or its backend.
     fn prepared_pod_connection(
         &self,
         request: ConnectPodRequest,
@@ -1033,7 +1031,8 @@ impl Daemon for DaemonClient {
             Ok(response.json()?)
         } else {
             let error: ErrorResponse = response.json()?;
-            Err(anyhow::anyhow!("{}", error.error))
+            let error = error.error;
+            Err(anyhow::anyhow!("{error}"))
         }
     }
 

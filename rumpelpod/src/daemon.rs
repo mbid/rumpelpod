@@ -456,8 +456,7 @@ impl DaemonServer {
         let Some(connection) = self.connections.pod(&request.repo_path, &request.pod_name) else {
             return Ok(None);
         };
-        // The event greeting is sent only after pod setup has completed.
-        // A listening proxy alone does not establish that commands can start.
+        // Only the readiness greeting confirms that pod setup finished.
         match connection.status() {
             PodConnectionStatus::Connected => {}
             PodConnectionStatus::Connecting
@@ -469,14 +468,12 @@ impl DaemonServer {
             return Ok(None);
         };
 
-        // A concurrent recreate can replace the name-keyed connection after
-        // we read the database. Never mix metadata from different pods.
+        // Recreating a pod can replace its connection after the database read.
         if endpoint.token != record.token {
             return Ok(None);
         }
 
-        // The running pod's workspace belongs to the config it was created
-        // with, even if the host's devcontainer file has since changed.
+        // Host configuration edits must not change a running pod's workspace.
         let local_env = deserialize_local_env(&record.local_env)?;
         let devcontainer = parse_stored_devcontainer(
             &record.devcontainer_json,

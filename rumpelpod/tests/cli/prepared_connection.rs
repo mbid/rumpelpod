@@ -53,7 +53,6 @@ fn enter_warm_connection_skips_preparation() {
         .expect("create pod without Claude configuration");
     wait_for_prepared_connection(&repo, &daemon);
 
-    // Configuration changes on the host must not prevent using a ready pod.
     fs::write(
         repo.path().join(".devcontainer/devcontainer.json"),
         "invalid json",
@@ -255,47 +254,64 @@ enum BrokenConnection {
 
 #[test]
 fn enter_stale_prepared_connection_falls_back() {
-    check_broken_connection(false, BrokenConnection::Closed);
+    check_broken_connection(&["enter", "test", "--", "true"], BrokenConnection::Closed);
 }
 
 #[test]
 fn cp_stale_prepared_connection_falls_back() {
-    check_broken_connection(true, BrokenConnection::Closed);
+    check_broken_connection(&["cp", "source", "test:file"], BrokenConnection::Closed);
 }
 
 #[test]
 fn enter_prepared_connection_bounds_stalled_headers() {
-    check_broken_connection(false, BrokenConnection::StalledHeaders);
+    check_broken_connection(
+        &["enter", "test", "--", "true"],
+        BrokenConnection::StalledHeaders,
+    );
 }
 
 #[test]
 fn cp_prepared_connection_bounds_stalled_headers() {
-    check_broken_connection(true, BrokenConnection::StalledHeaders);
+    check_broken_connection(
+        &["cp", "source", "test:file"],
+        BrokenConnection::StalledHeaders,
+    );
 }
 
 #[test]
 fn enter_prepared_connection_bounds_stalled_greeting() {
-    check_broken_connection(false, BrokenConnection::StalledGreeting);
+    check_broken_connection(
+        &["enter", "test", "--", "true"],
+        BrokenConnection::StalledGreeting,
+    );
 }
 
 #[test]
 fn cp_prepared_connection_bounds_stalled_greeting() {
-    check_broken_connection(true, BrokenConnection::StalledGreeting);
+    check_broken_connection(
+        &["cp", "source", "test:file"],
+        BrokenConnection::StalledGreeting,
+    );
 }
 
 #[test]
 fn enter_prepared_connection_rejects_lifecycle_error() {
-    check_broken_connection(false, BrokenConnection::LifecycleError);
+    check_broken_connection(
+        &["enter", "test", "--", "true"],
+        BrokenConnection::LifecycleError,
+    );
 }
 
 #[test]
 fn cp_prepared_connection_rejects_lifecycle_error() {
-    check_broken_connection(true, BrokenConnection::LifecycleError);
+    check_broken_connection(
+        &["cp", "source", "test:file"],
+        BrokenConnection::LifecycleError,
+    );
 }
 
-// A fake daemon keeps the stale route deterministic even when real event
-// supervision would invalidate it before the next command reaches the CLI.
-fn check_broken_connection(copy: bool, failure: BrokenConnection) {
+// Real event supervision can invalidate the stale route before the CLI uses it.
+fn check_broken_connection(args: &[&str], failure: BrokenConnection) {
     let repo = TestRepo::new();
     let home = TestHome::new();
     let socket_dir = tempfile::tempdir_in("/tmp").unwrap();
@@ -402,13 +418,12 @@ fn check_broken_connection(copy: bool, failure: BrokenConnection) {
         .env("HOME", home.path())
         .env("PATH", home.bin_dir())
         .env("RUMPELPOD_DAEMON_SOCKET", &socket);
-    if copy {
-        let source = home.path().join("source");
-        fs::write(&source, "must not be sent to stale connection").unwrap();
-        command.args(["cp", source.to_str().unwrap(), "test:file"]);
-    } else {
-        command.args(["enter", "test", "--", "true"]);
-    }
+    fs::write(
+        repo.path().join("source"),
+        "must not be sent to stale connection",
+    )
+    .unwrap();
+    command.args(args);
     let started = Instant::now();
     let output = command.output().unwrap();
     let elapsed = started.elapsed();

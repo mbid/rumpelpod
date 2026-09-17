@@ -50,7 +50,6 @@ impl PodClient {
         Self::new(url, token, RetryPolicy::UserBlocking)
     }
 
-    /// Check a cached route once before starting work that cannot be replayed.
     pub fn connect_prepared(url: &str, token: &str) -> Result<Self> {
         let pod = Self {
             client: reqwest::Client::builder().gzip(true).build()?,
@@ -58,13 +57,12 @@ impl PodClient {
             token: token.to_string(),
         };
         block_on(async {
-            // Bound the entire greeting, including a proxy that accepts TCP
-            // but never returns headers or the readiness event. Transfers on
-            // the returned client must not inherit this startup deadline.
+            // A client-wide timeout would also cut off long file transfers.
             tokio::time::timeout(Duration::from_secs(10), async {
+                let url = &pod.url;
                 let response = pod
                     .client
-                    .get(format!("{}/events", pod.url))
+                    .get(format!("{url}/events"))
                     .bearer_auth(&pod.token)
                     .send()
                     .await?
