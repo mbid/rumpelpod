@@ -1,0 +1,4 @@
+Provide ripgrep for Codex in the devcontainer
+
+Codex frequently uses rg to search the repository. Install ripgrep with
+the devcontainer packages so those searches work without extra setup.
