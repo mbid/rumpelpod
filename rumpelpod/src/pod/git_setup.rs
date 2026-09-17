@@ -371,14 +371,6 @@ fn configure_remotes(repo_path: &Path, remotes: &[GitRemote]) -> Result<()> {
 }
 
 fn configure_gateway_urls(repo_path: &Path, repo_url: &str, token: &str) -> Result<()> {
-    // Baked checkouts can carry the pod's previous gateway configuration.
-    // Remove unscoped bearer headers without discarding unrelated headers.
-    unset_git_config(
-        repo_path,
-        "http.extraHeader",
-        Some("^Authorization: Bearer "),
-    )?;
-
     for remote in MANAGED_REMOTES {
         let output = Command::new("git")
             .args([
@@ -398,7 +390,7 @@ fn configure_gateway_urls(repo_path: &Path, repo_url: &str, token: &str) -> Resu
                 if old_url != repo_url {
                     // A retired tunnel port can be reused by an unrelated server.
                     for setting in ["extraHeader", "followRedirects"] {
-                        unset_git_config(repo_path, &format!("http.{old_url}.{setting}"), None)?;
+                        unset_git_config(repo_path, &format!("http.{old_url}.{setting}"))?;
                     }
                 }
             }
@@ -446,13 +438,9 @@ fn run_git_with_secret(command: &mut Command, token: &str) -> Result<()> {
     Ok(())
 }
 
-fn unset_git_config(repo_path: &Path, key: &str, pattern: Option<&str>) -> Result<()> {
-    let mut command = Command::new("git");
-    command.args(["config", "--local", "--unset-all", key]);
-    if let Some(pattern) = pattern {
-        command.arg(pattern);
-    }
-    let output = command
+fn unset_git_config(repo_path: &Path, key: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["config", "--local", "--unset-all", key])
         .current_dir(repo_path)
         .output()
         .with_context(|| format!("removing Git setting {key}"))?;

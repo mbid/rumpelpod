@@ -6,6 +6,7 @@ stale scopes when tunnel addresses change and reject redirects to keep
 credentials at the intended endpoint. Avoid exposing tokens in Git
 command errors, including Git trace output.
 
-Preserve inherited Git configuration and support nested submodule
-paths containing equals signs. Integration tests cover unrelated HTTP
-requests, nested repositories, and tunnel address changes.
+Preserve unrelated credentials and inherited Git configuration.
+Support nested submodule paths containing equals signs. Integration
+tests cover unrelated HTTP requests, nested repositories, and tunnel
+address changes.
