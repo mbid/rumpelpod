@@ -1,0 +1,12 @@
+Avoid pod preparation when reattaching Claude
+
+Use the daemon's prepared connection to open the Claude terminal
+directly, so detach and reattach avoid synchronous container checks and
+setup RPCs. Only reuse connections whose pod setup and Claude
+configuration completed, and keep the original workspace when host
+devcontainer files change.
+
+Retain normal preparation for missing or stopped pods and failed cached
+connections. Bound terminal handshakes so a stale proxy cannot prevent
+recovery. Cover screen replay, fresh sessions, lifecycle changes, and
+failed or stalled handshakes with integration tests.

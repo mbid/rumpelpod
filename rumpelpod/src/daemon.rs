@@ -40,9 +40,9 @@ use crate::git_http_server::{AmbientSshAgents, GitHttpServer, SharedGitServerSta
 use connections::Connections;
 use pod_connection::{PodConnection, PodConnectionStatus, PodEndpoint, PodRepairBackoff};
 use protocol::{
-    AddForwardedPortRequest, ClientContext, ConnectPodRequest, ContainerId, Daemon, DaemonEvent,
-    EnsureClaudeConfigRequest, EnsurePiConfigRequest, ForkPodRequest, Image, LaunchResult, PodInfo,
-    PodLaunchParams, PodName, PodStatus, PortInfo,
+    AddForwardedPortRequest, ClaudeConnection, ClientContext, ConnectPodRequest, ContainerId,
+    Daemon, DaemonEvent, EnsureClaudeConfigRequest, EnsurePiConfigRequest, ForkPodRequest, Image,
+    LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
 };
 
 use crate::pod::types::{ClaudeState, CodexState, GitSetupParams};
@@ -6421,6 +6421,64 @@ impl Daemon for DaemonServer {
             this.connect_pod_impl_async(request).await
         })?;
         block_on(handle).map_err(startup_join_error)?
+    }
+
+    fn claude_connection(&self, request: ConnectPodRequest) -> Result<Option<ClaudeConnection>> {
+        self.remember_client_context(&request.client_context);
+        let record = {
+            let conn = self.db.lock().unwrap();
+            let Some(record) = db::get_pod(&conn, &request.repo_path, &request.pod_name)? else {
+                return Ok(None);
+            };
+            match record.status {
+                db::PodStatus::Ready => {}
+                db::PodStatus::Initializing
+                | db::PodStatus::Error
+                | db::PodStatus::Stopping
+                | db::PodStatus::Deleting
+                | db::PodStatus::DeleteFailed => return Ok(None),
+            }
+            if !db::has_claude_config_copied(&conn, record.id)? {
+                return Ok(None);
+            }
+            record
+        };
+        let Some(connection) = self.connections.pod(&request.repo_path, &request.pod_name) else {
+            return Ok(None);
+        };
+        // The event greeting is sent only after pod setup has completed.
+        // A listening proxy alone does not establish that Claude can start.
+        match connection.status() {
+            PodConnectionStatus::Connected => {}
+            PodConnectionStatus::Connecting
+            | PodConnectionStatus::HostDisconnected
+            | PodConnectionStatus::PodDisconnected
+            | PodConnectionStatus::Stopped => return Ok(None),
+        }
+        let Some(endpoint) = connection.endpoint() else {
+            return Ok(None);
+        };
+
+        // A concurrent recreate can replace the name-keyed connection after
+        // we read the database. Never mix metadata from different pods.
+        if endpoint.token != record.token {
+            return Ok(None);
+        }
+
+        // The running pod's workspace belongs to the config it was created
+        // with, even if the host's devcontainer file has since changed.
+        let local_env = deserialize_local_env(&record.local_env)?;
+        let devcontainer = parse_stored_devcontainer(
+            &record.devcontainer_json,
+            &request.repo_path,
+            &request.pod_name,
+            &local_env,
+        )?;
+        Ok(Some(ClaudeConnection {
+            container_url: endpoint.url,
+            container_token: endpoint.token,
+            container_repo_path: devcontainer.container_repo_path(&request.repo_path),
+        }))
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
