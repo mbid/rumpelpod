@@ -1067,7 +1067,7 @@ pub fn sanitize_impl(repo_path: &Path) -> Result<()> {
 mod tests {
     use std::process::Command;
 
-    use super::{run_git_with_secret, setup_git_impl, GitSetupRequest};
+    use super::{configure_gateway_urls, run_git_with_secret};
     use crate::command_ext::CommandExt;
 
     #[test]
@@ -1089,19 +1089,8 @@ mod tests {
                 .expect("setting conflicting headers");
         }
         let token = "secret-that-must-not-appear-in-errors";
-        let error = setup_git_impl(&GitSetupRequest {
-            repo_path: repo.path().to_path_buf(),
-            url: url.to_string(),
-            token: token.to_string(),
-            pod_name: "auth-error".to_string(),
-            extra_host_fetch: Vec::new(),
-            branches: Vec::new(),
-            primary: "auth-error".to_string(),
-            git_identity: None,
-            remotes: Vec::new(),
-            description_file: None,
-        })
-        .expect_err("multiple header values must reject the credential write");
+        let error = configure_gateway_urls(repo.path(), url, token)
+            .expect_err("multiple header values must reject the credential write");
         let error = format!("{error:#}");
         assert!(
             error.contains("multiple values"),
@@ -1169,25 +1158,8 @@ mod tests {
                 .success()
                 .expect("setting baked checkout headers");
         }
-        // Setup writes the gateway configuration before fetching. A closed local
-        // port lets this exercise replacement without a running container backend.
-        let error = setup_git_impl(&GitSetupRequest {
-            repo_path: repo.path().to_path_buf(),
-            url: new_url.to_string(),
-            token: "new-token".to_string(),
-            pod_name: "auth-refresh".to_string(),
-            extra_host_fetch: Vec::new(),
-            branches: Vec::new(),
-            primary: "auth-refresh".to_string(),
-            git_identity: None,
-            remotes: Vec::new(),
-            description_file: None,
-        })
-        .expect_err("the new gateway is not listening yet");
-        assert!(
-            format!("{error:#}").contains("fetch"),
-            "unexpected error: {error:#}"
-        );
+        configure_gateway_urls(repo.path(), new_url, "new-token")
+            .expect("replacing gateway credentials");
 
         for url in [old_url, "https://example.invalid/unrelated.git"] {
             let headers = Command::new("git")

@@ -171,70 +171,65 @@ fn gateway_credentials_are_scoped_to_host_remotes() {
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
     let daemon = TestDaemon::start(&home);
-    write_test_devcontainer(&repo, "RUN apk add --no-cache python3", "");
+    write_test_devcontainer(&repo, "RUN apk add --no-cache socat", "");
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
 
     // An unrelated HTTP remote must never receive the pod's bearer token,
     // including on the first request before any authentication challenge.
     let script = indoc! {r#"
-        import http.server
-        import subprocess
-        import threading
-        import urllib.parse
+        set -eu
+        gateway=$(git remote get-url host)
+        header=$(git config --get-urlmatch http.extraHeader "$gateway")
+        case "$header" in
+            'Authorization: Bearer '*) ;;
+            *) echo 'missing gateway credential' >&2; exit 1 ;;
+        esac
+        for remote in host rumpelpod; do
+            url=$(git remote get-url "$remote")
+            test "$(git config --get-urlmatch http.extraHeader "$url")" = "$header"
+            git fetch "$remote"
+        done
+        test "$(git config --get-urlmatch http.extraHeader "$gateway/info/lfs")" = "$header"
+        test "$(git config --get-urlmatch http.followRedirects "$gateway")" = false
+        base=${gateway%/rumpelpod.git}
+        port=${base##*:}
+        for url in https://example.invalid/repo.git "${gateway}-other" \
+            "$base/other.git" "https://${gateway#http://}" "http://localhost:$port/rumpelpod.git"; do
+            if git config --get-urlmatch http.extraHeader "$url" >/dev/null; then
+                echo 'credential matches an unrelated URL' >&2
+                exit 1
+            fi
+        done
 
-        def config(*args):
-            return subprocess.run(["git", "config", *args], capture_output=True)
-
-        gateway = config("--get", "remote.host.url").stdout.decode().strip()
-        header = config("--get-urlmatch", "http.extraHeader", gateway).stdout
-        assert header.startswith(b"Authorization: Bearer ")
-        for remote in ["host", "rumpelpod"]:
-            url = config("--get", "remote." + remote + ".url").stdout.decode().strip()
-            assert config("--get-urlmatch", "http.extraHeader", url).stdout == header
-            subprocess.run(["git", "fetch", remote], check=True)
-        assert config("--get-urlmatch", "http.extraHeader", gateway + "/info/lfs").stdout == header
-        assert config("--get-urlmatch", "http.followRedirects", gateway).stdout.strip() == b"false"
-        parts = urllib.parse.urlsplit(gateway)
-        for url in [
-            "https://example.invalid/repo.git",
-            gateway + "-other",
-            urllib.parse.urlunsplit(parts._replace(path="/other.git")),
-            urllib.parse.urlunsplit(parts._replace(scheme="https")),
-            urllib.parse.urlunsplit(parts._replace(netloc="localhost:" + str(parts.port))),
-        ]:
-            assert header not in config("--get-urlmatch", "http.extraHeader", url).stdout
-
-        received = []
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):
-                received.append(self.headers.get("Authorization"))
-                self.send_response(404)
-                self.end_headers()
-            def log_message(self, *args):
-                pass
-
-        with http.server.HTTPServer(("127.0.0.1", 0), Handler) as server:
-            worker = threading.Thread(target=server.serve_forever)
-            worker.start()
-            try:
-                url = "http://127.0.0.1:" + str(server.server_port) + "/unrelated.git"
-                subprocess.run(["git", "ls-remote", url], capture_output=True, timeout=10)
-                assert received, "Git did not contact the unrelated remote"
-                assert all(value is None for value in received), "Git leaked an Authorization header"
-            finally:
-                server.shutdown()
-                worker.join()
+        cat > /tmp/http-receiver <<'EOF'
+        #!/bin/sh
+        while IFS= read -r line; do
+            printf '%s\n' "$line" >> /tmp/http-requests
+            test "$line" != "$(printf '\r')" || break
+        done
+        printf 'HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
+        EOF
+        chmod +x /tmp/http-receiver
+        socat TCP-LISTEN:32891,bind=127.0.0.1,reuseaddr,fork EXEC:/tmp/http-receiver &
+        receiver=$!
+        trap 'kill "$receiver"; wait "$receiver" || test "$?" -eq 143' EXIT
+        for attempt in $(seq 1 100); do
+            if git ls-remote http://127.0.0.1:32891/unrelated.git >/tmp/git-result 2>&1; then
+                echo 'expected the unrelated remote to return 404' >&2
+                exit 1
+            fi
+            test ! -s /tmp/http-requests || break
+            kill -0 "$receiver"
+            sleep 0.05
+        done
+        test -s /tmp/http-requests
+        if grep -qi '^Authorization:' /tmp/http-requests; then
+            echo 'Git leaked an Authorization header' >&2
+            exit 1
+        fi
     "#};
     pod_command(&repo, &daemon)
-        .args([
-            "enter",
-            "--create",
-            "auth-scope",
-            "--",
-            "python3",
-            "-c",
-            script,
-        ])
+        .args(["enter", "--create", "auth-scope", "--", "sh", "-c", script])
         .success()
         .expect("gateway credentials must only authenticate the gateway remotes");
 }
