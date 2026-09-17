@@ -3,11 +3,9 @@ Keep pod Git credentials scoped to the gateway
 Scope bearer headers to the repository URL shared by host and
 rumpelpod, including submodule clones and gateway refreshes. Remove
 stale scopes when tunnel addresses change and reject redirects to keep
-credentials at the intended endpoint. Avoid printing credential-
-bearing arguments when Git commands fail, including when Git tracing
-is enabled.
+credentials at the intended endpoint. Avoid exposing tokens in Git
+command errors, including Git trace output.
 
 Preserve inherited Git configuration and support nested submodule
-paths containing equals signs. Add regression coverage for unrelated
-HTTP requests, nested repositories, error redaction, and stale
-credentials.
+paths containing equals signs. Integration tests cover unrelated HTTP
+requests, nested repositories, and tunnel address changes.
