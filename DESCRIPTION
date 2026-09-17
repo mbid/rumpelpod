@@ -1,0 +1,12 @@
+Skip pod preparation for warm enter and cp
+
+Reuse the daemon's prepared pod connection so repeated enter and cp
+commands avoid backend inspection, configuration loading, and setup
+RPCs. Share Claude's readiness and pod identity checks while preserving
+the running pod's workspace and native interactive exec transport.
+
+Bound cached connection validation before commands or transfers begin,
+so stopped pods and broken routes can fall back to preparation without
+replaying commands or uploads. Keep transfer duration unrestricted.
+Cover warm reuse, workspace and stdin behavior, lifecycle recovery, and
+failed or stalled readiness checks with integration tests.

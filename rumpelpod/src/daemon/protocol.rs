@@ -424,6 +424,30 @@ pub struct ClaudeConnection {
     pub container_repo_path: PathBuf,
 }
 
+/// Prepared pod metadata for clients that also need native container exec.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PreparedPodConnection {
+    pub container_id: ContainerId,
+    pub docker_socket: Option<PathBuf>,
+    pub host: Host,
+    pub container_url: String,
+    pub container_token: String,
+    pub container_repo_path: PathBuf,
+}
+
+impl From<LaunchResult> for PreparedPodConnection {
+    fn from(result: LaunchResult) -> Self {
+        Self {
+            container_id: result.container_id,
+            docker_socket: result.docker_socket,
+            host: result.host,
+            container_url: result.container_url,
+            container_token: result.container_token,
+            container_repo_path: result.container_repo_path,
+        }
+    }
+}
+
 /// Request body for ensure_claude_config endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EnsureClaudeConfigRequest {
@@ -581,6 +605,13 @@ pub trait Daemon: Send + Sync + 'static {
     // POST /pod/connect
     // Probe the host and pod, restoring only failed or missing connections.
     fn connect_pod(&self, request: ConnectPodRequest) -> Result<()>;
+
+    // POST /pod/prepared-connection
+    // Return ready pod metadata without probing the pod or its backend.
+    fn prepared_pod_connection(
+        &self,
+        request: ConnectPodRequest,
+    ) -> Result<Option<PreparedPodConnection>>;
 
     // POST /pod/claude-connection
     // Return a prepared connection without probing the pod or its backend.
@@ -990,6 +1021,20 @@ impl Daemon for DaemonClient {
 
         let _: serde_json::Value = read_sse_result(response, "connecting to pod")?;
         Ok(())
+    }
+
+    fn prepared_pod_connection(
+        &self,
+        request: ConnectPodRequest,
+    ) -> Result<Option<PreparedPodConnection>> {
+        let url = self.url.join("/pod/prepared-connection")?;
+        let response = self.client.post(url).json(&request).send()?;
+        if response.status().is_success() {
+            Ok(response.json()?)
+        } else {
+            let error: ErrorResponse = response.json()?;
+            Err(anyhow::anyhow!("{}", error.error))
+        }
     }
 
     fn claude_connection(&self, request: ConnectPodRequest) -> Result<Option<ClaudeConnection>> {
@@ -1711,6 +1756,21 @@ async fn connect_pod_handler<D: Daemon>(
     })
 }
 
+async fn prepared_pod_connection_handler<D: Daemon>(
+    State(daemon): State<Arc<D>>,
+    Json(request): Json<ConnectPodRequest>,
+) -> Result<Json<Option<PreparedPodConnection>>, (StatusCode, Json<ErrorResponse>)> {
+    match block_in_place(|| daemon.prepared_pod_connection(request)) {
+        Ok(connection) => Ok(Json(connection)),
+        Err(error) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("{error:#}"),
+            }),
+        )),
+    }
+}
+
 async fn claude_connection_handler<D: Daemon>(
     State(daemon): State<Arc<D>>,
     Json(request): Json<ConnectPodRequest>,
@@ -1964,6 +2024,10 @@ where
             get(list_ports_handler::<D>).post(add_forwarded_port_handler::<D>),
         )
         .route("/pod/connect", post(connect_pod_handler::<D>))
+        .route(
+            "/pod/prepared-connection",
+            post(prepared_pod_connection_handler::<D>),
+        )
         .route(
             "/pod/claude-connection",
             post(claude_connection_handler::<D>),

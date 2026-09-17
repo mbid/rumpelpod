@@ -488,15 +488,22 @@ impl PodConnection {
     }
 
     pub fn endpoint(&self) -> Option<PodEndpoint> {
+        self.exec_endpoint().map(|(endpoint, _)| endpoint)
+    }
+
+    pub fn exec_endpoint(&self) -> Option<(PodEndpoint, String)> {
         let resources = self.resources.lock().unwrap();
         let handle = resources.pod_server.as_ref()?;
         if !handle.is_alive() {
             return None;
         }
-        Some(PodEndpoint {
-            url: format!("http://127.0.0.1:{}", handle.port),
-            token: self.token.lock().unwrap().clone(),
-        })
+        Some((
+            PodEndpoint {
+                url: format!("http://127.0.0.1:{}", handle.port),
+                token: self.token.lock().unwrap().clone(),
+            },
+            handle.target_container().to_string(),
+        ))
     }
 
     pub fn probe(&self) -> Result<()> {
