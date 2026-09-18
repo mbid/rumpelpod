@@ -3442,11 +3442,11 @@ fn gateway_lfs_not_used() {
 }
 
 #[test]
-fn gateway_lfs_initial_push_with_leftover_image_branch() {
-    // First-enter recover_push walks every leftover image branch through
-    // prepare_lfs_for_rumpelpod_push.  An image-only commit makes that
-    // branch a strict descendant of the host remotes, so the LFS scan
-    // has to classify objects with cat-file --batch-check.
+fn gateway_lfs_initial_push_exceeds_pipe_capacity() {
+    // Image-only history forces the initial LFS scan to classify objects
+    // even though the repository has no LFS files.  32768 commit IDs exceed
+    // 1 MiB in both cat-file requests and responses, so writing all requests
+    // before draining the responses deadlocks on full pipes.
     let repo = TestRepo::new();
     std::fs::write(repo.path().join("plain.txt"), "hello\n").expect("write file");
     Command::new("git")
@@ -3458,7 +3458,17 @@ fn gateway_lfs_initial_push_with_leftover_image_branch() {
 
     let extra_dockerfile = formatdoc! {r#"
         RUN apk add --no-cache git-lfs
-        RUN git -C {TEST_REPO_PATH} commit --allow-empty -m 'image-only leftover commit'
+        RUN cd {TEST_REPO_PATH} && base=$(git rev-parse HEAD) && \
+            awk -v base="$base" 'BEGIN {{ \
+                for (i = 0; i < 32768; i++) {{ \
+                    message = "image-only commit " i; \
+                    printf "commit refs/heads/image-only\n"; \
+                    printf "committer Test User <test@example.com> 946684800 +0000\n"; \
+                    printf "data %d\n%s\n", length(message), message; \
+                    if (i == 0) printf "from %s\n", base; \
+                    printf "\n"; \
+                }} \
+            }}' | git fast-import --quiet
     "#};
     let home = TestHome::new();
     let executor = ExecutorResources::setup(&home);
@@ -3467,18 +3477,32 @@ fn gateway_lfs_initial_push_with_leftover_image_branch() {
     fs::write(repo.path().join(".rumpelpod.json"), &executor.json).unwrap();
     let pod_name = "lfs-leftover";
 
-    pod_command(&repo, &daemon)
-        .args(["enter", "--create", pod_name, "--", "cat", "plain.txt"])
+    let output = pod_command(&repo, &daemon)
+        .args([
+            "enter",
+            "--create",
+            pod_name,
+            "--",
+            "git",
+            "rev-parse",
+            "refs/heads/image-only",
+        ])
         .success()
-        .expect(
-            "initial enter should succeed when leftover image branches are ahead of host remotes",
-        );
+        .expect("initial enter should finish when the LFS scan exceeds pipe capacity");
+    let image_commit = String::from_utf8(output).expect("image commit should be UTF-8");
 
-    let expected_ref = format!("refs/rumpelpod/{pod_name}@{pod_name}");
-    assert!(
-        get_pod_ref_commit(repo.path(), &expected_ref).is_some(),
-        "initial recover_push should publish {expected_ref}"
+    let expected_ref = format!("refs/rumpelpod/image-only@{pod_name}");
+    assert_eq!(
+        get_pod_ref_commit(repo.path(), &expected_ref).as_deref(),
+        Some(image_commit.trim()),
+        "initial recover_push should publish the entire image-only history"
     );
+
+    let output = pod_command(&repo, &daemon)
+        .args(["enter", pod_name, "--", "cat", "plain.txt"])
+        .success()
+        .expect("reentry should finish after the initial push releases the lifecycle lock");
+    assert_eq!(output, b"hello\n");
 }
 
 #[test]
