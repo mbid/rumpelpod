@@ -8,5 +8,4 @@ the running pod's workspace and native interactive exec transport.
 Bound cached connection validation before commands or transfers begin,
 so stopped pods and broken routes can fall back to preparation without
 replaying commands or uploads. Keep transfer duration unrestricted.
-Cover warm reuse, workspace and stdin behavior, lifecycle recovery, and
-failed or stalled readiness checks with integration tests.
+Cover warm reuse and stopped-pod recovery with integration tests.
