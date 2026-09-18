@@ -81,15 +81,73 @@ fn read_ref_updates() -> Result<Vec<(String, String, String)>> {
     Ok(updates)
 }
 
-/// Run a git command, logging failures to stderr.
+// Git uses the same exit status for transport and repository errors. Only
+// recognize connection diagnostics: reconnect recovery handles these, while
+// authentication, rejected pushes, and local repository errors need attention.
+fn offline_push_failure(message: &str) -> bool {
+    message.lines().any(|line| {
+        if let Some(access) = line.strip_prefix("fatal: unable to access '") {
+            if let Some((_, reason)) = access.rsplit_once("': ") {
+                return [
+                    "Failed to connect to ",
+                    "Couldn't connect to server",
+                    "Could not connect to server",
+                    "Connection timed out",
+                    "Operation timed out",
+                    "Operation too slow.",
+                    "Empty reply from server",
+                    "transfer closed with ",
+                    "end of response with ",
+                    "Recv failure: Connection reset by peer",
+                    "Send failure: Connection reset by peer",
+                    "Send failure: Broken pipe",
+                ]
+                .iter()
+                .any(|prefix| reason.starts_with(prefix));
+            }
+        }
+        if let Some(rpc) = line.strip_prefix("error: RPC failed; curl ") {
+            if let Some((code, _)) = rpc.split_once(' ') {
+                return matches!(code, "7" | "18" | "28" | "52" | "55" | "56");
+            }
+        }
+
+        // LFS uses Go's HTTP client rather than Git's libcurl, including
+        // when new branches upload their payloads before the ref push.
+        let line = line
+            .strip_prefix("git lfs push --object-id failed: ")
+            .unwrap_or(line);
+        if line.starts_with("batch response: Post \"") || line.starts_with("LFS: Put \"") {
+            if let Some((_, reason)) = line.rsplit_once("\": ") {
+                return reason == "EOF"
+                    || reason.starts_with("context deadline exceeded")
+                    || [
+                        ": connect: connection refused",
+                        ": read: connection reset by peer",
+                        ": write: broken pipe",
+                        ": i/o timeout",
+                    ]
+                    .iter()
+                    .any(|suffix| reason.ends_with(suffix));
+            }
+        }
+        false
+    })
+}
+
+/// Run a git command, logging failures that reconnect recovery cannot fix.
 fn run_git(args: &[&str], skip_lfs_pre_push: bool) {
     let mut command = Command::new("git");
-    command.args(args);
+    // Keep Git's transport diagnostics stable across container locales.
+    command.args(args).env("LC_ALL", "C");
     if skip_lfs_pre_push {
         command.env("GIT_LFS_SKIP_PUSH", "1");
     }
     if let Err(e) = command.success() {
-        eprintln!("rumpelpod hook: {e:#}");
+        // Recovery republishes existing branches, but cannot replay deletions.
+        if args.contains(&"--delete") || !offline_push_failure(&format!("{e:#}")) {
+            eprintln!("rumpelpod hook: {e:#}");
+        }
     }
 }
 
@@ -119,7 +177,9 @@ pub fn reference_transaction(cmd: &ReferenceTransactionCommand) -> Result<()> {
             match crate::git::prepare_lfs_for_new_ref(Path::new("."), "rumpelpod", &newvalue) {
                 Ok(skip) => skip,
                 Err(e) => {
-                    eprintln!("rumpelpod hook: git lfs push failed: {e:#}");
+                    if !offline_push_failure(&format!("{e:#}")) {
+                        eprintln!("rumpelpod hook: git lfs push failed: {e:#}");
+                    }
                     continue;
                 }
             }

@@ -1,7 +1,10 @@
-Explain expected offline Git sync failures
+Keep expected offline Git pushes quiet
 
-Agents should keep working when the host sleeps or disconnects because
-local commits sync automatically after reconnection. Explain this in the
-shared pod instructions and ask agents to avoid warnings, retries, or
-configuration changes for these transient failures. Keep other Git
-errors and persistent sync failures reportable.
+Host disconnects are routine and pending commits sync on reconnect, so
+quiet automatic branch pushes for connection failures while preserving
+other Git errors and deletions that recovery cannot replay. Give agents
+one short sentence explaining recovery.
+
+Cover offline commits and recovery, interrupted HTTP connections, and
+errors that still need to be reported. Refresh the API response cache so
+the agent integration tests can replay offline.
