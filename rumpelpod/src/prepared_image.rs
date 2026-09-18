@@ -1262,7 +1262,11 @@ pub fn system_prompt(description_file: Option<&str>) -> String {
         `rumpelpod/` has branches from other pods on the same repo.
 
         Always commit your changes. The user interacts with your work via git, not by looking at the working tree.
-        Committing automatically pushes to the host repo.
+        Committing automatically attempts to push to the host repo.
+        Automatic pushes can fail when the host is asleep or disconnected (for example, when the user closes their laptop).
+        These connection failures are expected: commits remain in the pod, and rumpelpod automatically syncs them when the host reconnects.
+        Keep working and committing; do not warn the user about these transient sync failures, retry pushes, or change the Git sync configuration to fix them.
+        Report other Git errors and sync failures that persist after reconnection.
         Fetching from these remotes is not automatic; run `git fetch` explicitly when you need updates.
     "}
     .to_string();
