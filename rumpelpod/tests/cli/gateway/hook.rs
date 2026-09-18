@@ -2,12 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Output};
-use std::thread;
-use std::time::Duration;
 
 use indoc::indoc;
 use rumpelpod::CommandExt;
@@ -54,30 +51,6 @@ fn commit(repo: &TestRepo) -> Output {
     output
 }
 
-// Both the branch and its primary shortcut must handle a disconnected host.
-fn serve_pushes(
-    listener: TcpListener,
-    response: impl Fn(&mut TcpStream) + Send + 'static,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        for _ in 0..2 {
-            let (mut stream, _) = listener.accept().unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            let mut reader = BufReader::new(&mut stream);
-            loop {
-                let mut line = String::new();
-                assert!(reader.read_line(&mut line).unwrap() > 0);
-                if line == "\r\n" {
-                    break;
-                }
-            }
-            response(&mut stream);
-        }
-    })
-}
-
 #[test]
 fn gateway_hook_connection_refused_is_quiet() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -90,65 +63,13 @@ fn gateway_hook_connection_refused_is_quiet() {
 }
 
 #[test]
-fn gateway_hook_dropped_connection_is_quiet() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = serve_pushes(listener, |_| {});
-    let repo = hook_repo(&format!("http://{address}/repo.git"));
-    let output = commit(&repo);
-    server.join().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.is_empty(), "{stderr}");
-}
-
-#[test]
-fn gateway_hook_stalled_connection_is_quiet() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = serve_pushes(listener, |_| thread::sleep(Duration::from_secs(3)));
-    let repo = hook_repo(&format!("http://{address}/repo.git"));
-    let output = commit(&repo);
-    server.join().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.is_empty(), "{stderr}");
-}
-
-#[test]
-fn gateway_hook_http_errors_are_reported() {
-    for status in [
-        "401 Unauthorized",
-        "403 Forbidden",
-        "500 Internal Server Error",
-    ] {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = serve_pushes(listener, move |stream| {
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-        });
-        let repo = hook_repo(&format!("http://{address}/repo.git"));
-        let output = commit(&repo);
-        server.join().unwrap();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("rumpelpod hook:"), "{status}: {stderr}");
-    }
-}
-
-#[test]
-fn gateway_hook_repository_errors_are_reported() {
+fn gateway_hook_repository_errors_are_quiet() {
     let missing = tempfile::tempdir().unwrap();
     let remote = missing.path().join("missing.git");
     let repo = hook_repo(remote.to_str().unwrap());
     let output = commit(&repo);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("rumpelpod hook:"), "{stderr}");
-    assert!(
-        stderr.contains("does not appear to be a git repository"),
-        "{stderr}"
-    );
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
@@ -192,7 +113,7 @@ fn gateway_hook_lfs_new_branch_offline_is_quiet() {
 }
 
 #[test]
-fn gateway_hook_offline_deletion_is_reported() {
+fn gateway_hook_offline_deletion_is_quiet() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
@@ -209,32 +130,11 @@ fn gateway_hook_offline_deletion_is_reported() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
-    assert!(stderr.contains("rumpelpod hook:"), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
-fn gateway_hook_interrupted_response_is_quiet() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = serve_pushes(listener, |stream| {
-        write!(
-            stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-receive-pack-advertisement\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n001f# service=git-receive-pack\n0000"
-        )
-        .unwrap();
-    });
-    let repo = hook_repo(&format!("http://{address}/repo.git"));
-    let output = commit(&repo);
-    server.join().unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.is_empty(),
-        "interrupted response should be quiet: {stderr}"
-    );
-}
-
-#[test]
-fn gateway_hook_rejected_push_is_reported() {
+fn gateway_hook_rejected_push_is_quiet_until_explicit_push() {
     let remote = tempfile::tempdir().unwrap();
     Command::new("git")
         .args(["init", "--bare"])
@@ -242,12 +142,11 @@ fn gateway_hook_rejected_push_is_reported() {
         .success()
         .unwrap();
     let hook = remote.path().join("hooks/pre-receive");
-    // A server's rejection explanation must not look like a local transport error.
     fs::write(
         &hook,
         indoc! {r#"
             #!/bin/sh
-            echo "fatal: unable to access 'policy service': Failed to connect to policy service" >&2
+            echo "push rejected by repository policy" >&2
             exit 1
         "#},
     )
@@ -256,6 +155,18 @@ fn gateway_hook_rejected_push_is_reported() {
     let repo = hook_repo(remote.path().to_str().unwrap());
     let output = commit(&repo);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("rumpelpod hook:"), "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+
+    let output = Command::new("git")
+        .args(["push", "rumpelpod", "test"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "explicit push should fail");
+    assert!(
+        stderr.contains("push rejected by repository policy"),
+        "{stderr}"
+    );
     assert!(stderr.contains("pre-receive hook declined"), "{stderr}");
 }

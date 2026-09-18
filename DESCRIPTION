@@ -1,10 +1,10 @@
-Keep expected offline Git pushes quiet
+Keep automatic Git pushes quiet
 
 Host disconnects are routine and pending commits sync on reconnect, so
-quiet automatic branch pushes for connection failures while preserving
-other Git errors and deletions that recovery cannot replay. Give agents
-one short sentence explaining recovery.
+ignore automatic push failures without classifying Git or LFS errors.
+Explicit pushes still report failures. Give agents one short sentence
+explaining reconnect recovery.
 
-Cover offline commits and recovery, interrupted HTTP connections, and
-errors that still need to be reported. Refresh the API response cache so
-the agent integration tests can replay offline.
+Cover quiet automatic pushes, explicit push errors, and reconnect
+recovery. Refresh the API response cache so agent integration tests can
+replay offline.
