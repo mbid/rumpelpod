@@ -6,6 +6,7 @@
 //! Tests verify that pods can push branches to refs/rumpelpod/ in the host repo
 //! and that access control restricts cross-pod writes.
 
+mod hook;
 mod submodules;
 
 use std::collections::BTreeSet;
@@ -3813,7 +3814,7 @@ fn gateway_reconnect_push() {
     // Create a commit inside the container while the daemon is down.
     // The tunnel-server exits on stdin close so the hook push gets
     // connection refused.
-    Command::new("docker")
+    let output = Command::new("docker")
         .args([
             "exec",
             &container_id,
@@ -3829,8 +3830,11 @@ fn gateway_reconnect_push() {
             "-m",
             "offline commit",
         ])
-        .success()
+        .output()
         .expect("docker exec git commit failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "offline commit failed: {stderr}");
+    assert!(stderr.is_empty(), "offline push should be quiet: {stderr}");
 
     let rev_output = Command::new("docker")
         .args([
