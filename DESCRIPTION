@@ -1,0 +1,11 @@
+Prevent pipe deadlocks during initial pod pushes
+
+Git cat-file can fill its response pipe while LFS preparation is still
+writing object IDs, leaving pod setup and its lifecycle lock stuck.
+Write requests in a scoped thread while draining stdout and stderr, and
+join the writer before returning so write errors remain visible.
+
+Report the initial branch push separately from submodule setup,
+including slow-operation progress. Exercise initial entry and reentry
+with 32768 image-only commits so the non-LFS regression exceeds pipe
+capacity and verifies that the full branch history reaches the host.
