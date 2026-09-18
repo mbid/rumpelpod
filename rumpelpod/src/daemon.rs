@@ -42,7 +42,7 @@ use pod_connection::{PodConnection, PodConnectionStatus, PodEndpoint, PodRepairB
 use protocol::{
     AddForwardedPortRequest, ClaudeConnection, ClientContext, ConnectPodRequest, ContainerId,
     Daemon, DaemonEvent, EnsureClaudeConfigRequest, EnsurePiConfigRequest, ForkPodRequest, Image,
-    LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo,
+    LaunchResult, PodInfo, PodLaunchParams, PodName, PodStatus, PortInfo, PreparedPodConnection,
 };
 
 use crate::pod::types::{ClaudeState, CodexState, GitSetupParams};
@@ -429,6 +429,69 @@ pub struct DaemonServer {
 }
 
 impl DaemonServer {
+    fn prepared_connection(
+        &self,
+        request: ConnectPodRequest,
+        require_claude_config: bool,
+    ) -> Result<Option<PreparedPodConnection>> {
+        self.remember_client_context(&request.client_context);
+        let record = {
+            let conn = self.db.lock().unwrap();
+            let Some(record) = db::get_pod(&conn, &request.repo_path, &request.pod_name)? else {
+                return Ok(None);
+            };
+            match record.status {
+                db::PodStatus::Ready => {}
+                db::PodStatus::Initializing
+                | db::PodStatus::Error
+                | db::PodStatus::Stopping
+                | db::PodStatus::Deleting
+                | db::PodStatus::DeleteFailed => return Ok(None),
+            }
+            if require_claude_config && !db::has_claude_config_copied(&conn, record.id)? {
+                return Ok(None);
+            }
+            record
+        };
+        let Some(connection) = self.connections.pod(&request.repo_path, &request.pod_name) else {
+            return Ok(None);
+        };
+        // Only the readiness greeting confirms that pod setup finished.
+        match connection.status() {
+            PodConnectionStatus::Connected => {}
+            PodConnectionStatus::Connecting
+            | PodConnectionStatus::HostDisconnected
+            | PodConnectionStatus::PodDisconnected
+            | PodConnectionStatus::Stopped => return Ok(None),
+        }
+        let Some((endpoint, container_id)) = connection.exec_endpoint() else {
+            return Ok(None);
+        };
+
+        // Recreating a pod can replace its connection after the database read.
+        if endpoint.token != record.token {
+            return Ok(None);
+        }
+
+        // Host configuration edits must not change a running pod's workspace.
+        let local_env = deserialize_local_env(&record.local_env)?;
+        let devcontainer = parse_stored_devcontainer(
+            &record.devcontainer_json,
+            &request.repo_path,
+            &request.pod_name,
+            &local_env,
+        )?;
+        let host = connection.host();
+        Ok(Some(PreparedPodConnection {
+            container_id: ContainerId(container_id),
+            docker_socket: initialize_docker_socket(&host),
+            host,
+            container_url: endpoint.url,
+            container_token: endpoint.token,
+            container_repo_path: devcontainer.container_repo_path(&request.repo_path),
+        }))
+    }
+
     fn handle(&self) -> Arc<Self> {
         self.this
             .upgrade()
@@ -6423,62 +6486,21 @@ impl Daemon for DaemonServer {
         block_on(handle).map_err(startup_join_error)?
     }
 
+    fn prepared_pod_connection(
+        &self,
+        request: ConnectPodRequest,
+    ) -> Result<Option<PreparedPodConnection>> {
+        self.prepared_connection(request, false)
+    }
+
     fn claude_connection(&self, request: ConnectPodRequest) -> Result<Option<ClaudeConnection>> {
-        self.remember_client_context(&request.client_context);
-        let record = {
-            let conn = self.db.lock().unwrap();
-            let Some(record) = db::get_pod(&conn, &request.repo_path, &request.pod_name)? else {
-                return Ok(None);
-            };
-            match record.status {
-                db::PodStatus::Ready => {}
-                db::PodStatus::Initializing
-                | db::PodStatus::Error
-                | db::PodStatus::Stopping
-                | db::PodStatus::Deleting
-                | db::PodStatus::DeleteFailed => return Ok(None),
-            }
-            if !db::has_claude_config_copied(&conn, record.id)? {
-                return Ok(None);
-            }
-            record
-        };
-        let Some(connection) = self.connections.pod(&request.repo_path, &request.pod_name) else {
-            return Ok(None);
-        };
-        // The event greeting is sent only after pod setup has completed.
-        // A listening proxy alone does not establish that Claude can start.
-        match connection.status() {
-            PodConnectionStatus::Connected => {}
-            PodConnectionStatus::Connecting
-            | PodConnectionStatus::HostDisconnected
-            | PodConnectionStatus::PodDisconnected
-            | PodConnectionStatus::Stopped => return Ok(None),
-        }
-        let Some(endpoint) = connection.endpoint() else {
-            return Ok(None);
-        };
-
-        // A concurrent recreate can replace the name-keyed connection after
-        // we read the database. Never mix metadata from different pods.
-        if endpoint.token != record.token {
-            return Ok(None);
-        }
-
-        // The running pod's workspace belongs to the config it was created
-        // with, even if the host's devcontainer file has since changed.
-        let local_env = deserialize_local_env(&record.local_env)?;
-        let devcontainer = parse_stored_devcontainer(
-            &record.devcontainer_json,
-            &request.repo_path,
-            &request.pod_name,
-            &local_env,
-        )?;
-        Ok(Some(ClaudeConnection {
-            container_url: endpoint.url,
-            container_token: endpoint.token,
-            container_repo_path: devcontainer.container_repo_path(&request.repo_path),
-        }))
+        Ok(self
+            .prepared_connection(request, true)?
+            .map(|connection| ClaudeConnection {
+                container_url: connection.container_url,
+                container_token: connection.container_token,
+                container_repo_path: connection.container_repo_path,
+            }))
     }
 
     fn ensure_claude_config(&self, request: EnsureClaudeConfigRequest) -> Result<()> {
