@@ -1,0 +1,14 @@
+Scope build SSH identities to configured keys
+
+Use a fresh agent for builds that enable SSH forwarding when
+sshAgent.keys is explicit, so only the configured identities are
+exposed. Preserve existing forwarding when sshAgent is unset or ambient,
+and avoid creating a build agent when SSH forwarding is disabled.
+
+Point build SSH sources at the temporary socket while preserving the
+ambient agent for remote Docker authentication. Reuse pod agent startup
+and cleanup so key paths and errors stay consistent across Dockerfile,
+preparation, and Compose builds.
+
+Cover key isolation, fresh agents, cleanup, absent and empty key lists,
+and unchanged ambient forwarding with integration tests.

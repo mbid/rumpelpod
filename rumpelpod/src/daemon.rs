@@ -374,35 +374,6 @@ pub fn ssh_agent_dir(repo_path: &Path, pod_name: &PodName) -> PathBuf {
     runtime_dir.join("rumpelpod/agents").join(hash_prefix)
 }
 
-fn resolve_ssh_key_paths(repo_root: &Path, keys: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut resolved = Vec::with_capacity(keys.len());
-    for key in keys {
-        let path = match key.to_str() {
-            Some("~") => dirs::home_dir().context("could not determine home directory")?,
-            Some(value) if value.starts_with("~/") => dirs::home_dir()
-                .context("could not determine home directory")?
-                .join(&value[2..]),
-            Some(value) if value.starts_with('~') => {
-                return Err(anyhow::anyhow!(
-                    "SSH key path '{value}' uses unsupported user-home expansion"
-                ));
-            }
-            Some(_) | None if key.is_absolute() => key.clone(),
-            Some(_) | None => repo_root.join(key),
-        };
-        let metadata = std::fs::metadata(&path).with_context(|| {
-            let path = path.display();
-            format!("reading configured SSH key {path}")
-        })?;
-        if !metadata.is_file() {
-            let path = path.display();
-            return Err(anyhow::anyhow!("configured SSH key {path} is not a file"));
-        }
-        resolved.push(path);
-    }
-    Ok(resolved)
-}
-
 pub struct DaemonServer {
     /// Upgrade path for `&self` methods that spawn work.  The daemon
     /// lives in an `Arc`; it is not `Clone`.
@@ -4142,7 +4113,8 @@ impl DaemonServer {
                         &docker_host,
                         docker_socket.as_deref(),
                         ssh_auth_sock.as_deref(),
-                        &[],
+                        &model,
+                        &repo_path,
                         &client_env,
                         &build_tx,
                     )
@@ -4299,6 +4271,7 @@ impl DaemonServer {
         let container_env_keys = container_env_keys_sorted(&devcontainer);
         let prepared = crate::prepared_image::build_prepared_image_async(
             &base_image,
+            &repo_path,
             &docker_host,
             &git_dir,
             workspace_clone,
@@ -5853,7 +5826,10 @@ impl DaemonServer {
         let config = load_json_config(repo_path)?;
         let keys = match config.ssh_agent.ambient {
             true => None,
-            false => Some(resolve_ssh_key_paths(repo_path, &config.ssh_agent.keys)?),
+            false => Some(crate::ssh_agent::resolve_ssh_key_paths(
+                repo_path,
+                config.ssh_agent.keys.as_deref().unwrap_or_default(),
+            )?),
         };
         self.connections
             .get_or_create_pod_async(

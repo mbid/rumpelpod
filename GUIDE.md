@@ -461,6 +461,7 @@ If `kubernetes.builder` is set, Docker buildx is required.
 ```
 
 Controls the SSH agent relayed into the pod.
+Builds with SSH forwarding enabled also use a fresh agent containing only `keys` when explicitly configured; otherwise they keep using the ambient agent.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
