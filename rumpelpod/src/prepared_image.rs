@@ -721,6 +721,7 @@ async fn ensure_buildable_tag(
 ///   can switch to it at runtime.
 pub async fn build_prepared_image_async(
     base_image: &Image,
+    repo_root: &Path,
     docker_host: &Host,
     git_dir: &Path,
     workspace_clone: WorkspaceCloneMode,
@@ -865,6 +866,7 @@ pub async fn build_prepared_image_async(
     )?;
     let mut extra_args = vec![format!("--build-arg=BASE_USER={image_user}")];
     extra_args.extend(build_options.iter().cloned());
+    let _build_agent = crate::ssh_agent::configure_build_ssh(repo_root, &mut extra_args).await?;
 
     let dockerfile = build_ctx.path().join("Dockerfile");
 
